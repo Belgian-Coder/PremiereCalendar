@@ -1,0 +1,78 @@
+@inject Microsoft.AspNetCore.Http.IHttpContextAccessor HttpContextAccessor
+
+<!DOCTYPE html>
+<html lang="en" data-theme="@InitialTheme">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <script>
+        (() => {
+            const key = "premiere-calendar:theme";
+            const cookieKey = "premiere-calendar-theme";
+            const validThemes = new Set(["light", "dark"]);
+            let saved = null;
+            const cookieTheme = () => {
+                const match = document.cookie.match(new RegExp(`(?:^|; )${cookieKey}=([^;]*)`));
+                const value = match ? decodeURIComponent(match[1]) : null;
+                return validThemes.has(value) ? value : null;
+            };
+            const saveCookie = (theme) => {
+                document.cookie = `${cookieKey}=${encodeURIComponent(theme)}; Max-Age=31536000; Path=/; SameSite=Lax`;
+            };
+            try {
+                saved = window.localStorage?.getItem(key);
+            } catch {
+                saved = null;
+            }
+            const theme = validThemes.has(saved)
+                ? saved
+                : (cookieTheme() ?? (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+            document.documentElement.dataset.theme = theme;
+            document.documentElement.style.colorScheme = theme;
+            saveCookie(theme);
+        })();
+    </script>
+    <ResourcePreloader />
+    <link rel="stylesheet" href="@Assets["lib/bootstrap/dist/css/bootstrap.min.css"]" />
+    <link rel="stylesheet" href="@Assets["app.css"]" />
+    <link rel="stylesheet" href="@Assets["PremiereCalendar.styles.css"]" />
+    <ImportMap />
+    <link rel="icon" type="image/svg+xml" href="@Assets["favicon.svg"]" />
+    <HeadOutlet />
+</head>
+
+<body>
+    <Routes />
+    <ReconnectModal />
+    <script src="@Assets["filter-storage.js"]"></script>
+    <script src="@Assets["theme-toggle.js"]"></script>
+    <script src="@Assets["dom-observer.js"]"></script>
+    <script type="module" src="@Assets["lazy-images.js"]"></script>
+    <script type="module" src="@Assets["day-autoload.js"]"></script>
+    <script type="module" src="@Assets["week-scroll.js"]"></script>
+    <script src="@Assets["_framework/blazor.web.js"]" autostart="false"></script>
+    <script>
+        Blazor.start({
+            circuit: {
+                configureSignalR: builder => {
+                    builder.withServerTimeout(60000).withKeepAliveInterval(15000);
+                }
+            }
+        });
+    </script>
+</body>
+
+</html>
+
+@code {
+    private string InitialTheme
+    {
+        get
+        {
+            var theme = HttpContextAccessor.HttpContext?.Request.Cookies["premiere-calendar-theme"];
+            return theme is "dark" or "light" ? theme : "light";
+        }
+    }
+}

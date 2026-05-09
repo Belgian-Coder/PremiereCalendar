@@ -1,0 +1,225 @@
+<div class="filter-overlay" data-testid="filter-overlay" @onclick="CloseAsync">
+    <section class="filter-pane"
+             role="dialog"
+             aria-modal="true"
+             aria-labelledby="filter-pane-title"
+             tabindex="-1"
+             data-testid="filter-pane"
+             data-filter-pane
+             @onclick:stopPropagation="true">
+        <header class="filter-pane-header">
+            <div>
+                <p class="eyebrow">Calendar controls</p>
+                <h2 id="filter-pane-title">Filters</h2>
+            </div>
+            <button class="tool-button"
+                    type="button"
+                    title="Close filters"
+                    aria-label="Close filters"
+                    data-filter-close
+                    @onclick="CloseAsync">
+                Close
+            </button>
+        </header>
+
+        <div class="filter-pane-body">
+            <div class="filter-section">
+                <h3>Sort</h3>
+                <label>
+                    Sort results by
+                    <select @bind="_draftFilters.SortMode" @bind:after="NotifyDraftChanged">
+                        <option value="@PremiereSortMode.PremiereDate">Premiere date</option>
+                        <option value="@PremiereSortMode.Title">Title</option>
+                        <option value="@PremiereSortMode.Score">TMDb user score</option>
+                        <option value="@PremiereSortMode.VoteCount">Minimum user votes</option>
+                    </select>
+                </label>
+
+                <label>
+                    Direction
+                    <select @bind="_draftFilters.SortDirection" @bind:after="NotifyDraftChanged">
+                        <option value="@SortDirection.Ascending">Ascending</option>
+                        <option value="@SortDirection.Descending">Descending</option>
+                    </select>
+                </label>
+            </div>
+
+            @if (PageMode == CalendarPageMode.All)
+            {
+                <div class="filter-section">
+                    <h3>Media</h3>
+                    <details class="filter-dropdown" data-testid="media-filter">
+                        <summary>
+                            <span>Media types</span>
+                            <strong>@MediaSummary(_draftFilters)</strong>
+                        </summary>
+                        <div class="filter-dropdown-menu">
+                            <label class="dropdown-check-option">
+                                <input type="checkbox"
+                                       checked="@_draftFilters.ShowSeries"
+                                       @onchange="args => ToggleMedia(PremiereMediaType.Series, args)" />
+                                <span>Series</span>
+                            </label>
+
+                            <label class="dropdown-check-option">
+                                <input type="checkbox"
+                                       checked="@_draftFilters.ShowMovies"
+                                       @onchange="args => ToggleMedia(PremiereMediaType.Movie, args)" />
+                                <span>Movies</span>
+                            </label>
+                        </div>
+                    </details>
+                </div>
+            }
+
+            @if (PageMode is CalendarPageMode.All or CalendarPageMode.Series)
+            {
+                <MediaFilterPanel MediaType="PremiereMediaType.Series"
+                                  Filters="_draftFilters.SeriesFilters"
+                                  Catalog="Catalog"
+                                  Items="Items"
+                                  OnFiltersChanged="NotifyDraftChanged" />
+            }
+
+            @if (PageMode is CalendarPageMode.All or CalendarPageMode.Movies)
+            {
+                <MediaFilterPanel MediaType="PremiereMediaType.Movie"
+                                  Filters="_draftFilters.MovieFilters"
+                                  Catalog="Catalog"
+                                  Items="Items"
+                                  OnFiltersChanged="NotifyDraftChanged" />
+            }
+
+            <div class="filter-section">
+                <h3>User score</h3>
+                <ScoreFilter Filters="_draftFilters" OnFiltersChanged="NotifyDraftChanged" />
+            </div>
+
+            <div class="filter-section">
+                <h3>Minimum user votes</h3>
+                <label>
+                    TMDb votes
+                    <input type="number"
+                           min="0"
+                           max="5000"
+                           step="10"
+                           @bind="_draftFilters.MinVoteCount"
+                           @bind:after="NotifyDraftChanged" />
+                </label>
+            </div>
+        </div>
+
+        <footer class="filter-pane-footer">
+            <button class="tool-button"
+                    type="button"
+                    title="Clear current page filters"
+                    @onclick="ClearDraftFilters">
+                Clear filters
+            </button>
+
+            <div class="filter-footer-actions">
+                <button class="tool-button" type="button" title="Cancel filter changes" data-filter-close @onclick="CloseAsync">
+                    Cancel
+                </button>
+                <button class="tool-button primary-action" type="button" title="Save filters" @onclick="SaveAsync">
+                    Save
+                </button>
+            </div>
+        </footer>
+    </section>
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public CalendarPageMode PageMode { get; set; }
+
+    [Parameter, EditorRequired]
+    public CalendarFilters Filters { get; set; } = default!;
+
+    [Parameter]
+    public FilterCatalog Catalog { get; set; } = new();
+
+    [Parameter]
+    public IReadOnlyList<PremiereItem> Items { get; set; } = [];
+
+    [Parameter]
+    public EventCallback<CalendarFilters> OnSave { get; set; }
+
+    [Parameter]
+    public EventCallback OnClose { get; set; }
+
+    private CalendarFilters _draftFilters = new();
+    private string _lastInitialSignature = "";
+
+    protected override void OnParametersSet()
+    {
+        var signature = $"{PageMode}|{Filters.WeekStart:yyyyMMdd}|{PremiereDiscoveryCriteria.FromFilters(Filters).CacheKey()}";
+        if (string.Equals(signature, _lastInitialSignature, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastInitialSignature = signature;
+        _draftFilters = CalendarFilterState.Clone(Filters);
+        CalendarFilterState.ApplyPageMode(_draftFilters, PageMode);
+    }
+
+    private Task NotifyDraftChanged()
+    {
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveAsync()
+    {
+        CalendarFilterState.Normalize(_draftFilters);
+        CalendarFilterState.ApplyPageMode(_draftFilters, PageMode);
+        await OnSave.InvokeAsync(CalendarFilterState.Clone(_draftFilters));
+    }
+
+    private Task CloseAsync()
+    {
+        return OnClose.InvokeAsync();
+    }
+
+    private Task ClearDraftFilters()
+    {
+        var weekStart = _draftFilters.WeekStart;
+        _draftFilters = new CalendarFilters
+        {
+            WeekStart = weekStart
+        };
+        CalendarFilterState.ApplyPageMode(_draftFilters, PageMode);
+        return NotifyDraftChanged();
+    }
+
+    private Task ToggleMedia(PremiereMediaType mediaType, ChangeEventArgs args)
+    {
+        var isChecked = args.Value is bool value && value;
+        if (mediaType == PremiereMediaType.Series)
+        {
+            _draftFilters.ShowSeries = isChecked;
+        }
+        else
+        {
+            _draftFilters.ShowMovies = isChecked;
+        }
+
+        return NotifyDraftChanged();
+    }
+
+    private static string MediaSummary(CalendarFilters filters)
+    {
+        if (filters.ShowSeries && filters.ShowMovies)
+        {
+            return "Series + movies";
+        }
+
+        if (filters.ShowSeries)
+        {
+            return "Series";
+        }
+
+        return filters.ShowMovies ? "Movies" : "None";
+    }
+}

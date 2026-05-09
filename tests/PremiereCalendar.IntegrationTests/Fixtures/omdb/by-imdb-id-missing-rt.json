@@ -1,0 +1,11 @@
+{
+  "Response": "True",
+  "imdbRating": "7.4",
+  "Poster": "https://m.media-amazon.com/images/M/independent-feature.jpg",
+  "Ratings": [
+    {
+      "Source": "Internet Movie Database",
+      "Value": "7.4/10"
+    }
+  ]
+}

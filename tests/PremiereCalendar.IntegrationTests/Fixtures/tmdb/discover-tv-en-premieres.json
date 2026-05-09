@@ -1,0 +1,18 @@
+{
+  "page": 1,
+  "total_pages": 1,
+  "results": [
+    {
+      "id": 100,
+      "name": "Pilot Week",
+      "first_air_date": "2026-05-04",
+      "overview": "A new drama launches with a focused first season.",
+      "poster_path": "/pilot-week.jpg",
+      "backdrop_path": "/pilot-week-backdrop.jpg",
+      "original_language": "en",
+      "origin_country": [ "US" ],
+      "vote_average": 7.8,
+      "vote_count": 42
+    }
+  ]
+}

@@ -1,0 +1,296 @@
+@using System.Globalization
+@inject IJSRuntime JS
+
+<div class="calendar-week-board">
+    <div class="week-sticky-controls">
+        <div class="week-day-row">
+            <button class="filter-open-button"
+                    type="button"
+                    title="Open filters"
+                    aria-label="Open filters"
+                    @onclick="OnOpenFilters">
+                <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                    <path d="M4 5h16l-6.2 7.1v5.1l-3.6 1.8v-6.9L4 5Z" />
+                </svg>
+                <span class="visually-hidden">Filters</span>
+            </button>
+
+            <nav class="day-jump-nav" aria-label="Week days" role="tablist">
+                @for (var index = 0; index < 7; index++)
+                {
+                    var day = WeekStart.AddDays(index);
+                    <button class="@DayButtonClass(day)"
+                            type="button"
+                            role="tab"
+                            data-day-button
+                            data-day-target="@DayElementId(day)"
+                            aria-selected="@AriaSelected(day)"
+                            tabindex="@DayTabIndex(day)"
+                            aria-controls="@DayElementId(day)"
+                            @onkeydown="args => OnDayKeyDown(args, day)"
+                            @onclick="() => SelectDay(day)">
+                        <span class="day-jump-main">
+                            <span>@day.ToString("ddd", CultureInfo.CurrentCulture)</span>
+                            <span>@day.ToString("dd MMM", CultureInfo.CurrentCulture)</span>
+                        </span>
+                        <small class="day-jump-count">@DayCountLabel(day)</small>
+                    </button>
+                }
+            </nav>
+        </div>
+    </div>
+
+    <div class="calendar-grid" data-testid="calendar-week" @ref="_selectedDayContainer">
+        <CalendarDay Day="_selectedDay"
+                     DayId="@DayElementId(_selectedDay)"
+                     Items="SelectedDayItems"
+                     ScoreSource="ScoreSource"
+                     ImageCacheVersion="@ImageCacheVersion"
+                     RefreshImageCache="RefreshImageCache"
+                     InitialVisibleCount="InitialItemsPerDay"
+                     LoadBatchSize="ItemsPerDayBatch"
+                     IntegrationSettings="IntegrationSettings"
+                     OnAddToArr="OnAddToArr"
+                     IsArrActionBusy="IsArrActionBusy" />
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public DateOnly WeekStart { get; set; }
+
+    [Parameter]
+    public IReadOnlyList<PremiereItem> Items { get; set; } = [];
+
+    [Parameter]
+    public ScoreSource ScoreSource { get; set; } = ScoreSource.Tmdb;
+
+    [Parameter]
+    public PremiereSortMode SortMode { get; set; } = PremiereSortMode.PremiereDate;
+
+    [Parameter]
+    public SortDirection SortDirection { get; set; } = SortDirection.Ascending;
+
+    [Parameter]
+    public string? ImageCacheVersion { get; set; }
+
+    [Parameter]
+    public bool RefreshImageCache { get; set; }
+
+    [Parameter]
+    public IntegrationSettings IntegrationSettings { get; set; } = new();
+
+    [Parameter]
+    public EventCallback<PremiereItem> OnAddToArr { get; set; }
+
+    [Parameter]
+    public bool IsArrActionBusy { get; set; }
+
+    [Parameter]
+    public int InitialItemsPerDay { get; set; } = 10;
+
+    [Parameter]
+    public int ItemsPerDayBatch { get; set; } = 10;
+
+    [Parameter]
+    public EventCallback OnOpenFilters { get; set; }
+
+    [Parameter]
+    public DateOnly? SelectedDay { get; set; }
+
+    [Parameter]
+    public EventCallback<DateOnly> OnSelectedDayChanged { get; set; }
+
+    private Dictionary<DateOnly, List<PremiereItem>> _dayGroups = [];
+    private IReadOnlyList<PremiereItem>? _lastGroupedItems;
+    private string _lastGroupKey = "";
+    private DateOnly _selectedDay;
+    private DateOnly _lastWeekStart;
+    private ElementReference _selectedDayContainer;
+    private bool _hasUserSelectedDay;
+    private bool _scrollSelectedDayIntoView;
+
+    private IReadOnlyList<PremiereItem> SelectedDayItems => _dayGroups.GetValueOrDefault(_selectedDay) ?? [];
+
+    protected override void OnParametersSet()
+    {
+        var weekChanged = _lastWeekStart != WeekStart;
+        if (weekChanged)
+        {
+            _lastWeekStart = WeekStart;
+            _selectedDay = NormalizeSelectedDay(SelectedDay) ?? WeekStart;
+            _hasUserSelectedDay = false;
+        }
+        else if (NormalizeSelectedDay(SelectedDay) is { } externallySelectedDay
+            && externallySelectedDay != _selectedDay)
+        {
+            _selectedDay = externallySelectedDay;
+            _hasUserSelectedDay = true;
+        }
+
+        var groupKey = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{WeekStart:yyyyMMdd}|{Items.Count}|{SortMode}|{SortDirection}|{ScoreSource}");
+
+        if (ReferenceEquals(Items, _lastGroupedItems)
+            && string.Equals(groupKey, _lastGroupKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastGroupedItems = Items;
+        _lastGroupKey = groupKey;
+        _dayGroups = CreateDayGroups();
+
+        if (_selectedDay == default
+            || _selectedDay < WeekStart
+            || _selectedDay > WeekStart.AddDays(6))
+        {
+            _selectedDay = WeekStart;
+            _hasUserSelectedDay = false;
+        }
+
+        if (!_hasUserSelectedDay && SelectedDayItems.Count == 0)
+        {
+            _selectedDay = FirstDayWithItems() ?? WeekStart;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_scrollSelectedDayIntoView)
+        {
+            return;
+        }
+
+        _scrollSelectedDayIntoView = false;
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarWeek.scrollSelectedDayIntoView", _selectedDayContainer);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (JSException)
+        {
+        }
+    }
+
+    private Dictionary<DateOnly, List<PremiereItem>> CreateDayGroups()
+    {
+        var start = WeekStart;
+        var end = start.AddDays(6);
+
+        return PremiereFilter
+            .SortItems(
+                Items.Where(item => item.PremiereDate >= start && item.PremiereDate <= end),
+                SortMode,
+                SortDirection,
+                ScoreSource)
+            .GroupBy(item => item.PremiereDate)
+            .ToDictionary(group => group.Key, group => group.ToList());
+    }
+
+    private static string DayElementId(DateOnly day)
+    {
+        return $"premiere-day-{day.ToString("yyyyMMdd", CultureInfo.InvariantCulture)}";
+    }
+
+    private string DayButtonClass(DateOnly day)
+    {
+        return day == _selectedDay ? "day-jump-link active" : "day-jump-link";
+    }
+
+    private string AriaSelected(DateOnly day)
+    {
+        return day == _selectedDay ? "true" : "false";
+    }
+
+    private int DayTabIndex(DateOnly day)
+    {
+        return day == _selectedDay ? 0 : -1;
+    }
+
+    private string DayCountLabel(DateOnly day)
+    {
+        if (!_dayGroups.TryGetValue(day, out var items) || items.Count == 0)
+        {
+            return "Empty";
+        }
+
+        var movieCount = items.Count(item => item.MediaType == PremiereMediaType.Movie);
+        var seriesCount = items.Count - movieCount;
+
+        return movieCount switch
+        {
+            > 0 when seriesCount > 0 => $"{movieCount} movie{Plural(movieCount)} / {seriesCount} series",
+            > 0 => $"{movieCount} movie{Plural(movieCount)}",
+            _ => $"{seriesCount} series"
+        };
+    }
+
+    private static string Plural(int count)
+    {
+        return count == 1 ? "" : "s";
+    }
+
+    private async Task SelectDay(DateOnly day)
+    {
+        _selectedDay = day;
+        _hasUserSelectedDay = true;
+        _scrollSelectedDayIntoView = true;
+        await OnSelectedDayChanged.InvokeAsync(day);
+    }
+
+    private async Task OnDayKeyDown(KeyboardEventArgs args, DateOnly day)
+    {
+        var nextDay = args.Key switch
+        {
+            "ArrowRight" => day.AddDays(1),
+            "ArrowLeft" => day.AddDays(-1),
+            "Home" => WeekStart,
+            "End" => WeekStart.AddDays(6),
+            _ => (DateOnly?)null
+        };
+
+        if (nextDay is not { } value)
+        {
+            return;
+        }
+
+        if (value < WeekStart)
+        {
+            value = WeekStart.AddDays(6);
+        }
+        else if (value > WeekStart.AddDays(6))
+        {
+            value = WeekStart;
+        }
+
+        await SelectDay(value);
+    }
+
+    private DateOnly? FirstDayWithItems()
+    {
+        for (var index = 0; index < 7; index++)
+        {
+            var day = WeekStart.AddDays(index);
+            if (_dayGroups.TryGetValue(day, out var items) && items.Count > 0)
+            {
+                return day;
+            }
+        }
+
+        return null;
+    }
+
+    private DateOnly? NormalizeSelectedDay(DateOnly? day)
+    {
+        return day is { } value && value >= WeekStart && value <= WeekStart.AddDays(6)
+            ? value
+            : null;
+    }
+}

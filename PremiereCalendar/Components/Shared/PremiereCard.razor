@@ -1,0 +1,414 @@
+@using System.Globalization
+@using System.Text
+
+<article class="premiere-card @MediaClass()" data-testid="premiere-card" data-canonical-id="@Item.CanonicalId">
+    <div class="poster-frame">
+        @if (!string.IsNullOrWhiteSpace(Item.PosterUrl))
+        {
+            <img src="@TransparentPosterPlaceholder"
+                 data-lazy-image
+                 data-lazy-src="@CachedImageUrl.Build(Item.PosterUrl, ImageCacheVersion, RefreshImageCache, PosterCacheWidth)"
+                 alt="@($"{Item.Title} poster")"
+                 loading="lazy"
+                 decoding="async"
+                 width="104"
+                 height="156" />
+        }
+        else
+        {
+            <div class="poster-placeholder" aria-hidden="true">@Initials(Item.Title)</div>
+        }
+    </div>
+
+    <div class="card-content">
+        <div class="card-title-row">
+            <span class="card-type">@FormatType(Item.Type)</span>
+            <h3>@Item.Title</h3>
+        </div>
+
+        @if (Item.Type == PremiereItemType.SeriesEpisode)
+        {
+            <div class="episode-facts" aria-label="Episode details">
+                <span class="episode-label">Episode</span>
+                <span>@FormatEpisode(Item)</span>
+            </div>
+        }
+
+        <div class="meta" aria-label="Premiere metadata">
+            <span>@Item.PremiereDate.ToString("dd MMM yyyy", CultureInfo.CurrentCulture)</span>
+            <span>TMDb date</span>
+            <span>@FormatCountries(Item.OriginCountries)</span>
+            <span>@FormatRuntime(Item.RuntimeMinutes)</span>
+        </div>
+
+        <div class="item-facts" aria-label="Item facts">
+            <span class="item-fact-label">Original language</span>
+            <span class="language-value">@FormatLanguage(Item.OriginalLanguage)</span>
+        </div>
+
+        <div class="provider-sources" aria-label="Provider and channel sources">
+            <span class="provider-source-label">Source</span>
+            @if (Item.SourceNames.Length == 0)
+            {
+                <span class="provider-source-empty">No source listed</span>
+            }
+            else
+            {
+                @foreach (var source in VisibleSourceNames)
+                {
+                    <span>@source</span>
+                }
+
+                @if (HiddenSourceCount > 0)
+                {
+                    <span title="@AllSourceNamesTitle">+@HiddenSourceCount more</span>
+                }
+            }
+        </div>
+
+        <p class="card-description">@(string.IsNullOrWhiteSpace(Item.Overview) ? "No description available." : Item.Overview)</p>
+
+        @if (Item.Genres.Length > 0)
+        {
+            <div class="genre-tags" aria-label="Genres">
+                @foreach (var genre in Item.Genres.Take(4))
+                {
+                    <span>@genre</span>
+                }
+            </div>
+        }
+
+        <div class="scores" aria-label="Scores">
+            <span class="@ScoreClass(ScoreSource.Tmdb)">TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
+            <span class="@ScoreClass(ScoreSource.Imdb)">IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
+            <span class="@ScoreClass(ScoreSource.RottenTomatoes)">RT @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
+            <span class="@ScoreClass(ScoreSource.Metacritic)">Meta @FormatMetacritic(Item.MetacriticScore)</span>
+        </div>
+
+        @if (Item.TvmazeRating is not null)
+        {
+            <div class="series-enrichment" aria-label="Series enrichment">
+                <span>TVmaze @FormatScore(Item.TvmazeRating) / 10</span>
+            </div>
+        }
+
+        <details class="source-details">
+            <summary>Provenance</summary>
+            <div class="source-tags" aria-label="Sources">
+                <span>TMDb score</span>
+                @if (Item.ImdbScore is not null)
+                {
+                    <span>IMDb via OMDb</span>
+                }
+                @if (Item.RottenTomatoesScore is not null)
+                {
+                    <span>RT via OMDb</span>
+                }
+                @if (Item.MetacriticScore is not null)
+                {
+                    <span>Metacritic via OMDb</span>
+                }
+                @if (Item.TvmazeUrl is not null)
+                {
+                    <span>TVmaze enrichment</span>
+                }
+                @if (Item.EpisodeSource is not null)
+                {
+                    <span>@Item.EpisodeSource</span>
+                }
+                @if (Item.TrailerUrl is not null)
+                {
+                    <span>Trailer via TMDb Videos</span>
+                }
+                @if (Item.ImageSource is not null)
+                {
+                    <span>@Item.ImageSource</span>
+                }
+            </div>
+        </details>
+
+        <div class="links" aria-label="Links">
+            @if (ShowArrButton)
+            {
+                <button type="button"
+                        class="@ArrButtonClass"
+                        title="@ArrButtonTitle"
+                        disabled="@IsArrActionBusy"
+                        @onclick="AddToArrAsync">
+                    @ArrButtonText
+                </button>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(Item.TrailerUrl))
+            {
+                <a href="@Item.TrailerUrl" target="_blank" rel="noopener noreferrer">Trailer</a>
+            }
+            else
+            {
+                <span>No trailer</span>
+            }
+
+            <a href="@BuildYouTubeTrailerSearchUrl(Item.Title)" target="_blank" rel="noopener noreferrer">YouTube search</a>
+
+            @if (!string.IsNullOrWhiteSpace(Item.TmdbUrl))
+            {
+                <a href="@Item.TmdbUrl" target="_blank" rel="noopener noreferrer">TMDb</a>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(Item.ImdbUrl))
+            {
+                <a href="@Item.ImdbUrl" target="_blank" rel="noopener noreferrer">IMDb</a>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(Item.TvmazeUrl))
+            {
+                <a href="@Item.TvmazeUrl" target="_blank" rel="noopener noreferrer">TVmaze</a>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(Item.OfficialSiteUrl))
+            {
+                <a href="@Item.OfficialSiteUrl" target="_blank" rel="noopener noreferrer">Official site</a>
+            }
+        </div>
+    </div>
+</article>
+
+@code {
+    [Parameter, EditorRequired]
+    public PremiereItem Item { get; set; } = default!;
+
+    [Parameter]
+    public ScoreSource ScoreSource { get; set; } = ScoreSource.Tmdb;
+
+    [Parameter]
+    public string? ImageCacheVersion { get; set; }
+
+    [Parameter]
+    public bool RefreshImageCache { get; set; }
+
+    [Parameter]
+    public IntegrationSettings IntegrationSettings { get; set; } = new();
+
+    [Parameter]
+    public EventCallback<PremiereItem> OnAddToArr { get; set; }
+
+    [Parameter]
+    public bool IsArrActionBusy { get; set; }
+
+    private const string TransparentPosterPlaceholder = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+    private const int PosterCacheWidth = 185;
+    private const int MaxVisibleSourceNames = 6;
+    private string _renderFingerprint = "";
+    private bool _shouldRender = true;
+
+    protected override void OnParametersSet()
+    {
+        var fingerprint = BuildRenderFingerprint();
+        _shouldRender = !string.Equals(fingerprint, _renderFingerprint, StringComparison.Ordinal);
+        _renderFingerprint = fingerprint;
+    }
+
+    protected override bool ShouldRender()
+    {
+        return _shouldRender;
+    }
+
+    private IEnumerable<string> VisibleSourceNames => Item.SourceNames.Take(MaxVisibleSourceNames);
+
+    private int HiddenSourceCount => Math.Max(0, Item.SourceNames.Length - MaxVisibleSourceNames);
+
+    private string AllSourceNamesTitle => string.Join(", ", Item.SourceNames);
+
+    private bool ShowArrButton => OnAddToArr.HasDelegate
+        && (Item.MediaType == PremiereMediaType.Movie
+            ? IntegrationSettings.Radarr.Enabled
+            : IntegrationSettings.Sonarr.Enabled);
+
+    private string ArrButtonText => Item.MediaType == PremiereMediaType.Movie ? "Add to Radarr" : "Add to Sonarr";
+
+    private string ArrButtonTitle => Item.MediaType == PremiereMediaType.Movie
+        ? "Add this movie to Radarr"
+        : "Add this series to Sonarr";
+
+    private string ArrButtonClass => Item.MediaType == PremiereMediaType.Movie
+        ? "arr-add-button radarr"
+        : "arr-add-button sonarr";
+
+    private string ScoreClass(ScoreSource source)
+    {
+        return source == ScoreSource ? "selected-score" : "";
+    }
+
+    private string MediaClass()
+    {
+        return Item.MediaType == PremiereMediaType.Movie ? "movie-card" : "series-card";
+    }
+
+    private static string FormatScore(double? score)
+    {
+        return score is null
+            ? "n/a"
+            : score.Value.ToString("0.0", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatRottenTomatoes(int? score)
+    {
+        return score is null ? "n/a" : $"{score.Value}%";
+    }
+
+    private static string FormatMetacritic(int? score)
+    {
+        return score is null ? "n/a" : $"{score.Value}/100";
+    }
+
+    private static string FormatVoteCount(int? voteCount)
+    {
+        return voteCount is null ? "n/a" : voteCount.Value.ToString("N0", CultureInfo.CurrentCulture);
+    }
+
+    private static string FormatType(PremiereItemType type)
+    {
+        return type switch
+        {
+            PremiereItemType.SeriesPremiere => "Series premiere",
+            PremiereItemType.SeriesEpisode => "Series episode",
+            _ => "Movie release"
+        };
+    }
+
+    private static string FormatEpisode(PremiereItem item)
+    {
+        var number = item.SeasonNumber is > 0 && item.EpisodeNumber is > 0
+            ? $"S{item.SeasonNumber.Value:00}E{item.EpisodeNumber.Value:00}"
+            : "Air date";
+
+        return string.IsNullOrWhiteSpace(item.EpisodeTitle)
+            ? number
+            : $"{number} - {item.EpisodeTitle}";
+    }
+
+    private static string FormatLanguage(string language)
+    {
+        if (string.IsNullOrWhiteSpace(language))
+        {
+            return "n/a";
+        }
+
+        var normalizedLanguage = language.Trim().ToLowerInvariant();
+        var languageName = normalizedLanguage switch
+        {
+            "en" => "English",
+            "nl" => "Dutch",
+            "fr" => "French",
+            "de" => "German",
+            "es" => "Spanish",
+            "it" => "Italian",
+            "pt" => "Portuguese",
+            "sv" => "Swedish",
+            "da" => "Danish",
+            "no" => "Norwegian",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            "zh" or "cn" => "Chinese",
+            _ => null
+        };
+
+        var languageCode = normalizedLanguage.ToUpperInvariant();
+        return languageName is null ? languageCode : $"{languageName} ({languageCode})";
+    }
+
+    private static string FormatCountries(IReadOnlyList<string> countries)
+    {
+        return countries.Count == 0 ? "country n/a" : string.Join(", ", countries);
+    }
+
+    private static string FormatRuntime(int? runtimeMinutes)
+    {
+        return runtimeMinutes is > 0 ? $"{runtimeMinutes} min" : "runtime n/a";
+    }
+
+    private static string Initials(string title)
+    {
+        var letters = title
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Take(2)
+            .Select(word => char.ToUpperInvariant(word[0]))
+            .ToArray();
+
+        return letters.Length == 0 ? "PC" : new string(letters);
+    }
+
+    private static string BuildYouTubeTrailerSearchUrl(string title)
+    {
+        return $"https://www.youtube.com/results?search_query={Uri.EscapeDataString($"{title} trailer")}";
+    }
+
+    private Task AddToArrAsync()
+    {
+        return OnAddToArr.InvokeAsync(Item);
+    }
+
+    private string BuildRenderFingerprint()
+    {
+        if (Item is null)
+        {
+            return $"{ScoreSource}|{ImageCacheVersion}|{RefreshImageCache}";
+        }
+
+        var builder = new StringBuilder();
+        Append(builder, ScoreSource);
+        Append(builder, ImageCacheVersion);
+        Append(builder, RefreshImageCache);
+        Append(builder, IntegrationSettings.Sonarr.Enabled);
+        Append(builder, IntegrationSettings.Radarr.Enabled);
+        Append(builder, IsArrActionBusy);
+        Append(builder, Item.CanonicalId);
+        Append(builder, Item.Type);
+        Append(builder, Item.MediaType);
+        Append(builder, Item.TmdbId);
+        Append(builder, Item.Title);
+        Append(builder, Item.PremiereDate);
+        Append(builder, Item.SeasonNumber);
+        Append(builder, Item.EpisodeNumber);
+        Append(builder, Item.EpisodeTitle);
+        Append(builder, Item.PosterUrl);
+        Append(builder, Item.ImageSource);
+        Append(builder, Item.Overview);
+        Append(builder, Item.OriginalLanguage);
+        Append(builder, Item.RuntimeMinutes);
+        Append(builder, Item.TmdbScore);
+        Append(builder, Item.TmdbVoteCount);
+        Append(builder, Item.ImdbScore);
+        Append(builder, Item.ImdbVoteCount);
+        Append(builder, Item.RottenTomatoesScore);
+        Append(builder, Item.MetacriticScore);
+        Append(builder, Item.TvmazeRating);
+        Append(builder, Item.TrailerUrl);
+        Append(builder, Item.TmdbUrl);
+        Append(builder, Item.ImdbUrl);
+        Append(builder, Item.TvmazeUrl);
+        Append(builder, Item.OfficialSiteUrl);
+        Append(builder, Item.EpisodeSource);
+        Append(builder, Item.OriginCountries);
+        Append(builder, Item.SourceNames);
+        Append(builder, Item.Genres);
+        return builder.ToString();
+    }
+
+    private static void Append(StringBuilder builder, object? value)
+    {
+        builder.Append(value?.ToString());
+        builder.Append('\u001f');
+    }
+
+    private static void Append(StringBuilder builder, IEnumerable<string> values)
+    {
+        foreach (var value in values)
+        {
+            builder.Append(value);
+            builder.Append('\u001e');
+        }
+
+        builder.Append('\u001f');
+    }
+}

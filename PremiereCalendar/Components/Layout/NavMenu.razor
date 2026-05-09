@@ -1,0 +1,33 @@
+<header class="app-topbar">
+    <a class="navbar-brand" href="">Premiere Calendar</a>
+
+    <div class="topbar-actions">
+        <nav class="top-nav" aria-label="Main navigation">
+            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">All</NavLink>
+            <NavLink class="nav-link" href="series">Series</NavLink>
+            <NavLink class="nav-link" href="movies">Movies</NavLink>
+            <NavLink class="nav-link" href="about">About</NavLink>
+        </nav>
+
+        <NavLink class="settings-link"
+                 href="settings"
+                 title="Settings"
+                 aria-label="Settings">
+            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a7.5 7.5 0 0 0-2.6-1.5L14 2h-4l-.4 3a7.5 7.5 0 0 0-2.6 1.5l-2.4-1-2 3.5 2 1.5A8.5 8.5 0 0 0 4.5 12c0 .5 0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a7.5 7.5 0 0 0 2.6 1.5l.4 3h4l.4-3a7.5 7.5 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z" />
+            </svg>
+            <span class="visually-hidden">Settings</span>
+        </NavLink>
+
+        <button class="theme-toggle"
+                type="button"
+                title="Toggle light or dark theme"
+                aria-label="Toggle light or dark theme"
+                data-theme-toggle>
+            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                <path d="M9 21h6v-2H9v2Zm3-20C8.1 1 5 4.1 5 8c0 2.4 1.2 4.5 3 5.8V17h8v-3.2c1.8-1.3 3-3.4 3-5.8 0-3.9-3.1-7-7-7Zm2.8 11.2-.8.6V15h-4v-2.2l-.8-.6C7.8 11.2 7 9.7 7 8c0-2.8 2.2-5 5-5s5 2.2 5 5c0 1.7-.8 3.2-2.2 4.2Z" />
+            </svg>
+            <span class="visually-hidden">Theme</span>
+        </button>
+    </div>
+</header>

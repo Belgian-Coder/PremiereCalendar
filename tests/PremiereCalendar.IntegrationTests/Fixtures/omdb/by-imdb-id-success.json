@@ -1,0 +1,18 @@
+{
+  "Response": "True",
+  "imdbRating": "8.2",
+  "imdbVotes": "1,234",
+  "Metascore": "72",
+  "Plot": "An OMDb fallback plot.",
+  "Poster": "https://m.media-amazon.com/images/M/pilot-week.jpg",
+  "Ratings": [
+    {
+      "Source": "Internet Movie Database",
+      "Value": "8.2/10"
+    },
+    {
+      "Source": "Rotten Tomatoes",
+      "Value": "91%"
+    }
+  ]
+}

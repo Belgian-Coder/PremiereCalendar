@@ -1,0 +1,265 @@
+using Bunit;
+using PremiereCalendar.Components.Shared;
+using PremiereCalendar.Models;
+
+namespace PremiereCalendar.ComponentTests;
+
+public sealed class CalendarWeekTests : BunitContext
+{
+    public CalendarWeekTests()
+    {
+        JSInterop.Mode = JSRuntimeMode.Loose;
+    }
+
+    [Fact]
+    public void CalendarWeek_RendersSevenDayButtonsAndOneSelectedDay()
+    {
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, Array.Empty<PremiereItem>())
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Single(component.FindAll("[data-testid='calendar-day']"));
+        Assert.Equal(7, component.FindAll(".day-jump-link").Count);
+        Assert.Equal(7, component.FindAll("[data-day-button]").Count);
+        Assert.Single(component.FindAll("button[title='Open filters']"));
+        Assert.Empty(component.FindAll("[data-testid='week-scroll-control']"));
+        Assert.NotEmpty(component.FindAll(".calendar-grid"));
+        Assert.NotEmpty(component.FindAll("button[data-day-target='premiere-day-20260504']"));
+        Assert.NotEmpty(component.FindAll("#premiere-day-20260504"));
+        Assert.Single(component.FindAll(".empty-day"));
+        Assert.Contains("No premieres", component.Markup);
+    }
+
+    [Fact]
+    public void CalendarWeek_GroupsPremieresIntoMatchingDay()
+    {
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "tv:10",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 10,
+                Title = "Monday Launch",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7.5,
+                PosterUrl = "https://image.tmdb.org/t/p/w185/poster.jpg"
+            }
+        };
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.ImageCacheVersion, "abc123"));
+
+        Assert.Single(component.FindAll("[data-testid='premiere-card']"));
+        Assert.Contains("Monday Launch", component.Markup);
+        Assert.Contains("1 series", component.Markup);
+        Assert.Contains("w=185&amp;v=abc123", component.Markup);
+        Assert.DoesNotContain("ImageCacheVersion", component.Markup);
+        Assert.Empty(component.FindAll(".empty-day"));
+    }
+
+    [Fact]
+    public void CalendarWeek_ClickingDaySwitchesSelectedDay()
+    {
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "tv:9",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 9,
+                Title = "Monday Launch",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7.1
+            },
+            new PremiereItem
+            {
+                CanonicalId = "tv:10",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 10,
+                Title = "Tuesday Launch",
+                PremiereDate = new DateOnly(2026, 5, 5),
+                TmdbScore = 7.5
+            }
+        };
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Contains("Monday Launch", component.Markup);
+        Assert.DoesNotContain("Tuesday Launch", component.Markup);
+        Assert.Contains("Monday", component.Markup);
+        Assert.Single(component.FindAll("[data-testid='calendar-day']"));
+
+        component.Find("button[data-day-target='premiere-day-20260505']").Click();
+
+        Assert.Contains("Tuesday Launch", component.Markup);
+        Assert.Contains("Tuesday", component.Markup);
+        Assert.Single(component.FindAll("[data-testid='calendar-day']"));
+        Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260505']").ClassName);
+    }
+
+    [Fact]
+    public void CalendarWeek_UsesVirtualizedRowsForDenseDays()
+    {
+        var items = Enumerable.Range(1, 45)
+            .Select(index => new PremiereItem
+            {
+                CanonicalId = $"tv:{index}",
+                Type = PremiereItemType.SeriesEpisode,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = index,
+                Title = $"Episode {index}",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7
+            })
+            .ToArray();
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Single(component.FindAll("[data-testid='virtualized-day']"));
+        Assert.Contains("Showing all 45 with virtual scrolling", component.Markup);
+        Assert.Empty(component.FindAll("[data-day-load-more]"));
+    }
+
+    [Fact]
+    public void CalendarDay_ShowAllLoadsRemainingSmallDayItemsAtOnce()
+    {
+        var items = Enumerable.Range(1, 12)
+            .Select(index => new PremiereItem
+            {
+                CanonicalId = $"movie:{index}",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = index,
+                Title = $"Movie {index}",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7
+            })
+            .ToArray();
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
+
+        component.FindAll(".day-load-controls button").Last().Click();
+
+        Assert.Equal(12, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Empty(component.FindAll("[data-day-autoload-sentinel]"));
+    }
+
+    [Fact]
+    public void CalendarWeek_UsesTenCardBatchesForSmallerDays()
+    {
+        var items = Enumerable.Range(1, 12)
+            .Select(index => new PremiereItem
+            {
+                CanonicalId = $"movie:{index}",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = index,
+                Title = $"Movie {index}",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7
+            })
+            .ToArray();
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Single(component.FindAll("[data-day-load-more]"));
+        Assert.Single(component.FindAll("[data-day-autoload-sentinel]"));
+        Assert.Empty(component.FindAll("[data-testid='virtualized-day']"));
+
+        component.Find("[data-day-load-more]").Click();
+
+        Assert.Equal(12, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.DoesNotContain("Collapse", component.Markup);
+        Assert.Empty(component.FindAll("[data-day-load-more]"));
+    }
+
+    [Fact]
+    public void CalendarDay_SkipsRenderWhenDayFingerprintIsUnchanged()
+    {
+        var items = Enumerable.Range(1, 12)
+            .Select(index => new PremiereItem
+            {
+                CanonicalId = $"tv:{index}",
+                Type = PremiereItemType.SeriesEpisode,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = index,
+                Title = $"Episode {index}",
+                PremiereDate = new DateOnly(2026, 5, 4)
+            })
+            .ToArray();
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        var renderCount = component.RenderCount;
+        component.Render(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Equal(renderCount, component.RenderCount);
+    }
+
+    [Fact]
+    public void CalendarDay_RerendersWhenScoreSourceChanges()
+    {
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "movie:1",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                Title = "Score Change",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7,
+                ImdbScore = 8
+            }
+        };
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        var renderCount = component.RenderCount;
+        component.Render(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Imdb));
+
+        Assert.True(component.RenderCount > renderCount);
+        Assert.NotEmpty(component.FindAll(".selected-score"));
+    }
+}

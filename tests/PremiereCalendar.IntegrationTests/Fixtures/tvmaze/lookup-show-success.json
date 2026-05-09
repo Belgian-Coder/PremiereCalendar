@@ -1,0 +1,16 @@
+{
+  "id": 82,
+  "url": "https://www.tvmaze.com/shows/82/game-of-thrones",
+  "name": "Pilot Week",
+  "summary": "<p>A TVmaze fallback summary.</p>",
+  "runtime": 60,
+  "averageRuntime": 58,
+  "officialSite": "https://example.com/pilot-week",
+  "rating": {
+    "average": 8.6
+  },
+  "network": {
+    "name": "HBO"
+  },
+  "webChannel": null
+}

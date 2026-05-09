@@ -1,0 +1,29 @@
+<div class="toast-host" aria-live="polite" aria-atomic="true">
+    @foreach (var toast in Messages)
+    {
+        <div class="@ToastClass(toast)" role="@ToastRole(toast)" @key="toast.Id">
+            <strong>@toast.Title</strong>
+            <span>@toast.Message</span>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public IReadOnlyList<ToastMessage> Messages { get; set; } = [];
+
+    private static string ToastClass(ToastMessage toast)
+    {
+        return toast.Kind switch
+        {
+            ToastKind.Success => "toast-message success",
+            ToastKind.Error => "toast-message error",
+            _ => "toast-message info"
+        };
+    }
+
+    private static string ToastRole(ToastMessage toast)
+    {
+        return toast.Kind == ToastKind.Error ? "alert" : "status";
+    }
+}

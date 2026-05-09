@@ -1,0 +1,63 @@
+# Build output
+bin/
+obj/
+[Bb]uild/
+publish/
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# IDE and editor state
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# Local SDK/tooling
+.dotnet/
+.run/
+.playwright-cli/
+.playwright-mcp/
+artifacts/
+output/
+node_modules/
+
+# Local app data, caches, and databases
+App_Data/
+**/App_Data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.pid
+
+# Local configuration and secrets
+.env
+.env.*
+*.secrets.json
+secrets.json
+
+# Generated release packages
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.nupkg
+*.snupkg
+
+# Ad-hoc screenshots and notes generated during local UI debugging.
+# README screenshots live under docs/images/readme and remain tracked.
+/*.png
+/*-snapshot.md

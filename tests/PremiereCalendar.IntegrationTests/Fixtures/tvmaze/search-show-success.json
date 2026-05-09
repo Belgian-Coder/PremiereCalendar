@@ -1,0 +1,25 @@
+[
+  {
+    "score": 0.95,
+    "show": {
+      "id": 9001,
+      "url": "https://www.tvmaze.com/shows/9001/no-poster-show",
+      "name": "No Poster Show",
+      "summary": "<p>A matching TVmaze search result.</p>",
+      "runtime": 44,
+      "averageRuntime": 45,
+      "officialSite": "https://example.com/no-poster-show",
+      "image": {
+        "medium": "https://static.tvmaze.com/uploads/images/medium_portrait/1/1.jpg",
+        "original": "https://static.tvmaze.com/uploads/images/original_untouched/1/1.jpg"
+      },
+      "rating": {
+        "average": 7.3
+      },
+      "network": {
+        "name": "Example Network"
+      },
+      "webChannel": null
+    }
+  }
+]

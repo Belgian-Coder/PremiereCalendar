@@ -1,0 +1,804 @@
+@using System.Globalization
+
+<div class="filter-section media-filter-set" data-testid="@($"{MediaSlug}-filter-set")">
+    <div class="filter-section-heading">
+        <h3>@Title</h3>
+        <button class="text-command"
+                type="button"
+                title="@($"Clear {Title}")"
+                @onclick="ClearFilterSet">
+            Clear
+        </button>
+    </div>
+
+    <details class="filter-dropdown" data-testid="@($"{MediaSlug}-where-to-watch-filter")">
+        <summary>
+            <span>Where to watch</span>
+            <strong>@SelectedSourceSummary()</strong>
+        </summary>
+        <div class="filter-dropdown-menu">
+            <label>
+                Country
+                <select @bind="Filters.WatchRegion" @bind:after="NotifyChanged">
+                    <option value="">None selected</option>
+                    @foreach (var country in CountryOptions())
+                    {
+                        <option value="@country.Value">@country.Label</option>
+                    }
+                </select>
+            </label>
+
+            <label class="filter-option-search-label">
+                Search sources
+                <input class="filter-option-search"
+                       placeholder="Type to narrow sources..."
+                       aria-label="@($"{Title} source option search")"
+                       @bind="_sourceSearch"
+                       @bind:event="oninput" />
+            </label>
+
+            @{
+                var sourceOptions = SourceOptions();
+                var visibleSourceOptions = VisibleFilterOptions(sourceOptions, Filters.SelectedSources, _sourceSearch);
+            }
+            @foreach (var source in visibleSourceOptions)
+            {
+                <label @key="source.Value" class="dropdown-check-option">
+                    <input type="checkbox"
+                           checked="@IsSourceSelected(source.Value)"
+                           aria-label="@($"Toggle {Title} source {source.Label}")"
+                           @onchange="args => SetSourceSelected(source.Value, args)" />
+                    <span>@source.Label</span>
+                </label>
+            }
+
+            @if (sourceOptions.Count > visibleSourceOptions.Count)
+            {
+                <p class="filter-option-limit-hint">@OptionLimitText(sourceOptions.Count, visibleSourceOptions.Count, _sourceSearch)</p>
+            }
+
+            @if (Filters.SelectedSources.Count > 0)
+            {
+                <button class="text-command" type="button" @onclick="ClearSources">Clear sources</button>
+            }
+        </div>
+    </details>
+
+    @if (MediaType == PremiereMediaType.Series)
+    {
+        <details class="filter-dropdown" data-testid="series-date-mode-filter">
+            <summary>
+                <span>Calendar rows</span>
+                <strong>@SeriesDateModeSummary()</strong>
+            </summary>
+            <div class="filter-dropdown-menu">
+                @foreach (var option in SeriesDateModeOptions)
+                {
+                    <label @key="option.Value" class="dropdown-check-option">
+                        <input type="radio"
+                               name="series-date-mode"
+                               checked="@(Filters.SeriesDateMode == option.Value)"
+                               aria-label="@($"Use {option.Label}")"
+                               @onchange="_ => ChangeSeriesDateMode(option.Value)" />
+                        <span>@option.Label</span>
+                    </label>
+                }
+            </div>
+        </details>
+    }
+
+    <details class="filter-dropdown" data-testid="@($"{MediaSlug}-availability-filter")">
+        <summary>
+            <span>Availabilities</span>
+            <strong>@SelectedAvailabilitySummary()</strong>
+        </summary>
+        <div class="filter-dropdown-menu">
+            @foreach (var option in MonetizationOptions)
+            {
+                <label @key="option.Value" class="dropdown-check-option">
+                    <input type="checkbox"
+                           checked="@Filters.MonetizationTypes.Contains(option.Value, StringComparer.OrdinalIgnoreCase)"
+                           aria-label="@($"Toggle {Title} availability {option.Label}")"
+                           @onchange="args => SetStringSelected(Filters.MonetizationTypes, option.Value, args)" />
+                    <span>@option.Label</span>
+                </label>
+            }
+        </div>
+    </details>
+
+    @if (MediaType == PremiereMediaType.Movie)
+    {
+        <details class="filter-dropdown" data-testid="movie-release-type-filter">
+            <summary>
+                <span>Release dates</span>
+                <strong>@SelectedMovieReleaseTypeSummary()</strong>
+            </summary>
+            <div class="filter-dropdown-menu">
+                @foreach (var option in MovieReleaseTypeOptions)
+                {
+                    <label @key="option.Value" class="dropdown-check-option">
+                        <input type="checkbox"
+                               checked="@Filters.MovieReleaseTypes.Contains(option.Value)"
+                               aria-label="@($"Toggle movie release type {option.Label}")"
+                               @onchange="args => SetIntSelected(Filters.MovieReleaseTypes, option.Value, args)" />
+                        <span>@option.Label</span>
+                    </label>
+                }
+            </div>
+        </details>
+    }
+    else
+    {
+        <input class="search-input"
+               placeholder="Filter by TV network"
+               aria-label="TV network"
+               @bind="Filters.SourceText"
+               @bind:event="oninput"
+               @bind:after="NotifyChanged" />
+
+        <details class="filter-dropdown" data-testid="series-status-filter">
+            <summary>
+                <span>Status</span>
+                <strong>@SelectedTvStatusSummary()</strong>
+            </summary>
+            <div class="filter-dropdown-menu">
+                @foreach (var option in TvStatusOptions)
+                {
+                    <label @key="option.Value" class="dropdown-check-option">
+                        <input type="checkbox"
+                               checked="@Filters.TvStatuses.Contains(option.Value, StringComparer.OrdinalIgnoreCase)"
+                               aria-label="@($"Toggle series status {option.Label}")"
+                               @onchange="args => SetStringSelected(Filters.TvStatuses, option.Value, args)" />
+                        <span>@option.Label</span>
+                    </label>
+                }
+            </div>
+        </details>
+
+        <details class="filter-dropdown" data-testid="series-type-filter">
+            <summary>
+                <span>Type</span>
+                <strong>@SelectedTvTypeSummary()</strong>
+            </summary>
+            <div class="filter-dropdown-menu">
+                @foreach (var option in TvTypeOptions)
+                {
+                    <label @key="option.Value" class="dropdown-check-option">
+                        <input type="checkbox"
+                               checked="@Filters.TvTypes.Contains(option.Value, StringComparer.OrdinalIgnoreCase)"
+                               aria-label="@($"Toggle series type {option.Label}")"
+                               @onchange="args => SetStringSelected(Filters.TvTypes, option.Value, args)" />
+                        <span>@option.Label</span>
+                    </label>
+                }
+            </div>
+        </details>
+    }
+
+    <details class="filter-dropdown" data-testid="@($"{MediaSlug}-genre-filter")">
+        <summary>
+            <span>Genres</span>
+            <strong>@SelectedGenreSummary()</strong>
+        </summary>
+        <div class="filter-dropdown-menu">
+            @foreach (var genre in GenreOptions())
+            {
+                <label @key="genre.Value" class="dropdown-check-option">
+                    <input type="checkbox"
+                           checked="@Filters.GenreIds.Contains(ParseInt(genre.Value))"
+                           aria-label="@($"Toggle {Title} genre {genre.Label}")"
+                           @onchange="args => SetIntSelected(Filters.GenreIds, ParseInt(genre.Value), args)" />
+                    <span>@genre.Label</span>
+                </label>
+            }
+
+            @if (Filters.GenreIds.Count > 0)
+            {
+                <button class="text-command" type="button" @onclick="ClearGenres">Clear genres</button>
+            }
+        </div>
+    </details>
+
+    @if (MediaType == PremiereMediaType.Movie)
+    {
+        <details class="filter-dropdown" data-testid="@($"{MediaSlug}-certification-filter")">
+            <summary>
+                <span>Certification</span>
+                <strong>@SelectedCertificationSummary()</strong>
+            </summary>
+            <div class="filter-dropdown-menu">
+                @foreach (var certification in CertificationOptions())
+                {
+                    <label @key="certification.Value" class="dropdown-check-option">
+                        <input type="checkbox"
+                               checked="@Filters.Certifications.Contains(certification.Value, StringComparer.OrdinalIgnoreCase)"
+                               aria-label="@($"Toggle {Title} certification {certification.Label}")"
+                               @onchange="args => SetStringSelected(Filters.Certifications, certification.Value, args)" />
+                        <span>@certification.Label</span>
+                    </label>
+                }
+            </div>
+        </details>
+    }
+
+    <details class="filter-dropdown" data-testid="@($"{MediaSlug}-language-filter")">
+        <summary>
+            <span>Language</span>
+            <strong>@SelectedLanguageSummary()</strong>
+        </summary>
+        <div class="filter-dropdown-menu">
+            <label class="filter-option-search-label">
+                Search languages
+                <input class="filter-option-search"
+                       placeholder="Type to narrow languages..."
+                       aria-label="@($"{Title} language option search")"
+                       @bind="_languageSearch"
+                       @bind:event="oninput" />
+            </label>
+
+            @{
+                var languageOptions = LanguageOptions();
+                var visibleLanguageOptions = VisibleFilterOptions(languageOptions, Filters.OriginalLanguages, _languageSearch);
+            }
+            @foreach (var language in visibleLanguageOptions)
+            {
+                <label @key="language.Value" class="dropdown-check-option">
+                    <input type="checkbox"
+                           checked="@IsLanguageSelected(language.Value)"
+                           aria-label="@($"Toggle {Title} language {language.Label}")"
+                           @onchange="args => SetLanguageSelected(language.Value, args)" />
+                    <span>@language.Label</span>
+                </label>
+            }
+
+            @if (languageOptions.Count > visibleLanguageOptions.Count)
+            {
+                <p class="filter-option-limit-hint">@OptionLimitText(languageOptions.Count, visibleLanguageOptions.Count, _languageSearch)</p>
+            }
+
+            @if (Filters.OriginalLanguages.Count > 0)
+            {
+                <button class="text-command" type="button" @onclick="ClearLanguages">Clear languages</button>
+            }
+        </div>
+    </details>
+
+    <details class="filter-dropdown" data-testid="@($"{MediaSlug}-origin-country-filter")">
+        <summary>
+            <span>Origin country</span>
+            <strong>@SelectedOriginCountrySummary()</strong>
+        </summary>
+        <div class="filter-dropdown-menu">
+            <label class="filter-option-search-label">
+                Search countries
+                <input class="filter-option-search"
+                       placeholder="Type to narrow countries..."
+                       aria-label="@($"{Title} origin country option search")"
+                       @bind="_countrySearch"
+                       @bind:event="oninput" />
+            </label>
+
+            @{
+                var countryOptions = CountryOptions();
+                var visibleCountryOptions = VisibleFilterOptions(countryOptions, Filters.OriginCountries, _countrySearch);
+            }
+            @foreach (var country in visibleCountryOptions)
+            {
+                <label @key="country.Value" class="dropdown-check-option">
+                    <input type="checkbox"
+                           checked="@IsCountrySelected(country.Value)"
+                           aria-label="@($"Toggle {Title} origin country {country.Label}")"
+                           @onchange="args => SetCountrySelected(country.Value, args)" />
+                    <span>@country.Label</span>
+                </label>
+            }
+
+            @if (countryOptions.Count > visibleCountryOptions.Count)
+            {
+                <p class="filter-option-limit-hint">@OptionLimitText(countryOptions.Count, visibleCountryOptions.Count, _countrySearch)</p>
+            }
+
+            @if (Filters.OriginCountries.Count > 0)
+            {
+                <button class="text-command" type="button" @onclick="ClearCountries">Clear origin countries</button>
+            }
+        </div>
+    </details>
+
+    <div class="range-pair">
+        <label>
+            Runtime from
+            <input type="number"
+                   min="0"
+                   max="360"
+                   step="5"
+                   @bind="Filters.RuntimeMinMinutes"
+                   @bind:after="NotifyChanged" />
+        </label>
+        <label>
+            Runtime to
+            <input type="number"
+                   min="0"
+                   max="360"
+                   step="5"
+                   @bind="Filters.RuntimeMaxMinutes"
+                   @bind:after="NotifyChanged" />
+        </label>
+    </div>
+
+    <input class="search-input"
+           placeholder="Filter by keywords..."
+           aria-label="@($"{Title} keywords")"
+           @bind="Filters.KeywordText"
+           @bind:event="oninput"
+           @bind:after="NotifyChanged" />
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public PremiereMediaType MediaType { get; set; }
+
+    [Parameter, EditorRequired]
+    public MediaFilterSet Filters { get; set; } = default!;
+
+    [Parameter]
+    public FilterCatalog Catalog { get; set; } = new();
+
+    [Parameter]
+    public IReadOnlyList<PremiereItem> Items { get; set; } = [];
+
+    [Parameter]
+    public EventCallback OnFiltersChanged { get; set; }
+
+    private string Title => MediaType == PremiereMediaType.Series ? "Series filters" : "Movie filters";
+
+    private string MediaSlug => MediaType == PremiereMediaType.Series ? "series" : "movie";
+
+    private const int MaxVisibleDropdownOptions = 90;
+
+    private string _sourceSearch = "";
+    private string _languageSearch = "";
+    private string _countrySearch = "";
+
+    private IReadOnlyList<FilterOption> GenreOptions()
+    {
+        return MergeOptions(
+            MediaType == PremiereMediaType.Series ? Catalog.SeriesGenres : Catalog.MovieGenres,
+            ItemsForMedia()
+                .SelectMany(item => item.GenreIds.Zip(item.Genres, (id, name) => new FilterOption(id.ToString(CultureInfo.InvariantCulture), name))));
+    }
+
+    private IReadOnlyList<FilterOption> SourceOptions()
+    {
+        return MergeOptions(
+            MediaType == PremiereMediaType.Series ? Catalog.SeriesProviders : Catalog.MovieProviders,
+            ItemsForMedia().SelectMany(ItemSourceOptions),
+            collapseDuplicateLabels: true);
+    }
+
+    private static IEnumerable<FilterOption> ItemSourceOptions(PremiereItem item)
+    {
+        return item.Sources
+            .Select(source => SourceFilterValue.OptionValue(source) is { } value
+                ? new FilterOption(value, source.Name)
+                : null)
+            .OfType<FilterOption>()
+            .Concat(item.SourceNames
+                .Concat([item.NetworkName, item.WebChannelName])
+                .Where(source => !string.IsNullOrWhiteSpace(source))
+                .Select(source => new FilterOption(source!, source!)));
+    }
+
+    private IReadOnlyList<FilterOption> CertificationOptions()
+    {
+        return MergeOptions(
+            MediaType == PremiereMediaType.Series ? Catalog.SeriesCertifications : Catalog.MovieCertifications,
+            ItemsForMedia()
+                .SelectMany(item => item.Certifications)
+                .Select(value => new FilterOption(value, value.Replace(':', ' '))));
+    }
+
+    private IReadOnlyList<FilterOption> LanguageOptions()
+    {
+        return MergeOptions(
+            Catalog.Languages,
+            ItemsForMedia()
+                .Select(item => item.OriginalLanguage)
+                .Where(language => !string.IsNullOrWhiteSpace(language))
+                .Select(language => new FilterOption(language, language.ToUpperInvariant())));
+    }
+
+    private IReadOnlyList<FilterOption> CountryOptions()
+    {
+        return MergeOptions(
+            Catalog.Countries,
+            ItemsForMedia()
+                .SelectMany(item => item.OriginCountries)
+                .Where(country => !string.IsNullOrWhiteSpace(country))
+                .Select(country => new FilterOption(country, country.ToUpperInvariant())));
+    }
+
+    private IEnumerable<PremiereItem> ItemsForMedia()
+    {
+        return Items.Where(item => item.MediaType == MediaType);
+    }
+
+    private static IReadOnlyList<FilterOption> MergeOptions(
+        IEnumerable<FilterOption> primary,
+        IEnumerable<FilterOption> secondary,
+        bool collapseDuplicateLabels = false)
+    {
+        var options = primary
+            .Select(option => (Option: option, Priority: 0))
+            .Concat(secondary.Select(option => (Option: option, Priority: 1)))
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.Option.Value) && !string.IsNullOrWhiteSpace(entry.Option.Label))
+            .GroupBy(entry => entry.Option.Value, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group
+                .OrderBy(entry => entry.Priority)
+                .ThenBy(entry => entry.Option.Label.Length)
+                .ThenBy(entry => entry.Option.Label, StringComparer.OrdinalIgnoreCase)
+                .First()
+            )
+            .ToArray();
+
+        if (collapseDuplicateLabels)
+        {
+            options = options
+                .GroupBy(entry => entry.Option.Label.Trim(), StringComparer.OrdinalIgnoreCase)
+                .Select(group => group
+                    .OrderBy(entry => entry.Priority)
+                    .ThenBy(entry => entry.Option.Value, StringComparer.OrdinalIgnoreCase)
+                    .First())
+                .ToArray();
+        }
+
+        return options
+            .Select(entry => entry.Option)
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<FilterOption> VisibleFilterOptions(
+        IReadOnlyList<FilterOption> options,
+        IReadOnlyCollection<string> selectedValues,
+        string searchText)
+    {
+        var selected = selectedValues.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var matching = MatchingFilterOptions(options, searchText);
+
+        return options
+            .Where(option => selected.Contains(option.Value))
+            .Concat(matching.Where(option => !selected.Contains(option.Value)))
+            .DistinctBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .Take(MaxVisibleDropdownOptions)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<FilterOption> MatchingFilterOptions(
+        IReadOnlyList<FilterOption> options,
+        string searchText)
+    {
+        if (string.IsNullOrWhiteSpace(searchText))
+        {
+            return options;
+        }
+
+        var trimmedSearch = searchText.Trim();
+        return options
+            .Where(option =>
+                option.Label.Contains(trimmedSearch, StringComparison.OrdinalIgnoreCase)
+                || option.Value.Contains(trimmedSearch, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    private static string OptionLimitText(int totalCount, int visibleCount, string searchText)
+    {
+        return string.IsNullOrWhiteSpace(searchText)
+            ? $"Showing {visibleCount} of {totalCount}. Type to narrow."
+            : $"Showing {visibleCount} matching options.";
+    }
+
+    private bool IsSourceSelected(string source)
+    {
+        return Filters.SelectedSources.Contains(source, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private bool IsLanguageSelected(string language)
+    {
+        return Filters.OriginalLanguages.Contains(language, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private bool IsCountrySelected(string country)
+    {
+        return Filters.OriginCountries.Contains(country, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private Task SetSourceSelected(string source, ChangeEventArgs args)
+    {
+        return SetStringSelected(Filters.SelectedSources, source, args);
+    }
+
+    private Task SetLanguageSelected(string language, ChangeEventArgs args)
+    {
+        return SetStringSelected(Filters.OriginalLanguages, language.Trim().ToLowerInvariant(), args);
+    }
+
+    private Task SetCountrySelected(string country, ChangeEventArgs args)
+    {
+        return SetStringSelected(Filters.OriginCountries, country.Trim().ToUpperInvariant(), args);
+    }
+
+    private Task ClearSources()
+    {
+        Filters.SelectedSources.Clear();
+        return NotifyChanged();
+    }
+
+    private Task ClearLanguages()
+    {
+        Filters.OriginalLanguages.Clear();
+        return NotifyChanged();
+    }
+
+    private Task ClearCountries()
+    {
+        Filters.OriginCountries.Clear();
+        return NotifyChanged();
+    }
+
+    private Task ClearGenres()
+    {
+        Filters.GenreIds.Clear();
+        return NotifyChanged();
+    }
+
+    private Task ClearFilterSet()
+    {
+        Filters.SeriesDateMode = SeriesDateMode.AllEpisodes;
+        Filters.OriginalLanguages.Clear();
+        Filters.OriginCountries.Clear();
+        Filters.GenreIds.Clear();
+        Filters.SelectedSources.Clear();
+        Filters.WatchRegion = "";
+        Filters.SourceText = "";
+        Filters.MonetizationTypes.Clear();
+        Filters.MovieReleaseTypes.Clear();
+        Filters.Certifications.Clear();
+        Filters.CertificationCountry = "";
+        Filters.TvStatuses.Clear();
+        Filters.TvTypes.Clear();
+        Filters.RuntimeMinMinutes = 0;
+        Filters.RuntimeMaxMinutes = 360;
+        Filters.KeywordText = "";
+        Filters.SearchText = "";
+
+        return NotifyChanged();
+    }
+
+    private Task ChangeSeriesDateMode(SeriesDateMode value)
+    {
+        Filters.SeriesDateMode = value;
+        return NotifyChanged();
+    }
+
+    private Task SetStringSelected(List<string> values, string value, ChangeEventArgs args)
+    {
+        return SetStringSelected(values, value, IsChecked(args));
+    }
+
+    private Task SetStringSelected(List<string> values, string value, bool isSelected)
+    {
+        value = value.Trim();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return Task.CompletedTask;
+        }
+
+        var index = values.FindIndex(existing => string.Equals(existing, value, StringComparison.OrdinalIgnoreCase));
+        if (isSelected)
+        {
+            if (index < 0)
+            {
+                values.Add(value);
+                values.Sort(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        else if (index >= 0)
+        {
+            values.RemoveAt(index);
+        }
+
+        return NotifyChanged();
+    }
+
+    private Task SetIntSelected(List<int> values, int value, ChangeEventArgs args)
+    {
+        if (value <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        var isSelected = IsChecked(args);
+        if (isSelected)
+        {
+            if (!values.Contains(value))
+            {
+                values.Add(value);
+                values.Sort();
+            }
+        }
+        else
+        {
+            values.Remove(value);
+        }
+
+        return NotifyChanged();
+    }
+
+    private static bool IsChecked(ChangeEventArgs args)
+    {
+        return args.Value is bool value && value;
+    }
+
+    private Task NotifyChanged()
+    {
+        return OnFiltersChanged.InvokeAsync();
+    }
+
+    private string SelectedSourceSummary()
+    {
+        return Filters.SelectedSources.Count switch
+        {
+            0 => "All sources",
+            1 => SourceOptions().FirstOrDefault(option => string.Equals(
+                    option.Value,
+                    Filters.SelectedSources[0],
+                    StringComparison.OrdinalIgnoreCase))?.Label
+                ?? SourceFilterValue.Label(Filters.SelectedSources[0]),
+            _ => $"{Filters.SelectedSources.Count} sources"
+        };
+    }
+
+    private string SelectedAvailabilitySummary()
+    {
+        return SelectedStringSummary(Filters.MonetizationTypes, "All availabilities");
+    }
+
+    private string SelectedMovieReleaseTypeSummary()
+    {
+        return Filters.MovieReleaseTypes.Count switch
+        {
+            0 => "All releases",
+            1 => MovieReleaseTypeOptions.First(option => option.Value == Filters.MovieReleaseTypes[0]).Label,
+            _ => $"{Filters.MovieReleaseTypes.Count} releases"
+        };
+    }
+
+    private string SeriesDateModeSummary()
+    {
+        return SeriesDateModeOptions.First(option => option.Value == Filters.SeriesDateMode).Label;
+    }
+
+    private string SelectedTvStatusSummary()
+    {
+        return SelectedStringSummary(Filters.TvStatuses, "All statuses");
+    }
+
+    private string SelectedTvTypeSummary()
+    {
+        return SelectedStringSummary(Filters.TvTypes, "All types");
+    }
+
+    private string SelectedGenreSummary()
+    {
+        return Filters.GenreIds.Count switch
+        {
+            0 => "All genres",
+            1 => GenreOptions().FirstOrDefault(genre => ParseInt(genre.Value) == Filters.GenreIds[0])?.Label ?? "1 genre",
+            _ => $"{Filters.GenreIds.Count} genres"
+        };
+    }
+
+    private string SelectedCertificationSummary()
+    {
+        return SelectedStringSummary(Filters.Certifications, "All certifications");
+    }
+
+    private string SelectedLanguageSummary()
+    {
+        return Filters.OriginalLanguages.Count switch
+        {
+            0 => "All languages",
+            1 => LanguageLabel(Filters.OriginalLanguages[0]),
+            _ => $"{Filters.OriginalLanguages.Count} languages"
+        };
+    }
+
+    private string SelectedOriginCountrySummary()
+    {
+        return Filters.OriginCountries.Count switch
+        {
+            0 => "All countries",
+            1 => CountryLabel(Filters.OriginCountries[0]),
+            _ => $"{Filters.OriginCountries.Count} countries"
+        };
+    }
+
+    private string LanguageLabel(string language)
+    {
+        return LanguageOptions()
+            .FirstOrDefault(option => string.Equals(option.Value, language, StringComparison.OrdinalIgnoreCase))
+            ?.Label ?? language.ToUpperInvariant();
+    }
+
+    private string CountryLabel(string country)
+    {
+        return CountryOptions()
+            .FirstOrDefault(option => string.Equals(option.Value, country, StringComparison.OrdinalIgnoreCase))
+            ?.Label ?? country.ToUpperInvariant();
+    }
+
+    private static string SelectedStringSummary(IReadOnlyCollection<string> values, string emptyText)
+    {
+        return values.Count switch
+        {
+            0 => emptyText,
+            1 => values.First(),
+            _ => $"{values.Count} selected"
+        };
+    }
+
+    private static int ParseInt(string value)
+    {
+        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : 0;
+    }
+
+    private static readonly FilterOption[] MonetizationOptions =
+    [
+        new("flatrate", "Stream"),
+        new("free", "Free"),
+        new("ads", "Ads"),
+        new("rent", "Rent"),
+        new("buy", "Buy")
+    ];
+
+    private static readonly (int Value, string Label)[] MovieReleaseTypeOptions =
+    [
+        (1, "Premiere"),
+        (2, "Theatrical (limited)"),
+        (3, "Theatrical"),
+        (4, "Digital"),
+        (5, "Physical"),
+        (6, "TV")
+    ];
+
+    private static readonly (SeriesDateMode Value, string Label)[] SeriesDateModeOptions =
+    [
+        (SeriesDateMode.AllEpisodes, "Every episode"),
+        (SeriesDateMode.NewSeriesOnly, "New series only")
+    ];
+
+    private static readonly FilterOption[] TvStatusOptions =
+    [
+        new("Returning Series", "Returning Series"),
+        new("Planned", "Planned"),
+        new("In Production", "In Production"),
+        new("Ended", "Ended"),
+        new("Canceled", "Canceled"),
+        new("Pilot", "Pilot")
+    ];
+
+    private static readonly FilterOption[] TvTypeOptions =
+    [
+        new("Documentary", "Documentary"),
+        new("News", "News"),
+        new("Miniseries", "Miniseries"),
+        new("Reality", "Reality"),
+        new("Scripted", "Scripted"),
+        new("Talk Show", "Talk Show"),
+        new("Video", "Video")
+    ];
+
+}

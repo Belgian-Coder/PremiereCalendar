@@ -1,0 +1,18 @@
+{
+  "page": 1,
+  "total_pages": 1,
+  "results": [
+    {
+      "id": 200,
+      "title": "Independent Feature",
+      "release_date": "2026-05-06",
+      "overview": "A feature-length release from an Australian production team.",
+      "poster_path": null,
+      "backdrop_path": "/independent-feature-backdrop.jpg",
+      "original_language": "en",
+      "origin_country": [ "AU" ],
+      "vote_average": 6.9,
+      "vote_count": 18
+    }
+  ]
+}

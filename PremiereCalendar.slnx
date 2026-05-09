@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/PremiereCalendar.ComponentTests/PremiereCalendar.ComponentTests.csproj" />
+    <Project Path="tests/PremiereCalendar.IntegrationTests/PremiereCalendar.IntegrationTests.csproj" />
+    <Project Path="tests/PremiereCalendar.UnitTests/PremiereCalendar.UnitTests.csproj" />
+  </Folder>
+  <Project Path="PremiereCalendar/PremiereCalendar.csproj" />
+</Solution>

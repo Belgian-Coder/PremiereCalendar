@@ -1,0 +1,241 @@
+@using System.Globalization
+@using System.Text
+
+<section class="calendar-day" id="@DayId" data-testid="calendar-day">
+    <header class="day-header">
+        <div>
+            <span class="day-date">@Day.ToString("dd MMM", CultureInfo.CurrentCulture)</span>
+            <h2>@Day.ToString("dddd", CultureInfo.CurrentCulture)</h2>
+        </div>
+        <div class="day-header-meta">
+            @if (Items.Count > 0)
+            {
+                <span>@FormatCount(MovieCount, "movie")</span>
+                <span>@FormatCount(SeriesCount, "series")</span>
+            }
+        </div>
+    </header>
+    <div class="day-separator" aria-hidden="true"></div>
+
+    @if (Items.Count == 0)
+    {
+        <p class="empty-day">No premieres</p>
+    }
+    else
+    {
+        @if (UseVirtualizedRows)
+        {
+            <div class="day-virtualized-list" data-testid="virtualized-day">
+                <div class="day-load-controls" aria-label="@($"Virtualized items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
+                    <span class="day-visible-count">Showing all @Items.Count with virtual scrolling</span>
+                </div>
+
+                <Virtualize Items="_cardRows"
+                            Context="row"
+                            ItemSize="VirtualizedRowItemSize"
+                            OverscanCount="VirtualizedOverscanRows">
+                    <div class="day-card-row" @key="row.Index">
+                        @foreach (var item in row.Items)
+                        {
+                            <PremiereCard @key="item.CanonicalId"
+                                          Item="item"
+                                          ScoreSource="ScoreSource"
+                                          ImageCacheVersion="@ImageCacheVersion"
+                                          RefreshImageCache="RefreshImageCache"
+                                          IntegrationSettings="IntegrationSettings"
+                                          OnAddToArr="OnAddToArr"
+                                          IsArrActionBusy="IsArrActionBusy" />
+                        }
+                    </div>
+                </Virtualize>
+            </div>
+        }
+        else
+        {
+            <div class="day-items-grid">
+                @foreach (var item in VisibleItems)
+                {
+                    <PremiereCard @key="item.CanonicalId"
+                                  Item="item"
+                                  ScoreSource="ScoreSource"
+                                  ImageCacheVersion="@ImageCacheVersion"
+                                  RefreshImageCache="RefreshImageCache"
+                                  IntegrationSettings="IntegrationSettings"
+                                  OnAddToArr="OnAddToArr"
+                                  IsArrActionBusy="IsArrActionBusy" />
+                }
+            </div>
+
+            @if (HiddenItemCount > 0)
+            {
+                <div class="day-load-controls" aria-label="@($"More items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
+                    <span class="day-visible-count">Showing @_visibleCount of @Items.Count</span>
+                    <button class="tool-button"
+                            type="button"
+                            data-day-load-more
+                            title="@($"Show {NextBatchCount} more items")"
+                            @onclick="ShowMore">
+                        Show @NextBatchCount more
+                    </button>
+                    <button class="tool-button"
+                            type="button"
+                            data-day-load-all
+                            title="@($"Show all {Items.Count} items")"
+                            @onclick="ShowAll">
+                        Show all @Items.Count
+                    </button>
+                </div>
+
+                <div class="day-autoload-sentinel" data-day-autoload-sentinel>
+                    More items load as you scroll
+                </div>
+            }
+        }
+    }
+</section>
+
+@code {
+    [Parameter]
+    public DateOnly Day { get; set; }
+
+    [Parameter]
+    public string DayId { get; set; } = "";
+
+    [Parameter]
+    public IReadOnlyList<PremiereItem> Items { get; set; } = [];
+
+    [Parameter]
+    public ScoreSource ScoreSource { get; set; } = ScoreSource.Tmdb;
+
+    [Parameter]
+    public string? ImageCacheVersion { get; set; }
+
+    [Parameter]
+    public bool RefreshImageCache { get; set; }
+
+    [Parameter]
+    public IntegrationSettings IntegrationSettings { get; set; } = new();
+
+    [Parameter]
+    public EventCallback<PremiereItem> OnAddToArr { get; set; }
+
+    [Parameter]
+    public bool IsArrActionBusy { get; set; }
+
+    [Parameter]
+    public int InitialVisibleCount { get; set; } = 10;
+
+    [Parameter]
+    public int LoadBatchSize { get; set; } = 10;
+
+    private int _visibleCount;
+    private string _itemsSignature = "";
+    private bool _autoLoadAll;
+    private List<CardRow> _cardRows = [];
+    private string _lastRenderFingerprint = "";
+    private bool _shouldRender = true;
+
+    private const int VirtualizeThreshold = 40;
+    private const int VirtualizedOverscanRows = 4;
+    private const float VirtualizedRowItemSize = 520;
+
+    private int MovieCount => Items.Count(item => item.MediaType == PremiereMediaType.Movie);
+
+    private int SeriesCount => Items.Count(item => item.MediaType == PremiereMediaType.Series);
+
+    private int HiddenItemCount => Math.Max(0, Items.Count - _visibleCount);
+
+    private int InitialCount => Math.Min(Items.Count, Math.Max(10, InitialVisibleCount));
+
+    private int NextBatchCount => Math.Min(Math.Max(1, LoadBatchSize), HiddenItemCount);
+
+    private IEnumerable<PremiereItem> VisibleItems => Items.Take(_visibleCount);
+
+    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold;
+
+    protected override void OnParametersSet()
+    {
+        var signature = BuildItemsSignature();
+
+        if (!string.Equals(signature, _itemsSignature, StringComparison.Ordinal))
+        {
+            _itemsSignature = signature;
+            _visibleCount = InitialCount;
+            _autoLoadAll = false;
+            _cardRows = CreateCardRows();
+        }
+        else
+        {
+            _visibleCount = Math.Min(_visibleCount, Items.Count);
+            if (HiddenItemCount == 0)
+            {
+                _autoLoadAll = false;
+            }
+        }
+
+        var renderFingerprint = BuildRenderFingerprint();
+        _shouldRender = !string.Equals(renderFingerprint, _lastRenderFingerprint, StringComparison.Ordinal);
+        _lastRenderFingerprint = renderFingerprint;
+    }
+
+    protected override bool ShouldRender()
+    {
+        return _shouldRender;
+    }
+
+    private void ShowMore()
+    {
+        _visibleCount = Math.Min(Items.Count, _visibleCount + Math.Max(1, LoadBatchSize));
+        _shouldRender = true;
+    }
+
+    private void ShowAll()
+    {
+        _visibleCount = Items.Count;
+        _autoLoadAll = false;
+        _shouldRender = true;
+    }
+
+    private List<CardRow> CreateCardRows()
+    {
+        return Items
+            .Chunk(2)
+            .Select((items, index) => new CardRow(index, items))
+            .ToList();
+    }
+
+    private static string FormatCount(int count, string noun)
+    {
+        if (noun == "series")
+        {
+            return $"{count} series";
+        }
+
+        return count == 1 ? $"1 {noun}" : $"{count} {noun}s";
+    }
+
+    private string BuildRenderFingerprint()
+    {
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{_itemsSignature}|{ScoreSource}|{ImageCacheVersion}|{RefreshImageCache}|{InitialVisibleCount}|{LoadBatchSize}|{_visibleCount}|{_autoLoadAll}|{UseVirtualizedRows}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}");
+    }
+
+    private string BuildItemsSignature()
+    {
+        var builder = new StringBuilder();
+        builder.Append(Day.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
+        builder.Append('|');
+        builder.Append(Items.Count);
+
+        foreach (var item in Items)
+        {
+            builder.Append('|');
+            builder.Append(item.CanonicalId);
+        }
+
+        return builder.ToString();
+    }
+
+    private sealed record CardRow(int Index, IReadOnlyList<PremiereItem> Items);
+}

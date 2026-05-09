@@ -1,0 +1,103 @@
+@page "/about"
+@inject IIntegrationSettingsStore SettingsStore
+
+<PageTitle>About</PageTitle>
+
+<div class="about-page">
+    <p class="eyebrow">Attribution</p>
+    <h1>About Premiere Calendar</h1>
+
+    <p>This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+
+    <p>Movie and TV metadata are provided by TMDB. Optional IMDb and Rotten Tomatoes rating enrichment is provided through OMDb when configured.</p>
+
+    <p>Optional enrichment can use TVmaze, Fanart.tv, Trakt, TheTVDB, and Wikimedia/Commons. External discovery rows are accepted only after they resolve back to a TMDB movie or TV ID.</p>
+
+    <p>Premiere Calendar is designed for local hosting. API keys stay server-side in the local settings database or ASP.NET Core configuration fallback, not in client-side code.</p>
+
+    <section class="source-status-panel" aria-labelledby="source-status-heading">
+        <h2 id="source-status-heading">Source status</h2>
+        <div class="source-status-grid">
+            @foreach (var source in Sources())
+            {
+                <div class="source-status-item">
+                    <span>@source.Name</span>
+                    <strong class="@StatusClass(source.IsActive)">@StatusText(source.IsActive)</strong>
+                    <small>@source.Note</small>
+                </div>
+            }
+        </div>
+    </section>
+</div>
+
+@code {
+    private IntegrationSettings _settings = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settings = await SettingsStore.GetAsync();
+    }
+
+    private IEnumerable<SourceStatus> Sources()
+    {
+        var sources = _settings.Sources;
+
+        yield return new SourceStatus(
+            "TMDb",
+            !string.IsNullOrWhiteSpace(sources.Tmdb.BearerToken),
+            "Canonical discovery, details, videos, watch providers, and IDs.");
+
+        yield return new SourceStatus(
+            "TVmaze schedules",
+            sources.Tvmaze.Enabled && sources.Tvmaze.EnableScheduleDiscovery,
+            $"Season 1 episode 1 broadcast/web schedules for {FormatCodes(sources.Tvmaze.ScheduleCountries)}.");
+
+        yield return new SourceStatus(
+            "Trakt",
+            sources.Trakt.Enabled && !string.IsNullOrWhiteSpace(sources.Trakt.ClientId),
+            sources.Trakt.Enabled ? "Global movie and new-show calendar candidates." : "Disabled by configuration.");
+
+        yield return new SourceStatus(
+            "Fanart.tv",
+            sources.Fanart.Enabled && !string.IsNullOrWhiteSpace(sources.Fanart.ApiKey),
+            sources.Fanart.Enabled ? "Poster fallback for TMDb-backed rows." : "Disabled by configuration.");
+
+        yield return new SourceStatus(
+            "TheTVDB",
+            sources.TheTvdb.Enabled && !string.IsNullOrWhiteSpace(sources.TheTvdb.ApiKey),
+            sources.TheTvdb.Enabled ? "Optional series artwork fallback." : "Disabled by configuration.");
+
+        yield return new SourceStatus(
+            "OMDb",
+            sources.Omdb.Enabled && !string.IsNullOrWhiteSpace(sources.Omdb.ApiKey),
+            sources.Omdb.Enabled ? "IMDb, Rotten Tomatoes, Metacritic, plot, and poster fallback." : "Disabled by configuration.");
+
+        yield return new SourceStatus(
+            "Wikimedia/Commons",
+            sources.Wikimedia.Enabled,
+            "Reusable-license image fallback from TMDb Wikidata IDs.");
+    }
+
+    private static string StatusText(bool isActive)
+    {
+        return isActive ? "Active" : "Inactive";
+    }
+
+    private static string StatusClass(bool isActive)
+    {
+        return isActive ? "active" : "inactive";
+    }
+
+    private static string FormatCodes(IEnumerable<string> codes)
+    {
+        var normalizedCodes = codes
+            .Where(code => !string.IsNullOrWhiteSpace(code))
+            .Select(code => code.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return normalizedCodes.Length == 0 ? "configured countries" : string.Join(", ", normalizedCodes);
+    }
+
+    private sealed record SourceStatus(string Name, bool IsActive, string Note);
+}

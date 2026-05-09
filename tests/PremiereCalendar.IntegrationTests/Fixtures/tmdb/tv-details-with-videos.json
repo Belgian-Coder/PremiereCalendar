@@ -1,0 +1,42 @@
+{
+  "id": 100,
+  "episode_run_time": [ 48 ],
+  "videos": {
+    "results": [
+      {
+        "name": "Official Trailer",
+        "key": "pilot-trailer",
+        "site": "YouTube",
+        "type": "Trailer",
+        "official": true,
+        "published_at": "2026-04-20T12:00:00Z"
+      }
+    ]
+  },
+  "external_ids": {
+    "imdb_id": "tt0000100",
+    "tvdb_id": 81189,
+    "wikidata_id": "Q23572"
+  },
+  "networks": [
+    {
+      "id": 49,
+      "name": "HBO"
+    }
+  ],
+  "watch/providers": {
+    "results": {
+      "BE": {
+        "link": "https://www.themoviedb.org/tv/100-pilot-week/watch?locale=BE",
+        "flatrate": [
+          {
+            "provider_id": 312,
+            "provider_name": "VTM GO",
+            "display_priority": 2,
+            "logo_path": "/vtmgo.png"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,1114 @@
+@page "/settings"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IIntegrationSettingsStore SettingsStore
+@inject IArrIntegrationService ArrService
+@inject ISimklClient SimklClient
+
+<PageTitle>Settings</PageTitle>
+
+<ToastStack Messages="_toasts" />
+
+<div class="settings-shell">
+    <header class="calendar-header">
+        <div>
+            <p class="eyebrow">Local integrations</p>
+            <h1>Settings</h1>
+        </div>
+    </header>
+
+    @if (_isLoading)
+    {
+        <div class="status-panel">Loading settings...</div>
+    }
+    else
+    {
+        <EditForm EditContext="_editContext">
+            <section class="settings-grid">
+                <article class="settings-panel">
+                    <div class="settings-panel-header">
+                        <div>
+                            <p class="eyebrow">Series</p>
+                            <h2>Sonarr</h2>
+                            <div class="settings-status-row compact" aria-label="Library app integration status">
+                                @StatusBadge("Sonarr", SonarrProviderStatus())
+                            </div>
+                        </div>
+                        <label class="switch-row">
+                            <InputCheckbox @bind-Value="_settings.Sonarr.Enabled" />
+                            <span>Enabled</span>
+                        </label>
+                    </div>
+
+                    <div class="settings-fields">
+                        <label>
+                            <span>URL</span>
+                            <InputText class="settings-input" aria-label="Sonarr URL" @bind-Value="_settings.Sonarr.BaseUrl" />
+                        </label>
+
+                        <label>
+                            <span>API key</span>
+                            <InputText type="password" class="settings-input" aria-label="Sonarr API key" @bind-Value="_settings.Sonarr.ApiKey" />
+                        </label>
+
+                        <label>
+                            <span>Tag on add</span>
+                            <InputText class="settings-input" aria-label="Sonarr tag on add" @bind-Value="_settings.Sonarr.TagOnAdd" />
+                            <small class="settings-help">Created if missing. Leave empty to add without a tag.</small>
+                        </label>
+
+                        <label>
+                            <span>Root folder path</span>
+                            <InputText class="settings-input" list="sonarr-root-folders" aria-label="Sonarr root folder path" @bind-Value="_settings.Sonarr.RootFolderPath" />
+                            <datalist id="sonarr-root-folders">
+                                @foreach (var root in _sonarrOptions.RootFolders)
+                                {
+                                    <option value="@root.Path">@root.Path</option>
+                                }
+                            </datalist>
+                        </label>
+
+                        @if (_sonarrOptions.QualityProfiles.Count > 0)
+                        {
+                            <label>
+                                <span>Quality profile</span>
+                                <select class="settings-input" aria-label="Sonarr quality profile" @bind="_settings.Sonarr.QualityProfileId">
+                                    <option value="">Select a profile</option>
+                                    @if (_settings.Sonarr.QualityProfileId is > 0
+                                                                    && !_sonarrOptions.QualityProfiles.Any(profile => profile.Id == _settings.Sonarr.QualityProfileId.Value))
+                                    {
+                                        <option value="@_settings.Sonarr.QualityProfileId.Value">Current ID @_settings.Sonarr.QualityProfileId.Value</option>
+                                    }
+                                    @foreach (var profile in _sonarrOptions.QualityProfiles)
+                                    {
+                                        <option value="@profile.Id">@profile.Name</option>
+                                    }
+                                </select>
+                            </label>
+                        }
+                        else
+                        {
+                            <label>
+                                <span>Quality profile ID</span>
+                                <InputNumber class="settings-input" aria-label="Sonarr quality profile ID" @bind-Value="_settings.Sonarr.QualityProfileId" />
+                                <small class="settings-help">Load Sonarr options to select by profile name.</small>
+                            </label>
+                        }
+
+                        @if (_sonarrOptions.QualityProfiles.Count > 0)
+                        {
+                            <div class="settings-selected-note" aria-label="Selected Sonarr quality profile">
+                                @foreach (var profile in _sonarrOptions.QualityProfiles)
+                                {
+                                    @if (_settings.Sonarr.QualityProfileId == profile.Id)
+                                    {
+                                        <span>Selected: @profile.Name</span>
+                                    }
+                                }
+                            </div>
+                        }
+
+                        <label>
+                            <span>Series type</span>
+                            <select class="settings-input" aria-label="Sonarr series type" @bind="_settings.Sonarr.SeriesType">
+                                <option value="standard">Standard</option>
+                                <option value="daily">Daily</option>
+                                <option value="anime">Anime</option>
+                            </select>
+                        </label>
+
+                        <label>
+                            <span>Monitor</span>
+                            <select class="settings-input" aria-label="Sonarr monitor mode" @bind="_settings.Sonarr.Monitor">
+                                <option value="all">All episodes</option>
+                                <option value="future">Future episodes</option>
+                                <option value="missing">Missing episodes</option>
+                                <option value="existing">Existing episodes</option>
+                                <option value="firstSeason">First season</option>
+                                <option value="latestSeason">Latest season</option>
+                                <option value="none">None</option>
+                            </select>
+                        </label>
+
+                        <label class="switch-row">
+                            <InputCheckbox @bind-Value="_settings.Sonarr.SeasonFolder" />
+                            <span>Use season folders</span>
+                        </label>
+
+                        <label class="switch-row">
+                            <InputCheckbox @bind-Value="_settings.Sonarr.SearchOnAdd" />
+                            <span>Search for missing episodes after add</span>
+                        </label>
+                    </div>
+
+                    <button class="tool-button settings-secondary" type="button" aria-label="Load Sonarr quality profiles and root folders" @onclick="LoadSonarrOptionsAsync" disabled="@_isLoadingSonarr">
+                        @(_isLoadingSonarr ? "Loading Sonarr..." : "Load Sonarr options")
+                    </button>
+                </article>
+
+                <article class="settings-panel">
+                    <div class="settings-panel-header">
+                        <div>
+                            <p class="eyebrow">Movies</p>
+                            <h2>Radarr</h2>
+                            <div class="settings-status-row compact" aria-label="Library app integration status">
+                                @StatusBadge("Radarr", RadarrProviderStatus())
+                            </div>
+                        </div>
+                        <label class="switch-row">
+                            <InputCheckbox @bind-Value="_settings.Radarr.Enabled" />
+                            <span>Enabled</span>
+                        </label>
+                    </div>
+
+                    <div class="settings-fields">
+                        <label>
+                            <span>URL</span>
+                            <InputText class="settings-input" aria-label="Radarr URL" @bind-Value="_settings.Radarr.BaseUrl" />
+                        </label>
+
+                        <label>
+                            <span>API key</span>
+                            <InputText type="password" class="settings-input" aria-label="Radarr API key" @bind-Value="_settings.Radarr.ApiKey" />
+                        </label>
+
+                        <label>
+                            <span>Tag on add</span>
+                            <InputText class="settings-input" aria-label="Radarr tag on add" @bind-Value="_settings.Radarr.TagOnAdd" />
+                            <small class="settings-help">Created if missing. Leave empty to add without a tag.</small>
+                        </label>
+
+                        <label>
+                            <span>Root folder path</span>
+                            <InputText class="settings-input" list="radarr-root-folders" aria-label="Radarr root folder path" @bind-Value="_settings.Radarr.RootFolderPath" />
+                            <datalist id="radarr-root-folders">
+                                @foreach (var root in _radarrOptions.RootFolders)
+                                {
+                                    <option value="@root.Path">@root.Path</option>
+                                }
+                            </datalist>
+                        </label>
+
+                        @if (_radarrOptions.QualityProfiles.Count > 0)
+                        {
+                            <label>
+                                <span>Quality profile</span>
+                                <select class="settings-input" aria-label="Radarr quality profile" @bind="_settings.Radarr.QualityProfileId">
+                                    <option value="">Select a profile</option>
+                                    @if (_settings.Radarr.QualityProfileId is > 0
+                                                                    && !_radarrOptions.QualityProfiles.Any(profile => profile.Id == _settings.Radarr.QualityProfileId.Value))
+                                    {
+                                        <option value="@_settings.Radarr.QualityProfileId.Value">Current ID @_settings.Radarr.QualityProfileId.Value</option>
+                                    }
+                                    @foreach (var profile in _radarrOptions.QualityProfiles)
+                                    {
+                                        <option value="@profile.Id">@profile.Name</option>
+                                    }
+                                </select>
+                            </label>
+                        }
+                        else
+                        {
+                            <label>
+                                <span>Quality profile ID</span>
+                                <InputNumber class="settings-input" aria-label="Radarr quality profile ID" @bind-Value="_settings.Radarr.QualityProfileId" />
+                                <small class="settings-help">Load Radarr options to select by profile name.</small>
+                            </label>
+                        }
+
+                        @if (_radarrOptions.QualityProfiles.Count > 0)
+                        {
+                            <div class="settings-selected-note" aria-label="Selected Radarr quality profile">
+                                @foreach (var profile in _radarrOptions.QualityProfiles)
+                                {
+                                    @if (_settings.Radarr.QualityProfileId == profile.Id)
+                                    {
+                                        <span>Selected: @profile.Name</span>
+                                    }
+                                }
+                            </div>
+                        }
+
+                        <label>
+                            <span>Minimum availability</span>
+                            <select class="settings-input" aria-label="Radarr minimum availability" @bind="_settings.Radarr.MinimumAvailability">
+                                <option value="announced">Announced</option>
+                                <option value="inCinemas">In cinemas</option>
+                                <option value="released">Released</option>
+                                <option value="preDB">PreDB</option>
+                            </select>
+                        </label>
+
+                        <label class="switch-row">
+                            <InputCheckbox @bind-Value="_settings.Radarr.Monitored" />
+                            <span>Monitor movie</span>
+                        </label>
+
+                        <label class="switch-row">
+                            <InputCheckbox @bind-Value="_settings.Radarr.SearchOnAdd" />
+                            <span>Search for movie after add</span>
+                        </label>
+                    </div>
+
+                    <button class="tool-button settings-secondary" type="button" aria-label="Load Radarr quality profiles and root folders" @onclick="LoadRadarrOptionsAsync" disabled="@_isLoadingRadarr">
+                        @(_isLoadingRadarr ? "Loading Radarr..." : "Load Radarr options")
+                    </button>
+                </article>
+
+                <article class="settings-panel">
+                    <div class="settings-panel-header">
+                        <div>
+                            <p class="eyebrow">Metadata sources</p>
+                            <h2>Source APIs</h2>
+                        </div>
+                    </div>
+
+                    <div class="settings-fields">
+                        <section class="settings-provider-group" aria-label="Movie and series provider settings">
+                            <div class="settings-provider-group-header">
+                                <div>
+                                    <p class="eyebrow">Calendar discovery</p>
+                                    <h3>Movie and series providers</h3>
+                                </div>
+                                <div class="settings-status-row">
+                                    @StatusBadge("TMDb", TmdbProviderStatus())
+                                    @StatusBadge("TVmaze", TvmazeProviderStatus())
+                                    @StatusBadge("Trakt", TraktProviderStatus())
+                                    @StatusBadge("Watchmode releases", WatchmodeReleaseProviderStatus())
+                                </div>
+                            </div>
+
+                            <label>
+                                <span>TMDb API read access token</span>
+                                <InputText type="password" class="settings-input" aria-label="TMDb API read access token" @bind-Value="_settings.Sources.Tmdb.BearerToken" />
+                                <small class="settings-help">Required for live calendar data.</small>
+                            </label>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Tvmaze.Enabled" />
+                                <span>Enable TVmaze enrichment</span>
+                            </label>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Tvmaze.EnableScheduleDiscovery" />
+                                <span>Enable TVmaze schedule discovery</span>
+                            </label>
+
+                            <label>
+                                <span>TVmaze schedule countries</span>
+                                <InputText class="settings-input" aria-label="TVmaze schedule countries" @bind-Value="_tvmazeScheduleCountries" />
+                                <small class="settings-help">Comma-separated country codes, for example BE, US, GB, AU. Leave empty for global web schedules only.</small>
+                            </label>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Trakt.Enabled" />
+                                <span>Enable Trakt calendar candidates</span>
+                            </label>
+
+                            <label>
+                                <span>Trakt client ID</span>
+                                <InputText type="password" class="settings-input" aria-label="Trakt client ID" @bind-Value="_settings.Sources.Trakt.ClientId" />
+                                <small class="settings-help">Only the client ID is needed for the public calendar endpoints.</small>
+                            </label>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Watchmode.Enabled" />
+                                <span>Enable Watchmode</span>
+                            </label>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Watchmode.EnableReleaseDiscovery" />
+                                <span>Enable Watchmode release discovery</span>
+                            </label>
+
+                            <label>
+                                <span>Watchmode API key</span>
+                                <InputText type="password" class="settings-input" aria-label="Watchmode API key" @bind-Value="_settings.Sources.Watchmode.ApiKey" />
+                            </label>
+                        </section>
+
+                        <section class="settings-provider-group" aria-label="Watch availability provider settings">
+                            <div class="settings-provider-group-header">
+                                <div>
+                                    <p class="eyebrow">Streaming sources</p>
+                                    <h3>Watch availability</h3>
+                                </div>
+                                <div class="settings-status-row">
+                                    @StatusBadge("Watchmode availability", WatchmodeAvailabilityProviderStatus())
+                                </div>
+                            </div>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Watchmode.EnableAvailabilityEnrichment" />
+                                <span>Enable Watchmode availability fallback</span>
+                            </label>
+
+                            <label>
+                                <span>Watchmode regions</span>
+                                <InputText class="settings-input" aria-label="Watchmode regions" @bind-Value="_watchmodeRegions" />
+                                <small class="settings-help">Comma-separated country codes. Used when TMDb has no watch providers.</small>
+                            </label>
+                        </section>
+
+                        <section class="settings-provider-group" aria-label="Sync provider settings">
+                            <div class="settings-provider-group-header">
+                                <div>
+                                    <p class="eyebrow">Watch state</p>
+                                    <h3>Sync provider</h3>
+                                </div>
+                                <div class="settings-status-row">
+                                    @StatusBadge("SIMKL", SimklProviderStatus())
+                                </div>
+                            </div>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Simkl.Enabled" />
+                                <span>Enable SIMKL sync state</span>
+                            </label>
+
+                            <label>
+                                <span>SIMKL client ID</span>
+                                <InputText type="password" class="settings-input" aria-label="SIMKL client ID" @bind-Value="_settings.Sources.Simkl.ClientId" />
+                            </label>
+
+                            <label>
+                                <span>SIMKL client secret</span>
+                                <InputText type="password" class="settings-input" aria-label="SIMKL client secret" @bind-Value="_settings.Sources.Simkl.ClientSecret" />
+                            </label>
+
+                            <div class="simkl-connect" aria-label="SIMKL connection">
+                                <div class="simkl-connect-header">
+                                    <div>
+                                        <span class="simkl-connect-title">SIMKL account</span>
+                                        <small class="settings-help">@SimklConnectionSummary</small>
+                                    </div>
+                                    <span class="simkl-status @SimklStatusClass">@SimklStatusText</span>
+                                </div>
+
+                                <button class="tool-button primary-action settings-secondary" type="button" aria-label="Connect SIMKL" @onclick="ConnectSimklAsync" disabled="@_isRequestingSimklPin">
+                                    @(_isRequestingSimklPin ? "Starting SIMKL..." : SimklConnectButtonText)
+                                </button>
+
+                                @if (_simklPinCode is { Success: true } simklPinCode)
+                                {
+                                    <div class="simkl-pin-panel" aria-label="SIMKL authorization code">
+                                        <div class="simkl-pin-row">
+                                            <span class="simkl-pin-label">Code</span>
+                                            <strong class="simkl-pin-code">@simklPinCode.UserCode</strong>
+                                            <a class="tool-button settings-secondary simkl-pin-link" href="@simklPinCode.VerificationUrl" target="_blank" rel="noopener">Open SIMKL authorization page</a>
+                                        </div>
+                                        <small class="settings-help">After you approve the app on SIMKL, this page will save the token automatically. Use the button below if it has not updated yet.</small>
+                                        <button class="tool-button settings-secondary" type="button" aria-label="Save SIMKL token after authorization" @onclick="SaveSimklTokenAfterAuthorizationAsync" disabled="@_isCheckingSimklPin">
+                                            @(_isCheckingSimklPin ? "Checking SIMKL..." : "I authorized SIMKL - save token")
+                                        </button>
+                                    </div>
+                                }
+                            </div>
+
+                            <label>
+                                <span>SIMKL access token</span>
+                                <InputText type="password" class="settings-input" aria-label="SIMKL access token" @bind-Value="_settings.Sources.Simkl.AccessToken" />
+                                <small class="settings-help">Continuous sync remains idle until an OAuth access token is saved.</small>
+                            </label>
+
+                            <label>
+                                <span>SIMKL activity check interval</span>
+                                <InputNumber class="settings-input" aria-label="SIMKL activity check interval minutes" @bind-Value="_settings.Sources.Simkl.MinimumActivityCheckMinutes" />
+                                <small class="settings-help">Recommended: 30 minutes. This only checks SIMKL activity before a sync; it is not a background polling timer.</small>
+                            </label>
+                        </section>
+
+                        <section class="settings-provider-group" aria-label="Score provider settings">
+                            <div class="settings-provider-group-header">
+                                <div>
+                                    <p class="eyebrow">Ratings</p>
+                                    <h3>Score provider</h3>
+                                </div>
+                                <div class="settings-status-row">
+                                    @StatusBadge("OMDb", OmdbProviderStatus())
+                                </div>
+                            </div>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Omdb.Enabled" />
+                                <span>Enable OMDb ratings</span>
+                            </label>
+
+                            <label>
+                                <span>OMDb API key</span>
+                                <InputText type="password" class="settings-input" aria-label="OMDb API key" @bind-Value="_settings.Sources.Omdb.ApiKey" />
+                            </label>
+                        </section>
+
+                        <section class="settings-provider-group" aria-label="Artwork provider settings">
+                            <div class="settings-provider-group-header">
+                                <div>
+                                    <p class="eyebrow">Posters and covers</p>
+                                    <h3>Artwork providers</h3>
+                                </div>
+                                <div class="settings-status-row">
+                                    @StatusBadge("Fanart.tv", FanartProviderStatus())
+                                    @StatusBadge("TheTVDB", TheTvdbProviderStatus())
+                                    @StatusBadge("Wikimedia", WikimediaProviderStatus())
+                                </div>
+                            </div>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Fanart.Enabled" />
+                                <span>Enable Fanart.tv artwork</span>
+                            </label>
+
+                            <label>
+                                <span>Fanart.tv API key</span>
+                                <InputText type="password" class="settings-input" aria-label="Fanart.tv API key" @bind-Value="_settings.Sources.Fanart.ApiKey" />
+                            </label>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.TheTvdb.Enabled" />
+                                <span>Enable TheTVDB artwork</span>
+                            </label>
+
+                            <label>
+                                <span>TheTVDB API key</span>
+                                <InputText type="password" class="settings-input" aria-label="TheTVDB API key" @bind-Value="_settings.Sources.TheTvdb.ApiKey" />
+                            </label>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Wikimedia.Enabled" />
+                                <span>Enable Wikimedia/Commons fallback</span>
+                            </label>
+                        </section>
+                    </div>
+                </article>
+            </section>
+
+            <div class="settings-actions sticky" aria-live="polite">
+                <span class="@SettingsDirtyClass">@SettingsDirtyText</span>
+                <button class="tool-button primary-action" type="button" title="Save integration settings" @onclick="SaveAsync" disabled="@_isSaving">
+                    @(_isSaving ? "Saving..." : "Save settings")
+                </button>
+            </div>
+        </EditForm>
+    }
+</div>
+
+@code {
+    private IntegrationSettings _settings = new();
+    private ArrConnectionOptions _sonarrOptions = new([], []);
+    private ArrConnectionOptions _radarrOptions = new([], []);
+    private readonly List<ToastMessage> _toasts = [];
+    private string _tvmazeScheduleCountries = "";
+    private string _watchmodeRegions = "";
+    private bool _isLoading = true;
+    private bool _isSaving;
+    private bool _isLoadingSonarr;
+    private bool _isLoadingRadarr;
+    private bool _isRequestingSimklPin;
+    private bool _isCheckingSimklPin;
+    private SimklPinCodeResult? _simklPinCode;
+    private string? _simklAuthorizationStatus;
+    private CancellationTokenSource? _simklPinPollingCancellation;
+    private readonly CancellationTokenSource _disposeCancellation = new();
+    private EditContext? _editContext;
+    private bool _isDirty;
+
+    private bool HasSimklAccessToken => !string.IsNullOrWhiteSpace(_settings.Sources.Simkl.AccessToken);
+
+    private string SimklConnectButtonText => HasSimklAccessToken ? "Reconnect SIMKL" : "Connect SIMKL";
+
+    private string SettingsDirtyText => _isDirty ? "Unsaved changes" : "All changes saved";
+
+    private string SettingsDirtyClass => _isDirty ? "settings-dirty dirty" : "settings-dirty clean";
+
+    private string SimklConnectionSummary
+    {
+        get
+        {
+            if (_simklPinCode is not null)
+            {
+                return "Open SIMKL, enter the code, and leave this page open while it saves the token.";
+            }
+
+            return HasSimklAccessToken
+                ? "Access token saved locally. Reconnect only if SIMKL access stops working."
+                : "Connect once to let SIMKL sync state use an OAuth access token.";
+        }
+    }
+
+    private string SimklStatusText
+    {
+        get
+        {
+            if (_simklPinCode is not null)
+            {
+                return _simklAuthorizationStatus ?? "Waiting for authorization";
+            }
+
+            return HasSimklAccessToken ? "Connected" : "Not connected";
+        }
+    }
+
+    private string SimklStatusClass
+    {
+        get
+        {
+            if (_simklPinCode is not null)
+            {
+                return "pending";
+            }
+
+            return HasSimklAccessToken ? "connected" : "idle";
+        }
+    }
+
+    private RenderFragment StatusBadge(string name, ProviderAvailability status) => builder =>
+    {
+        builder.OpenElement(0, "span");
+        builder.AddAttribute(1, "class", $"integration-status {status.CssClass}");
+        builder.AddContent(2, $"{name}: {status.Text}");
+        builder.CloseElement();
+    };
+
+    private ProviderAvailability SonarrProviderStatus()
+    {
+        if (!_settings.Sonarr.Enabled)
+        {
+            return ProviderAvailability.Disabled;
+        }
+
+        if (!CanLoadSonarrOptions())
+        {
+            return ProviderAvailability.NeedsSetup;
+        }
+
+        return HasLoadedOptions(_sonarrOptions) ? ProviderAvailability.Online : ProviderAvailability.Available;
+    }
+
+    private ProviderAvailability RadarrProviderStatus()
+    {
+        if (!_settings.Radarr.Enabled)
+        {
+            return ProviderAvailability.Disabled;
+        }
+
+        if (!CanLoadRadarrOptions())
+        {
+            return ProviderAvailability.NeedsSetup;
+        }
+
+        return HasLoadedOptions(_radarrOptions) ? ProviderAvailability.Online : ProviderAvailability.Available;
+    }
+
+    private ProviderAvailability TmdbProviderStatus()
+    {
+        return string.IsNullOrWhiteSpace(_settings.Sources.Tmdb.BearerToken)
+            ? ProviderAvailability.NeedsSetup
+            : ProviderAvailability.Available;
+    }
+
+    private ProviderAvailability TvmazeProviderStatus()
+    {
+        return _settings.Sources.Tvmaze.Enabled
+            ? ProviderAvailability.Available
+            : ProviderAvailability.Disabled;
+    }
+
+    private ProviderAvailability TraktProviderStatus()
+    {
+        return EnabledWithRequiredValue(_settings.Sources.Trakt.Enabled, _settings.Sources.Trakt.ClientId);
+    }
+
+    private ProviderAvailability WatchmodeReleaseProviderStatus()
+    {
+        return EnabledWithRequiredValue(
+            _settings.Sources.Watchmode.Enabled && _settings.Sources.Watchmode.EnableReleaseDiscovery,
+            _settings.Sources.Watchmode.ApiKey);
+    }
+
+    private ProviderAvailability WatchmodeAvailabilityProviderStatus()
+    {
+        return EnabledWithRequiredValue(
+            _settings.Sources.Watchmode.Enabled && _settings.Sources.Watchmode.EnableAvailabilityEnrichment,
+            _settings.Sources.Watchmode.ApiKey);
+    }
+
+    private ProviderAvailability SimklProviderStatus()
+    {
+        if (!_settings.Sources.Simkl.Enabled)
+        {
+            return ProviderAvailability.Disabled;
+        }
+
+        if (string.IsNullOrWhiteSpace(_settings.Sources.Simkl.ClientId)
+            || string.IsNullOrWhiteSpace(_settings.Sources.Simkl.ClientSecret))
+        {
+            return ProviderAvailability.NeedsSetup;
+        }
+
+        return HasSimklAccessToken ? ProviderAvailability.Online : new ProviderAvailability("Needs auth", "needs-setup");
+    }
+
+    private ProviderAvailability OmdbProviderStatus()
+    {
+        return EnabledWithRequiredValue(_settings.Sources.Omdb.Enabled, _settings.Sources.Omdb.ApiKey);
+    }
+
+    private ProviderAvailability FanartProviderStatus()
+    {
+        return EnabledWithRequiredValue(_settings.Sources.Fanart.Enabled, _settings.Sources.Fanart.ApiKey);
+    }
+
+    private ProviderAvailability TheTvdbProviderStatus()
+    {
+        return EnabledWithRequiredValue(_settings.Sources.TheTvdb.Enabled, _settings.Sources.TheTvdb.ApiKey);
+    }
+
+    private ProviderAvailability WikimediaProviderStatus()
+    {
+        return _settings.Sources.Wikimedia.Enabled
+            ? ProviderAvailability.Available
+            : ProviderAvailability.Disabled;
+    }
+
+    private static ProviderAvailability EnabledWithRequiredValue(bool enabled, string value)
+    {
+        if (!enabled)
+        {
+            return ProviderAvailability.Disabled;
+        }
+
+        return string.IsNullOrWhiteSpace(value)
+            ? ProviderAvailability.NeedsSetup
+            : ProviderAvailability.Available;
+    }
+
+    private static bool HasLoadedOptions(ArrConnectionOptions options)
+    {
+        return options.RootFolders.Count > 0 || options.QualityProfiles.Count > 0;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settings = await SettingsStore.GetAsync();
+        CreateEditContext();
+        EnsureSimklActivityCheckInterval();
+        _tvmazeScheduleCountries = string.Join(", ", _settings.Sources.Tvmaze.ScheduleCountries);
+        _watchmodeRegions = string.Join(", ", _settings.Sources.Watchmode.Regions);
+
+        var optionLoadTasks = new List<Task>();
+        if (CanLoadSonarrOptions())
+        {
+            optionLoadTasks.Add(LoadSonarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+        }
+
+        if (CanLoadRadarrOptions())
+        {
+            optionLoadTasks.Add(LoadRadarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+        }
+
+        if (optionLoadTasks.Count > 0)
+        {
+            await Task.WhenAll(optionLoadTasks);
+        }
+
+        _isLoading = false;
+    }
+
+    private async Task ConnectSimklAsync()
+    {
+        _isRequestingSimklPin = true;
+        try
+        {
+            StopSimklAuthorizationPolling();
+            NormalizeSettings();
+            await SettingsStore.SaveAsync(_settings);
+
+            var result = await SimklClient.RequestPinCodeAsync(_disposeCancellation.Token);
+            if (!result.Success)
+            {
+                _simklPinCode = null;
+                _simklAuthorizationStatus = null;
+                ShowToast(ToastKind.Error, "SIMKL PIN failed", result.Error ?? "SIMKL did not return a PIN.");
+                return;
+            }
+
+            _simklPinCode = result;
+            _simklAuthorizationStatus = "Waiting for authorization";
+            StartSimklAuthorizationPolling(result);
+            ShowToast(ToastKind.Info, "SIMKL authorization started", "Open SIMKL, enter the displayed code, and leave this page open.");
+        }
+        catch (Exception ex)
+        {
+            _simklPinCode = null;
+            _simklAuthorizationStatus = null;
+            ShowToast(ToastKind.Error, "SIMKL PIN failed", ex.Message);
+        }
+        finally
+        {
+            _isRequestingSimklPin = false;
+        }
+    }
+
+    private async Task SaveSimklTokenAfterAuthorizationAsync()
+    {
+        if (_simklPinCode?.UserCode is not { Length: > 0 } userCode)
+        {
+            ShowToast(ToastKind.Error, "SIMKL authorization failed", "Connect SIMKL first.");
+            return;
+        }
+
+        _isCheckingSimklPin = true;
+        try
+        {
+            await CheckSimklAuthorizationCoreAsync(userCode, showToast: true, _disposeCancellation.Token);
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "SIMKL authorization failed", ex.Message);
+        }
+        finally
+        {
+            _isCheckingSimklPin = false;
+        }
+    }
+
+    private void StartSimklAuthorizationPolling(SimklPinCodeResult pinCode)
+    {
+        StopSimklAuthorizationPolling();
+        if (string.IsNullOrWhiteSpace(pinCode.UserCode))
+        {
+            return;
+        }
+
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_disposeCancellation.Token);
+        _simklPinPollingCancellation = cancellation;
+        _ = PollSimklAuthorizationAsync(pinCode, cancellation.Token);
+    }
+
+    private async Task PollSimklAuthorizationAsync(SimklPinCodeResult pinCode, CancellationToken cancellationToken)
+    {
+        var expiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, pinCode.ExpiresInSeconds));
+        var delay = TimeSpan.FromSeconds(Math.Clamp(pinCode.IntervalSeconds, 1, 60));
+        var userCode = pinCode.UserCode ?? "";
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && DateTimeOffset.UtcNow < expiresAtUtc)
+            {
+                await Task.Delay(delay, cancellationToken);
+                if (_simklPinCode?.UserCode != userCode)
+                {
+                    return;
+                }
+
+                var completed = await CheckSimklAuthorizationCoreAsync(userCode, showToast: false, cancellationToken);
+                if (completed)
+                {
+                    return;
+                }
+            }
+
+            if (!cancellationToken.IsCancellationRequested && _simklPinCode?.UserCode == userCode)
+            {
+                _simklAuthorizationStatus = "Authorization code expired";
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private async Task<bool> CheckSimklAuthorizationCoreAsync(string userCode, bool showToast, CancellationToken cancellationToken)
+    {
+        var result = await SimklClient.CheckPinCodeAsync(userCode, cancellationToken);
+        switch (result.Status)
+        {
+            case SimklPinStatus.Authorized when !string.IsNullOrWhiteSpace(result.AccessToken):
+                _settings.Sources.Simkl.AccessToken = result.AccessToken;
+                NormalizeSettings();
+                await SettingsStore.SaveAsync(_settings, cancellationToken);
+                _isDirty = false;
+                _simklPinCode = null;
+                _simklAuthorizationStatus = null;
+                StopSimklAuthorizationPolling();
+                ShowToast(ToastKind.Success, "SIMKL connected", "Access token was saved locally.");
+                await InvokeAsync(StateHasChanged);
+                return true;
+            case SimklPinStatus.Pending:
+                _simklAuthorizationStatus = "Waiting for authorization";
+                if (showToast)
+                {
+                    ShowToast(ToastKind.Info, "SIMKL authorization pending", result.Message ?? "Enter the displayed code on SIMKL, then check again.");
+                }
+
+                await InvokeAsync(StateHasChanged);
+                return false;
+            case SimklPinStatus.SlowDown:
+                _simklAuthorizationStatus = "Waiting for authorization";
+                if (showToast)
+                {
+                    ShowToast(ToastKind.Info, "SIMKL asked to slow down", result.Message ?? "Wait a few seconds before checking again.");
+                }
+
+                await InvokeAsync(StateHasChanged);
+                return false;
+            default:
+                _simklAuthorizationStatus = result.Message ?? "Authorization failed";
+                if (showToast)
+                {
+                    ShowToast(ToastKind.Error, "SIMKL authorization failed", result.Message ?? "SIMKL did not authorize this PIN.");
+                }
+
+                await InvokeAsync(StateHasChanged);
+                return false;
+        }
+    }
+
+    private void StopSimklAuthorizationPolling()
+    {
+        var cancellation = _simklPinPollingCancellation;
+        _simklPinPollingCancellation = null;
+        if (cancellation is null)
+        {
+            return;
+        }
+
+        cancellation.Cancel();
+        cancellation.Dispose();
+    }
+
+    private async Task SaveAsync()
+    {
+        _isSaving = true;
+        try
+        {
+            NormalizeSettings();
+            await SettingsStore.SaveAsync(_settings);
+            _isDirty = false;
+            ShowToast(ToastKind.Success, "Settings saved", "Integration and source API parameters were saved to the local database.");
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "Settings not saved", ex.Message);
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private async Task LoadSonarrOptionsAsync()
+    {
+        await LoadSonarrOptionsCoreAsync(showToast: true);
+    }
+
+    private async Task LoadSonarrOptionsCoreAsync(bool showToast, TimeSpan? timeout = null)
+    {
+        _isLoadingSonarr = true;
+        using var timeoutCts = timeout is null ? null : new CancellationTokenSource(timeout.Value);
+        try
+        {
+            _sonarrOptions = await ArrService.GetSonarrOptionsAsync(_settings.Sonarr, timeoutCts?.Token ?? default);
+            _settings.Sonarr.RootFolderPath = FirstRootIfEmpty(_settings.Sonarr.RootFolderPath, _sonarrOptions);
+            _settings.Sonarr.QualityProfileId ??= _sonarrOptions.QualityProfiles.FirstOrDefault()?.Id;
+            if (showToast)
+            {
+                ShowToast(ToastKind.Success, "Sonarr connected", "Root folders and quality profiles were loaded.");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (showToast)
+            {
+                ShowToast(ToastKind.Error, "Sonarr connection failed", ex.Message);
+            }
+        }
+        finally
+        {
+            _isLoadingSonarr = false;
+        }
+    }
+
+    private async Task LoadRadarrOptionsAsync()
+    {
+        await LoadRadarrOptionsCoreAsync(showToast: true);
+    }
+
+    private async Task LoadRadarrOptionsCoreAsync(bool showToast, TimeSpan? timeout = null)
+    {
+        _isLoadingRadarr = true;
+        using var timeoutCts = timeout is null ? null : new CancellationTokenSource(timeout.Value);
+        try
+        {
+            _radarrOptions = await ArrService.GetRadarrOptionsAsync(_settings.Radarr, timeoutCts?.Token ?? default);
+            _settings.Radarr.RootFolderPath = FirstRootIfEmpty(_settings.Radarr.RootFolderPath, _radarrOptions);
+            _settings.Radarr.QualityProfileId ??= _radarrOptions.QualityProfiles.FirstOrDefault()?.Id;
+            if (showToast)
+            {
+                ShowToast(ToastKind.Success, "Radarr connected", "Root folders and quality profiles were loaded.");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (showToast)
+            {
+                ShowToast(ToastKind.Error, "Radarr connection failed", ex.Message);
+            }
+        }
+        finally
+        {
+            _isLoadingRadarr = false;
+        }
+    }
+
+    private bool CanLoadSonarrOptions()
+    {
+        return _settings.Sonarr.Enabled
+            && !string.IsNullOrWhiteSpace(_settings.Sonarr.BaseUrl)
+            && !string.IsNullOrWhiteSpace(_settings.Sonarr.ApiKey);
+    }
+
+    private bool CanLoadRadarrOptions()
+    {
+        return _settings.Radarr.Enabled
+            && !string.IsNullOrWhiteSpace(_settings.Radarr.BaseUrl)
+            && !string.IsNullOrWhiteSpace(_settings.Radarr.ApiKey);
+    }
+
+    private void NormalizeSettings()
+    {
+        _settings.Sonarr.BaseUrl = NormalizeUrl(_settings.Sonarr.BaseUrl);
+        _settings.Sonarr.ApiKey = _settings.Sonarr.ApiKey.Trim();
+        _settings.Sonarr.RootFolderPath = _settings.Sonarr.RootFolderPath.Trim();
+        _settings.Sonarr.SeriesType = string.IsNullOrWhiteSpace(_settings.Sonarr.SeriesType) ? "standard" : _settings.Sonarr.SeriesType.Trim();
+        _settings.Sonarr.Monitor = string.IsNullOrWhiteSpace(_settings.Sonarr.Monitor) ? "all" : _settings.Sonarr.Monitor.Trim();
+        _settings.Sonarr.TagOnAdd = _settings.Sonarr.TagOnAdd.Trim();
+
+        _settings.Radarr.BaseUrl = NormalizeUrl(_settings.Radarr.BaseUrl);
+        _settings.Radarr.ApiKey = _settings.Radarr.ApiKey.Trim();
+        _settings.Radarr.RootFolderPath = _settings.Radarr.RootFolderPath.Trim();
+        _settings.Radarr.MinimumAvailability = string.IsNullOrWhiteSpace(_settings.Radarr.MinimumAvailability)
+            ? "released"
+            : _settings.Radarr.MinimumAvailability.Trim();
+        _settings.Radarr.TagOnAdd = _settings.Radarr.TagOnAdd.Trim();
+
+        _settings.Sources.Tmdb.BearerToken = _settings.Sources.Tmdb.BearerToken.Trim();
+        _settings.Sources.Tvmaze.ScheduleCountries = ParseCountryCodes(_tvmazeScheduleCountries);
+        _settings.Sources.Trakt.ClientId = _settings.Sources.Trakt.ClientId.Trim();
+        _settings.Sources.Watchmode.ApiKey = _settings.Sources.Watchmode.ApiKey.Trim();
+        _settings.Sources.Watchmode.Regions = ParseCountryCodes(_watchmodeRegions);
+        _settings.Sources.Simkl.ClientId = _settings.Sources.Simkl.ClientId.Trim();
+        _settings.Sources.Simkl.ClientSecret = _settings.Sources.Simkl.ClientSecret.Trim();
+        _settings.Sources.Simkl.AccessToken = _settings.Sources.Simkl.AccessToken.Trim();
+        EnsureSimklActivityCheckInterval();
+
+        _settings.Sources.Omdb.ApiKey = _settings.Sources.Omdb.ApiKey.Trim();
+        _settings.Sources.Fanart.ApiKey = _settings.Sources.Fanart.ApiKey.Trim();
+        _settings.Sources.TheTvdb.ApiKey = _settings.Sources.TheTvdb.ApiKey.Trim();
+    }
+
+    private void EnsureSimklActivityCheckInterval()
+    {
+        if (_settings.Sources.Simkl.MinimumActivityCheckMinutes is null or <= 0)
+        {
+            _settings.Sources.Simkl.MinimumActivityCheckMinutes = 30;
+        }
+    }
+
+    private void CreateEditContext()
+    {
+        if (_editContext is not null)
+        {
+            _editContext.OnFieldChanged -= MarkSettingsDirty;
+        }
+
+        _editContext = new EditContext(_settings);
+        _editContext.OnFieldChanged += MarkSettingsDirty;
+    }
+
+    private void MarkSettingsDirty(object? sender, FieldChangedEventArgs args)
+    {
+        _isDirty = true;
+    }
+
+    private static string[] ParseCountryCodes(string value)
+    {
+        return value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(code => !string.IsNullOrWhiteSpace(code))
+            .Select(code => code.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static string FirstRootIfEmpty(string currentValue, ArrConnectionOptions options)
+    {
+        return string.IsNullOrWhiteSpace(currentValue)
+            ? options.RootFolders.FirstOrDefault()?.Path ?? ""
+            : currentValue;
+    }
+
+    private static string NormalizeUrl(string url)
+    {
+        var trimmed = url.Trim();
+        return trimmed.EndsWith("/", StringComparison.Ordinal) ? trimmed : trimmed;
+    }
+
+    private void ShowToast(ToastKind kind, string title, string message)
+    {
+        var toast = new ToastMessage(Guid.NewGuid(), kind, title, message);
+        _toasts.Add(toast);
+        _ = RemoveToastAfterDelayAsync(toast.Id, _disposeCancellation.Token);
+    }
+
+    private async Task RemoveToastAfterDelayAsync(Guid id, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            _toasts.RemoveAll(toast => toast.Id == id);
+            await InvokeAsync(() =>
+            {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    StateHasChanged();
+                }
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    public void Dispose()
+    {
+        _disposeCancellation.Cancel();
+        if (_editContext is not null)
+        {
+            _editContext.OnFieldChanged -= MarkSettingsDirty;
+        }
+
+        StopSimklAuthorizationPolling();
+        _disposeCancellation.Dispose();
+    }
+
+    private sealed record ProviderAvailability(string Text, string CssClass)
+    {
+        public static ProviderAvailability Online { get; } = new("Online", "online");
+        public static ProviderAvailability Available { get; } = new("Configured", "configured");
+        public static ProviderAvailability NeedsSetup { get; } = new("Needs setup", "needs-setup");
+        public static ProviderAvailability Disabled { get; } = new("Disabled", "disabled");
+    }
+}
