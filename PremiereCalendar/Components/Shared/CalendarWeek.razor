@@ -42,7 +42,8 @@
     </div>
 
     <div class="calendar-grid" data-testid="calendar-week" @ref="_selectedDayContainer">
-        <CalendarDay Day="_selectedDay"
+        <CalendarDay @key="_selectedDay"
+                     Day="_selectedDay"
                      DayId="@DayElementId(_selectedDay)"
                      Items="SelectedDayItems"
                      ScoreSource="ScoreSource"

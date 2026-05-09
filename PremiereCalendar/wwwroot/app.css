@@ -355,6 +355,10 @@ h1:focus {
     background: linear-gradient(135deg, rgba(223, 245, 239, 0.9), rgba(255, 252, 246, 0.95));
 }
 
+.query-progress.compact {
+    padding-block: 0.58rem;
+}
+
 .query-progress-heading {
     display: flex;
     flex-wrap: wrap;
@@ -363,12 +367,19 @@ h1:focus {
     gap: 0.5rem;
 }
 
-.query-progress-heading span {
+.query-progress-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.55rem;
+}
+
+.query-progress-summary span {
     color: var(--ink);
     font-weight: 800;
 }
 
-.query-progress-heading strong {
+.query-progress-summary strong {
     color: var(--teal-strong);
     font-size: 0.88rem;
 }
@@ -377,6 +388,25 @@ h1:focus {
     display: flex;
     flex-wrap: wrap;
     gap: 0.45rem;
+}
+
+.query-progress-toggle {
+    min-height: 2rem;
+    padding: 0.28rem 0.62rem;
+    border: 1px solid rgba(20, 125, 115, 0.28);
+    border-radius: 6px;
+    background: var(--surface-strong);
+    color: var(--teal-strong);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.query-progress-toggle:hover,
+.query-progress-toggle:focus {
+    border-color: var(--teal);
+    background: var(--teal-soft);
 }
 
 .query-progress-entry {
@@ -1148,11 +1178,13 @@ h1:focus {
     align-items: center;
     justify-content: center;
     min-height: 2.4rem;
-    padding: 0.55rem 0.85rem;
-    border: 1px dashed rgba(20, 125, 115, 0.38);
+    padding: 0.65rem 1rem;
+    border: 2px solid var(--teal);
     border-radius: 999px;
-    background: color-mix(in srgb, var(--teal-soft) 32%, transparent);
-    color: var(--teal-strong);
+    background: var(--surface-strong);
+    box-shadow: 0 12px 30px rgba(14, 70, 65, 0.22);
+    color: var(--ink);
+    text-transform: uppercase;
 }
 
 .day-scroll-prompt-top {
@@ -1290,6 +1322,118 @@ h1:focus {
 .premiere-card.unverified-card {
     border-left-color: #8a6f20;
     background: color-mix(in srgb, var(--surface-strong) 88%, #f1c84b 12%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .calendar-day {
+        animation: calendar-day-enter 180ms ease-out both;
+    }
+
+    .premiere-card {
+        animation: premiere-card-enter 180ms ease-out both;
+    }
+
+    .query-progress-entry:not(.final):not(.cache) .query-progress-meter span {
+        background-size: 180% 100%;
+        animation: query-progress-flow 1.05s linear infinite;
+    }
+
+    .query-progress-list {
+        animation: query-progress-details-enter 150ms ease-out both;
+    }
+
+    .status-panel[data-testid="loading"] {
+        position: relative;
+    }
+
+    .status-panel[data-testid="loading"],
+    .status-panel.refreshing {
+        overflow: hidden;
+    }
+
+    .status-panel[data-testid="loading"]::after,
+    .status-panel.refreshing::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        transform: translateX(-110%);
+        background: linear-gradient(
+            90deg,
+            transparent,
+            color-mix(in srgb, var(--teal-soft) 55%, transparent),
+            transparent
+        );
+        animation: loading-sheen 1.15s ease-in-out infinite;
+    }
+
+    @keyframes calendar-day-enter {
+        from {
+            opacity: 0.86;
+            transform: translateY(8px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    @keyframes premiere-card-enter {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    @keyframes query-progress-flow {
+        from {
+            background-position: 0 0;
+        }
+
+        to {
+            background-position: 180% 0;
+        }
+    }
+
+    @keyframes query-progress-details-enter {
+        from {
+            opacity: 0;
+            transform: translateY(-4px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    @keyframes loading-sheen {
+        to {
+            transform: translateX(110%);
+        }
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .calendar-day,
+    .premiere-card,
+    .query-progress-meter span,
+    .day-scroll-prompt {
+        animation: none !important;
+        transition: none !important;
+    }
+
+    .status-panel[data-testid="loading"]::after,
+    .status-panel.refreshing::after {
+        animation: none !important;
+        content: none;
+    }
 }
 
 .poster-frame {
@@ -1611,7 +1755,8 @@ html[data-theme="dark"] .query-progress {
 }
 
 html[data-theme="dark"] .query-progress-entry,
-html[data-theme="dark"] .query-progress-clear {
+html[data-theme="dark"] .query-progress-clear,
+html[data-theme="dark"] .query-progress-toggle {
     border-color: rgba(237, 244, 242, 0.12);
     background: rgba(31, 43, 54, 0.86);
 }

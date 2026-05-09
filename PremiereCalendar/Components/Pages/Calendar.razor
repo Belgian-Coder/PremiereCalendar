@@ -61,65 +61,72 @@
 
     @if (_loadProgress.Count > 0)
     {
-        <section class="query-progress" data-testid="query-progress" aria-live="polite">
+        <section class="@QueryProgressPanelClass()" data-testid="query-progress" aria-live="polite">
             <div class="query-progress-heading">
-                <span>Loaded-source filters</span>
-                @if (_isLoading)
-                {
-                    <strong>Loading sources</strong>
-                }
-                else
-                {
-                    <strong>@_items.Count total</strong>
-                }
+                <div class="query-progress-summary">
+                    <span>Loaded-source filters</span>
+                    <strong>@QueryProgressSummaryText()</strong>
+                </div>
+                <button type="button"
+                        class="query-progress-toggle"
+                        title="@(_isQueryProgressExpanded ? "Hide loaded-source filters" : "Show loaded-source filters")"
+                        aria-expanded="@AriaExpanded(_isQueryProgressExpanded)"
+                        aria-controls="query-progress-details"
+                        data-testid="query-progress-toggle"
+                        @onclick="ToggleQueryProgressDetails">
+                    @(_isQueryProgressExpanded ? "Hide sources" : "Show sources")
+                </button>
             </div>
-            <div class="query-progress-list">
-                @foreach (var entry in GroupedLoadProgressEntries())
-                {
-                    <button type="button"
-                            class="@QueryProgressClass(entry)"
-                            title="@QueryProgressTitle(entry)"
-                            aria-pressed="@IsSourceProgressFilterActive(entry)"
-                            @onclick="() => ToggleSourceProgressFilter(entry)">
-                        <span>@entry.SourceName</span>
-                        <strong>@FormatSourceCardCount(entry.SourceItemCount)</strong>
-                        @if (entry.UnmappedCount is > 0)
-                        {
-                            <small class="query-progress-detail">@FormatUnmappedCount(entry.UnmappedCount.Value)</small>
-                        }
-                        @if (entry.TotalWork is > 0)
-                        {
-                            <span class="query-progress-meter"
-                                  role="progressbar"
-                                  aria-label="@($"{entry.SourceName} loading progress")"
-                                  aria-valuemin="0"
-                                  aria-valuemax="100"
-                                  aria-valuenow="@QueryProgressPercent(entry)"
-                                  data-testid="query-progress-bar">
-                                <span style="@($"width: {QueryProgressWidth(entry)}")"></span>
-                            </span>
-                        }
-                        @if (!string.IsNullOrWhiteSpace(entry.ProgressText))
-                        {
-                            <small class="query-progress-detail">@entry.ProgressText</small>
-                        }
-                        @if (entry.ElapsedMilliseconds is > 0)
-                        {
-                            <small class="query-progress-detail">@FormatElapsed(entry.ElapsedMilliseconds.Value)</small>
-                        }
-                    </button>
-                }
+            @if (_isQueryProgressExpanded)
+            {
+                <div class="query-progress-list" id="query-progress-details" data-testid="query-progress-details">
+                    @foreach (var entry in GroupedLoadProgressEntries())
+                    {
+                        <button type="button"
+                                class="@QueryProgressClass(entry)"
+                                title="@QueryProgressTitle(entry)"
+                                aria-pressed="@IsSourceProgressFilterActive(entry)"
+                                @onclick="() => ToggleSourceProgressFilter(entry)">
+                            <span>@entry.SourceName</span>
+                            <strong>@FormatSourceCardCount(entry.SourceItemCount)</strong>
+                            @if (entry.UnmappedCount is > 0)
+                            {
+                                <small class="query-progress-detail">@FormatUnmappedCount(entry.UnmappedCount.Value)</small>
+                            }
+                            @if (entry.TotalWork is > 0)
+                            {
+                                <span class="query-progress-meter"
+                                      role="progressbar"
+                                      aria-label="@($"{entry.SourceName} loading progress")"
+                                      aria-valuemin="0"
+                                      aria-valuemax="100"
+                                      aria-valuenow="@QueryProgressPercent(entry)"
+                                      data-testid="query-progress-bar">
+                                    <span style="@($"width: {QueryProgressWidth(entry)}")"></span>
+                                </span>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(entry.ProgressText))
+                            {
+                                <small class="query-progress-detail">@entry.ProgressText</small>
+                            }
+                            @if (entry.ElapsedMilliseconds is > 0)
+                            {
+                                <small class="query-progress-detail">@FormatElapsed(entry.ElapsedMilliseconds.Value)</small>
+                            }
+                        </button>
+                    }
 
-                @if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
-                {
-                    <button type="button"
-                            class="query-progress-clear"
-                            title="Show all loaded sources"
-                            @onclick="ClearSourceProgressFilter">
-                        All loaded sources
-                    </button>
-                }
-            </div>
+                    @if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
+                    {
+                        <button type="button"
+                                class="query-progress-clear"
+                                title="Show all loaded sources"
+                                @onclick="ClearSourceProgressFilter">
+                            All loaded sources
+                        </button>
+                    }
+                </div>
+            }
         </section>
     }
 
@@ -180,6 +187,7 @@
     private string? _sourceProgressFilter;
     private DateOnly? _selectedDay;
     private bool _isLoading = true;
+    private bool _isQueryProgressExpanded;
     private bool _hasRendered;
     private bool _forceLoadOnNextLocationChange;
     private bool _isDisposed;
@@ -777,6 +785,31 @@
             .ThenBy(item => item.MediaType)
             .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private string QueryProgressPanelClass()
+    {
+        return _isQueryProgressExpanded ? "query-progress" : "query-progress compact";
+    }
+
+    private string QueryProgressSummaryText()
+    {
+        if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
+        {
+            return $"{_visibleItems.Count.ToString("N0", CultureInfo.InvariantCulture)} shown / {_items.Count.ToString("N0", CultureInfo.InvariantCulture)} total";
+        }
+
+        return $"{_items.Count.ToString("N0", CultureInfo.InvariantCulture)} total";
+    }
+
+    private static string AriaExpanded(bool expanded)
+    {
+        return expanded ? "true" : "false";
+    }
+
+    private void ToggleQueryProgressDetails()
+    {
+        _isQueryProgressExpanded = !_isQueryProgressExpanded;
     }
 
     private string QueryProgressClass(LoadProgressEntry entry)

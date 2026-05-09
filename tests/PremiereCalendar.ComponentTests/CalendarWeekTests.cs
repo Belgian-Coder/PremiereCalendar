@@ -110,6 +110,45 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
+    public void CalendarWeek_UpdatesSelectedDayAnimationKeyWhenDayChanges()
+    {
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "tv:9",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 9,
+                Title = "Monday Launch",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7.1
+            },
+            new PremiereItem
+            {
+                CanonicalId = "tv:10",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 10,
+                Title = "Tuesday Launch",
+                PremiereDate = new DateOnly(2026, 5, 5),
+                TmdbScore = 7.5
+            }
+        };
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Equal("20260504", component.Find("[data-testid='calendar-day']").GetAttribute("data-day-animation-key"));
+
+        component.Find("button[data-day-target='premiere-day-20260505']").Click();
+
+        Assert.Equal("20260505", component.Find("[data-testid='calendar-day']").GetAttribute("data-day-animation-key"));
+    }
+
+    [Fact]
     public async Task CalendarWeek_ScrollAdjacentDayMovesWithinWeek()
     {
         DateOnly? selectedDay = null;

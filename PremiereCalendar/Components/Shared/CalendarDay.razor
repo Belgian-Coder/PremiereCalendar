@@ -1,7 +1,10 @@
 @using System.Globalization
 @using System.Text
 
-<section class="calendar-day" id="@DayId" data-testid="calendar-day">
+<section class="calendar-day"
+         id="@DayId"
+         data-testid="calendar-day"
+         data-day-animation-key="@Day.ToString("yyyyMMdd", CultureInfo.InvariantCulture)">
     <div class="day-scroll-prompt day-scroll-prompt-top" data-day-scroll-prompt="previous" aria-hidden="true">
         <span>Scroll to yesterday</span>
     </div>

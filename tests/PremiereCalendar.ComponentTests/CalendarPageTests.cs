@@ -25,6 +25,18 @@ public sealed class CalendarPageTests : BunitContext
         Services.Configure<CalendarLoadOptions>(_ => { });
     }
 
+    private static void ExpandQueryProgress(IRenderedComponent<PremiereCalendar.Components.Pages.Calendar> component)
+    {
+        component.WaitForAssertion(() =>
+            Assert.Single(component.FindAll("[data-testid='query-progress-toggle']")));
+
+        var toggle = component.Find("[data-testid='query-progress-toggle']");
+        if (toggle.GetAttribute("aria-expanded") != "true")
+        {
+            toggle.Click();
+        }
+    }
+
     [Fact]
     public void CalendarPage_SearchTextFiltersVisibleCards()
     {
@@ -866,11 +878,18 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() =>
         {
             var progress = component.Find("[data-testid='query-progress']");
-            Assert.Contains("Fake source one", progress.TextContent);
-            Assert.Contains("Fake source two", progress.TextContent);
-            Assert.Contains("Complete", progress.TextContent);
+            Assert.Contains("2 total", progress.TextContent);
+            Assert.Empty(component.FindAll("[data-testid='query-progress-details']"));
             Assert.Single(component.FindAll("[data-testid='premiere-card']"));
         });
+
+        ExpandQueryProgress(component);
+
+        var expandedProgress = component.Find("[data-testid='query-progress']");
+        Assert.Contains("Fake source one", expandedProgress.TextContent);
+        Assert.Contains("Fake source two", expandedProgress.TextContent);
+        Assert.Contains("Complete", expandedProgress.TextContent);
+        Assert.Single(component.FindAll("[data-testid='query-progress-details']"));
     }
 
     [Fact]
@@ -966,6 +985,8 @@ public sealed class CalendarPageTests : BunitContext
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
+        ExpandQueryProgress(component);
+
         component.WaitForAssertion(() =>
         {
             var progress = component.Find("[data-testid='query-progress']");
@@ -985,6 +1006,8 @@ public sealed class CalendarPageTests : BunitContext
         Services.AddSingleton<IPremiereService>(service);
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        ExpandQueryProgress(component);
 
         component.WaitForAssertion(() =>
         {
@@ -1008,6 +1031,8 @@ public sealed class CalendarPageTests : BunitContext
         Services.AddSingleton<IPremiereService>(service);
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        ExpandQueryProgress(component);
 
         component.WaitForAssertion(() =>
         {
@@ -1036,6 +1061,8 @@ public sealed class CalendarPageTests : BunitContext
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
+        ExpandQueryProgress(component);
+
         component.WaitForAssertion(() =>
         {
             var progress = component.Find("[data-testid='query-progress']");
@@ -1058,6 +1085,8 @@ public sealed class CalendarPageTests : BunitContext
         Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        ExpandQueryProgress(component);
 
         component.WaitForAssertion(() =>
         {
@@ -1083,6 +1112,8 @@ public sealed class CalendarPageTests : BunitContext
         Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        ExpandQueryProgress(component);
 
         component.WaitForAssertion(() =>
         {
