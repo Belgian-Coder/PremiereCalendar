@@ -80,7 +80,7 @@ flowchart TD
     Persist --> Cleanup["Daily cleanup older than retention"]
 ```
 
-Warmup is a wake/check process, not a forced remote refresh loop. Routine warmup calls use `forceRefresh: false`, so fresh disk and memory caches are reused. Foreground loads have priority; background warmup skips or stops when the coordinator reports active foreground work.
+Warmup is a wake/check process, not a forced remote refresh loop. Routine warmup calls use `forceRefresh: false`, so fresh disk and memory caches are reused. Foreground loads have priority; background warmup skips or stops when the coordinator reports active foreground work. Each wake checks week-cache metadata and only starts up to `CalendarWarmup:MaximumRemoteWindowsPerWake` missing or stale windows, so a cold install fills the long-range cache gradually instead of hammering providers on boot.
 
 ## Integration Add Flow
 
@@ -135,7 +135,18 @@ TVmaze schedule output is cached by TVmaze and locally for about 60 minutes. Bro
 
 ### Rate Limits
 
-TMDb uses a local request limiter and honors `Retry-After` on `429`. TVmaze and Watchmode requests also honor retry behavior where available. If provider chips show failures during repeated manual refreshes, wait for the provider cache window instead of repeatedly forcing refresh.
+TMDb uses a local request limiter and honors `Retry-After` on `429`. The limiter has both `Tmdb:MaxRequestsPerSecond` and `Tmdb:MaxConcurrentRequests`; if TMDb chips frequently time out, lower the concurrency cap before raising timeouts. TVmaze and Watchmode requests also honor retry behavior where available and are protected by provider-level concurrency caps. If provider chips show failures during repeated manual refreshes, wait for the provider cache window instead of repeatedly forcing refresh.
+
+### Request Storm Protection
+
+The app intentionally has several independent caps:
+
+- `CalendarWarmup:MaximumRemoteWindowsPerWake` limits cold-cache warmup spread per wake.
+- `Tmdb:MaxConcurrentRequests` limits TMDb discover, detail, and external-ID calls across all loads.
+- `Tvmaze:MaxConcurrentRequests` and `Watchmode:MaxConcurrentRequests` limit provider HTTP calls across foreground, prefetch, and warmup.
+- `ImageCache:MaxConcurrentDownloads` limits remote poster/backdrop downloads triggered by lazy image loading.
+
+Keep these lower than provider rate-limit ceilings. They protect the app from local fan-out and usually improve reliability more than simply increasing request timeouts.
 
 ### Foreground Load Budget
 
@@ -143,7 +154,7 @@ TMDb uses a local request limiter and honors `Retry-After` on `429`. TVmaze and 
 
 ### Image Cache Failures
 
-The image endpoint only accepts HTTPS URLs from allowed hosts. If posters fail, check `ImageCache:AllowedHosts`, disk permissions in the image cache directory, and `ImageCache:MaxBytes`.
+The image endpoint only accepts HTTPS URLs from allowed hosts. If posters fail, check `ImageCache:AllowedHosts`, disk permissions in the image cache directory, `ImageCache:MaxBytes`, and `ImageCache:MaxConcurrentDownloads`.
 
 ### Service, Port, Or Firewall
 

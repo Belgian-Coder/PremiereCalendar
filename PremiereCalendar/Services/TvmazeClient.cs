@@ -16,19 +16,22 @@ public sealed class TvmazeClient : ITvmazeClient
     private readonly TvmazeOptions _options;
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly ISingleFlightCoordinator _singleFlight;
+    private readonly ProviderRequestThrottler _requestThrottler;
 
     public TvmazeClient(
         HttpClient httpClient,
         IMemoryCache cache,
         IOptions<TvmazeOptions> options,
         IIntegrationSettingsStore? settingsStore = null,
-        ISingleFlightCoordinator? singleFlight = null)
+        ISingleFlightCoordinator? singleFlight = null,
+        ProviderRequestThrottler? requestThrottler = null)
     {
         _httpClient = httpClient;
         _cache = cache;
         _options = options.Value;
         _settingsStore = settingsStore;
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
+        _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
     }
 
     public async Task<TvmazeShow?> LookupShowAsync(
@@ -66,7 +69,7 @@ public sealed class TvmazeClient : ITvmazeClient
 
                 try
                 {
-                    using var response = await _httpClient.GetAsync(path, token);
+                    using var response = await GetAsync(path, token);
                     if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                     {
                         return null;
@@ -140,7 +143,7 @@ public sealed class TvmazeClient : ITvmazeClient
                 try
                 {
                     var path = $"search/shows?q={Uri.EscapeDataString(title.Trim())}";
-                    using var response = await _httpClient.GetAsync(path, token);
+                    using var response = await GetAsync(path, token);
                     if (!response.IsSuccessStatusCode)
                     {
                         return null;
@@ -209,7 +212,7 @@ public sealed class TvmazeClient : ITvmazeClient
 
                 try
                 {
-                    using var response = await _httpClient.GetAsync($"shows/{showId}/images", token);
+                    using var response = await GetAsync($"shows/{showId}/images", token);
                     if (!response.IsSuccessStatusCode)
                     {
                         return [];
@@ -312,7 +315,7 @@ public sealed class TvmazeClient : ITvmazeClient
         const int maxAttempts = 3;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var response = await _httpClient.GetAsync(path, cancellationToken);
+            var response = await GetAsync(path, cancellationToken);
             if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt == maxAttempts)
             {
                 return response;
@@ -323,6 +326,15 @@ public sealed class TvmazeClient : ITvmazeClient
             await Task.Delay(delay, cancellationToken);
         }
 
+        return await GetAsync(path, cancellationToken);
+    }
+
+    private async Task<HttpResponseMessage> GetAsync(string path, CancellationToken cancellationToken)
+    {
+        using var lease = await _requestThrottler.AcquireAsync(
+            "tvmaze",
+            _options.MaxConcurrentRequests,
+            cancellationToken);
         return await _httpClient.GetAsync(path, cancellationToken);
     }
 

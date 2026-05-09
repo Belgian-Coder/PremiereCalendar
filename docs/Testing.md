@@ -18,6 +18,7 @@ Unit tests cover pure behavior:
 - Artwork priority and Fanart.tv language/likes ordering.
 - External discovery candidate acceptance, TMDb mapping requirements, duplicate collapse, and provider failure isolation.
 - Source-batch timeout and bounded day-source concurrency so a slow TMDb batch does not block all other progress.
+- Request-storm guards for TMDb concurrency and bounded background warmup windows.
 - Belgium-origin language-free discovery, Belgian TV network discovery, and optional source-region ordering.
 - French-language and Belgium-origin local filtering.
 

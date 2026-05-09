@@ -21,4 +21,5 @@ public sealed class TmdbOptions
     public int RequestTimeoutSeconds { get; set; } = 20;
     public int SourceTimeoutSeconds { get; set; } = 30;
     public int MaxRequestsPerSecond { get; set; } = 20;
+    public int MaxConcurrentRequests { get; set; } = 4;
 }

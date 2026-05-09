@@ -11,6 +11,8 @@ public sealed class CurrentWeekCalendarWarmupRunner
     private readonly ICalendarFilterUsageStore _usageStore;
     private readonly CalendarLoadCoordinator _loadCoordinator;
     private readonly CalendarWarmupOptions _options;
+    private readonly CalendarCacheOptions _cacheOptions;
+    private readonly ICalendarCacheMaintenance? _cacheMaintenance;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<CurrentWeekCalendarWarmupRunner> _logger;
 
@@ -20,12 +22,16 @@ public sealed class CurrentWeekCalendarWarmupRunner
         CalendarLoadCoordinator loadCoordinator,
         IOptions<CalendarWarmupOptions> options,
         TimeProvider timeProvider,
-        ILogger<CurrentWeekCalendarWarmupRunner> logger)
+        ILogger<CurrentWeekCalendarWarmupRunner> logger,
+        IOptions<CalendarCacheOptions>? cacheOptions = null,
+        ICalendarCacheMaintenance? cacheMaintenance = null)
     {
         _premiereService = premiereService;
         _usageStore = usageStore;
         _loadCoordinator = loadCoordinator;
         _options = options.Value;
+        _cacheOptions = cacheOptions?.Value ?? new CalendarCacheOptions();
+        _cacheMaintenance = cacheMaintenance;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -74,8 +80,10 @@ public sealed class CurrentWeekCalendarWarmupRunner
             IsDefault: false)));
 
         var maximumProfiles = Math.Max(1, _options.MaximumProfilesPerWake);
+        var maximumRemoteWindows = Math.Max(1, _options.MaximumRemoteWindowsPerWake);
         var minimumRefreshAge = TimeSpan.FromMinutes(Math.Max(1, _options.MinimumRemoteRefreshMinutes));
         var warmedProfiles = 0;
+        var remoteWindowsStarted = 0;
 
         foreach (var profile in profiles
             .GroupBy(profile => profile.ProfileKey, StringComparer.Ordinal)
@@ -105,17 +113,34 @@ public sealed class CurrentWeekCalendarWarmupRunner
             var successfulWindows = 0;
             var failures = new List<string>();
             CalendarFilters? lastFilters = null;
+            var completedAllWindows = true;
 
             foreach (var window in windows)
             {
                 if (Stopwatch.GetElapsedTime(cycleStartedAt) >= cycleBudget)
                 {
                     failures.Add($"cycle budget exceeded after {Math.Max(1, _options.CycleBudgetSeconds)}s");
+                    completedAllWindows = false;
                     break;
                 }
 
                 var filters = RehydrateFilters(profile.Filters, profile.PageMode, window.Start, window.PriorityDate);
                 lastFilters = filters;
+                if (await IsWarmupWindowFreshAsync(window, filters, nowUtc, runToken))
+                {
+                    continue;
+                }
+
+                if (remoteWindowsStarted >= maximumRemoteWindows)
+                {
+                    completedAllWindows = false;
+                    _logger.LogDebug(
+                        "Stopping current-week calendar warmup because the configured {MaximumRemoteWindowsPerWake} missing/stale window limit was reached.",
+                        _options.MaximumRemoteWindowsPerWake);
+                    break;
+                }
+
+                remoteWindowsStarted++;
                 var windowBudget = TimeSpan.FromSeconds(Math.Max(1, _options.WindowBudgetSeconds));
                 using var windowTimeout = new CancellationTokenSource(windowBudget);
                 using var windowCancellation = CancellationTokenSource.CreateLinkedTokenSource(runToken, windowTimeout.Token);
@@ -157,7 +182,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
             }
 
             var trackingFilters = lastFilters ?? RehydrateFilters(profile.Filters, profile.PageMode, today, today);
-            if (successfulWindows > 0)
+            if (completedAllWindows && failures.Count == 0)
             {
                 await _usageStore.MarkWarmedAsync(
                     profile.ProfileKey,
@@ -183,6 +208,31 @@ public sealed class CurrentWeekCalendarWarmupRunner
 
             warmedProfiles++;
         }
+    }
+
+    private async Task<bool> IsWarmupWindowFreshAsync(
+        CalendarWarmupWindow window,
+        CalendarFilters filters,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken)
+    {
+        if (_cacheMaintenance is null)
+        {
+            return false;
+        }
+
+        var metadata = await _cacheMaintenance.GetWeekMetadataAsync(
+            window.Start,
+            window.End,
+            PremiereDiscoveryCriteria.FromFilters(filters).CacheKey(),
+            cancellationToken);
+        if (metadata is null || metadata.Completeness != CalendarCacheCompleteness.Complete)
+        {
+            return false;
+        }
+
+        var maxAge = TimeSpan.FromHours(Math.Max(1, _cacheOptions.WeekCacheHours));
+        return nowUtc - metadata.CachedAtUtc <= maxAge;
     }
 
     public static IReadOnlyList<CalendarWarmupWindow> BuildWarmupWindows(DateOnly today)

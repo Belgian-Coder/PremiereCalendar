@@ -6,6 +6,7 @@ public sealed class ImageCacheOptions
     public string Directory { get; init; } = "App_Data/cache/images";
     public int CacheDays { get; init; } = 30;
     public int MaxBytes { get; init; } = 5 * 1024 * 1024;
+    public int MaxConcurrentDownloads { get; init; } = 4;
     public string[] AllowedHosts { get; init; } =
     [
         "image.tmdb.org",

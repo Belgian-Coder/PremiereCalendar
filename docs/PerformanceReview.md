@@ -81,9 +81,13 @@ Operational safeguards:
 - `Tmdb:EnrichmentProgressBatchSize` controls how many enriched cards are grouped into one progress update.
 - `Tmdb:ExternalCandidateBatchSize` controls how many external-provider candidates are accumulated before TMDb ID resolution/enrichment. The default is 100, which keeps TVmaze schedule mapping parallel enough without waiting for a whole very large candidate set.
 - `Tmdb:MaxRequestsPerSecond` defaults to 20, below TMDb's documented upper-limit guidance, and the client retries `429` responses.
+- `Tmdb:MaxConcurrentRequests` defaults to 4. This is a separate hard cap from the rate limiter and prevents page/detail enrichment fan-out from creating large local queues that then time out.
 - `Tmdb:RequestTimeoutSeconds` bounds each HTTP request.
 - `Tmdb:SourceTimeoutSeconds` lets one slow source fail closed instead of leaving Refresh in an updating state indefinitely.
-- `Tvmaze:ScheduleFetchConcurrency` defaults to 20. TVmaze documents at least 20 calls per 10 seconds and recommends backing off on `429`; schedule calls now retry `429` with `Retry-After` or a small fallback delay.
+- `Tvmaze:ScheduleFetchConcurrency` defaults to 4. TVmaze documents at least 20 calls per 10 seconds and recommends backing off on `429`; schedule calls now retry `429` with `Retry-After` or a small fallback delay. `Tvmaze:MaxConcurrentRequests` also defaults to 4 across schedule, lookup, search, and image-list calls.
+- `Watchmode:MaxConcurrentRequests` defaults to 2 because the free plan is request-limited and availability fallback can otherwise multiply quickly across many cards.
+- `CalendarWarmup:MaximumRemoteWindowsPerWake` defaults to 4. The warmer still checks all priority windows, but fresh cache metadata is skipped and only a few missing/stale windows can start remote work per wake.
+- `ImageCache:MaxConcurrentDownloads` defaults to 4 so browser lazy loading cannot start unbounded remote poster downloads.
 - Foreground refresh ownership is guarded so an older canceled load cannot clear loading state or overwrite progress for a newer load.
 - Nearby-week prefetch runs through a hosted background worker with a bounded priority queue, rather than being owned by the Blazor circuit.
 - Calendar cache files are written atomically through a temporary file and then replaced after the write succeeds.

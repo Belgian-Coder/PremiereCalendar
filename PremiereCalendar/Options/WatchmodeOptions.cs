@@ -11,4 +11,5 @@ public sealed class WatchmodeOptions
     public int RequestTimeoutSeconds { get; set; } = 20;
     public int MaxRetryAfterDelaySeconds { get; set; } = 2;
     public int CacheHours { get; set; } = 12;
+    public int MaxConcurrentRequests { get; set; } = 2;
 }

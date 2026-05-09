@@ -27,17 +27,20 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
     private readonly ImageCacheOptions _options;
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<FileImageCache> _logger;
+    private readonly ProviderRequestThrottler _requestThrottler;
 
     public FileImageCache(
         HttpClient httpClient,
         IOptions<ImageCacheOptions> options,
         IWebHostEnvironment environment,
-        ILogger<FileImageCache> logger)
+        ILogger<FileImageCache> logger,
+        ProviderRequestThrottler? requestThrottler = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _environment = environment;
         _logger = logger;
+        _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
     }
 
     public async Task<CachedImage> GetOrAddAsync(
@@ -236,6 +239,10 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         TimeSpan browserMaxAge,
         CancellationToken cancellationToken)
     {
+        using var lease = await _requestThrottler.AcquireAsync(
+            "images",
+            _options.MaxConcurrentDownloads,
+            cancellationToken);
         using var request = new HttpRequestMessage(HttpMethod.Get, sourceUri);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
 

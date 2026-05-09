@@ -22,7 +22,8 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
             {
                 MinimumRemoteRefreshMinutes = 60,
                 MaximumProfilesPerWake = 3,
-                TopFilterProfileCount = 0
+                TopFilterProfileCount = 0,
+                MaximumRemoteWindowsPerWake = int.MaxValue
             });
 
         await runner.RunOnceAsync(CancellationToken.None);
@@ -93,7 +94,12 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
             premiereService,
             usageStore,
             timeProvider,
-            new CalendarWarmupOptions { MaximumProfilesPerWake = 4, TopFilterProfileCount = 1 });
+            new CalendarWarmupOptions
+            {
+                MaximumProfilesPerWake = 4,
+                TopFilterProfileCount = 1,
+                MaximumRemoteWindowsPerWake = int.MaxValue
+            });
 
         await runner.RunOnceAsync(CancellationToken.None);
 
@@ -106,6 +112,30 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
         Assert.Equal(new DateOnly(2026, 5, 8), hotCall.Filters.PriorityDate);
         Assert.False(hotCall.Filters.ShowSeries);
         Assert.True(hotCall.Filters.ShowMovies);
+    }
+
+    [Fact]
+    public async Task RunOnceAsync_LimitsMissingWarmupWindowsPerWake()
+    {
+        var timeProvider = new TestTimeProvider(new DateTimeOffset(2026, 5, 8, 12, 0, 0, TimeSpan.Zero));
+        var premiereService = new RecordingPremiereService();
+        var runner = CreateRunner(
+            premiereService,
+            new RecordingFilterUsageStore(),
+            timeProvider,
+            new CalendarWarmupOptions
+            {
+                MaximumProfilesPerWake = 5,
+                TopFilterProfileCount = 0,
+                MaximumRemoteWindowsPerWake = 3
+            });
+
+        await runner.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(3, premiereService.Calls.Count);
+        Assert.Equal(
+            ExpectedWindowsForMay8().Take(3),
+            premiereService.Calls.Select(call => (call.Start, call.End)));
     }
 
     [Fact]

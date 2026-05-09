@@ -175,6 +175,7 @@ builder.Services.AddSingleton<IIntegrationSettingsStore, SqliteIntegrationSettin
 builder.Services.AddSingleton<ICalendarFilterUsageStore, SqliteCalendarFilterUsageStore>();
 builder.Services.AddSingleton<ISimklSyncStateStore, SqliteSimklSyncStateStore>();
 builder.Services.AddSingleton<ISingleFlightCoordinator, SingleFlightCoordinator>();
+builder.Services.AddSingleton<ProviderRequestThrottler>();
 builder.Services.AddSingleton<CalendarLoadCoordinator>();
 builder.Services.AddSingleton<AdjacentWeekPrefetcher>();
 builder.Services.AddSingleton<IAdjacentWeekPrefetcher>(sp => sp.GetRequiredService<AdjacentWeekPrefetcher>());

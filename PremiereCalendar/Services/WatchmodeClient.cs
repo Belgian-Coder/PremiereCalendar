@@ -18,6 +18,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
     private readonly WatchmodeOptions _options;
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly ISingleFlightCoordinator _singleFlight;
+    private readonly ProviderRequestThrottler _requestThrottler;
     private readonly object _rateLimitLock = new();
     private DateTimeOffset _rateLimitedUntilUtc = DateTimeOffset.MinValue;
 
@@ -26,13 +27,15 @@ public sealed class WatchmodeClient : IWatchmodeClient
         IMemoryCache cache,
         IOptions<WatchmodeOptions> options,
         IIntegrationSettingsStore? settingsStore = null,
-        ISingleFlightCoordinator? singleFlight = null)
+        ISingleFlightCoordinator? singleFlight = null,
+        ProviderRequestThrottler? requestThrottler = null)
     {
         _httpClient = httpClient;
         _cache = cache;
         _options = options.Value;
         _settingsStore = settingsStore;
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
+        _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
     }
 
     public async Task<IReadOnlyList<PremiereSource>> GetTitleSourcesAsync(
@@ -300,7 +303,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
         {
             try
             {
-                using var response = await _httpClient.GetAsync(path, cancellationToken);
+                using var response = await GetAsync(path, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
                 {
                     var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
@@ -384,6 +387,15 @@ public sealed class WatchmodeClient : IWatchmodeClient
     private TimeSpan MaxRetryAfterDelay()
     {
         return TimeSpan.FromSeconds(Math.Clamp(_options.MaxRetryAfterDelaySeconds, 0, 60));
+    }
+
+    private async Task<HttpResponseMessage> GetAsync(string path, CancellationToken cancellationToken)
+    {
+        using var lease = await _requestThrottler.AcquireAsync(
+            "watchmode",
+            _options.MaxConcurrentRequests,
+            cancellationToken);
+        return await _httpClient.GetAsync(path, cancellationToken);
     }
 
     private async ValueTask<WatchmodeSourceSettings> GetEffectiveSettingsAsync(CancellationToken cancellationToken)

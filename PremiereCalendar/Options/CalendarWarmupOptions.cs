@@ -8,6 +8,7 @@ public sealed class CalendarWarmupOptions
     public int WakeIntervalMinutes { get; set; } = 15;
     public int MinimumRemoteRefreshMinutes { get; set; } = 60;
     public int MaximumProfilesPerWake { get; set; } = 5;
+    public int MaximumRemoteWindowsPerWake { get; set; } = 4;
     public int TopFilterProfileCount { get; set; } = 4;
     public bool SkipWhenForegroundLoadActive { get; set; } = true;
     public int CleanupRetentionDays { get; set; } = 60;
