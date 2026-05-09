@@ -594,7 +594,8 @@ public sealed class PremiereService : IPremiereService
                         progressText: batch.ProgressText,
                         elapsedMilliseconds: batch.ElapsedMilliseconds,
                         isSourceComplete: batch.IsComplete,
-                        unmappedCount: batch.UnmappedCount);
+                        unmappedCount: batch.UnmappedCount,
+                        filteredCount: batch.FilteredCount);
 
                     source.MoveNextTask = source.Enumerator.MoveNextAsync().AsTask();
                     continue;
@@ -648,8 +649,12 @@ public sealed class PremiereService : IPremiereService
 
         try
         {
-            var items = ApplyRequestedFilters(await getItems(token), filters);
-            return new PremiereSourceBatch(name, items);
+            var unfilteredItems = MergePremiereItems(await getItems(token));
+            var items = ApplyRequestedFilters(unfilteredItems, filters);
+            return new PremiereSourceBatch(
+                name,
+                items,
+                FilteredCount: CountFilteredOut(unfilteredItems, items));
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested
             && sourceTimeoutCts?.IsCancellationRequested == true)
@@ -700,7 +705,7 @@ public sealed class PremiereService : IPremiereService
         yield return batch with
         {
             IsComplete = true,
-            ProgressText = SourceCompletionProgressText(batch.Items.Count, batch.ProgressText)
+            ProgressText = SourceCompletionProgressText(batch.Items.Count, batch.ProgressText, batch.FilteredCount ?? 0)
         };
     }
 
@@ -781,17 +786,20 @@ public sealed class PremiereService : IPremiereService
 
             if (error is not null)
             {
-                var filteredErrorItems = ApplyRequestedFilters(accumulated.ToMergedItems(), filters);
+                var unfilteredErrorItems = accumulated.ToMergedItems();
+                var filteredErrorItems = ApplyRequestedFilters(unfilteredErrorItems, filters);
+                var errorFilteredCount = CountFilteredOut(unfilteredErrorItems, filteredErrorItems);
                 yield return new PremiereSourceBatch(
                     name,
                     filteredErrorItems,
                     error,
                     CompletedWork: lastItemBatch?.TotalWork ?? lastItemBatch?.CompletedWork ?? 0,
                     TotalWork: lastItemBatch?.TotalWork ?? lastItemBatch?.CompletedWork ?? 0,
-                    ProgressText: SourceFailureProgressText(error),
+                    ProgressText: ProgressTextWithFilteredCount(SourceFailureProgressText(error), errorFilteredCount),
                     ElapsedMilliseconds: ElapsedMilliseconds(),
                     IsComplete: true,
-                    UnmappedCount: CountUnverified(filteredErrorItems));
+                    UnmappedCount: CountUnverified(filteredErrorItems),
+                    FilteredCount: errorFilteredCount);
                 yield break;
             }
 
@@ -810,16 +818,19 @@ public sealed class PremiereService : IPremiereService
                 }
                 else if (!lastYieldWasComplete)
                 {
-                    var completionItems = ApplyRequestedFilters(accumulated.ToMergedItems(), filters);
+                    var unfilteredCompletionItems = accumulated.ToMergedItems();
+                    var completionItems = ApplyRequestedFilters(unfilteredCompletionItems, filters);
+                    var completionFilteredCount = CountFilteredOut(unfilteredCompletionItems, completionItems);
                     yield return new PremiereSourceBatch(
                         name,
                         completionItems,
                         CompletedWork: lastItemBatch?.TotalWork is > 0 ? lastItemBatch.TotalWork : lastItemBatch?.CompletedWork,
                         TotalWork: lastItemBatch?.TotalWork,
-                        ProgressText: SourceCompletionProgressText(completionItems.Count, lastItemBatch?.ProgressText),
+                        ProgressText: SourceCompletionProgressText(completionItems.Count, lastItemBatch?.ProgressText, completionFilteredCount),
                         ElapsedMilliseconds: ElapsedMilliseconds(),
                         IsComplete: true,
-                        UnmappedCount: CountUnverified(completionItems));
+                        UnmappedCount: CountUnverified(completionItems),
+                        FilteredCount: completionFilteredCount);
                 }
 
                 yield break;
@@ -827,7 +838,9 @@ public sealed class PremiereService : IPremiereService
 
             lastItemBatch = itemBatch;
             accumulated.AddRange(itemBatch?.Items ?? []);
-            var filteredItems = ApplyRequestedFilters(accumulated.ToMergedItems(), filters);
+            var unfilteredItems = accumulated.ToMergedItems();
+            var filteredItems = ApplyRequestedFilters(unfilteredItems, filters);
+            var filteredCount = CountFilteredOut(unfilteredItems, filteredItems);
             var isKnownWorkComplete = itemBatch is
             {
                 CompletedWork: { } completedWork,
@@ -841,11 +854,12 @@ public sealed class PremiereService : IPremiereService
                 CompletedWork: itemBatch?.CompletedWork,
                 TotalWork: itemBatch?.TotalWork,
                 ProgressText: isKnownWorkComplete
-                    ? SourceCompletionProgressText(filteredItems.Count, itemBatch?.ProgressText)
-                    : itemBatch?.ProgressText,
+                    ? SourceCompletionProgressText(filteredItems.Count, itemBatch?.ProgressText, filteredCount)
+                    : ProgressTextWithFilteredCount(itemBatch?.ProgressText, filteredCount),
                 ElapsedMilliseconds: ElapsedMilliseconds(),
                 IsComplete: isKnownWorkComplete,
-                UnmappedCount: CountUnverified(filteredItems));
+                UnmappedCount: CountUnverified(filteredItems),
+                FilteredCount: filteredCount);
         }
     }
 
@@ -1231,7 +1245,8 @@ public sealed class PremiereService : IPremiereService
         bool isSourceComplete = false,
         bool hasSourceErrors = false,
         IReadOnlyList<string>? failedSourceNames = null,
-        int? unmappedCount = null)
+        int? unmappedCount = null,
+        int? filteredCount = null)
     {
         return new PremiereLoadProgress(
             sourceName,
@@ -1250,13 +1265,21 @@ public sealed class PremiereService : IPremiereService
             SourceItems = sourceItems,
             HasSourceErrors = hasSourceErrors,
             FailedSourceNames = failedSourceNames ?? [],
-            UnmappedCount = unmappedCount ?? CountUnverified(sourceItems)
+            UnmappedCount = unmappedCount ?? CountUnverified(sourceItems),
+            FilteredCount = filteredCount
         };
     }
 
     private static int CountUnverified(IEnumerable<PremiereItem> items)
     {
         return items.Count(item => item.VerificationState == PremiereVerificationState.Unverified);
+    }
+
+    private static int CountFilteredOut(
+        IReadOnlyCollection<PremiereItem> unfilteredItems,
+        IReadOnlyCollection<PremiereItem> filteredItems)
+    {
+        return Math.Max(0, unfilteredItems.Count - filteredItems.Count);
     }
 
     private static string ProviderKeyForSource(string sourceName)
@@ -2781,12 +2804,31 @@ public sealed class PremiereService : IPremiereService
         };
     }
 
-    private static string SourceCompletionProgressText(int itemCount, string? previousProgressText)
+    private static string SourceCompletionProgressText(
+        int itemCount,
+        string? previousProgressText,
+        int filteredCount = 0)
     {
         var summary = itemCount == 0 ? "Done - no matching cards" : "Done";
-        return string.IsNullOrWhiteSpace(previousProgressText)
+        var progressText = ProgressTextWithFilteredCount(previousProgressText, filteredCount);
+        return string.IsNullOrWhiteSpace(progressText)
             ? summary
-            : $"{summary} - {previousProgressText}";
+            : $"{summary} - {progressText}";
+    }
+
+    private static string? ProgressTextWithFilteredCount(string? progressText, int filteredCount)
+    {
+        if (filteredCount <= 0)
+        {
+            return progressText;
+        }
+
+        var filteredText = filteredCount == 1
+            ? "1 filtered by active filters"
+            : $"{filteredCount:N0} filtered by active filters";
+        return string.IsNullOrWhiteSpace(progressText)
+            ? filteredText
+            : $"{progressText} · {filteredText}";
     }
 
     private static string SourceFailureProgressText(Exception error)
@@ -3761,5 +3803,6 @@ public sealed class PremiereService : IPremiereService
         string? ProgressText = null,
         long? ElapsedMilliseconds = null,
         bool IsComplete = false,
-        int? UnmappedCount = null);
+        int? UnmappedCount = null,
+        int? FilteredCount = null);
 }

@@ -690,6 +690,72 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
+    public async Task GetPremieresAsync_ReportsResolvedExternalCardsFilteredAfterEnrichment()
+    {
+        var discovery = new FakeDiscoveryProvider
+        {
+            DisplayName = "TVmaze schedules",
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Series,
+                    new DateOnly(2026, 5, 4),
+                    "English External",
+                    81,
+                    null,
+                    null,
+                    "TVmaze",
+                    OriginalLanguage: "en"),
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Series,
+                    new DateOnly(2026, 5, 4),
+                    "Resolved Japanese External",
+                    82,
+                    null,
+                    null,
+                    "TVmaze")
+            ]
+        };
+        var tmdb = new FakeTmdbClient();
+        tmdb.TvDetailsById[82] = new TmdbDetailsWithExtras
+        {
+            Id = 82,
+            OriginalLanguage = "ja"
+        };
+        var reports = new List<PremiereLoadProgress>();
+        var service = CreateService(
+            tmdb,
+            discoveryProviders: [discovery],
+            enrichmentProgressBatchSize: 2);
+        var filters = new CalendarFilters
+        {
+            ShowSeries = true,
+            ShowMovies = false,
+            SeriesFilters =
+            {
+                OriginalLanguages = { "en" }
+            }
+        };
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
+            filters: filters);
+
+        var item = Assert.Single(items);
+        Assert.Equal("English External", item.Title);
+        Assert.Contains(
+            reports,
+            report => report.SourceName == "TVmaze schedules"
+                && report.Phase == "complete"
+                && report.SourceItemCount == 1
+                && report.ProgressText?.Contains("resolved 2 of 2 candidates", StringComparison.OrdinalIgnoreCase) == true
+                && report.ProgressText.Contains("1 filtered by active filters", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task GetPremieresAsync_SkipsExternalCandidatesWithKnownMismatchedLanguageBeforeTmdbResolution()
     {
         var discovery = new FakeDiscoveryProvider
