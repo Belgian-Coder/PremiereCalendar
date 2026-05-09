@@ -1,6 +1,10 @@
 const filterPaneSelector = "[data-filter-pane]";
 const filterCloseSelector = "[data-filter-close]";
 const dayButtonSelector = "[data-day-button]";
+const autoDayNavigationDebounceMs = 550;
+const autoDayNavigationWheelThreshold = 24;
+const autoDayNavigationEdgeTolerance = 4;
+const autoDayNavigation = new WeakMap();
 const focusableSelector = [
     "a[href]",
     "button:not([disabled])",
@@ -46,6 +50,75 @@ function scrollSelectedDayIntoView(element, behavior = "smooth") {
         top: Math.max(0, targetTop),
         behavior
     });
+}
+
+function focusDayButton(dayElementId) {
+    const target = String(dayElementId ?? "");
+    const button = Array
+        .from(document.querySelectorAll(dayButtonSelector))
+        .find(candidate => candidate.getAttribute("data-day-target") === target);
+
+    if (button instanceof HTMLElement) {
+        button.focus({ preventScroll: true });
+    }
+}
+
+function isAtPageTop() {
+    return window.scrollY <= autoDayNavigationEdgeTolerance;
+}
+
+function isAtPageBottom() {
+    const documentElement = document.documentElement;
+    const scrollHeight = Math.max(
+        documentElement.scrollHeight,
+        document.body?.scrollHeight ?? 0);
+    return window.scrollY + window.innerHeight >= scrollHeight - autoDayNavigationEdgeTolerance;
+}
+
+function registerAutoDayNavigation(element, dotNetReference) {
+    if (!(element instanceof HTMLElement) || !dotNetReference) {
+        return;
+    }
+
+    disposeAutoDayNavigation(element);
+
+    let lastNavigationAt = 0;
+    const onWheel = (event) => {
+        if (document.querySelector(filterPaneSelector) || Math.abs(event.deltaY) < autoDayNavigationWheelThreshold) {
+            return;
+        }
+
+        const direction = event.deltaY > 0 ? 1 : -1;
+        if ((direction > 0 && !isAtPageBottom()) || (direction < 0 && !isAtPageTop())) {
+            return;
+        }
+
+        const now = Date.now();
+        if (now - lastNavigationAt < autoDayNavigationDebounceMs) {
+            event.preventDefault();
+            return;
+        }
+
+        lastNavigationAt = now;
+        event.preventDefault();
+        dotNetReference
+            .invokeMethodAsync("SelectAdjacentDayByScrollAsync", direction)
+            .catch(() => {
+            });
+    };
+
+    element.addEventListener("wheel", onWheel, { passive: false });
+    autoDayNavigation.set(element, { onWheel });
+}
+
+function disposeAutoDayNavigation(element) {
+    const registration = autoDayNavigation.get(element);
+    if (!registration) {
+        return;
+    }
+
+    element.removeEventListener("wheel", registration.onWheel);
+    autoDayNavigation.delete(element);
 }
 
 function initializeWeekControls(roots = [document]) {
@@ -147,7 +220,10 @@ function initializeFilterPane(pane) {
 }
 
 window.premiereCalendarWeek = {
-    scrollSelectedDayIntoView
+    scrollSelectedDayIntoView,
+    focusDayButton,
+    registerAutoDayNavigation,
+    disposeAutoDayNavigation
 };
 
 if (window.premiereCalendarDomObserver) {

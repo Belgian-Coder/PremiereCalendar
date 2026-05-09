@@ -61,7 +61,9 @@ public sealed class OmdbClient : IOmdbClient
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        return null;
+                        var error = await ReadErrorMessageAsync(response, token);
+                        throw new ExternalApiException(
+                            $"OMDb lookup for {imdbId} failed with HTTP {(int)response.StatusCode} {response.ReasonPhrase}: {error}");
                     }
 
                     var item = await response.Content.ReadFromJsonAsync<OmdbItem>(JsonOptions, token);
@@ -90,6 +92,23 @@ public sealed class OmdbClient : IOmdbClient
                 }
             },
             cancellationToken);
+    }
+
+    private static async Task<string> ReadErrorMessageAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var item = await response.Content.ReadFromJsonAsync<OmdbItem>(JsonOptions, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(item?.Error))
+            {
+                return item.Error.Trim();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return "OMDb returned an unsuccessful response.";
     }
 
     private async ValueTask<OmdbSourceSettings> GetEffectiveSettingsAsync(CancellationToken cancellationToken)

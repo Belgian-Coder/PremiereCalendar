@@ -154,6 +154,7 @@
                       OnOpenFilters="OpenFilters"
                       SelectedDay="_selectedDay"
                       OnSelectedDayChanged="OnSelectedDayChanged"
+                      OnAdjacentCalendarDayRequested="NavigateToCalendarDayAsync"
                       IntegrationSettings="_integrationSettings"
                       OnAddToArr="AddToArrAsync"
                       IsArrActionBusy="_arrAddInProgress.Count > 0" />
@@ -865,6 +866,26 @@
     private void OnSelectedDayChanged(DateOnly day)
     {
         _selectedDay = day;
+    }
+
+    private async Task NavigateToCalendarDayAsync(DateOnly day)
+    {
+        _selectedDay = day;
+        var targetWeekStart = CalendarFilters.StartOfWeek(day);
+        if (_filters.WeekStart == targetWeekStart)
+        {
+            StateHasChanged();
+            return;
+        }
+
+        _filters.WeekStart = targetWeekStart;
+        RecalculateVisibleItems();
+        var navigationChanged = UpdateUrl(replace: true);
+        await PersistCurrentFiltersAsync();
+        if (!navigationChanged)
+        {
+            await LoadAsync();
+        }
     }
 
     private DateOnly? PriorityDateForCurrentWeek(DateOnly start, DateOnly end)

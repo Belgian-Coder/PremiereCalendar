@@ -2,6 +2,10 @@
 @using System.Text
 
 <section class="calendar-day" id="@DayId" data-testid="calendar-day">
+    <div class="day-scroll-prompt day-scroll-prompt-top" data-day-scroll-prompt>
+        <span>Scroll to yesterday</span>
+    </div>
+
     <header class="day-header">
         <div>
             <span class="day-date">@Day.ToString("dd MMM", CultureInfo.CurrentCulture)</span>
@@ -115,6 +119,10 @@
             }
         }
     }
+
+    <div class="day-scroll-prompt day-scroll-prompt-bottom" data-day-scroll-prompt>
+        <span>Scroll to tomorrow</span>
+    </div>
 </section>
 
 @code {

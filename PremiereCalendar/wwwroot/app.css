@@ -910,7 +910,7 @@ h1:focus {
 }
 
 .day-jump-link:hover,
-.day-jump-link:focus {
+.day-jump-link:focus-visible {
     border-color: var(--teal);
     background: var(--teal-soft);
     color: var(--teal-strong);
@@ -1121,6 +1121,37 @@ h1:focus {
     height: 1px;
     margin: 0 0 0.85rem;
     background: linear-gradient(90deg, var(--teal), var(--amber), transparent);
+}
+
+.day-scroll-prompt {
+    display: grid;
+    min-height: 7.5rem;
+    place-items: center;
+    padding: 2.2rem 1rem;
+    color: var(--muted);
+    font-size: 0.88rem;
+    font-weight: 800;
+    text-align: center;
+}
+
+.day-scroll-prompt span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.4rem;
+    padding: 0.55rem 0.85rem;
+    border: 1px dashed rgba(20, 125, 115, 0.38);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--teal-soft) 32%, transparent);
+    color: var(--teal-strong);
+}
+
+.day-scroll-prompt-top {
+    margin-bottom: 0.45rem;
+}
+
+.day-scroll-prompt-bottom {
+    margin-top: 1rem;
 }
 
 .day-items-grid {

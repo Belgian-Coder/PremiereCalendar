@@ -7,6 +7,9 @@ public sealed record OmdbItem
     [JsonPropertyName("Response")]
     public string? Response { get; init; }
 
+    [JsonPropertyName("Error")]
+    public string? Error { get; init; }
+
     [JsonPropertyName("imdbRating")]
     public string? ImdbRating { get; init; }
 

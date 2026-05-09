@@ -109,6 +109,54 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
+    public async Task CalendarWeek_ScrollAdjacentDayMovesWithinWeek()
+    {
+        DateOnly? selectedDay = null;
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, Array.Empty<PremiereItem>())
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.OnSelectedDayChanged, day => selectedDay = day));
+
+        await component.InvokeAsync(() => component.Instance.SelectAdjacentDayByScrollAsync(1));
+
+        Assert.Equal(new DateOnly(2026, 5, 5), selectedDay);
+        Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260505']").ClassName);
+        Assert.DoesNotContain("active", component.Find("button[data-day-target='premiere-day-20260504']").ClassName);
+        var focusInvocation = JSInterop.Invocations["premiereCalendarWeek.focusDayButton"].Single();
+        Assert.Equal("premiere-day-20260505", focusInvocation.Arguments[0]);
+    }
+
+    [Fact]
+    public async Task CalendarWeek_ScrollAdjacentDayRequestsNextCalendarDayAcrossWeekBoundary()
+    {
+        DateOnly? requestedDay = null;
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "tv:10",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 10,
+                Title = "Sunday Launch",
+                PremiereDate = new DateOnly(2026, 5, 10)
+            }
+        };
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.SelectedDay, new DateOnly(2026, 5, 10))
+            .Add(x => x.OnAdjacentCalendarDayRequested, day => requestedDay = day));
+
+        await component.InvokeAsync(() => component.Instance.SelectAdjacentDayByScrollAsync(1));
+
+        Assert.Equal(new DateOnly(2026, 5, 11), requestedDay);
+        Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260510']").ClassName);
+    }
+
+    [Fact]
     public void CalendarWeek_UsesVirtualizedRowsForDenseDays()
     {
         var items = Enumerable.Range(1, 45)
@@ -195,6 +243,24 @@ public sealed class CalendarWeekTests : BunitContext
         Assert.Equal(12, component.FindAll("[data-testid='premiere-card']").Count);
         Assert.DoesNotContain("Collapse", component.Markup);
         Assert.Empty(component.FindAll("[data-day-load-more]"));
+    }
+
+    [Fact]
+    public void CalendarDay_RendersAdjacentDayScrollPromptsWithBreathingRoom()
+    {
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, Array.Empty<PremiereItem>())
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        var prompts = component.FindAll("[data-day-scroll-prompt]");
+
+        Assert.Equal(2, prompts.Count);
+        Assert.Contains("Scroll to yesterday", prompts[0].TextContent);
+        Assert.Contains("Scroll to tomorrow", prompts[1].TextContent);
+        Assert.Contains("day-scroll-prompt-top", prompts[0].ClassName);
+        Assert.Contains("day-scroll-prompt-bottom", prompts[1].ClassName);
     }
 
     [Fact]

@@ -1,5 +1,6 @@
 @using System.Globalization
 @inject IJSRuntime JS
+@implements IAsyncDisposable
 
 <div class="calendar-week-board">
     <div class="week-sticky-controls">
@@ -101,14 +102,20 @@
     [Parameter]
     public EventCallback<DateOnly> OnSelectedDayChanged { get; set; }
 
+    [Parameter]
+    public EventCallback<DateOnly> OnAdjacentCalendarDayRequested { get; set; }
+
     private Dictionary<DateOnly, List<PremiereItem>> _dayGroups = [];
     private IReadOnlyList<PremiereItem>? _lastGroupedItems;
     private string _lastGroupKey = "";
     private DateOnly _selectedDay;
     private DateOnly _lastWeekStart;
     private ElementReference _selectedDayContainer;
+    private DotNetObjectReference<CalendarWeek>? _objectReference;
+    private bool _autoDayNavigationRegistered;
     private bool _hasUserSelectedDay;
     private bool _scrollSelectedDayIntoView;
+    private bool _focusSelectedDayButton;
 
     private IReadOnlyList<PremiereItem> SelectedDayItems => _dayGroups.GetValueOrDefault(_selectedDay) ?? [];
 
@@ -158,24 +165,62 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (!_scrollSelectedDayIntoView)
+        if (firstRender && !_autoDayNavigationRegistered)
         {
-            return;
+            _autoDayNavigationRegistered = true;
+            _objectReference = DotNetObjectReference.Create(this);
+            try
+            {
+                await JS.InvokeVoidAsync(
+                    "premiereCalendarWeek.registerAutoDayNavigation",
+                    _selectedDayContainer,
+                    _objectReference);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+            catch (JSException)
+            {
+            }
         }
 
-        _scrollSelectedDayIntoView = false;
-        try
+        if (_focusSelectedDayButton)
         {
-            await JS.InvokeVoidAsync("premiereCalendarWeek.scrollSelectedDayIntoView", _selectedDayContainer);
+            _focusSelectedDayButton = false;
+            try
+            {
+                await JS.InvokeVoidAsync("premiereCalendarWeek.focusDayButton", DayElementId(_selectedDay));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+            catch (JSException)
+            {
+            }
         }
-        catch (InvalidOperationException)
+
+        if (_scrollSelectedDayIntoView)
         {
-        }
-        catch (JSDisconnectedException)
-        {
-        }
-        catch (JSException)
-        {
+            _scrollSelectedDayIntoView = false;
+            try
+            {
+                await JS.InvokeVoidAsync("premiereCalendarWeek.scrollSelectedDayIntoView", _selectedDayContainer);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+            catch (JSException)
+            {
+            }
         }
     }
 
@@ -244,12 +289,33 @@
         return item.VerificationState == PremiereVerificationState.Unverified ? 1 : 0;
     }
 
-    private async Task SelectDay(DateOnly day)
+    private async Task SelectDay(DateOnly day, bool focusSelectedDayButton = false)
     {
         _selectedDay = day;
         _hasUserSelectedDay = true;
         _scrollSelectedDayIntoView = true;
+        _focusSelectedDayButton = focusSelectedDayButton;
         await OnSelectedDayChanged.InvokeAsync(day);
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task SelectAdjacentDayByScrollAsync(int direction)
+    {
+        var normalizedDirection = Math.Sign(direction);
+        if (normalizedDirection == 0)
+        {
+            return;
+        }
+
+        var nextDay = _selectedDay.AddDays(normalizedDirection);
+        if (nextDay >= WeekStart && nextDay <= WeekStart.AddDays(6))
+        {
+            await SelectDay(nextDay, focusSelectedDayButton: true);
+            return;
+        }
+
+        await OnAdjacentCalendarDayRequested.InvokeAsync(nextDay);
     }
 
     private async Task OnDayKeyDown(KeyboardEventArgs args, DateOnly day)
@@ -277,7 +343,7 @@
             value = WeekStart;
         }
 
-        await SelectDay(value);
+        await SelectDay(value, focusSelectedDayButton: true);
     }
 
     private DateOnly? FirstDayWithItems()
@@ -299,5 +365,24 @@
         return day is { } value && value >= WeekStart && value <= WeekStart.AddDays(6)
             ? value
             : null;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarWeek.disposeAutoDayNavigation", _selectedDayContainer);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (JSException)
+        {
+        }
+
+        _objectReference?.Dispose();
     }
 }

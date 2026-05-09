@@ -33,6 +33,24 @@ public sealed class OmdbClientIntegrationTests
     }
 
     [Fact]
+    public async Task GetByImdbIdAsync_ThrowsHelpfulExceptionWhenRequestLimitIsReached()
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.Unauthorized)
+        {
+            Content = new StringContent(
+                "{\"Response\":\"False\",\"Error\":\"Request limit reached!\"}",
+                System.Text.Encoding.UTF8,
+                "application/json")
+        });
+        var client = CreateOmdbClient(handler, enabled: true);
+
+        var error = await Assert.ThrowsAsync<ExternalApiException>(() =>
+            client.GetByImdbIdAsync("tt0000100", CancellationToken.None));
+
+        Assert.Contains("Request limit reached", error.Message);
+    }
+
+    [Fact]
     public async Task GetByImdbIdAsync_CachesSuccessfulResponse()
     {
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(Fixture.Read("omdb/by-imdb-id-success.json")));

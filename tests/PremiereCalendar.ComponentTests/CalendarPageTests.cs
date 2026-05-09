@@ -2,6 +2,7 @@ using Bunit;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.DependencyInjection;
+using PremiereCalendar.Components.Shared;
 using PremiereCalendar.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Services;
@@ -1110,6 +1111,26 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.Equal(new DateOnly(2026, 5, 5), service.Calls.Last().PriorityDate);
+    }
+
+    [Fact]
+    public async Task CalendarPage_ScrollAdjacentDayAcrossWeekBoundaryLoadsAdjacentWeek()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        component.Find("button[data-day-target='premiere-day-20260510']").Click();
+
+        var week = component.FindComponent<CalendarWeek>();
+        await week.InvokeAsync(() => week.Instance.SelectAdjacentDayByScrollAsync(1));
+
+        component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
+        Assert.Equal(new DateOnly(2026, 5, 11), service.Calls.Last().Start);
+        Assert.Equal(new DateOnly(2026, 5, 11), service.Calls.Last().PriorityDate);
     }
 
     private static void AssertDelimitedValues(string actual, char separator, params string[] expected)
