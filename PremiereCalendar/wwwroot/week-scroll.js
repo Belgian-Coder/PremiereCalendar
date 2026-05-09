@@ -3,6 +3,8 @@ const filterCloseSelector = "[data-filter-close]";
 const dayButtonSelector = "[data-day-button]";
 const autoDayNavigationDebounceMs = 550;
 const autoDayNavigationWheelThreshold = 24;
+const autoDayNavigationActivationDelta = 760;
+const autoDayNavigationMinimumPromptMs = 800;
 const autoDayNavigationEdgeTolerance = 4;
 const autoDayNavigation = new WeakMap();
 const focusableSelector = [
@@ -63,8 +65,17 @@ function focusDayButton(dayElementId) {
     }
 }
 
-function isAtPageTop() {
-    return window.scrollY <= autoDayNavigationEdgeTolerance;
+function isAtContentTop(element) {
+    if (!(element instanceof HTMLElement)) {
+        return window.scrollY <= autoDayNavigationEdgeTolerance;
+    }
+
+    const sticky = document.querySelector(".week-sticky-controls");
+    const stickyBottom = sticky instanceof HTMLElement
+        ? sticky.getBoundingClientRect().bottom
+        : 0;
+    return element.getBoundingClientRect().top >= stickyBottom - autoDayNavigationEdgeTolerance
+        || window.scrollY <= autoDayNavigationEdgeTolerance;
 }
 
 function isAtPageBottom() {
@@ -75,6 +86,39 @@ function isAtPageBottom() {
     return window.scrollY + window.innerHeight >= scrollHeight - autoDayNavigationEdgeTolerance;
 }
 
+function findEdgePrompt(element, direction) {
+    const promptName = direction > 0 ? "next" : "previous";
+    const root = element?.closest?.(".calendar-week-board") ?? document;
+    return root.querySelector(`[data-day-scroll-prompt="${promptName}"]`);
+}
+
+function showEdgePrompt(element, direction, accumulatedDelta) {
+    const prompt = findEdgePrompt(element, direction);
+    if (!(prompt instanceof HTMLElement)) {
+        return;
+    }
+
+    const pull = Math.min(18, Math.max(0, accumulatedDelta / 18));
+    prompt.style.setProperty("--edge-scroll-pull", `${pull.toFixed(1)}px`);
+    prompt.classList.add("is-active");
+    prompt.setAttribute("aria-hidden", "false");
+}
+
+function hideEdgePrompt(prompt) {
+    if (!(prompt instanceof HTMLElement)) {
+        return;
+    }
+
+    prompt.classList.remove("is-active");
+    prompt.setAttribute("aria-hidden", "true");
+    prompt.style.removeProperty("--edge-scroll-pull");
+}
+
+function hideEdgePrompts(element) {
+    const root = element?.closest?.(".calendar-week-board") ?? document;
+    root.querySelectorAll("[data-day-scroll-prompt]").forEach(hideEdgePrompt);
+}
+
 function registerAutoDayNavigation(element, dotNetReference) {
     if (!(element instanceof HTMLElement) || !dotNetReference) {
         return;
@@ -83,13 +127,27 @@ function registerAutoDayNavigation(element, dotNetReference) {
     disposeAutoDayNavigation(element);
 
     let lastNavigationAt = 0;
+    let activeDirection = 0;
+    let accumulatedDelta = 0;
+    let promptStartedAt = 0;
+    let resetPromptTimer = 0;
+    const resetPrompt = () => {
+        window.clearTimeout(resetPromptTimer);
+        resetPromptTimer = 0;
+        activeDirection = 0;
+        accumulatedDelta = 0;
+        promptStartedAt = 0;
+        hideEdgePrompts(element);
+    };
+
     const onWheel = (event) => {
         if (document.querySelector(filterPaneSelector) || Math.abs(event.deltaY) < autoDayNavigationWheelThreshold) {
             return;
         }
 
         const direction = event.deltaY > 0 ? 1 : -1;
-        if ((direction > 0 && !isAtPageBottom()) || (direction < 0 && !isAtPageTop())) {
+        if ((direction > 0 && !isAtPageBottom()) || (direction < 0 && !isAtContentTop(element))) {
+            resetPrompt();
             return;
         }
 
@@ -99,8 +157,27 @@ function registerAutoDayNavigation(element, dotNetReference) {
             return;
         }
 
-        lastNavigationAt = now;
         event.preventDefault();
+        window.clearTimeout(resetPromptTimer);
+
+        if (activeDirection !== direction) {
+            hideEdgePrompts(element);
+            activeDirection = direction;
+            accumulatedDelta = 0;
+            promptStartedAt = now;
+        }
+
+        accumulatedDelta += Math.abs(event.deltaY);
+        showEdgePrompt(element, direction, accumulatedDelta);
+        resetPromptTimer = window.setTimeout(resetPrompt, 1400);
+
+        if (accumulatedDelta < autoDayNavigationActivationDelta
+            || now - promptStartedAt < autoDayNavigationMinimumPromptMs) {
+            return;
+        }
+
+        lastNavigationAt = now;
+        resetPrompt();
         dotNetReference
             .invokeMethodAsync("SelectAdjacentDayByScrollAsync", direction)
             .catch(() => {
@@ -108,7 +185,10 @@ function registerAutoDayNavigation(element, dotNetReference) {
     };
 
     element.addEventListener("wheel", onWheel, { passive: false });
-    autoDayNavigation.set(element, { onWheel });
+    autoDayNavigation.set(element, {
+        onWheel,
+        resetPrompt
+    });
 }
 
 function disposeAutoDayNavigation(element) {
@@ -118,6 +198,7 @@ function disposeAutoDayNavigation(element) {
     }
 
     element.removeEventListener("wheel", registration.onWheel);
+    registration.resetPrompt?.();
     autoDayNavigation.delete(element);
 }
 

@@ -1114,11 +1114,48 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_LoadsSelectedDayFromDayQuery()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04&day=2026-05-06");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260506']").ClassName);
+        Assert.Equal(new DateOnly(2026, 5, 6), service.Calls.Last().PriorityDate);
+    }
+
+    [Fact]
+    public void CalendarPage_ClickingDayUpdatesDayQueryWithoutReloading()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        component.Find("button[data-day-target='premiere-day-20260505']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
+            Assert.Equal("2026-05-04", query["week"].ToString());
+            Assert.Equal("2026-05-05", query["day"].ToString());
+            Assert.Single(service.Calls);
+        });
+    }
+
+    [Fact]
     public async Task CalendarPage_ScrollAdjacentDayAcrossWeekBoundaryLoadsAdjacentWeek()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
-        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1131,6 +1168,9 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.Equal(new DateOnly(2026, 5, 11), service.Calls.Last().Start);
         Assert.Equal(new DateOnly(2026, 5, 11), service.Calls.Last().PriorityDate);
+        var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
+        Assert.Equal("2026-05-11", query["week"].ToString());
+        Assert.Equal("2026-05-11", query["day"].ToString());
     }
 
     private static void AssertDelimitedValues(string actual, char separator, params string[] expected)

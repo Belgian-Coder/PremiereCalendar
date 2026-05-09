@@ -2,7 +2,7 @@
 @using System.Text
 
 <section class="calendar-day" id="@DayId" data-testid="calendar-day">
-    <div class="day-scroll-prompt day-scroll-prompt-top" data-day-scroll-prompt>
+    <div class="day-scroll-prompt day-scroll-prompt-top" data-day-scroll-prompt="previous" aria-hidden="true">
         <span>Scroll to yesterday</span>
     </div>
 
@@ -120,7 +120,7 @@
         }
     }
 
-    <div class="day-scroll-prompt day-scroll-prompt-bottom" data-day-scroll-prompt>
+    <div class="day-scroll-prompt day-scroll-prompt-bottom" data-day-scroll-prompt="next" aria-hidden="true">
         <span>Scroll to tomorrow</span>
     </div>
 </section>

@@ -863,9 +863,11 @@
         RecalculateVisibleItems();
     }
 
-    private void OnSelectedDayChanged(DateOnly day)
+    private async Task OnSelectedDayChanged(DateOnly day)
     {
         _selectedDay = day;
+        UpdateUrl(replace: true, forceLoadOnChange: false);
+        await Task.CompletedTask;
     }
 
     private async Task NavigateToCalendarDayAsync(DateOnly day)
@@ -1018,6 +1020,7 @@
     private async Task PreviousWeek()
     {
         _filters.WeekStart = _filters.WeekStart.AddDays(-7);
+        _selectedDay = _selectedDay?.AddDays(-7) ?? _filters.WeekStart;
         var navigationChanged = UpdateUrl(replace: true);
         await PersistCurrentFiltersAsync();
         if (!navigationChanged)
@@ -1029,6 +1032,7 @@
     private async Task CurrentWeek()
     {
         _filters.WeekStart = CalendarFilters.StartOfWeek(DateOnly.FromDateTime(DateTime.Today));
+        _selectedDay = DateOnly.FromDateTime(DateTime.Today);
         var navigationChanged = UpdateUrl(replace: true);
         await PersistCurrentFiltersAsync();
         if (!navigationChanged)
@@ -1040,6 +1044,7 @@
     private async Task NextWeek()
     {
         _filters.WeekStart = _filters.WeekStart.AddDays(7);
+        _selectedDay = _selectedDay?.AddDays(7) ?? _filters.WeekStart;
         var navigationChanged = UpdateUrl(replace: true);
         await PersistCurrentFiltersAsync();
         if (!navigationChanged)
@@ -1067,6 +1072,14 @@
             && DateOnly.TryParseExact(week, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var weekStart))
         {
             _filters.WeekStart = CalendarFilters.StartOfWeek(weekStart);
+        }
+
+        _selectedDay = null;
+        if (TryGet(query, "day", out var day)
+            && DateOnly.TryParseExact(day, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var selectedDay))
+        {
+            _selectedDay = selectedDay;
+            _filters.WeekStart = CalendarFilters.StartOfWeek(selectedDay);
         }
 
         if (TryGet(query, "media", out var media))
@@ -1249,12 +1262,12 @@
         }
     }
 
-    private bool UpdateUrl(bool replace)
+    private bool UpdateUrl(bool replace, bool forceLoadOnChange = true)
     {
         var url = BuildFilterUrl();
         if (!string.Equals(Navigation.Uri, url, StringComparison.Ordinal))
         {
-            _forceLoadOnNextLocationChange = true;
+            _forceLoadOnNextLocationChange = forceLoadOnChange;
             Navigation.NavigateTo(url, replace);
             return true;
         }
@@ -1365,13 +1378,13 @@
 
     private string BuildFilterUrl()
     {
-        return BuildFilterUrl(_pageMode, _filters);
+        return BuildFilterUrl(_pageMode, _filters, _selectedDay);
     }
 
-    private string BuildFilterUrl(CalendarPageMode mode, CalendarFilters filters)
+    private string BuildFilterUrl(CalendarPageMode mode, CalendarFilters filters, DateOnly? selectedDay = null)
     {
         var baseUri = Navigation.ToAbsoluteUri(Navigation.Uri).GetLeftPart(UriPartial.Path);
-        var parameters = BuildFilterParameters(mode, filters, includeWeek: true);
+        var parameters = BuildFilterParameters(mode, filters, includeWeek: true, selectedDay);
 
         return parameters.Count == 0
             ? baseUri
@@ -1386,13 +1399,20 @@
     private static Dictionary<string, string?> BuildFilterParameters(
         CalendarPageMode mode,
         CalendarFilters filters,
-        bool includeWeek)
+        bool includeWeek,
+        DateOnly? selectedDay = null)
     {
         var parameters = new Dictionary<string, string?>();
 
         if (includeWeek)
         {
             parameters["week"] = filters.WeekStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            if (selectedDay is { } day
+                && day >= filters.WeekStart
+                && day <= filters.WeekStart.AddDays(6))
+            {
+                parameters["day"] = day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            }
         }
 
         if (filters.SortMode != PremiereSortMode.PremiereDate)

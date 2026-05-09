@@ -246,7 +246,7 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
-    public void CalendarDay_RendersAdjacentDayScrollPromptsWithBreathingRoom()
+    public void CalendarDay_RendersHiddenAdjacentDayScrollPrompts()
     {
         var component = Render<CalendarDay>(parameters => parameters
             .Add(x => x.Day, new DateOnly(2026, 5, 4))
@@ -259,6 +259,10 @@ public sealed class CalendarWeekTests : BunitContext
         Assert.Equal(2, prompts.Count);
         Assert.Contains("Scroll to yesterday", prompts[0].TextContent);
         Assert.Contains("Scroll to tomorrow", prompts[1].TextContent);
+        Assert.Equal("previous", prompts[0].GetAttribute("data-day-scroll-prompt"));
+        Assert.Equal("next", prompts[1].GetAttribute("data-day-scroll-prompt"));
+        Assert.Equal("true", prompts[0].GetAttribute("aria-hidden"));
+        Assert.Equal("true", prompts[1].GetAttribute("aria-hidden"));
         Assert.Contains("day-scroll-prompt-top", prompts[0].ClassName);
         Assert.Contains("day-scroll-prompt-bottom", prompts[1].ClassName);
     }

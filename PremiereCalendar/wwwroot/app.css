@@ -1124,6 +1124,10 @@ h1:focus {
 }
 
 .day-scroll-prompt {
+    position: fixed;
+    left: var(--page-x);
+    right: var(--page-x);
+    z-index: 28;
     display: grid;
     min-height: 7.5rem;
     place-items: center;
@@ -1131,7 +1135,12 @@ h1:focus {
     color: var(--muted);
     font-size: 0.88rem;
     font-weight: 800;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
     text-align: center;
+    visibility: hidden;
+    transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
 }
 
 .day-scroll-prompt span {
@@ -1147,11 +1156,23 @@ h1:focus {
 }
 
 .day-scroll-prompt-top {
-    margin-bottom: 0.45rem;
+    top: 4.35rem;
+    transform: translateY(calc(-0.85rem - var(--edge-scroll-pull, 0px)));
 }
 
 .day-scroll-prompt-bottom {
-    margin-top: 1rem;
+    bottom: 1rem;
+    transform: translateY(calc(0.85rem + var(--edge-scroll-pull, 0px)));
+}
+
+.day-scroll-prompt.is-active {
+    opacity: 1;
+    visibility: visible;
+}
+
+.day-scroll-prompt-top.is-active,
+.day-scroll-prompt-bottom.is-active {
+    transform: translateY(0);
 }
 
 .day-items-grid {
