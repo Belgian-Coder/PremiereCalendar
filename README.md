@@ -1,8 +1,15 @@
 # Premiere Calendar
 
-Premiere Calendar is a local-first .NET 11 preview Blazor app for weekly movie and series discovery. TMDb is the canonical source for normal cards; Trakt and TVmaze can add extra candidate rows when they map to TMDb, while OMDb, Watchmode availability, Fanart.tv, TheTVDB, Wikimedia, Sonarr, Radarr, and SIMKL are optional enrichments or integrations configured from Settings.
+Premiere Calendar is a web page you run yourself. It shows upcoming movie and series premieres by week.
 
-Runtime keys are stored in the local SQLite settings database. User-secrets and environment variables remain first-run fallbacks, but secrets should not be committed.
+Use it to:
+
+- Browse new movies and series.
+- Filter by language, provider, score, runtime, and more.
+- See where each card came from.
+- Add verified movies to Radarr and verified series to Sonarr, if you use those apps.
+
+TMDb is required for live data. Everything else is optional.
 
 ## Screenshots
 
@@ -14,85 +21,106 @@ Runtime keys are stored in the local SQLite settings database. User-secrets and 
 | --- | --- |
 | ![Movie calendar in dark mode](docs/images/readme/movies-dark.png) | ![Filter drawer in dark mode](docs/images/readme/filters-dark.png) |
 
-## What It Does
+## First Setup
 
-- Builds Monday-to-Sunday calendars for All, Series, and Movies routes.
-- Pushes supported saved filters into TMDb Discover instead of always fetching the broad week.
-- Streams source progress so cards can appear before every source finishes.
-- Shows unverified external candidates below verified TMDb-backed cards when a provider row cannot yet resolve to TMDb.
-- Persists week JSON cache and image cache on disk, with 60-day cleanup for old runtime data.
-- Warms reusable full-week cache keys in the background without forcing fresh remote calls every wake.
-- Keeps foreground loads bounded by a 30-second budget and shows partial/stale diagnostics instead of a stuck loader.
+1. Start the app.
+2. Open `http://localhost:5298`.
+3. Click the cog icon.
+4. Paste your TMDb API read access token.
+5. Click Save.
+6. Go back to All, Series, or Movies.
 
-## Provider Roles
+No TMDb token means the app cannot load real calendar data.
 
-| Provider | Role |
-| --- | --- |
-| TMDb | Required discovery, identity, metadata, posters, watch providers |
-| Trakt | Optional calendar candidates, accepted only after TMDb mapping |
-| TVmaze | Optional series schedule candidates and TV enrichment |
-| Watchmode | Optional streaming availability fallback only |
-| OMDb | Optional IMDb, Rotten Tomatoes, Metacritic, plot, poster fallback |
-| Fanart.tv / TheTVDB / Wikimedia | Optional artwork fallbacks when no better poster exists |
-| SIMKL | Optional account/library sync state, not calendar discovery |
-| Sonarr / Radarr | Optional add actions from verified cards |
+## Run It
 
-## Run Locally
+For a quick local run:
 
 ```powershell
 .\Run-PremiereCalendar.ps1
 ```
 
-The script builds, opens `http://localhost:5298`, and runs in the current terminal until Ctrl+C. Use `-Port 5301` if the default port is busy.
-
-Manual run:
-
-```powershell
-.\.dotnet\dotnet.exe run --project .\PremiereCalendar\PremiereCalendar.csproj
-```
-
-Open `/settings` from the cog icon and add at least a TMDb API read access token for live data.
-
-## Install Or Update As A Service
-
-From the repository root:
+To install or update the Windows service:
 
 ```powershell
 .\Install-PremiereCalendar.ps1
 ```
 
-The installer publishes a self-contained Windows x64 build, preserves runtime data, installs or updates the `PremiereCalendar` Windows Service, starts it, and checks `/health`.
+The service starts automatically after a reboot.
 
-Useful options:
+## Navigation And Shortcuts
 
-```powershell
-.\Install-PremiereCalendar.ps1 -Port 5301
-.\Install-PremiereCalendar.ps1 -TargetDirectory '<install-directory>'
-.\Install-PremiereCalendar.ps1 -SkipServiceInstall
-```
+| What you want | What to do |
+| --- | --- |
+| Go to the previous day | Press Left Arrow |
+| Go to the next day | Press Right Arrow |
+| Pick a day in the week | Click the day button |
+| Go to another week | Use Previous, This week, or Next |
+| Move from the top of a day to yesterday | Keep scrolling upward until the message appears |
+| Move from the bottom of a day to tomorrow | Keep scrolling downward until the message appears |
+| See which sources loaded | Click Show sources in Loaded-source filters |
+| Hide source details again | Click Hide sources |
+| Change filters | Click the filter button |
+| Change settings | Click the cog icon |
 
-For a portable release zip:
+The arrow keys do not take over while you are typing in a text box.
 
-```powershell
-.\Build-ReleasePackage.ps1
-```
+## What The Cards Mean
 
-See [Release Installer](docs/ReleaseInstaller.md) for install, update, and uninstall details.
+- Normal cards are verified through TMDb.
+- Unverified cards are shown below normal cards when an outside source found something that does not match TMDb yet.
+- `Source` chips show provider, channel, or streaming source names when known.
+- Scores can be `n/a` when the score provider has no data or is not configured.
 
-## Validate
+## Providers
+
+| Provider | Needed? | What it does |
+| --- | --- | --- |
+| TMDb | Required | Main calendar data, posters, trailers, metadata |
+| Trakt | Optional | Extra movie and new-series candidates |
+| TVmaze | Optional | Extra series schedule data |
+| Watchmode | Optional | Streaming availability fallback |
+| OMDb | Optional | IMDb, Rotten Tomatoes, Metacritic scores |
+| Fanart.tv, TheTVDB, Wikimedia | Optional | Poster fallback when TMDb has no poster |
+| SIMKL | Optional | Account/library sync state |
+| Sonarr, Radarr | Optional | Add buttons on verified cards |
+
+## Cache
+
+The app keeps calendar data and images on disk. This means cached data survives restarts, crashes, and updates.
+
+Click Refresh when you want the current week checked again. Refresh keeps useful existing data where possible and fills in changes or missing details.
+
+## Common Problems
+
+| Problem | Try this |
+| --- | --- |
+| No cards load | Add a TMDb token in Settings, then click Refresh |
+| Scores are missing | Enable OMDb with a working API key; OMDb free keys can hit daily limits |
+| A source looks slow | Click Show sources to see which provider is still loading |
+| TVmaze is slow | Use narrower filters or disable TVmaze schedule discovery in Settings |
+| Settings look wrong | Change them in the app Settings page, not in `appsettings.json` |
+| Posters are missing | Check optional artwork providers, then Refresh |
+
+More help: [Troubleshooting](docs/Troubleshooting.md).
+
+## Test It
 
 ```powershell
 .\.dotnet\dotnet.exe test .\PremiereCalendar.slnx
 ```
 
-Automated tests use fakes and fixtures. They must not call live external providers.
+Tests use fake providers. They must not call live external services.
 
-## Documentation
+## More Documentation
 
+Most users only need this README and [Troubleshooting](docs/Troubleshooting.md).
+
+Technical references:
+
+- [Release Installer](docs/ReleaseInstaller.md)
+- [Configuration](docs/Configuration.md)
 - [How It Works](docs/HowItWorks.md)
 - [Architecture](docs/Architecture.md)
-- [Configuration](docs/Configuration.md)
-- [Troubleshooting](docs/Troubleshooting.md)
-- [Release Installer](docs/ReleaseInstaller.md)
 - [Performance Notes](docs/PerformanceReview.md)
 - [Testing](docs/Testing.md)

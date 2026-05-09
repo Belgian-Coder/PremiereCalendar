@@ -115,4 +115,4 @@ Nearby-week prefetch now runs after the visible week completes. The default queu
 
 ## Browser Rendering
 
-The calendar now renders one selected day at a time. Dense days use .NET 11 `Virtualize`; moderate days render 10 cards and auto-load more as the user scrolls. The card grid uses one shared gap variable so left/right columns and virtualized rows keep consistent spacing across desktop and mobile. Day switching reuses the mounted `CalendarDay` component instead of forcing a keyed teardown, scrolls the board immediately on the browser click, and avoids `content-visibility:auto` on cards to reduce visible paint flicker.
+The calendar renders one selected day at a time. Dense days use .NET 11 `Virtualize`; moderate days render 10 cards and auto-load more as the user scrolls. The card grid uses one shared gap variable so left/right columns and virtualized rows keep consistent spacing across desktop and mobile. Day switching keys the selected day so the short entrance animation reliably runs, scrolls the board immediately on browser navigation, and avoids `content-visibility:auto` on cards to reduce visible paint flicker.
