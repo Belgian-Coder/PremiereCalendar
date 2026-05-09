@@ -42,7 +42,8 @@ Arrow keys are ignored while you type in an input field.
 | Refresh seems slow | Wait for the 30-second budget, then click Show sources |
 | TVmaze is always slow | Use new-series mode, choose fewer languages, or disable TVmaze schedule discovery |
 | Watchmode shows no cards | That is expected; Watchmode is used as availability fallback, not broad discovery |
-| IMDb, Rotten Tomatoes, or Metacritic scores are missing | Enable OMDb with a working API key; free OMDb keys can hit daily limits |
+| IMDb scores are missing | Wait for the IMDb dataset import to finish, then Refresh |
+| Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key; free OMDb keys can hit daily limits |
 | Posters are missing | Check artwork provider settings, then Refresh |
 | Settings do not match `appsettings.json` | The Settings page wins; change values in the app |
 | Sonarr add fails | The series needs a TVDB ID and valid Sonarr settings |
@@ -60,7 +61,7 @@ The Loaded-source filters box is collapsed by default.
 
 ## Cache
 
-Calendar and image cache files are stored on disk. They survive app restarts, crashes, and updates.
+Calendar, image, IMDb rating, OMDb response, and provider-sync cache data are stored on disk. They survive app restarts, crashes, and updates.
 
 Refresh does not delete everything. It checks the week again and reuses useful existing details when it can.
 
@@ -94,10 +95,11 @@ This is why changing `appsettings.json` may not change the running app after you
 | Provider | Use it for |
 | --- | --- |
 | TMDb | Main calendar data. Required. |
+| IMDb datasets | IMDb score and vote count. Included. |
 | Trakt | Extra candidates. Optional. |
 | TVmaze | Extra series schedule data. Optional. |
 | Watchmode | Streaming availability fallback. Optional. |
-| OMDb | IMDb, Rotten Tomatoes, Metacritic. Optional. |
+| OMDb | Rotten Tomatoes, Metacritic, plot, poster fallback. Optional. |
 | Fanart.tv, TheTVDB, Wikimedia | Poster fallback. Optional. |
 | SIMKL | Account/library sync state. Optional. |
 | Sonarr, Radarr | Add buttons. Optional. |

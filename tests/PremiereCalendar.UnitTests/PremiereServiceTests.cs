@@ -1881,9 +1881,9 @@ public sealed class PremiereServiceTests
         Assert.Equal(PremiereVerificationState.Unverified, item.VerificationState);
         Assert.Equal("Unmapped Movie", item.Title);
         Assert.Contains("Watchmode", item.SourceNames);
-        Assert.Contains("Trakt", item.SourceNames);
         Assert.Contains(item.Sources, source => source.Name == "Watchmode" && source.Kind == "schedule");
-        Assert.Contains(item.Sources, source => source.Name == "Trakt" && source.Kind == "schedule");
+        Assert.DoesNotContain("Trakt", item.SourceNames);
+        Assert.DoesNotContain(item.Sources, source => source.Name == "Trakt");
     }
 
     [Fact]
@@ -2563,6 +2563,64 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
+    public async Task GetPremieresAsync_UsesImdbDatasetRatingsAndKeepsOmdbSupplementalScores()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            MovieItems =
+            [
+                new TmdbMovieDiscoverItem
+                {
+                    Id = 65,
+                    Title = "Hybrid Rating Movie",
+                    ReleaseDate = "2026-05-04",
+                    OriginalLanguage = "en",
+                    OriginCountry = ["US"]
+                }
+            ]
+        };
+        tmdb.MovieDetailsById[65] = new TmdbDetailsWithExtras
+        {
+            Id = 65,
+            ExternalIds = new TmdbExternalIds { ImdbId = "tt0000065" }
+        };
+        var omdb = new FakeOmdbClient();
+        omdb.ItemsByImdbId["tt0000065"] = new OmdbItem
+        {
+            Response = "True",
+            ImdbRating = "5.1",
+            ImdbVotes = "100",
+            Metascore = "71",
+            Ratings =
+            [
+                new OmdbRating { Source = "Rotten Tomatoes", Value = "82%" }
+            ]
+        };
+        var imdbRatings = new FakeImdbRatingsStore();
+        imdbRatings.Items["tt0000065"] = new ImdbRatingRecord(
+            "tt0000065",
+            8.4,
+            123456,
+            DateTimeOffset.Parse("2026-05-09T10:00:00Z"));
+        var service = CreateService(
+            tmdb,
+            omdb: omdb,
+            imdbRatingsStore: imdbRatings);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(8.4, item.ImdbScore);
+        Assert.Equal(123456, item.ImdbVoteCount);
+        Assert.Equal(82, item.RottenTomatoesScore);
+        Assert.Equal(71, item.MetacriticScore);
+    }
+
+    [Fact]
     public async Task GetPremieresAsync_SkipsFailedTvmazeEnrichmentWithoutDroppingSeries()
     {
         var tmdb = new FakeTmdbClient
@@ -3122,7 +3180,7 @@ public sealed class PremiereServiceTests
 
         var item = Assert.Single(items);
         Assert.Equal("Trakt Movie", item.Title);
-        Assert.Contains("Trakt", item.SourceNames);
+        Assert.Empty(item.SourceNames);
         Assert.Empty(watchmode.SourceCalls);
     }
 
@@ -3309,6 +3367,7 @@ public sealed class PremiereServiceTests
         IEnumerable<IArtworkProvider>? artworkProviders = null,
         IEnumerable<IPremiereDiscoveryProvider>? discoveryProviders = null,
         ICalendarCache? calendarCache = null,
+        IImdbRatingsStore? imdbRatingsStore = null,
         string[]? sourceRegions = null,
         int sourceTimeoutSeconds = 120,
         int sourceFetchConcurrency = 4,
@@ -3331,7 +3390,8 @@ public sealed class PremiereServiceTests
                 SourceFetchConcurrency = sourceFetchConcurrency,
                 EnrichmentProgressBatchSize = enrichmentProgressBatchSize
             }),
-            NullLogger<PremiereService>.Instance);
+            NullLogger<PremiereService>.Instance,
+            imdbRatingsStore);
     }
 
     private static string CacheKeyForPageMode(CalendarFilters filters, CalendarPageMode pageMode)
@@ -3608,6 +3668,24 @@ public sealed class PremiereServiceTests
             return Task.FromResult(KeywordResults);
         }
 
+        public Task<IReadOnlyList<TmdbChangedItem>> GetChangedMovieIdsAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            return Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
+        }
+
+        public Task<IReadOnlyList<TmdbChangedItem>> GetChangedTvIdsAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            return Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
+        }
+
         public ConcurrentBag<FindCall> FindCalls { get; } = [];
     }
 
@@ -3626,6 +3704,40 @@ public sealed class PremiereServiceTests
             }
 
             return Task.FromResult(ItemsByImdbId.GetValueOrDefault(imdbId));
+        }
+    }
+
+    private sealed class FakeImdbRatingsStore : IImdbRatingsStore
+    {
+        public Dictionary<string, ImdbRatingRecord> Items { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public Task<ImdbRatingRecord?> GetByImdbIdAsync(string imdbId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(Items.GetValueOrDefault(imdbId));
+        }
+
+        public Task ReplaceAllAsync(
+            IEnumerable<ImdbRatingRecord> ratings,
+            DateTimeOffset importedAtUtc,
+            CancellationToken cancellationToken)
+        {
+            Items.Clear();
+            foreach (var rating in ratings)
+            {
+                Items[rating.ImdbId] = rating;
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task<ImdbDatasetState> GetStateAsync(CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new ImdbDatasetState(null, Items.Count, null));
+        }
+
+        public Task SaveStateAsync(ImdbDatasetState state, CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
         }
     }
 
@@ -3677,6 +3789,14 @@ public sealed class PremiereServiceTests
         {
             ScheduleCalls.Add(new TvmazeScheduleCall(date, country, webSchedule, forceRefresh));
             return Task.FromResult(ScheduleItems);
+        }
+
+        public Task<IReadOnlyList<TvmazeShowUpdate>> GetShowUpdatesAsync(
+            TvmazeUpdateWindow since,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            return Task.FromResult<IReadOnlyList<TvmazeShowUpdate>>([]);
         }
     }
 

@@ -372,6 +372,49 @@ public sealed class TmdbClient : ITmdbClient
         return response?.Results ?? [];
     }
 
+    public Task<IReadOnlyList<TmdbChangedItem>> GetChangedMovieIdsAsync(
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        return GetChangedIdsAsync(PremiereMediaType.Movie, start, end, cancellationToken, forceRefresh);
+    }
+
+    public Task<IReadOnlyList<TmdbChangedItem>> GetChangedTvIdsAsync(
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        return GetChangedIdsAsync(PremiereMediaType.Series, start, end, cancellationToken, forceRefresh);
+    }
+
+    private Task<IReadOnlyList<TmdbChangedItem>> GetChangedIdsAsync(
+        PremiereMediaType mediaType,
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        EnsureConfigured();
+
+        if (end < start)
+        {
+            return Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
+        }
+
+        var mediaKey = mediaType == PremiereMediaType.Movie ? "movie" : "tv";
+        return GetOrCreateRequiredAsync(
+            $"tmdb:changes:{mediaKey}:{start:yyyyMMdd}:{end:yyyyMMdd}",
+            TimeSpan.FromHours(1),
+            token => GetPagedAsync<TmdbChangedItem>(
+                page => TmdbQueryBuilder.BuildChangesPath(mediaType, start, end, page),
+                token),
+            cancellationToken,
+            forceRefresh);
+    }
+
     private async Task<IReadOnlyList<T>> GetPagedAsync<T>(
         Func<int, string> pathFactory,
         CancellationToken cancellationToken)

@@ -36,8 +36,8 @@ public sealed class TraktDiscoveryProvider : IStreamingPremiereDiscoveryProvider
         bool forceRefresh = false,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var movieTask = _client.GetMovieCalendarAsync(start, end, cancellationToken, forceRefresh);
-        var showTask = _client.GetNewShowCalendarAsync(start, end, cancellationToken, forceRefresh);
+        var movieTask = TryStartMovieCalendarAsync(start, end, cancellationToken, forceRefresh);
+        var showTask = TryStartShowCalendarAsync(start, end, cancellationToken, forceRefresh);
         var active = new List<Task<IReadOnlyList<ExternalPremiereCandidate>>>
         {
             MapMovieCalendarAsync(movieTask),
@@ -49,11 +49,60 @@ public sealed class TraktDiscoveryProvider : IStreamingPremiereDiscoveryProvider
             var completed = await Task.WhenAny(active);
             active.Remove(completed);
 
-            var candidates = await completed;
+            IReadOnlyList<ExternalPremiereCandidate> candidates;
+            try
+            {
+                candidates = await completed;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                candidates = [];
+            }
+            catch (Exception)
+            {
+                candidates = [];
+            }
+
             if (candidates.Count > 0)
             {
                 yield return candidates;
             }
+        }
+    }
+
+    private Task<IReadOnlyList<TraktMovieCalendarItem>> TryStartMovieCalendarAsync(
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        try
+        {
+            return _client.GetMovieCalendarAsync(start, end, cancellationToken, forceRefresh);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromException<IReadOnlyList<TraktMovieCalendarItem>>(ex);
+        }
+    }
+
+    private Task<IReadOnlyList<TraktShowCalendarItem>> TryStartShowCalendarAsync(
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        try
+        {
+            return _client.GetNewShowCalendarAsync(start, end, cancellationToken, forceRefresh);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromException<IReadOnlyList<TraktShowCalendarItem>>(ex);
         }
     }
 

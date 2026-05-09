@@ -261,6 +261,14 @@ public sealed class TvmazeScheduleDiscoveryProviderTests
 
             return Task.FromResult(ScheduleItems);
         }
+
+        public Task<IReadOnlyList<TvmazeShowUpdate>> GetShowUpdatesAsync(
+            TvmazeUpdateWindow since,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            return Task.FromResult<IReadOnlyList<TvmazeShowUpdate>>([]);
+        }
     }
 
     private sealed record ScheduleCall(DateOnly Date, string? Country, bool WebSchedule);

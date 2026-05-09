@@ -236,5 +236,23 @@ public sealed class TmdbFilterCatalogServiceTests
         {
             throw new NotSupportedException();
         }
+
+        public Task<IReadOnlyList<TmdbChangedItem>> GetChangedMovieIdsAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<IReadOnlyList<TmdbChangedItem>> GetChangedTvIdsAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            throw new NotSupportedException();
+        }
     }
 }

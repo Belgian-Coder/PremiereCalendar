@@ -47,7 +47,23 @@ dotnet user-secrets set "Omdb:Enabled" "true" --project .\PremiereCalendar\Premi
 dotnet user-secrets set "Omdb:ApiKey" "YOUR_OMDB_API_KEY" --project .\PremiereCalendar\PremiereCalendar.csproj
 ```
 
-When disabled, IMDb and Rotten Tomatoes scores show as `n/a`, OMDb poster fallback is skipped, and the app still uses TMDb scores and filters normally.
+When disabled, Rotten Tomatoes and Metacritic show as `n/a`, OMDb plot/poster fallback is skipped, and the app still uses TMDb and local IMDb dataset scores normally.
+
+OMDb responses are cached in SQLite. If OMDb reports a limit or quota problem, the app records a cooldown and serves stale cached data when it has it.
+
+## IMDb Ratings Dataset
+
+IMDb scores and vote counts come from the official non-commercial `title.ratings.tsv.gz` dataset. No API key is needed.
+
+```json
+"ImdbDataset": {
+  "Enabled": true,
+  "RatingsUrl": "https://datasets.imdbws.com/title.ratings.tsv.gz",
+  "RefreshIntervalHours": 24
+}
+```
+
+The app downloads it on startup when due, imports it into SQLite, and reuses it for exact IMDb ID matches. IMDb does not provide a per-item change endpoint for this dataset.
 
 ## Health Check
 
@@ -68,6 +84,8 @@ The Settings page persists local app parameters in a SQLite database:
 ```
 
 Stored parameters currently include Sonarr and Radarr enable flags, URLs, API keys, root folder paths, quality profile IDs, tag-on-add values, add behavior, and source API settings for TMDb, TVmaze, Trakt, Watchmode, SIMKL, OMDb, Fanart.tv, TheTVDB, and Wikimedia. In release installs this path is overridden to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db` so updates can replace binaries without touching local settings.
+
+The same SQLite file also stores IMDb ratings, OMDb response cache, and provider-sync markers such as TMDb/TVmaze change checks.
 
 ## Sonarr And Radarr
 
@@ -215,6 +233,26 @@ Week-level normalized results are stored in a local file cache by default:
 The UI Refresh button bypasses the fresh week cache and the in-memory source API caches for the visible week, then fetches fresh data. If a source refresh fails, the app can still read the last cached week as a fallback. The cache directory is ignored by git.
 
 Keep the calendar and image cache payloads on disk rather than moving them into SQLite. The database is used for small mutable settings; week JSON files and poster bytes are larger, file-oriented payloads that benefit from streamed disk reads, simple cleanup, browser cache validators, and preservation across app updates without growing the settings database.
+
+## Provider Change Checks
+
+Some providers expose cheap "what changed" endpoints. The app records those markers in SQLite:
+
+- TMDb movie/TV change lists.
+- TVmaze show update timestamps.
+- SIMKL activity timestamps for account sync.
+
+```json
+"ProviderDeltaSync": {
+  "Enabled": true,
+  "WakeIntervalMinutes": 60,
+  "TmdbLookbackDays": 14,
+  "UseTmdbChanges": true,
+  "UseTvmazeUpdates": true
+}
+```
+
+OMDb and the IMDb dataset do not expose per-item change endpoints. OMDb is cached by IMDb ID; the IMDb dataset is refreshed as a whole on its interval.
 
 ## Adaptive Warmup And Load Budget
 

@@ -77,26 +77,28 @@ The arrow keys do not take over while you are typing in a text box.
 | Provider | Needed? | What it does |
 | --- | --- | --- |
 | TMDb | Required | Main calendar data, posters, trailers, metadata |
+| IMDb datasets | Included | IMDb scores and vote counts, cached locally |
 | Trakt | Optional | Extra movie and new-series candidates |
 | TVmaze | Optional | Extra series schedule data |
 | Watchmode | Optional | Streaming availability fallback |
-| OMDb | Optional | IMDb, Rotten Tomatoes, Metacritic scores |
+| OMDb | Optional | Rotten Tomatoes, Metacritic, plot and poster fallback |
 | Fanart.tv, TheTVDB, Wikimedia | Optional | Poster fallback when TMDb has no poster |
 | SIMKL | Optional | Account/library sync state |
 | Sonarr, Radarr | Optional | Add buttons on verified cards |
 
 ## Cache
 
-The app keeps calendar data and images on disk. This means cached data survives restarts, crashes, and updates.
+The app keeps calendar data, images, IMDb scores, OMDb responses, and small provider sync markers on disk. This means cached data survives restarts, crashes, and updates.
 
-Click Refresh when you want the current week checked again. Refresh keeps useful existing data where possible and fills in changes or missing details.
+Click Refresh when you want the current week checked again. Refresh keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 
 ## Common Problems
 
 | Problem | Try this |
 | --- | --- |
 | No cards load | Add a TMDb token in Settings, then click Refresh |
-| Scores are missing | Enable OMDb with a working API key; OMDb free keys can hit daily limits |
+| IMDb scores are missing | Wait for the IMDb dataset import to finish, then Refresh |
+| Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key; OMDb free keys can hit daily limits |
 | A source looks slow | Click Show sources to see which provider is still loading |
 | TVmaze is slow | Use narrower filters or disable TVmaze schedule discovery in Settings |
 | Settings look wrong | Change them in the app Settings page, not in `appsettings.json` |

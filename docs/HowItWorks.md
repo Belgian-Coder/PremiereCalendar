@@ -47,13 +47,15 @@ TMDb is the canonical identity source. TMDb Discover creates the primary verifie
 
 TMDb is required. It provides discovery, core metadata, TMDb scores, posters/backdrops, videos, genres, keywords, external IDs, TV networks, and watch providers. The TMDb API read access token is stored from the Settings page in the local database, or read from configuration fallback when the database value is empty.
 
-OMDb is optional. When enabled in Settings with an API key, it enriches exact IMDb ID matches with IMDb rating, IMDb votes, Rotten Tomatoes, Metacritic, plot, and poster fallback data.
+IMDb datasets are included. The app imports IMDb's non-commercial ratings dataset into SQLite and uses it for IMDb scores and vote counts when a card has an IMDb ID.
+
+OMDb is optional. When enabled in Settings with an API key, it enriches exact IMDb ID matches with Rotten Tomatoes, Metacritic, plot, and poster fallback data. OMDb responses are persisted and rate-limit cooldowns are remembered.
 
 TVmaze is optional and enabled by default. It enriches TV rows through exact TheTVDB or IMDb IDs, adding network names, web-channel names, TVmaze ratings, official site links, summaries, and fallback TV artwork. Schedule discovery is enabled by default for the global web schedule only; set schedule countries in Settings for explicit broadcast-country schedule calls. In every-episode mode, mappable TVmaze schedule rows can add exact season/episode cards. In new-series-only mode, ordinary schedule episodes are skipped so the page stays focused on new shows.
 
 Fanart.tv is optional and uses a free API key configured in Settings. It enriches missing posters from TMDb movie IDs and TV TheTVDB IDs. English artwork wins, then Dutch, then neutral-language assets, with likes used as a tie-breaker.
 
-Trakt is optional and uses a free app client ID configured in Settings. It contributes candidate movie and new-show calendar rows once the client ID is configured. The app accepts only candidates that have or can resolve to a TMDb ID.
+Trakt is optional and uses a free app client ID configured in Settings. It contributes candidate movie and new-show calendar rows once the client ID is configured. Candidates that resolve to TMDb become normal verified cards; unresolved candidates can appear as unverified cards.
 
 Watchmode is optional and uses an API key configured in Settings. It is used only as a fallback for missing streaming availability when TMDb has no provider data. Release discovery is not part of the default calendar pipeline because the free API is too request-limited for reliable broad-week refreshes.
 
@@ -98,20 +100,23 @@ Add results are shown in a top-right toast notification and disappear automatica
 
 ## Cache Layers
 
-There are four cache layers:
+There are five cache layers:
 
 - `TmdbClient` memory cache: TMDb discover responses for six hours, TMDb details for twelve hours, and external-ID lookup responses for seven days.
-- Source-client memory caches: OMDb, TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, and Wikimedia cache source responses or negative lookups according to their expected volatility.
+- Source-client memory caches: TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, Wikimedia, and OMDb cache source responses or negative lookups according to their expected volatility.
+- SQLite provider caches: IMDb dataset ratings, OMDb responses/cooldowns, most-used filters, and provider change markers.
 - `FileCalendarCache`: normalized filtered results by week plus criteria hash under `App_Data/cache/calendar`.
 - `FileImageCache`: remote poster/backdrop bytes and width-specific poster variants under `App_Data/cache/images`.
 
 TMDb, TVmaze, Watchmode, OMDb, and image-cache misses use keyed single-flight coalescing so several concurrent requests for the same key share one upstream request while the cache entry is being filled.
 
-The SQLite parameter database is not a cache layer. It stores small mutable settings. Week result JSON and image bytes stay in file caches so they can be streamed efficiently, invalidated independently, and preserved across publish/install updates without inflating the settings database.
+The SQLite database stores small mutable state: settings, IMDb ratings, OMDb cache rows, filter usage, and provider sync markers. Week result JSON and image bytes stay in file caches so they can be streamed efficiently and cleaned independently.
 
 The week cache filename includes the selected server-discovery criteria hash. If no request filters are saved, the key is `default`. Criteria that change source requests, such as media type, language, origin, genres, provider IDs, availability, runtime, keywords, release types, certification, TV networks, TV status/type, TMDb score range, and minimum votes, produce different cache files. View-only choices such as local title search, local source text, and final UI sort do not create duplicate source cache files; the UI applies those in memory after the week loads.
 
 During forced refresh, cached week items that are less than twelve hours old are also used as an enrichment seed. TMDb discover still decides which rows belong in the refreshed week, but matching cached rows keep known source names, external IDs, runtime, trailer, and rating data while discover metadata such as date, title, overview, score, and poster path is updated from the fresh response. External schedule candidates can also reuse cached TMDb/TVDB/IMDb mappings, avoiding repeated TMDb find/detail calls for already-known episodes.
+
+Provider change checks run in the background when available. TMDb exposes movie/TV change lists, TVmaze exposes show update timestamps, and SIMKL exposes activity timestamps for account sync. The app records those globally and per item/week. OMDb and IMDb datasets do not have per-item delta APIs, so OMDb uses cached exact-ID responses and IMDb ratings refresh from the full dataset.
 
 Adjacent-week prefetch uses the filters from the visible week. It warms nearby weeks with the current saved source-request filters and calls the normal premiere service with `forceRefresh: false`, so fresh matching cache files return immediately while missing or stale cache files are filled. By default the queue warms four future weeks and two past weeks in priority order after the visible week finishes. The queue is priority-based rather than FIFO, so a navigation to the previous or next week promotes that new window's adjacent weeks before older far-away pending entries.
 

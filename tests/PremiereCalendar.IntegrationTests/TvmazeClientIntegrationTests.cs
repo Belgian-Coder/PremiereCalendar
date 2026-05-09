@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Caching.Memory;
 using PremiereCalendar.IntegrationTests.Support;
+using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
@@ -140,6 +141,26 @@ public sealed class TvmazeClientIntegrationTests
             CancellationToken.None);
 
         Assert.Empty(episodes);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task GetShowUpdatesAsync_ReadsUnixTimestampsAndCachesResponse()
+    {
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            Assert.EndsWith("/updates/shows", request.RequestUri!.AbsolutePath);
+            Assert.Equal("day", QueryString.Parse(request.RequestUri)["since"]);
+            return StubHttpMessageHandler.Json("""{"82":1710000000,"83":1710000300}""");
+        });
+        var client = CreateClient(handler, enabled: true);
+
+        var first = await client.GetShowUpdatesAsync(TvmazeUpdateWindow.Day, CancellationToken.None);
+        var second = await client.GetShowUpdatesAsync(TvmazeUpdateWindow.Day, CancellationToken.None);
+
+        Assert.Equal([82, 83], first.Select(update => update.ShowId).ToArray());
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1710000000), first[0].UpdatedAtUtc);
+        Assert.Equal([82, 83], second.Select(update => update.ShowId).ToArray());
         Assert.Single(handler.Requests);
     }
 

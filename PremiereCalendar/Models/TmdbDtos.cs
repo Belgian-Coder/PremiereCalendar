@@ -24,6 +24,12 @@ public sealed record TmdbDiscoverBatch<T>(
     int TotalResults,
     IReadOnlyList<T> Results);
 
+public sealed record TmdbChangedItem
+{
+    [JsonPropertyName("id")]
+    public int Id { get; init; }
+}
+
 public sealed record TmdbTvDiscoverItem
 {
     [JsonPropertyName("id")]

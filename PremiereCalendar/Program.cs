@@ -54,6 +54,8 @@ builder.Services.Configure<AppDatabaseOptions>(builder.Configuration.GetSection(
 builder.Services.Configure<CalendarWarmupOptions>(builder.Configuration.GetSection("CalendarWarmup"));
 builder.Services.Configure<CalendarLoadOptions>(builder.Configuration.GetSection("CalendarLoad"));
 builder.Services.Configure<CacheMaintenanceOptions>(builder.Configuration.GetSection("CacheMaintenance"));
+builder.Services.Configure<ImdbDatasetOptions>(builder.Configuration.GetSection("ImdbDataset"));
+builder.Services.Configure<ProviderDeltaSyncOptions>(builder.Configuration.GetSection("ProviderDeltaSync"));
 
 builder.Services.AddMemoryCache();
 builder.Services.AddResponseCompression(options =>
@@ -88,6 +90,15 @@ builder.Services.AddHttpClient<IOmdbClient, OmdbClient>((sp, client) =>
 
     client.BaseAddress = new Uri(options.BaseUrl);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+});
+
+builder.Services.AddHttpClient<IImdbDatasetImporter, ImdbDatasetImporter>((sp, client) =>
+{
+    var options = sp.GetRequiredService<IOptions<ImdbDatasetOptions>>().Value;
+
+    client.BaseAddress = new Uri("https://datasets.imdbws.com/");
+    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 30, 600));
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/Belgian-Coder/PremiereCalendar)");
 });
 
 builder.Services.AddHttpClient<ITvmazeClient, TvmazeClient>((sp, client) =>
@@ -174,6 +185,9 @@ builder.Services.AddTransient<IImageCacheMaintenance>(sp => sp.GetRequiredServic
 builder.Services.AddSingleton<IIntegrationSettingsStore, SqliteIntegrationSettingsStore>();
 builder.Services.AddSingleton<ICalendarFilterUsageStore, SqliteCalendarFilterUsageStore>();
 builder.Services.AddSingleton<ISimklSyncStateStore, SqliteSimklSyncStateStore>();
+builder.Services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();
+builder.Services.AddSingleton<IOmdbCacheStore, SqliteOmdbCacheStore>();
+builder.Services.AddSingleton<IProviderCacheStateStore, SqliteProviderCacheStateStore>();
 builder.Services.AddSingleton<ISingleFlightCoordinator, SingleFlightCoordinator>();
 builder.Services.AddSingleton<ProviderRequestThrottler>();
 builder.Services.AddSingleton<CalendarLoadCoordinator>();
@@ -183,6 +197,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<AdjacentWeekPrefet
 builder.Services.AddScoped<CurrentWeekCalendarWarmupRunner>();
 builder.Services.AddScoped<CacheMaintenanceRunner>();
 builder.Services.AddHostedService<CurrentWeekCalendarWarmupService>();
+builder.Services.AddHostedService<ImdbDatasetRefreshService>();
+builder.Services.AddHostedService<ProviderDeltaSyncService>();
 builder.Services.AddSingleton<IFilterCatalogService, TmdbFilterCatalogService>();
 builder.Services.AddSingleton<TmdbRequestLimiter>();
 builder.Services.AddSingleton<TrailerSelector>();

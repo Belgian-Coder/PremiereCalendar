@@ -481,6 +481,33 @@ public sealed class TmdbClientIntegrationTests
         Assert.Equal("BE", QueryString.Parse(handler.Requests.Single(request => request.Uri.AbsolutePath.EndsWith("/watch/providers/movie")).Uri)["watch_region"]);
     }
 
+    [Fact]
+    public async Task GetChangedMovieIdsAsync_ReadsMovieChangesAndUsesCache()
+    {
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            Assert.EndsWith("/movie/changes", request.RequestUri!.AbsolutePath);
+            var query = QueryString.Parse(request.RequestUri);
+            Assert.Equal("2026-05-01", query["start_date"]);
+            Assert.Equal("2026-05-09", query["end_date"]);
+            return StubHttpMessageHandler.Json("""{"page":1,"total_pages":1,"results":[{"id":10},{"id":20}]}""");
+        });
+        var client = CreateTmdbClient(handler, maxPages: 5);
+
+        var first = await client.GetChangedMovieIdsAsync(
+            new DateOnly(2026, 5, 1),
+            new DateOnly(2026, 5, 9),
+            CancellationToken.None);
+        var second = await client.GetChangedMovieIdsAsync(
+            new DateOnly(2026, 5, 1),
+            new DateOnly(2026, 5, 9),
+            CancellationToken.None);
+
+        Assert.Equal([10, 20], first.Select(item => item.Id).ToArray());
+        Assert.Equal([10, 20], second.Select(item => item.Id).ToArray());
+        Assert.Single(handler.Requests);
+    }
+
     private static TmdbClient CreateTmdbClient(
         StubHttpMessageHandler handler,
         int maxPages,

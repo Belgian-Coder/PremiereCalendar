@@ -2,6 +2,17 @@ using System.Text.Json.Serialization;
 
 namespace PremiereCalendar.Models;
 
+public enum TvmazeUpdateWindow
+{
+    Day,
+    Week,
+    Month
+}
+
+public sealed record TvmazeShowUpdate(
+    int ShowId,
+    DateTimeOffset UpdatedAtUtc);
+
 public sealed record TvmazeShow
 {
     [JsonPropertyName("id")]

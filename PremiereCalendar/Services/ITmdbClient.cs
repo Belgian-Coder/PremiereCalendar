@@ -78,4 +78,16 @@ public interface ITmdbClient
         string query,
         CancellationToken cancellationToken,
         bool forceRefresh = false);
+
+    Task<IReadOnlyList<TmdbChangedItem>> GetChangedMovieIdsAsync(
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false);
+
+    Task<IReadOnlyList<TmdbChangedItem>> GetChangedTvIdsAsync(
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false);
 }

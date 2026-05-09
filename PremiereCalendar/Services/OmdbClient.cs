@@ -16,19 +16,25 @@ public sealed class OmdbClient : IOmdbClient
     private readonly OmdbOptions _options;
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly ISingleFlightCoordinator _singleFlight;
+    private readonly IOmdbCacheStore? _cacheStore;
+    private readonly TimeProvider _timeProvider;
 
     public OmdbClient(
         HttpClient httpClient,
         IMemoryCache cache,
         IOptions<OmdbOptions> options,
         IIntegrationSettingsStore? settingsStore = null,
-        ISingleFlightCoordinator? singleFlight = null)
+        ISingleFlightCoordinator? singleFlight = null,
+        IOmdbCacheStore? cacheStore = null,
+        TimeProvider? timeProvider = null)
     {
         _httpClient = httpClient;
         _cache = cache;
         _options = options.Value;
         _settingsStore = settingsStore;
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
+        _cacheStore = cacheStore;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<OmdbItem?> GetByImdbIdAsync(string imdbId, CancellationToken cancellationToken, bool forceRefresh = false)
@@ -45,6 +51,22 @@ public sealed class OmdbClient : IOmdbClient
             return cached;
         }
 
+        var persisted = await GetPersistedAsync(imdbId, cancellationToken);
+        if (!forceRefresh && IsFresh(persisted))
+        {
+            _cache.Set(cacheKey, persisted!.Item, CacheDuration());
+            return persisted.Item;
+        }
+
+        var state = _cacheStore is null
+            ? new OmdbProviderCacheState(null, null, null)
+            : await _cacheStore.GetProviderStateAsync(cancellationToken);
+        if (state.RateLimitedUntilUtc is { } rateLimitedUntil
+            && rateLimitedUntil > _timeProvider.GetUtcNow())
+        {
+            return persisted?.Item;
+        }
+
         return await _singleFlight.RunAsync(
             forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}",
             async token =>
@@ -52,6 +74,13 @@ public sealed class OmdbClient : IOmdbClient
                 if (!forceRefresh && _cache.TryGetValue(cacheKey, out OmdbItem? flightCached))
                 {
                     return flightCached;
+                }
+
+                var flightPersisted = persisted ?? await GetPersistedAsync(imdbId, token);
+                if (!forceRefresh && IsFresh(flightPersisted))
+                {
+                    _cache.Set(cacheKey, flightPersisted!.Item, CacheDuration());
+                    return flightPersisted.Item;
                 }
 
                 try
@@ -62,6 +91,12 @@ public sealed class OmdbClient : IOmdbClient
                     if (!response.IsSuccessStatusCode)
                     {
                         var error = await ReadErrorMessageAsync(response, token);
+                        await RecordFailureAsync(response, error, token);
+                        if (flightPersisted is not null)
+                        {
+                            return flightPersisted.Item;
+                        }
+
                         throw new ExternalApiException(
                             $"OMDb lookup for {imdbId} failed with HTTP {(int)response.StatusCode} {response.ReasonPhrase}: {error}");
                     }
@@ -69,14 +104,29 @@ public sealed class OmdbClient : IOmdbClient
                     var item = await response.Content.ReadFromJsonAsync<OmdbItem>(JsonOptions, token);
                     if (item is not null)
                     {
-                        _cache.Set(cacheKey, item, TimeSpan.FromDays(7));
+                        if (LooksLikeRateLimit(item.Error ?? ""))
+                        {
+                            await RecordOmdbPayloadFailureAsync(item.Error!, flightPersisted, token);
+                            if (flightPersisted is not null)
+                            {
+                                return flightPersisted.Item;
+                            }
+
+                            throw new ExternalApiException($"OMDb lookup for {imdbId} failed: {item.Error}");
+                        }
+
+                        _cache.Set(cacheKey, item, CacheDuration());
+                        if (_cacheStore is not null)
+                        {
+                            await _cacheStore.SetAsync(imdbId, item, _timeProvider.GetUtcNow(), token);
+                        }
                     }
 
                     return item;
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    return null;
+                    return flightPersisted?.Item;
                 }
                 catch (OperationCanceledException)
                 {
@@ -84,14 +134,121 @@ public sealed class OmdbClient : IOmdbClient
                 }
                 catch (HttpRequestException)
                 {
+                    if (flightPersisted is not null)
+                    {
+                        return flightPersisted.Item;
+                    }
+
+                    await MarkFailureAsync("OMDb HTTP request failed.", token);
                     return null;
                 }
                 catch (JsonException)
                 {
+                    if (flightPersisted is not null)
+                    {
+                        return flightPersisted.Item;
+                    }
+
+                    await MarkFailureAsync("OMDb returned invalid JSON.", token);
                     return null;
                 }
             },
             cancellationToken);
+    }
+
+    private async Task<OmdbCacheEntry?> GetPersistedAsync(string imdbId, CancellationToken cancellationToken)
+    {
+        return _cacheStore is null
+            ? null
+            : await _cacheStore.GetAsync(imdbId, cancellationToken);
+    }
+
+    private bool IsFresh(OmdbCacheEntry? entry)
+    {
+        return entry is not null
+            && _timeProvider.GetUtcNow() - entry.CachedAtUtc < CacheDuration();
+    }
+
+    private TimeSpan CacheDuration()
+    {
+        return TimeSpan.FromDays(Math.Max(1, _options.CacheDays));
+    }
+
+    private async Task RecordFailureAsync(HttpResponseMessage response, string error, CancellationToken cancellationToken)
+    {
+        if (_cacheStore is null)
+        {
+            return;
+        }
+
+        if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests
+            || response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+            || LooksLikeRateLimit(error))
+        {
+            await _cacheStore.MarkRateLimitedAsync(
+                RetryAfterUtc(response) ?? _timeProvider.GetUtcNow().AddHours(Math.Max(1, _options.RateLimitBackoffHours)),
+                error,
+                cancellationToken);
+            return;
+        }
+
+        await _cacheStore.MarkFailureAsync(error, cancellationToken);
+    }
+
+    private async Task RecordOmdbPayloadFailureAsync(
+        string error,
+        OmdbCacheEntry? persisted,
+        CancellationToken cancellationToken)
+    {
+        if (_cacheStore is null)
+        {
+            return;
+        }
+
+        if (LooksLikeRateLimit(error))
+        {
+            await _cacheStore.MarkRateLimitedAsync(
+                _timeProvider.GetUtcNow().AddHours(Math.Max(1, _options.RateLimitBackoffHours)),
+                error,
+                cancellationToken);
+            return;
+        }
+
+        if (persisted is null)
+        {
+            await _cacheStore.MarkFailureAsync(error, cancellationToken);
+        }
+    }
+
+    private async Task MarkFailureAsync(string error, CancellationToken cancellationToken)
+    {
+        if (_cacheStore is not null)
+        {
+            await _cacheStore.MarkFailureAsync(error, cancellationToken);
+        }
+    }
+
+    private DateTimeOffset? RetryAfterUtc(HttpResponseMessage response)
+    {
+        var retryAfter = response.Headers.RetryAfter;
+        if (retryAfter?.Date is { } date)
+        {
+            return date;
+        }
+
+        if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
+        {
+            return _timeProvider.GetUtcNow().Add(delta);
+        }
+
+        return null;
+    }
+
+    private static bool LooksLikeRateLimit(string error)
+    {
+        return error.Contains("limit", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("quota", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("rate", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<string> ReadErrorMessageAsync(HttpResponseMessage response, CancellationToken cancellationToken)

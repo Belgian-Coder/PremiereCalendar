@@ -26,4 +26,9 @@ public interface ITvmazeClient
         bool webSchedule,
         CancellationToken cancellationToken,
         bool forceRefresh = false);
+
+    Task<IReadOnlyList<TvmazeShowUpdate>> GetShowUpdatesAsync(
+        TvmazeUpdateWindow since,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false);
 }

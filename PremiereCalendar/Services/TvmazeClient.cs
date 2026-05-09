@@ -310,6 +310,80 @@ public sealed class TvmazeClient : ITvmazeClient
             cancellationToken);
     }
 
+    public async Task<IReadOnlyList<TvmazeShowUpdate>> GetShowUpdatesAsync(
+        TvmazeUpdateWindow since,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        var settings = await GetEffectiveSettingsAsync(cancellationToken);
+        if (!settings.Enabled)
+        {
+            return [];
+        }
+
+        var sinceKey = since.ToString().ToLowerInvariant();
+        var cacheKey = $"tvmaze:updates:shows:{sinceKey}";
+        if (!forceRefresh
+            && _cache.TryGetValue(cacheKey, out IReadOnlyList<TvmazeShowUpdate>? cached)
+            && cached is not null)
+        {
+            return cached;
+        }
+
+        return await _singleFlight.RunAsync(
+            FlightKey(cacheKey, forceRefresh),
+            async token =>
+            {
+                if (!forceRefresh
+                    && _cache.TryGetValue(cacheKey, out IReadOnlyList<TvmazeShowUpdate>? flightCached)
+                    && flightCached is not null)
+                {
+                    return flightCached;
+                }
+
+                try
+                {
+                    using var response = await GetWithRetryAsync($"updates/shows?since={sinceKey}", token);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        return [];
+                    }
+
+                    var values = await response.Content.ReadFromJsonAsync<Dictionary<string, long>>(
+                        JsonOptions,
+                        token) ?? [];
+                    var updates = values
+                        .Select(pair => int.TryParse(pair.Key, out var showId) && showId > 0
+                            ? new TvmazeShowUpdate(showId, DateTimeOffset.FromUnixTimeSeconds(pair.Value))
+                            : null)
+                        .Where(update => update is not null)
+                        .Select(update => update!)
+                        .OrderBy(update => update.ShowId)
+                        .ToArray();
+
+                    _cache.Set(cacheKey, updates, TimeSpan.FromMinutes(60));
+                    return updates;
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    return [];
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (HttpRequestException)
+                {
+                    return [];
+                }
+                catch (JsonException)
+                {
+                    return [];
+                }
+            },
+            cancellationToken);
+    }
+
     private async Task<HttpResponseMessage> GetWithRetryAsync(string path, CancellationToken cancellationToken)
     {
         const int maxAttempts = 3;

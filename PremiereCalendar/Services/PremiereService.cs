@@ -26,6 +26,8 @@ public sealed class PremiereService : IPremiereService
     private readonly IReadOnlyList<IPremiereDiscoveryProvider> _discoveryProviders;
     private readonly TmdbOptions _options;
     private readonly ILogger<PremiereService> _logger;
+    private readonly IImdbRatingsStore? _imdbRatingsStore;
+    private readonly IProviderCacheStateStore? _providerCacheStateStore;
 
     public PremiereService(
         ITmdbClient tmdbClient,
@@ -38,7 +40,9 @@ public sealed class PremiereService : IPremiereService
         IEnumerable<IArtworkProvider> artworkProviders,
         IEnumerable<IPremiereDiscoveryProvider> discoveryProviders,
         IOptions<TmdbOptions> options,
-        ILogger<PremiereService> logger)
+        ILogger<PremiereService> logger,
+        IImdbRatingsStore? imdbRatingsStore = null,
+        IProviderCacheStateStore? providerCacheStateStore = null)
     {
         _tmdbClient = tmdbClient;
         _omdbClient = omdbClient;
@@ -51,6 +55,8 @@ public sealed class PremiereService : IPremiereService
         _discoveryProviders = discoveryProviders.ToArray();
         _options = options.Value;
         _logger = logger;
+        _imdbRatingsStore = imdbRatingsStore;
+        _providerCacheStateStore = providerCacheStateStore;
     }
 
     public async Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
@@ -242,6 +248,7 @@ public sealed class PremiereService : IPremiereService
                 else
                 {
                     await _calendarCache.SetWeekAsync(start, end, cacheKey, finalItems, cancellationToken);
+                    await RecordWeekCacheStateAsync(start, cacheKey, finalItems.Count, cancellationToken);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -373,12 +380,53 @@ public sealed class PremiereService : IPremiereService
             PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(),
             seriesItems,
             cancellationToken);
+        await RecordWeekCacheStateAsync(
+            start,
+            PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(),
+            seriesItems.Count,
+            cancellationToken);
         await _calendarCache.SetWeekAsync(
             start,
             end,
             PremiereDiscoveryCriteria.FromFilters(movieFilters).CacheKey(),
             movieItems,
             cancellationToken);
+        await RecordWeekCacheStateAsync(
+            start,
+            PremiereDiscoveryCriteria.FromFilters(movieFilters).CacheKey(),
+            movieItems.Count,
+            cancellationToken);
+    }
+
+    private async Task RecordWeekCacheStateAsync(
+        DateOnly weekStart,
+        string cacheKey,
+        int itemCount,
+        CancellationToken cancellationToken)
+    {
+        if (_providerCacheStateStore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _providerCacheStateStore.SaveAsync(
+                new ProviderCacheState(
+                    "calendar",
+                    ProviderCacheScope.Week,
+                    $"{weekStart:yyyyMMdd}:{cacheKey}",
+                    DateTimeOffset.UtcNow,
+                    null,
+                    null,
+                    itemCount,
+                    null),
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not record calendar cache state for {WeekStart}.", weekStart);
+        }
     }
 
     private static CalendarFilters FiltersForPageMode(CalendarFilters? filters, CalendarPageMode pageMode)
@@ -2320,8 +2368,14 @@ public sealed class PremiereService : IPremiereService
                 : [candidate.Source])
             .Where(source => !string.IsNullOrWhiteSpace(source))
             .Select(source => source.Trim())
+            .Where(IsDisplayableCandidateSource)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static bool IsDisplayableCandidateSource(string source)
+    {
+        return !string.Equals(source, "Trakt", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<int?> ResolveCandidateTmdbIdAsync(
@@ -3212,16 +3266,41 @@ public sealed class PremiereService : IPremiereService
             return new ExternalRatings(null, null);
         }
 
+        ImdbRatingRecord? imdbRating = null;
+        if (_imdbRatingsStore is not null)
+        {
+            try
+            {
+                imdbRating = await _imdbRatingsStore.GetByImdbIdAsync(imdbId, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Skipping IMDb dataset rating lookup for IMDb ID {ImdbId}.", imdbId);
+            }
+        }
+
         try
         {
             var omdbItem = await _omdbClient.GetByImdbIdAsync(imdbId, cancellationToken, forceRefresh);
-            return _ratingMapper.Map(omdbItem);
+            var omdbRatings = _ratingMapper.Map(omdbItem);
+            return MergeExternalRatings(imdbRating, omdbRatings);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Skipping OMDb ratings enrichment for IMDb ID {ImdbId}.", imdbId);
-            return new ExternalRatings(null, null);
+            return MergeExternalRatings(imdbRating, new ExternalRatings(null, null));
         }
+    }
+
+    private static ExternalRatings MergeExternalRatings(ImdbRatingRecord? imdbRating, ExternalRatings omdbRatings)
+    {
+        return imdbRating is null
+            ? omdbRatings
+            : omdbRatings with
+            {
+                ImdbScore = imdbRating.AverageRating,
+                ImdbVoteCount = imdbRating.VoteCount
+            };
     }
 
     private async Task<ArtworkCandidate?> ResolveArtworkAsync(

@@ -158,6 +158,22 @@ public static class TmdbQueryBuilder
         });
     }
 
+    public static string BuildChangesPath(
+        PremiereCalendar.Models.PremiereMediaType mediaType,
+        DateOnly start,
+        DateOnly end,
+        int page)
+    {
+        return BuildPath(
+            mediaType == PremiereCalendar.Models.PremiereMediaType.Movie ? "movie/changes" : "tv/changes",
+            new Dictionary<string, string?>
+            {
+                ["start_date"] = FormatDate(start),
+                ["end_date"] = FormatDate(end),
+                ["page"] = page.ToString(CultureInfo.InvariantCulture)
+            });
+    }
+
     public static string BuildCountriesPath()
     {
         return BuildPath("configuration/countries", new Dictionary<string, string?>
