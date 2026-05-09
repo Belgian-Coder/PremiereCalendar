@@ -335,13 +335,10 @@
             return;
         }
 
-        if (value < WeekStart)
+        if (value < WeekStart || value > WeekStart.AddDays(6))
         {
-            value = WeekStart.AddDays(6);
-        }
-        else if (value > WeekStart.AddDays(6))
-        {
-            value = WeekStart;
+            await OnAdjacentCalendarDayRequested.InvokeAsync(value);
+            return;
         }
 
         await SelectDay(value, focusSelectedDayButton: true);

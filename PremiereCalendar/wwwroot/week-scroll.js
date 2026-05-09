@@ -119,6 +119,32 @@ function hideEdgePrompts(element) {
     root.querySelectorAll("[data-day-scroll-prompt]").forEach(hideEdgePrompt);
 }
 
+function shouldHandleDocumentDayKey(event) {
+    if (event.defaultPrevented
+        || event.altKey
+        || event.ctrlKey
+        || event.metaKey
+        || event.shiftKey
+        || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) {
+        return false;
+    }
+
+    const target = event.target;
+    if (target instanceof HTMLElement) {
+        const tagName = target.tagName.toLowerCase();
+        if (target.isContentEditable
+            || tagName === "input"
+            || tagName === "select"
+            || tagName === "textarea"
+            || target.closest(filterPaneSelector)
+            || target.closest(dayButtonSelector)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 function registerAutoDayNavigation(element, dotNetReference) {
     if (!(element instanceof HTMLElement) || !dotNetReference) {
         return;
@@ -183,9 +209,23 @@ function registerAutoDayNavigation(element, dotNetReference) {
             .catch(() => {
             });
     };
+    const onKeyDown = (event) => {
+        if (!shouldHandleDocumentDayKey(event)) {
+            return;
+        }
+
+        event.preventDefault();
+        const direction = event.key === "ArrowRight" ? 1 : -1;
+        dotNetReference
+            .invokeMethodAsync("SelectAdjacentDayByScrollAsync", direction)
+            .catch(() => {
+            });
+    };
 
     element.addEventListener("wheel", onWheel, { passive: false });
+    document.addEventListener("keydown", onKeyDown);
     autoDayNavigation.set(element, {
+        onKeyDown,
         onWheel,
         resetPrompt
     });
@@ -198,6 +238,7 @@ function disposeAutoDayNavigation(element) {
     }
 
     element.removeEventListener("wheel", registration.onWheel);
+    document.removeEventListener("keydown", registration.onKeyDown);
     registration.resetPrompt?.();
     autoDayNavigation.delete(element);
 }

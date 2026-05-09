@@ -1175,6 +1175,11 @@ h1:focus {
     transform: translateY(0);
 }
 
+.day-end-spacer {
+    min-height: clamp(8rem, 22vh, 12rem);
+    pointer-events: none;
+}
+
 .day-items-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

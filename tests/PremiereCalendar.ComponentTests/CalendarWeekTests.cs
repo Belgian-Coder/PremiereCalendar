@@ -1,4 +1,5 @@
 using Bunit;
+using Microsoft.AspNetCore.Components.Web;
 using PremiereCalendar.Components.Shared;
 using PremiereCalendar.Models;
 
@@ -157,6 +158,52 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
+    public void CalendarWeek_ArrowRightRequestsNextCalendarDayAcrossWeekBoundary()
+    {
+        DateOnly? requestedDay = null;
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "tv:10",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 10,
+                Title = "Sunday Launch",
+                PremiereDate = new DateOnly(2026, 5, 10)
+            }
+        };
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.SelectedDay, new DateOnly(2026, 5, 10))
+            .Add(x => x.OnAdjacentCalendarDayRequested, day => requestedDay = day));
+
+        component.Find("button[data-day-target='premiere-day-20260510']")
+            .KeyDown(new KeyboardEventArgs { Key = "ArrowRight" });
+
+        Assert.Equal(new DateOnly(2026, 5, 11), requestedDay);
+    }
+
+    [Fact]
+    public void CalendarWeek_ArrowLeftRequestsPreviousCalendarDayAcrossWeekBoundary()
+    {
+        DateOnly? requestedDay = null;
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, Array.Empty<PremiereItem>())
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.SelectedDay, new DateOnly(2026, 5, 4))
+            .Add(x => x.OnAdjacentCalendarDayRequested, day => requestedDay = day));
+
+        component.Find("button[data-day-target='premiere-day-20260504']")
+            .KeyDown(new KeyboardEventArgs { Key = "ArrowLeft" });
+
+        Assert.Equal(new DateOnly(2026, 5, 3), requestedDay);
+    }
+
+    [Fact]
     public void CalendarWeek_UsesVirtualizedRowsForDenseDays()
     {
         var items = Enumerable.Range(1, 45)
@@ -265,6 +312,36 @@ public sealed class CalendarWeekTests : BunitContext
         Assert.Equal("true", prompts[1].GetAttribute("aria-hidden"));
         Assert.Contains("day-scroll-prompt-top", prompts[0].ClassName);
         Assert.Contains("day-scroll-prompt-bottom", prompts[1].ClassName);
+    }
+
+    [Fact]
+    public void CalendarDay_RendersEndSpacerAfterDayContent()
+    {
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "movie:1",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                Title = "Bottom Space",
+                PremiereDate = new DateOnly(2026, 5, 4)
+            }
+        };
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        var spacer = Assert.Single(component.FindAll("[data-day-end-spacer]"));
+        Assert.Equal("true", spacer.GetAttribute("aria-hidden"));
+        Assert.Contains("day-end-spacer", spacer.ClassName);
+        Assert.Contains("Scroll to tomorrow", component.Markup);
+        Assert.True(component.Markup.IndexOf("day-end-spacer", StringComparison.Ordinal)
+            < component.Markup.IndexOf("Scroll to tomorrow", StringComparison.Ordinal));
     }
 
     [Fact]
