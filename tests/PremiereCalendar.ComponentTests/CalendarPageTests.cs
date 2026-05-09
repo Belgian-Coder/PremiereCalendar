@@ -873,6 +873,106 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_RendersUnverifiedCardsBelowVerifiedCards()
+    {
+        var service = new FakePremiereService
+        {
+            Items =
+            [
+                new PremiereItem
+                {
+                    CanonicalId = "unverified:movie:watchmode-1",
+                    Type = PremiereItemType.MovieFirstRelease,
+                    MediaType = PremiereMediaType.Movie,
+                    TmdbId = 0,
+                    Title = "External Hint",
+                    PremiereDate = new DateOnly(2026, 5, 4),
+                    VerificationState = PremiereVerificationState.Unverified,
+                    VerificationNote = "Could not match to TMDb yet",
+                    SourceNames = ["Watchmode"]
+                },
+                new PremiereItem
+                {
+                    CanonicalId = "movie:20",
+                    Type = PremiereItemType.MovieFirstRelease,
+                    MediaType = PremiereMediaType.Movie,
+                    TmdbId = 20,
+                    Title = "Verified Movie",
+                    PremiereDate = new DateOnly(2026, 5, 4),
+                    OriginalLanguage = "en"
+                }
+            ]
+        };
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var cards = component.FindAll("[data-testid='premiere-card']");
+            Assert.Equal(2, cards.Count);
+            Assert.Contains("Verified Movie", cards[0].TextContent);
+            Assert.Contains("External Hint", cards[1].TextContent);
+            Assert.Contains("Unverified from external sources", component.Markup);
+        });
+    }
+
+    [Fact]
+    public void PremiereCard_UnverifiedCardShowsProviderDateAndHidesArrButton()
+    {
+        var item = new PremiereItem
+        {
+            CanonicalId = "unverified:movie:watchmode-1",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 0,
+            Title = "External Hint",
+            PremiereDate = new DateOnly(2026, 5, 4),
+            VerificationState = PremiereVerificationState.Unverified,
+            VerificationNote = "Could not match to TMDb yet",
+            SourceNames = ["Watchmode"],
+            ExternalUrl = "https://example.test/title"
+        };
+        var settings = new IntegrationSettings
+        {
+            Radarr = new RadarrIntegrationSettings { Enabled = true }
+        };
+
+        var component = Render<PremiereCalendar.Components.Shared.PremiereCard>(parameters => parameters
+            .Add(card => card.Item, item)
+            .Add(card => card.IntegrationSettings, settings)
+            .Add(card => card.OnAddToArr, EventCallback.Factory.Create<PremiereItem>(this, _ => { })));
+
+        Assert.Contains("Unverified", component.Markup);
+        Assert.Contains("Provider date", component.Markup);
+        Assert.Contains("Could not match to TMDb yet", component.Markup);
+        Assert.Contains("External source", component.Markup);
+        Assert.Empty(component.FindAll(".arr-add-button"));
+    }
+
+    [Fact]
+    public void CalendarPage_QueryProgressShowsUnverifiedDiagnosticCounts()
+    {
+        var service = new FakePremiereService
+        {
+            ReportPartialProgress = true,
+            ReportProgressDetails = true,
+            ReportUnverifiedProgress = true,
+            SuppressFinalProgress = true
+        };
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var progress = component.Find("[data-testid='query-progress']");
+            Assert.Contains("1 unverified", progress.TextContent);
+        });
+    }
+
+    [Fact]
     public void CalendarPage_ShowsPerSourceProgressBarsAndDetails()
     {
         var service = new FakePremiereService
@@ -970,6 +1070,32 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_DaySourceGroupDoesNotLookCompleteWhileWeekLoadContinues()
+    {
+        var service = new FakePremiereService
+        {
+            ReportCompletedDaySourceProgress = true,
+            DelayBetweenDaySourceProgress = TimeSpan.FromSeconds(5),
+            SuppressFinalProgress = true
+        };
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var progress = component.Find("[data-testid='query-progress']");
+            Assert.Contains("TMDb series", progress.TextContent);
+            Assert.Contains("1 day batch", progress.TextContent);
+            Assert.DoesNotContain("Done", progress.TextContent);
+
+            var progressButton = Assert.Single(progress.QuerySelectorAll("button"), button => button.TextContent.Contains("TMDb series"));
+            Assert.DoesNotContain("final", progressButton.ClassName, StringComparison.OrdinalIgnoreCase);
+        }, TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
     public void CalendarPage_RefreshPassesSelectedDayAsPriorityDate()
     {
         var service = new FakePremiereService();
@@ -1006,9 +1132,15 @@ public sealed class CalendarPageTests : BunitContext
 
         public bool ReportDaySourceProgress { get; init; }
 
+        public bool ReportCompletedDaySourceProgress { get; init; }
+
+        public bool ReportUnverifiedProgress { get; init; }
+
         public bool SuppressFinalProgress { get; init; }
 
         public TimeSpan DelayAfterPartialProgress { get; init; }
+
+        public TimeSpan DelayBetweenDaySourceProgress { get; init; }
 
         public Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
             DateOnly start,
@@ -1049,7 +1181,10 @@ public sealed class CalendarPageTests : BunitContext
                     items,
                     CompletedWork: ReportProgressDetails ? 1 : null,
                     TotalWork: ReportProgressDetails ? 2 : null,
-                    ProgressText: ReportProgressDetails ? "resolved 1 of 2 candidates" : null);
+                    ProgressText: ReportProgressDetails ? "resolved 1 of 2 candidates" : null)
+                {
+                    UnmappedCount = ReportUnverifiedProgress ? 1 : null
+                };
 
                 if (DelayAfterPartialProgress > TimeSpan.Zero)
                 {
@@ -1081,6 +1216,43 @@ public sealed class CalendarPageTests : BunitContext
                     CompletedWork: 10,
                     TotalWork: 20,
                     ProgressText: "pages 1-1 of 1 · processed 10 of 20 rows",
+                    ElapsedMilliseconds: 1400)
+                {
+                    SourceItems = tuesdayItems
+                };
+            }
+
+            if (ReportCompletedDaySourceProgress)
+            {
+                var mondayItems = items.Take(1).ToArray();
+                var tuesdayItems = items.Skip(1).Take(1).ToArray();
+                yield return new PremiereLoadProgress(
+                    "TMDb series Mon 04 May",
+                    mondayItems.Length,
+                    mondayItems.Length,
+                    mondayItems,
+                    CompletedWork: 20,
+                    TotalWork: 20,
+                    ProgressText: "Done - pages 1-1 of 1 · processed 20 of 20 rows",
+                    ElapsedMilliseconds: 1200)
+                {
+                    Phase = "complete",
+                    SourceItems = mondayItems
+                };
+
+                if (DelayBetweenDaySourceProgress > TimeSpan.Zero)
+                {
+                    await Task.Delay(DelayBetweenDaySourceProgress, cancellationToken);
+                }
+
+                yield return new PremiereLoadProgress(
+                    "TMDb series Tue 05 May",
+                    tuesdayItems.Length,
+                    items.Count,
+                    items,
+                    CompletedWork: 8,
+                    TotalWork: 20,
+                    ProgressText: "pages 1-1 of 1 · processed 8 of 20 rows",
                     ElapsedMilliseconds: 1400)
                 {
                     SourceItems = tuesdayItems

@@ -43,7 +43,7 @@ Integration tests cover service and HTTP behavior with fake handlers:
 - Fanart.tv movie and TV artwork parsing.
 - Trakt movie and new-show calendar parsing.
 - Trakt no-client-ID skip behavior.
-- Watchmode availability and release-candidate parsing, including duplicate source attribution.
+- Watchmode availability fallback parsing.
 - SIMKL OAuth PIN exchange and sync-state behavior without live polling.
 - TheTVDB login and artwork parsing.
 - Wikimedia/Wikidata/Commons reusable-image fallback parsing.

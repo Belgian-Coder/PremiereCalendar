@@ -219,6 +219,16 @@ public sealed class TmdbFilterCatalogServiceTests
             throw new NotSupportedException();
         }
 
+        public Task<IReadOnlyList<TmdbTitleSearchResult>> SearchTitlesAsync(
+            PremiereMediaType mediaType,
+            string query,
+            int? year,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            throw new NotSupportedException();
+        }
+
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(
             string query,
             CancellationToken cancellationToken,

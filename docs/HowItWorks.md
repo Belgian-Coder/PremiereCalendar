@@ -17,23 +17,24 @@ flowchart LR
     Service --> Tmdb["TMDb"]
     Service --> Omdb["OMDb optional"]
     Service --> Tvmaze["TVmaze optional"]
-    Service --> Providers["Trakt / Watchmode / Fanart.tv / TheTVDB / Wikimedia optional"]
+    Service --> Providers["Trakt / TVmaze schedules / artwork providers optional"]
+    Service --> Watchmode["Watchmode availability optional"]
     Service --> Simkl["SIMKL sync optional"]
     Page --> Filter["PremiereFilter"]
     Filter --> Cards["CalendarWeek / CalendarDay / PremiereCard"]
     Cards --> ImageCache["/cached-image"]
 ```
 
-TMDb is the canonical identity source. TMDb Discover creates the primary rows. Trakt, Watchmode releases, and optional TVmaze schedules can add candidates, but candidates only become cards after they resolve to TMDb IDs. In the new-series view, TVmaze later episodes are filtered out before TMDb mapping; `S01E01` candidates can still support a series-premiere card. SIMKL is account/library sync state, not calendar discovery. Draft filter changes never call external APIs; saved filters do. Runtime API and integration settings are read from the local SQLite settings database first, with ASP.NET Core configuration used only as a fallback.
+TMDb is the canonical identity source. TMDb Discover creates the primary verified rows. Trakt and optional TVmaze schedules can add candidates; mapped candidates become verified cards, while unmapped candidates are retained as unverified external cards below the verified results. In the new-series view, TVmaze later episodes are filtered out before TMDb mapping; `S01E01` candidates can still support a series-premiere card. Watchmode is streaming availability fallback only. SIMKL is account/library sync state, not calendar discovery. Draft filter changes never call external APIs; saved filters do. Runtime API and integration settings are read from the local SQLite settings database first, with ASP.NET Core configuration used only as a fallback.
 
 ## Request Flow
 
 1. `Calendar.razor` reads query parameters, resolves the active route (`/`, `/series`, or `/movies`), calculates the Monday-to-Sunday week, and calls `IPremiereService.GetPremieresAsync`.
 2. `Calendar.razor` converts the saved filters into `PremiereDiscoveryCriteria`. With no filters this criteria is broad and the series scope defaults to every episode airing in the week; with saved filters it contains the TMDb-supported request filters.
 3. `PremiereService` first checks `FileCalendarCache` for a fresh week file matching the week plus criteria hash unless the user clicked Refresh.
-4. On a cache miss, `PremiereService` starts the needed external providers plus a bounded number of TMDb source batches in parallel. Trakt, Watchmode releases, and TVmaze schedules are separate source streams, so the UI can show which provider is still loading. Series uses one `air_date` request per day for every-episode mode, or `first_air_date` week requests for new-series-only mode. Movies are also split into one day-sized source batch during fresh week orchestration. If multiple original languages are selected, those TMDb calls are fanned out into independent source work per language because TMDb Discover accepts one `with_original_language` value per request. It does not apply hidden presets; it only sends filters selected in the UI and supported by TMDb Discover.
+4. On a cache miss, `PremiereService` starts the needed external providers plus a bounded number of TMDb source batches in parallel. Trakt and TVmaze schedules are separate source streams, so the UI can show which provider is still loading. Series uses one `air_date` request per day for every-episode mode, or `first_air_date` week requests for new-series-only mode. Movies are also split into one day-sized source batch during fresh week orchestration. If multiple original languages are selected, those TMDb calls are fanned out into independent source work per language because TMDb Discover accepts one `with_original_language` value per request. It does not apply hidden presets; it only sends filters selected in the UI and supported by TMDb Discover.
 5. `TmdbClient` fetches Discover page 1 first to learn `total_pages` and yields that first page immediately. It then fetches pages 2 through N in configurable chunks (`Tmdb:PageBatchSize`, default 10 pages, about 200 TMDb rows per chunk) with bounded page concurrency. Each TMDb request goes through the local token-bucket limiter and `429` retry path.
-6. Optional discovery providers fetch Trakt calendars and TVmaze schedules. External candidates without TMDb IDs are resolved through TMDb `/find/{external_id}` and skipped when no TMDb match exists. External candidates are batched before mapping so TVmaze schedule rows can use the same bounded TMDb resolution/enrichment concurrency as larger TMDb result sets. When TVmaze supplies a known show language and the saved original-language filter does not include it, the candidate is skipped before TMDb resolution.
+6. Optional discovery providers fetch Trakt calendars and TVmaze schedules. External candidates without TMDb IDs are resolved through TMDb external-ID lookup and strict title/year fallback. Candidates that still cannot map are kept as unverified external cards instead of being thrown away. External candidates are batched before mapping so TVmaze schedule rows can use the same bounded TMDb resolution/enrichment concurrency as larger TMDb result sets. When TVmaze supplies a known show language and the saved original-language filter does not include it, the candidate is skipped before TMDb resolution.
 7. Each accepted item is normalized into a `PremiereItem` with a stable canonical ID: `tv:{tmdbId}` for series premieres, `tv:{tmdbId}:air:{yyyyMMdd}` or `tv:{tmdbId}:s{season}e{episode}` for series episodes, and `movie:{tmdbId}` for movies.
 8. Detail enrichment runs with bounded concurrency so a busy week does not create unbounded external calls.
 9. Each source batch is yielded from `IPremiereService.StreamPremieresAsync` as an `IAsyncEnumerable<PremiereLoadProgress>` as soon as partial data is ready. The page consumes the stream with `await foreach` and updates `_items` from each batch, so a completed TMDb page can show cards while later pages, days, and providers are still running. Each loaded-source filter chip shows the loaded source-card count plus a small progress bar and text detail such as TMDb page ranges, external-candidate resolution counts, or a note that no external candidates matched the saved filters. For refreshes and saved-filter reloads, the page keeps the previous relevant result set visible with an updating indicator until a fresh source batch arrives. The chips can be clicked to show only one loaded batch without making another API request. If the foreground load budget expires, the page stops waiting, completes progress with a diagnostic, and renders the best available partial or cached result. The older `GetPremieresAsync` method remains as a compatibility wrapper over the same stream.
@@ -54,7 +55,7 @@ Fanart.tv is optional and uses a free API key configured in Settings. It enriche
 
 Trakt is optional and uses a free app client ID configured in Settings. It contributes candidate movie and new-show calendar rows once the client ID is configured. The app accepts only candidates that have or can resolve to a TMDb ID.
 
-Watchmode is optional and uses an API key configured in Settings. It can enrich missing streaming availability and contribute release candidates. Release candidates are accepted only after TMDb mapping, and equivalent candidates union their source names before rendering.
+Watchmode is optional and uses an API key configured in Settings. It is used only as a fallback for missing streaming availability when TMDb has no provider data. Release discovery is not part of the default calendar pipeline because the free API is too request-limited for reliable broad-week refreshes.
 
 SIMKL is optional account/library sync state. It uses client credentials plus an OAuth access token obtained through the PIN flow. It does not create calendar discovery rows.
 
@@ -201,13 +202,7 @@ http://0.0.0.0:5298
 
 That makes it reachable from other LAN devices when Windows Firewall allows inbound TCP `5298`.
 
-The current publish target is:
-
-```text
-D:\Apps\PremiereCalendar
-```
-
-Use the root `Install-PremiereCalendar.ps1` wrapper for source-tree app updates. It publishes the self-contained build, copies it over the hosted app while preserving `App_Data`, and installs or updates the automatic Windows Service. The wrapper restarts itself elevated when service installation needs administrator rights. `Run-PremiereCalendar.ps1` is the foreground build-and-run helper for local development and does not install a service.
+Use the root `Install-PremiereCalendar.ps1` wrapper for source-tree app updates. It publishes the self-contained build, copies it to the configured install directory while preserving runtime data, and installs or updates the automatic Windows Service. The wrapper restarts itself elevated when service installation needs administrator rights. `Run-PremiereCalendar.ps1` is the foreground build-and-run helper for local development and does not install a service.
 
 The health endpoint is:
 

@@ -62,7 +62,7 @@ public sealed class TvmazeScheduleDiscoveryProviderTests
             new DateOnly(2026, 5, 4),
             CancellationToken.None);
 
-        Assert.Equal(2, candidates.Count);
+        Assert.Equal(3, candidates.Count);
         var premiere = Assert.Single(candidates, candidate => candidate.Title == "Mappable Premiere");
         Assert.Equal(12345, premiere.TvdbId);
         Assert.True(premiere.IsSeriesEpisode);
@@ -75,6 +75,13 @@ public sealed class TvmazeScheduleDiscoveryProviderTests
         Assert.True(episode.IsSeriesEpisode);
         Assert.Equal(1, episode.SeasonNumber);
         Assert.Equal(2, episode.EpisodeNumber);
+
+        var unmappable = Assert.Single(candidates, candidate => candidate.Title == "Unmappable Premiere");
+        Assert.Null(unmappable.TmdbId);
+        Assert.Null(unmappable.ImdbId);
+        Assert.Null(unmappable.TvdbId);
+        Assert.True(unmappable.IsSeriesEpisode);
+        Assert.Equal("TVmaze schedule", unmappable.Source);
         Assert.Contains(client.ScheduleCalls, call => call.Country == "BE" && !call.WebSchedule);
         Assert.Contains(client.ScheduleCalls, call => call.Country == "BE" && call.WebSchedule);
         Assert.Contains(client.ScheduleCalls, call => call.Country == "US" && !call.WebSchedule);

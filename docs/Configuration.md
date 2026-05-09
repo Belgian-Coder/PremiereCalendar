@@ -114,7 +114,7 @@ The default host URL is configured as:
 "Urls": "http://0.0.0.0:5298"
 ```
 
-This lets the app listen on all VM interfaces. LAN devices still require the Windows firewall to allow inbound TCP `5298`.
+This lets the app listen on all network interfaces. Other LAN devices still require the Windows firewall to allow inbound TCP `5298`.
 
 ## TVmaze
 
@@ -130,7 +130,7 @@ TVmaze enrichment and schedule discovery can be controlled from the Settings pag
 
 TVmaze schedule entries can add exact episode rows in the app's every-episode mode when they can map back to TMDb through IMDb or TheTVDB IDs. In new-series-only mode, ordinary later episodes are skipped before TMDb mapping; a `S01E01` candidate may still support a series-premiere card. `Tvmaze:ScheduleCountries` is optional; leave it unset for only global web-schedule discovery and no hidden broadcast-country preset, or set explicit country codes if you want extra broadcast schedule calls.
 
-`Tvmaze:ScheduleFetchConcurrency` controls how many schedule endpoints are queried at once when schedule discovery is enabled. The default is 20, aligned with TVmaze's documented minimum allowance of 20 calls per 10 seconds. Schedule requests retry `429` responses with `Retry-After` or a short fallback delay.
+`Tvmaze:ScheduleFetchConcurrency` controls how many schedule endpoints are queried at once when schedule discovery is enabled. The default is 4, below TVmaze's documented minimum allowance of 20 calls per 10 seconds. Schedule requests retry `429` responses with `Retry-After` or a short fallback delay.
 
 Disable it from the Settings page if you want TMDb-only plus optional OMDb. Configuration fallback remains available:
 
@@ -158,6 +158,17 @@ dotnet user-secrets set "Trakt:ClientId" "YOUR_TRAKT_CLIENT_ID" --project .\Prem
 ```
 
 Trakt calendar rows are candidate rows only. The app accepts them only when a TMDb movie/TV ID is already present or can be resolved through TMDb external-ID lookup. Set `Trakt:Enabled` to `false` to keep Trakt disabled even when a client ID is present.
+
+## Watchmode
+
+Watchmode is optional and API-key gated through Settings. It is used only as a streaming availability fallback when TMDb has no provider data for a verified card. Release discovery is disabled by default and is not registered in the calendar discovery pipeline because the free API is too request-limited for broad week refreshes.
+
+Useful non-secret defaults:
+
+- `Watchmode:Enabled` - enables the availability fallback client.
+- `Watchmode:Regions` - fallback regions used when a card has no TMDb watch providers.
+- `Watchmode:EnableAvailabilityEnrichment` - controls availability fallback.
+- `Watchmode:MaxConcurrentRequests` - provider-level concurrency cap.
 
 ## TheTVDB
 

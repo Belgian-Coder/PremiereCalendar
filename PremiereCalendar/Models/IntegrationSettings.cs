@@ -93,7 +93,7 @@ public sealed record WatchmodeSourceSettings
     public bool Enabled { get; set; } = true;
     public string ApiKey { get; set; } = "";
     public string[] Regions { get; set; } = [];
-    public bool EnableReleaseDiscovery { get; set; } = true;
+    public bool EnableReleaseDiscovery { get; set; }
     public bool EnableAvailabilityEnrichment { get; set; } = true;
     public int? CacheHours { get; set; }
 }

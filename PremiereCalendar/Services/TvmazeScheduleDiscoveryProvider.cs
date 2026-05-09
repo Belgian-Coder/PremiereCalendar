@@ -154,7 +154,7 @@ public sealed class TvmazeScheduleDiscoveryProvider :
     private static ExternalPremiereCandidate? ToCandidate(TvmazeScheduleEpisode episode)
     {
         var show = episode.Show ?? episode.Embedded?.Show;
-        if (show?.Externals?.TheTvdb is not > 0 && string.IsNullOrWhiteSpace(show?.Externals?.Imdb))
+        if (show is null || string.IsNullOrWhiteSpace(show.Name))
         {
             return null;
         }
@@ -171,17 +171,26 @@ public sealed class TvmazeScheduleDiscoveryProvider :
         return new ExternalPremiereCandidate(
             PremiereMediaType.Series,
             airdate,
-            show?.Name,
+            show.Name,
             null,
-            show?.Externals?.Imdb,
-            show?.Externals?.TheTvdb,
+            show.Externals?.Imdb,
+            show.Externals?.TheTvdb,
             "TVmaze schedule",
             IsSeriesEpisode: true,
             EpisodeTitle: episode.Name,
             SeasonNumber: episode.Season,
             EpisodeNumber: episode.Number,
-            OriginalLanguage: NormalizeLanguage(show?.Language),
-            SeriesPremiereDate: TryParseDateOnly(show?.Premiered, out var premiered) ? premiered : null);
+            OriginalLanguage: NormalizeLanguage(show.Language),
+            SeriesPremiereDate: TryParseDateOnly(show.Premiered, out var premiered) ? premiered : null,
+            ExternalProviderId: show.Id > 0 ? show.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) : null,
+            ExternalUrl: show.Url,
+            PosterUrl: CoalesceText(show.Image?.Original, show.Image?.Medium),
+            ReleaseYear: premiered == default ? null : premiered.Year);
+    }
+
+    private static string? CoalesceText(params string?[] values)
+    {
+        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
     }
 
     private static string? NormalizeLanguage(string? language)
@@ -236,9 +245,22 @@ public sealed class TvmazeScheduleDiscoveryProvider :
     private static string CandidateKey(ExternalPremiereCandidate candidate)
     {
         var episodeKey = $"{candidate.PremiereDate:yyyyMMdd}:{candidate.SeasonNumber}:{candidate.EpisodeNumber}";
-        return candidate.TvdbId is > 0
-            ? $"tvdb:{candidate.TvdbId}:{episodeKey}"
-            : $"imdb:{candidate.ImdbId}:{episodeKey}";
+        if (candidate.TvdbId is > 0)
+        {
+            return $"tvdb:{candidate.TvdbId}:{episodeKey}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(candidate.ImdbId))
+        {
+            return $"imdb:{candidate.ImdbId}:{episodeKey}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(candidate.ExternalProviderId))
+        {
+            return $"tvmaze:{candidate.ExternalProviderId}:{episodeKey}";
+        }
+
+        return $"title:{candidate.Title}:{episodeKey}";
     }
 
     private async ValueTask<TvmazeSourceSettings> GetEffectiveSettingsAsync(CancellationToken cancellationToken)

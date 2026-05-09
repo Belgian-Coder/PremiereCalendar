@@ -44,4 +44,9 @@ public sealed record ExternalPremiereCandidate(
     int? EpisodeNumber = null,
     string? OriginalLanguage = null,
     DateOnly? SeriesPremiereDate = null,
-    IReadOnlyList<string>? SourceNames = null);
+    IReadOnlyList<string>? SourceNames = null,
+    string? ExternalProviderId = null,
+    string? ExternalUrl = null,
+    string? PosterUrl = null,
+    string? BackdropUrl = null,
+    int? ReleaseYear = null);

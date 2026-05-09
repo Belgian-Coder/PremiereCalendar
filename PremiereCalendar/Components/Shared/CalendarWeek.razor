@@ -191,7 +191,9 @@
                 SortDirection,
                 ScoreSource)
             .GroupBy(item => item.PremiereDate)
-            .ToDictionary(group => group.Key, group => group.ToList());
+            .ToDictionary(group => group.Key, group => group
+                .OrderBy(VerificationSortRank)
+                .ToList());
     }
 
     private static string DayElementId(DateOnly day)
@@ -235,6 +237,11 @@
     private static string Plural(int count)
     {
         return count == 1 ? "" : "s";
+    }
+
+    private static int VerificationSortRank(PremiereItem item)
+    {
+        return item.VerificationState == PremiereVerificationState.Unverified ? 1 : 0;
     }
 
     private async Task SelectDay(DateOnly day)

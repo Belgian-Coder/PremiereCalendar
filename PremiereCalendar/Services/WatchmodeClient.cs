@@ -448,7 +448,6 @@ public sealed class WatchmodeClient : IWatchmodeClient
     private static ExternalPremiereCandidate? ToExternalCandidate(WatchmodeRelease release)
     {
         if (!TryParseDate(release.SourceReleaseDate, out var releaseDate)
-            || release.TmdbId is not > 0
             || string.IsNullOrWhiteSpace(release.Title))
         {
             return null;
@@ -467,7 +466,9 @@ public sealed class WatchmodeClient : IWatchmodeClient
             null,
             string.IsNullOrWhiteSpace(release.SourceName) ? "Watchmode" : release.SourceName.Trim(),
             IsSeriesEpisode: false,
-            SeasonNumber: mediaType == PremiereMediaType.Series ? release.SeasonNumber : null);
+            SeasonNumber: mediaType == PremiereMediaType.Series ? release.SeasonNumber : null,
+            ExternalProviderId: release.Id > 0 ? release.Id.ToString(CultureInfo.InvariantCulture) : null,
+            ReleaseYear: releaseDate.Year);
     }
 
     private static bool IsMovie(WatchmodeRelease release)
@@ -479,7 +480,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
 
     private static string CandidateKey(ExternalPremiereCandidate candidate)
     {
-        return $"{candidate.MediaType}:{candidate.TmdbId}:{candidate.ImdbId}:{candidate.PremiereDate:yyyyMMdd}:{candidate.Source}";
+        return $"{candidate.MediaType}:{candidate.TmdbId}:{candidate.ImdbId}:{candidate.ExternalProviderId}:{candidate.PremiereDate:yyyyMMdd}:{candidate.Title}:{candidate.Source}";
     }
 
     private static string[] NormalizeRegions(IReadOnlyList<string> regions)

@@ -83,6 +83,10 @@
                             @onclick="() => ToggleSourceProgressFilter(entry)">
                         <span>@entry.SourceName</span>
                         <strong>@FormatSourceCardCount(entry.SourceItemCount)</strong>
+                        @if (entry.UnmappedCount is > 0)
+                        {
+                            <small class="query-progress-detail">@FormatUnmappedCount(entry.UnmappedCount.Value)</small>
+                        }
                         @if (entry.TotalWork is > 0)
                         {
                             <span class="query-progress-meter"
@@ -429,7 +433,8 @@
                         update.TotalWork,
                         update.ProgressText,
                         update.ElapsedMilliseconds,
-                        update.Phase);
+                        update.Phase,
+                        update.UnmappedCount);
                     var existingProgressIndex = _loadProgress.FindIndex(entry =>
                         string.Equals(entry.SourceName, progressEntry.SourceName, StringComparison.Ordinal));
                     if (existingProgressIndex >= 0)
@@ -538,7 +543,8 @@
             TotalWork: null,
             ProgressText: $"Stopped after {budgetSeconds.ToString(CultureInfo.InvariantCulture)} s foreground budget",
             ElapsedMilliseconds: budgetSeconds * 1000L,
-            Phase: "complete");
+            Phase: "complete",
+            UnmappedCount: _items.Count(item => item.VerificationState == PremiereVerificationState.Unverified));
         var existingIndex = _loadProgress.FindIndex(progress =>
             string.Equals(progress.SourceName, entry.SourceName, StringComparison.Ordinal));
         if (existingIndex >= 0)
@@ -631,12 +637,33 @@
                 ? entries.Sum(entry => entry.TotalWork ?? 0)
                 : (int?)null;
             var latestDetail = entries.LastOrDefault(entry => !string.IsNullOrWhiteSpace(entry.ProgressText))?.ProgressText;
-            var progressText = entries.Length == 1
-                ? latestDetail
-                : string.IsNullOrWhiteSpace(latestDetail)
-                    ? $"{entries.Length:N0} day batches"
-                    : $"{entries.Length:N0} day batches · {latestDetail}";
-            var phase = entries.All(entry => entry.IsFinal || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase))
+            var unmappedCount = entries.Sum(entry => entry.UnmappedCount ?? 0);
+            var daySourceGroupStillLoading = IsDaySourceProgressGroup(group.Key) && _isLoading;
+            if (daySourceGroupStillLoading)
+            {
+                latestDetail = StripTerminalProgressPrefix(latestDetail);
+                if (completedWork is { } completed && totalWork is { } total && completed >= total)
+                {
+                    totalWork = completed + 1;
+                }
+            }
+
+            var progressText = daySourceGroupStillLoading
+                ? string.IsNullOrWhiteSpace(latestDetail)
+                    ? FormatDayBatchCount(entries.Length)
+                    : $"{FormatDayBatchCount(entries.Length)} · {latestDetail}"
+                : entries.Length == 1
+                    ? latestDetail
+                    : string.IsNullOrWhiteSpace(latestDetail)
+                        ? FormatDayBatchCount(entries.Length)
+                        : $"{FormatDayBatchCount(entries.Length)} · {latestDetail}";
+            if (daySourceGroupStillLoading && string.IsNullOrWhiteSpace(progressText))
+            {
+                progressText = FormatDayBatchCount(entries.Length);
+            }
+
+            var phase = !daySourceGroupStillLoading
+                && entries.All(entry => entry.IsFinal || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase))
                 ? "complete"
                 : entries.All(entry => string.Equals(entry.Phase, "cache", StringComparison.OrdinalIgnoreCase))
                     ? "cache"
@@ -646,7 +673,7 @@
                 group.Key,
                 sourceItems.Count,
                 entries.Max(entry => entry.TotalItemCount),
-                entries.All(entry => entry.IsFinal),
+                !daySourceGroupStillLoading && entries.All(entry => entry.IsFinal),
                 entries.All(entry => entry.FromCache),
                 sourceItems,
                 allItems,
@@ -654,10 +681,40 @@
                 totalWork,
                 progressText,
                 entries.Max(entry => entry.ElapsedMilliseconds),
-                phase));
+                phase,
+                unmappedCount));
         }
 
         return groupedEntries;
+    }
+
+    private static bool IsDaySourceProgressGroup(string sourceName)
+    {
+        return string.Equals(sourceName, "TMDb series", StringComparison.Ordinal)
+            || string.Equals(sourceName, "TMDb movies", StringComparison.Ordinal);
+    }
+
+    private static string FormatDayBatchCount(int count)
+    {
+        return count == 1 ? "1 day batch" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} day batches";
+    }
+
+    private static string? StripTerminalProgressPrefix(string? progressText)
+    {
+        if (string.IsNullOrWhiteSpace(progressText))
+        {
+            return progressText;
+        }
+
+        const string donePrefix = "Done - ";
+        if (progressText.StartsWith(donePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return progressText[donePrefix.Length..];
+        }
+
+        return string.Equals(progressText, "Done", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : progressText;
     }
 
     private void FinalizeOpenProgressEntries()
@@ -708,12 +765,14 @@
         return items
             .GroupBy(item => item.CanonicalId)
             .Select(group => group
-                .OrderByDescending(item => item.TrailerUrl is not null)
+                .OrderByDescending(item => item.VerificationState == PremiereVerificationState.Verified)
+                .ThenByDescending(item => item.TrailerUrl is not null)
                 .ThenByDescending(item => item.PosterUrl is not null)
                 .ThenByDescending(item => item.SourceNames.Length)
                 .ThenByDescending(item => item.Genres.Length)
                 .First())
             .OrderBy(item => item.PremiereDate)
+            .ThenBy(item => item.VerificationState == PremiereVerificationState.Unverified ? 1 : 0)
             .ThenBy(item => item.MediaType)
             .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -777,6 +836,11 @@
     private static string FormatSourceCardCount(int itemCount)
     {
         return itemCount == 1 ? "1 card" : $"{itemCount.ToString("N0", CultureInfo.InvariantCulture)} cards";
+    }
+
+    private static string FormatUnmappedCount(int count)
+    {
+        return count == 1 ? "1 unverified" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} unverified";
     }
 
     private bool IsSourceProgressFilterActive(LoadProgressEntry entry)
@@ -1628,5 +1692,6 @@
         int? TotalWork,
         string? ProgressText,
         long? ElapsedMilliseconds,
-        string Phase);
+        string Phase,
+        int? UnmappedCount);
 }

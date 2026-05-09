@@ -23,6 +23,10 @@
     <div class="card-content">
         <div class="card-title-row">
             <span class="card-type">@FormatType(Item.Type)</span>
+            @if (IsUnverified)
+            {
+                <span class="verification-badge">Unverified</span>
+            }
             <h3>@Item.Title</h3>
         </div>
 
@@ -36,7 +40,7 @@
 
         <div class="meta" aria-label="Premiere metadata">
             <span>@Item.PremiereDate.ToString("dd MMM yyyy", CultureInfo.CurrentCulture)</span>
-            <span>TMDb date</span>
+            <span>@DateSourceLabel</span>
             <span>@FormatCountries(Item.OriginCountries)</span>
             <span>@FormatRuntime(Item.RuntimeMinutes)</span>
         </div>
@@ -68,6 +72,11 @@
 
         <p class="card-description">@(string.IsNullOrWhiteSpace(Item.Overview) ? "No description available." : Item.Overview)</p>
 
+        @if (IsUnverified && !string.IsNullOrWhiteSpace(Item.VerificationNote))
+        {
+            <p class="verification-note">@Item.VerificationNote</p>
+        }
+
         @if (Item.Genres.Length > 0)
         {
             <div class="genre-tags" aria-label="Genres">
@@ -95,7 +104,10 @@
         <details class="source-details">
             <summary>Provenance</summary>
             <div class="source-tags" aria-label="Sources">
-                <span>TMDb score</span>
+                @if (!IsUnverified)
+                {
+                    <span>TMDb score</span>
+                }
                 @if (Item.ImdbScore is not null)
                 {
                     <span>IMDb via OMDb</span>
@@ -123,6 +135,10 @@
                 @if (Item.ImageSource is not null)
                 {
                     <span>@Item.ImageSource</span>
+                }
+                @if (IsUnverified)
+                {
+                    <span>External source</span>
                 }
             </div>
         </details>
@@ -163,6 +179,11 @@
             @if (!string.IsNullOrWhiteSpace(Item.TvmazeUrl))
             {
                 <a href="@Item.TvmazeUrl" target="_blank" rel="noopener noreferrer">TVmaze</a>
+            }
+
+            @if (IsUnverified && !string.IsNullOrWhiteSpace(Item.ExternalUrl))
+            {
+                <a href="@Item.ExternalUrl" target="_blank" rel="noopener noreferrer">External source</a>
             }
 
             @if (!string.IsNullOrWhiteSpace(Item.OfficialSiteUrl))
@@ -220,9 +241,14 @@
     private string AllSourceNamesTitle => string.Join(", ", Item.SourceNames);
 
     private bool ShowArrButton => OnAddToArr.HasDelegate
+        && Item.VerificationState == PremiereVerificationState.Verified
         && (Item.MediaType == PremiereMediaType.Movie
             ? IntegrationSettings.Radarr.Enabled
             : IntegrationSettings.Sonarr.Enabled);
+
+    private bool IsUnverified => Item.VerificationState == PremiereVerificationState.Unverified;
+
+    private string DateSourceLabel => IsUnverified ? "Provider date" : "TMDb date";
 
     private string ArrButtonText => Item.MediaType == PremiereMediaType.Movie ? "Add to Radarr" : "Add to Sonarr";
 
@@ -241,7 +267,8 @@
 
     private string MediaClass()
     {
-        return Item.MediaType == PremiereMediaType.Movie ? "movie-card" : "series-card";
+        var mediaClass = Item.MediaType == PremiereMediaType.Movie ? "movie-card" : "series-card";
+        return IsUnverified ? $"{mediaClass} unverified-card" : mediaClass;
     }
 
     private static string FormatScore(double? score)
@@ -366,6 +393,9 @@
         Append(builder, Item.Type);
         Append(builder, Item.MediaType);
         Append(builder, Item.TmdbId);
+        Append(builder, Item.VerificationState);
+        Append(builder, Item.VerificationNote);
+        Append(builder, Item.ExternalUrl);
         Append(builder, Item.Title);
         Append(builder, Item.PremiereDate);
         Append(builder, Item.SeasonNumber);

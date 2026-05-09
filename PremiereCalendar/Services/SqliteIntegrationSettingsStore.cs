@@ -239,7 +239,7 @@ public sealed class SqliteIntegrationSettingsStore : IIntegrationSettingsStore
                     EnableReleaseDiscovery = GetBool(
                         values,
                         "Sources.Watchmode.EnableReleaseDiscovery",
-                        GetConfigBool("Watchmode:EnableReleaseDiscovery", true)),
+                        GetConfigBool("Watchmode:EnableReleaseDiscovery", false)),
                     EnableAvailabilityEnrichment = GetBool(
                         values,
                         "Sources.Watchmode.EnableAvailabilityEnrichment",

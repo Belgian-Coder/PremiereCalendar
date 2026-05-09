@@ -6,7 +6,7 @@ public sealed class WatchmodeOptions
     public bool Enabled { get; set; } = true;
     public string ApiKey { get; set; } = "";
     public string[] Regions { get; set; } = [];
-    public bool EnableReleaseDiscovery { get; set; } = true;
+    public bool EnableReleaseDiscovery { get; set; }
     public bool EnableAvailabilityEnrichment { get; set; } = true;
     public int RequestTimeoutSeconds { get; set; } = 20;
     public int MaxRetryAfterDelaySeconds { get; set; } = 2;

@@ -24,26 +24,19 @@ References:
 - `https://learn.microsoft.com/en-us/aspnet/core/performance/response-compression`
 - `https://developer.themoviedb.org/docs/rate-limiting`
 
-## Hosting And Sleep
+## Hosting
 
 This app does not run under IIS, so there is no IIS application-pool idle timeout. When installed as a Windows Service, the .NET process should remain running until the service is stopped, the machine restarts, or the process fails.
-
-Current VM check:
-
-- Active power plan: High performance.
-- Sleep after: disabled on AC and DC.
-- Hibernate after: disabled on AC and DC.
-- `PremiereCalendar` is installed as an automatic Windows Service.
 
 The service installer configures:
 
 - Automatic service start.
 - Service failure recovery with restart attempts.
-- LAN firewall access for TCP `5298`.
+- optional LAN firewall access for the configured port.
 - Cleanup of any manually started `PremiereCalendar.exe` process before the service starts, so the service can bind to the configured port.
 - Cleanup of old user Startup-folder shortcuts that would otherwise start duplicate manual app instances.
 
-If the app is only started as a background process, service recovery is not active. Run `deploy/Install-PremiereCalendarService.ps1` from an elevated PowerShell session after publishing to make hosting persistent. `deploy/Publish-PremiereCalendar.ps1` now also installs or updates the service automatically when it is run from an elevated PowerShell session.
+If the app is only started as a background process, service recovery is not active. Run the root `Install-PremiereCalendar.ps1` wrapper from an elevated PowerShell session to make hosting persistent.
 
 ## Cache And Images
 
@@ -108,7 +101,7 @@ Latest hosted smoke after the stability pass:
 - URL: `/series?week=2026-05-04&seriesLang=en%2Cnl`
 - Foreground refresh completed without browser console errors or circuit disconnects.
 - Final hosted refresh result: 342 cards.
-- TMDb source detail: 7 day batches, pages 2-6 of 6, processed 101 of 101 rows, 28.3 seconds on the live VM/API path.
+- TMDb source detail: 7 day batches, pages 2-6 of 6, processed 101 of 101 rows, 28.3 seconds in that hosted smoke run.
 - Trakt source detail: 0 cards, no candidates returned, 52 milliseconds.
 - TVmaze schedule detail: 0 accepted cards, resolved 71 of 71 candidates, 663 milliseconds.
 - Cached desktop revisit at 1920x1080: 22 mounted cards, 1,176 DOM nodes, no horizontal overflow.

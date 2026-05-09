@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -206,6 +207,36 @@ public sealed class TmdbClient : ITmdbClient
             : response?.TvResults.FirstOrDefault();
 
         return result?.Id > 0 ? result.Id : null;
+    }
+
+    public async Task<IReadOnlyList<TmdbTitleSearchResult>> SearchTitlesAsync(
+        PremiereMediaType mediaType,
+        string query,
+        int? year,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        EnsureConfigured();
+
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return [];
+        }
+
+        var normalizedQuery = query.Trim();
+        var normalizedYear = year is > 0 ? year.Value.ToString(CultureInfo.InvariantCulture) : "any";
+        var response = await GetOrCreateRequiredAsync(
+            $"tmdb:title-search:{mediaType}:{normalizedYear}:{normalizedQuery.ToLowerInvariant()}",
+            TimeSpan.FromDays(7),
+            token => SendJsonAsync<TmdbPagedResponse<TmdbTitleSearchResult>>(
+                TmdbQueryBuilder.BuildSearchTitlePath(mediaType, normalizedQuery, year),
+                "TMDb title search",
+                token,
+                notFoundReturnsNull: false),
+            cancellationToken,
+            forceRefresh);
+
+        return response?.Results ?? [];
     }
 
     public async Task<IReadOnlyList<TmdbGenre>> GetGenresAsync(

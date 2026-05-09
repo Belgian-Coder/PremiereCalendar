@@ -345,6 +345,30 @@ public sealed record TmdbFindResult
     public int Id { get; init; }
 }
 
+public sealed record TmdbTitleSearchResult
+{
+    [JsonPropertyName("id")]
+    public int Id { get; init; }
+
+    [JsonPropertyName("title")]
+    public string? Title { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    [JsonPropertyName("original_title")]
+    public string? OriginalTitle { get; init; }
+
+    [JsonPropertyName("original_name")]
+    public string? OriginalName { get; init; }
+
+    [JsonPropertyName("release_date")]
+    public string? ReleaseDate { get; init; }
+
+    [JsonPropertyName("first_air_date")]
+    public string? FirstAirDate { get; init; }
+}
+
 public sealed record TmdbMovieReleaseDateResponse
 {
     [JsonPropertyName("results")]

@@ -274,7 +274,6 @@
                                     @StatusBadge("TMDb", TmdbProviderStatus())
                                     @StatusBadge("TVmaze", TvmazeProviderStatus())
                                     @StatusBadge("Trakt", TraktProviderStatus())
-                                    @StatusBadge("Watchmode releases", WatchmodeReleaseProviderStatus())
                                 </div>
                             </div>
 
@@ -311,20 +310,6 @@
                                 <small class="settings-help">Only the client ID is needed for the public calendar endpoints.</small>
                             </label>
 
-                            <label class="switch-row">
-                                <InputCheckbox @bind-Value="_settings.Sources.Watchmode.Enabled" />
-                                <span>Enable Watchmode</span>
-                            </label>
-
-                            <label class="switch-row">
-                                <InputCheckbox @bind-Value="_settings.Sources.Watchmode.EnableReleaseDiscovery" />
-                                <span>Enable Watchmode release discovery</span>
-                            </label>
-
-                            <label>
-                                <span>Watchmode API key</span>
-                                <InputText type="password" class="settings-input" aria-label="Watchmode API key" @bind-Value="_settings.Sources.Watchmode.ApiKey" />
-                            </label>
                         </section>
 
                         <section class="settings-provider-group" aria-label="Watch availability provider settings">
@@ -337,6 +322,17 @@
                                     @StatusBadge("Watchmode availability", WatchmodeAvailabilityProviderStatus())
                                 </div>
                             </div>
+
+                            <label class="switch-row">
+                                <InputCheckbox @bind-Value="_settings.Sources.Watchmode.Enabled" />
+                                <span>Enable Watchmode availability</span>
+                            </label>
+
+                            <label>
+                                <span>Watchmode API key</span>
+                                <InputText type="password" class="settings-input" aria-label="Watchmode API key" @bind-Value="_settings.Sources.Watchmode.ApiKey" />
+                                <small class="settings-help">Used only as a fallback for streaming availability when TMDb has no provider data.</small>
+                            </label>
 
                             <label class="switch-row">
                                 <InputCheckbox @bind-Value="_settings.Sources.Watchmode.EnableAvailabilityEnrichment" />
@@ -616,13 +612,6 @@
     private ProviderAvailability TraktProviderStatus()
     {
         return EnabledWithRequiredValue(_settings.Sources.Trakt.Enabled, _settings.Sources.Trakt.ClientId);
-    }
-
-    private ProviderAvailability WatchmodeReleaseProviderStatus()
-    {
-        return EnabledWithRequiredValue(
-            _settings.Sources.Watchmode.Enabled && _settings.Sources.Watchmode.EnableReleaseDiscovery,
-            _settings.Sources.Watchmode.ApiKey);
     }
 
     private ProviderAvailability WatchmodeAvailabilityProviderStatus()
@@ -1001,6 +990,7 @@
         _settings.Sources.Trakt.ClientId = _settings.Sources.Trakt.ClientId.Trim();
         _settings.Sources.Watchmode.ApiKey = _settings.Sources.Watchmode.ApiKey.Trim();
         _settings.Sources.Watchmode.Regions = ParseCountryCodes(_watchmodeRegions);
+        _settings.Sources.Watchmode.EnableReleaseDiscovery = false;
         _settings.Sources.Simkl.ClientId = _settings.Sources.Simkl.ClientId.Trim();
         _settings.Sources.Simkl.ClientSecret = _settings.Sources.Simkl.ClientSecret.Trim();
         _settings.Sources.Simkl.AccessToken = _settings.Sources.Simkl.AccessToken.Trim();

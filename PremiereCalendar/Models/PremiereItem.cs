@@ -13,6 +13,12 @@ public enum PremiereMediaType
     Movie
 }
 
+public enum PremiereVerificationState
+{
+    Verified,
+    Unverified
+}
+
 public sealed record PremiereSource
 {
     public required string Name { get; init; }
@@ -30,6 +36,11 @@ public sealed record PremiereItem
     public string? ImdbId { get; init; }
     public int? TvdbId { get; init; }
     public string? WikidataId { get; init; }
+    public PremiereVerificationState VerificationState { get; init; } = PremiereVerificationState.Verified;
+    public string? VerificationNote { get; init; }
+    public string? ExternalProviderId { get; init; }
+    public string? ExternalUrl { get; init; }
+    public string? ExternalCandidateKey { get; init; }
 
     public required string Title { get; init; }
     public string? OriginalTitle { get; init; }

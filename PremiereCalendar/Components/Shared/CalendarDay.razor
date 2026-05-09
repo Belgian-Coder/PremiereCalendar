@@ -53,7 +53,7 @@
         else
         {
             <div class="day-items-grid">
-                @foreach (var item in VisibleItems)
+                @foreach (var item in VisibleVerifiedItems)
                 {
                     <PremiereCard @key="item.CanonicalId"
                                   Item="item"
@@ -65,6 +65,29 @@
                                   IsArrActionBusy="IsArrActionBusy" />
                 }
             </div>
+
+            @if (VisibleUnverifiedItems.Any())
+            {
+                <section class="unverified-day-section" data-testid="unverified-premieres">
+                    <div class="unverified-day-separator">
+                        <span>Unverified from external sources</span>
+                        <small>@FormatCount(VisibleUnverifiedItems.Count, "card")</small>
+                    </div>
+                    <div class="day-items-grid">
+                        @foreach (var item in VisibleUnverifiedItems)
+                        {
+                            <PremiereCard @key="item.CanonicalId"
+                                          Item="item"
+                                          ScoreSource="ScoreSource"
+                                          ImageCacheVersion="@ImageCacheVersion"
+                                          RefreshImageCache="RefreshImageCache"
+                                          IntegrationSettings="IntegrationSettings"
+                                          OnAddToArr="OnAddToArr"
+                                          IsArrActionBusy="IsArrActionBusy" />
+                        }
+                    </div>
+                </section>
+            }
 
             @if (HiddenItemCount > 0)
             {
@@ -150,6 +173,14 @@
     private int NextBatchCount => Math.Min(Math.Max(1, LoadBatchSize), HiddenItemCount);
 
     private IEnumerable<PremiereItem> VisibleItems => Items.Take(_visibleCount);
+
+    private IReadOnlyList<PremiereItem> VisibleVerifiedItems => VisibleItems
+        .Where(item => item.VerificationState == PremiereVerificationState.Verified)
+        .ToArray();
+
+    private IReadOnlyList<PremiereItem> VisibleUnverifiedItems => VisibleItems
+        .Where(item => item.VerificationState == PremiereVerificationState.Unverified)
+        .ToArray();
 
     private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold;
 

@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -11,6 +13,7 @@ namespace PremiereCalendar.Services;
 public sealed class PremiereService : IPremiereService
 {
     private static readonly TimeSpan CachedEnrichmentMaxAge = TimeSpan.FromHours(12);
+    private const int ConflictingExternalIdsTmdbId = -1;
 
     private readonly ITmdbClient _tmdbClient;
     private readonly IOmdbClient _omdbClient;
@@ -590,7 +593,8 @@ public sealed class PremiereService : IPremiereService
                         totalWork: batch.TotalWork,
                         progressText: batch.ProgressText,
                         elapsedMilliseconds: batch.ElapsedMilliseconds,
-                        isSourceComplete: batch.IsComplete);
+                        isSourceComplete: batch.IsComplete,
+                        unmappedCount: batch.UnmappedCount);
 
                     source.MoveNextTask = source.Enumerator.MoveNextAsync().AsTask();
                     continue;
@@ -786,7 +790,8 @@ public sealed class PremiereService : IPremiereService
                     TotalWork: lastItemBatch?.TotalWork ?? lastItemBatch?.CompletedWork ?? 0,
                     ProgressText: SourceFailureProgressText(error),
                     ElapsedMilliseconds: ElapsedMilliseconds(),
-                    IsComplete: true);
+                    IsComplete: true,
+                    UnmappedCount: CountUnverified(filteredErrorItems));
                 yield break;
             }
 
@@ -813,7 +818,8 @@ public sealed class PremiereService : IPremiereService
                         TotalWork: lastItemBatch?.TotalWork,
                         ProgressText: SourceCompletionProgressText(completionItems.Count, lastItemBatch?.ProgressText),
                         ElapsedMilliseconds: ElapsedMilliseconds(),
-                        IsComplete: true);
+                        IsComplete: true,
+                        UnmappedCount: CountUnverified(completionItems));
                 }
 
                 yield break;
@@ -838,7 +844,8 @@ public sealed class PremiereService : IPremiereService
                     ? SourceCompletionProgressText(filteredItems.Count, itemBatch?.ProgressText)
                     : itemBatch?.ProgressText,
                 ElapsedMilliseconds: ElapsedMilliseconds(),
-                IsComplete: isKnownWorkComplete);
+                IsComplete: isKnownWorkComplete,
+                UnmappedCount: CountUnverified(filteredItems));
         }
     }
 
@@ -861,10 +868,14 @@ public sealed class PremiereService : IPremiereService
             .Select(item => new SeriesDayKey(item.TmdbId, item.PremiereDate))
             .ToHashSet();
 
-        return mergedByCanonicalId
+        var withoutGenericAirDateRows = mergedByCanonicalId
             .Where(item => !IsGenericSeriesAirDate(item)
                 || !daysWithExactEpisodes.Contains(new SeriesDayKey(item.TmdbId, item.PremiereDate)))
+            .ToArray();
+
+        return MergeVerifiedAndUnverifiedItems(withoutGenericAirDateRows)
             .OrderBy(item => item.PremiereDate)
+            .ThenBy(VerificationSortRank)
             .ThenBy(item => item.MediaType)
             .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -874,7 +885,8 @@ public sealed class PremiereService : IPremiereService
     {
         var items = group.ToArray();
         var selected = items
-            .OrderByDescending(SourceAuthorityScore)
+            .OrderByDescending(item => item.VerificationState == PremiereVerificationState.Verified)
+            .ThenByDescending(SourceAuthorityScore)
             .ThenByDescending(item => item.TrailerUrl is not null)
             .ThenByDescending(EnrichmentScore)
             .ThenByDescending(item => item.PosterUrl is not null)
@@ -903,6 +915,154 @@ public sealed class PremiereService : IPremiereService
         };
     }
 
+    private static List<PremiereItem> MergeVerifiedAndUnverifiedItems(IReadOnlyList<PremiereItem> items)
+    {
+        var verifiedItems = items
+            .Where(item => item.VerificationState == PremiereVerificationState.Verified)
+            .ToList();
+        var result = new List<PremiereItem>(verifiedItems);
+        var retainedUnverifiedItems = new List<PremiereItem>();
+
+        foreach (var unverified in items.Where(item => item.VerificationState == PremiereVerificationState.Unverified))
+        {
+            var match = verifiedItems.FirstOrDefault(verified => UnverifiedMatchesVerified(unverified, verified));
+            if (match is null)
+            {
+                var existingUnverified = retainedUnverifiedItems.FirstOrDefault(existing => UnverifiedMatchesUnverified(unverified, existing));
+                if (existingUnverified is null)
+                {
+                    retainedUnverifiedItems.Add(unverified);
+                    continue;
+                }
+
+                var mergedUnverified = MergeSourceAttribution(existingUnverified, unverified) with
+                {
+                    PosterUrl = CoalesceText(existingUnverified.PosterUrl, unverified.PosterUrl),
+                    BackdropUrl = CoalesceText(existingUnverified.BackdropUrl, unverified.BackdropUrl),
+                    ImageSource = CoalesceText(existingUnverified.ImageSource, unverified.ImageSource),
+                    ExternalUrl = CoalesceText(existingUnverified.ExternalUrl, unverified.ExternalUrl),
+                    ExternalProviderId = CoalesceText(existingUnverified.ExternalProviderId, unverified.ExternalProviderId)
+                };
+                var retainedIndex = retainedUnverifiedItems.FindIndex(item =>
+                    string.Equals(item.CanonicalId, existingUnverified.CanonicalId, StringComparison.Ordinal));
+                if (retainedIndex >= 0)
+                {
+                    retainedUnverifiedItems[retainedIndex] = mergedUnverified;
+                }
+
+                continue;
+            }
+
+            var merged = MergeSourceAttribution(match, unverified);
+            var resultIndex = result.FindIndex(item => string.Equals(item.CanonicalId, match.CanonicalId, StringComparison.Ordinal));
+            if (resultIndex >= 0)
+            {
+                result[resultIndex] = merged;
+            }
+
+            var verifiedIndex = verifiedItems.FindIndex(item => string.Equals(item.CanonicalId, match.CanonicalId, StringComparison.Ordinal));
+            if (verifiedIndex >= 0)
+            {
+                verifiedItems[verifiedIndex] = merged;
+            }
+        }
+
+        result.AddRange(retainedUnverifiedItems);
+        return result;
+    }
+
+    private static PremiereItem MergeSourceAttribution(PremiereItem target, PremiereItem sourceItem)
+    {
+        var sourceNames = target.SourceNames
+            .Concat(sourceItem.SourceNames)
+            .Where(source => !string.IsNullOrWhiteSpace(source))
+            .Select(source => source.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var sources = target.Sources
+            .Concat(sourceItem.Sources)
+            .Where(source => !string.IsNullOrWhiteSpace(source.Name))
+            .DistinctBy(source => $"{source.Kind}:{source.Id}:{source.Name}", StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return target with
+        {
+            SourceNames = sourceNames,
+            Sources = sources
+        };
+    }
+
+    private static bool UnverifiedMatchesVerified(PremiereItem unverified, PremiereItem verified)
+    {
+        if (unverified.MediaType != verified.MediaType)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(unverified.ImdbId) && !string.IsNullOrWhiteSpace(verified.ImdbId))
+        {
+            return string.Equals(unverified.ImdbId, verified.ImdbId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (unverified.TvdbId is > 0 && verified.TvdbId is > 0)
+        {
+            return unverified.TvdbId == verified.TvdbId;
+        }
+
+        if (unverified.PremiereDate != verified.PremiereDate
+            || !string.Equals(NormalizeTitleForIdentity(unverified.Title), NormalizeTitleForIdentity(verified.Title), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (unverified.SeasonNumber is > 0 && verified.SeasonNumber is > 0
+            && unverified.SeasonNumber != verified.SeasonNumber)
+        {
+            return false;
+        }
+
+        return unverified.EpisodeNumber is not > 0
+            || verified.EpisodeNumber is not > 0
+            || unverified.EpisodeNumber == verified.EpisodeNumber;
+    }
+
+    private static bool UnverifiedMatchesUnverified(PremiereItem left, PremiereItem right)
+    {
+        if (left.MediaType != right.MediaType || left.PremiereDate != right.PremiereDate)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(left.ImdbId) && !string.IsNullOrWhiteSpace(right.ImdbId))
+        {
+            return string.Equals(left.ImdbId, right.ImdbId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (left.TvdbId is > 0 && right.TvdbId is > 0)
+        {
+            return left.TvdbId == right.TvdbId;
+        }
+
+        if (!string.Equals(NormalizeTitleForIdentity(left.Title), NormalizeTitleForIdentity(right.Title), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (left.SeasonNumber is > 0 && right.SeasonNumber is > 0 && left.SeasonNumber != right.SeasonNumber)
+        {
+            return false;
+        }
+
+        return left.EpisodeNumber is not > 0
+            || right.EpisodeNumber is not > 0
+            || left.EpisodeNumber == right.EpisodeNumber;
+    }
+
+    private static int VerificationSortRank(PremiereItem item)
+    {
+        return item.VerificationState == PremiereVerificationState.Unverified ? 1 : 0;
+    }
+
     private static int EnrichmentScore(PremiereItem item)
     {
         var score = 0;
@@ -924,6 +1084,7 @@ public sealed class PremiereService : IPremiereService
     {
         var score = 0;
 
+        score += item.VerificationState == PremiereVerificationState.Verified ? 40 : -40;
         score += item.MediaType == PremiereMediaType.Series && item.Type == PremiereItemType.SeriesEpisode ? 20 : 0;
         score += IsExactSeriesEpisode(item) ? 30 : 0;
         score += item.Type == PremiereItemType.SeriesPremiere ? 25 : 0;
@@ -974,7 +1135,8 @@ public sealed class PremiereService : IPremiereService
 
     private static bool IsFreshReusableEnrichment(PremiereItem item)
     {
-        return EnrichmentScore(item) > 0
+        return item.VerificationState == PremiereVerificationState.Verified
+            && EnrichmentScore(item) > 0
             && DateTimeOffset.UtcNow - item.LastUpdatedUtc <= CachedEnrichmentMaxAge;
     }
 
@@ -1068,7 +1230,8 @@ public sealed class PremiereService : IPremiereService
         long? elapsedMilliseconds = null,
         bool isSourceComplete = false,
         bool hasSourceErrors = false,
-        IReadOnlyList<string>? failedSourceNames = null)
+        IReadOnlyList<string>? failedSourceNames = null,
+        int? unmappedCount = null)
     {
         return new PremiereLoadProgress(
             sourceName,
@@ -1086,8 +1249,14 @@ public sealed class PremiereService : IPremiereService
             Phase = isFinal || isSourceComplete ? "complete" : fromCache ? "cache" : "loading",
             SourceItems = sourceItems,
             HasSourceErrors = hasSourceErrors,
-            FailedSourceNames = failedSourceNames ?? []
+            FailedSourceNames = failedSourceNames ?? [],
+            UnmappedCount = unmappedCount ?? CountUnverified(sourceItems)
         };
+    }
+
+    private static int CountUnverified(IEnumerable<PremiereItem> items)
+    {
+        return items.Count(item => item.VerificationState == PremiereVerificationState.Unverified);
     }
 
     private static string ProviderKeyForSource(string sourceName)
@@ -1766,9 +1935,14 @@ public sealed class PremiereService : IPremiereService
         }
 
         var tmdbId = await ResolveCandidateTmdbIdAsync(candidate, cancellationToken, forceRefresh);
-        if (tmdbId is not > 0)
+        if (tmdbId == ConflictingExternalIdsTmdbId)
         {
             return null;
+        }
+
+        if (tmdbId is not > 0)
+        {
+            return CreateUnverifiedPremiereItem(candidate, criteria);
         }
 
         var title = candidate.Title;
@@ -1835,6 +2009,55 @@ public sealed class PremiereService : IPremiereService
         return mappedItem is null ? null : MergeExternalCandidateSource(mappedItem, candidate);
     }
 
+    private static PremiereItem? CreateUnverifiedPremiereItem(
+        ExternalPremiereCandidate candidate,
+        PremiereDiscoveryCriteria criteria)
+    {
+        if (string.IsNullOrWhiteSpace(candidate.Title))
+        {
+            return null;
+        }
+
+        var type = candidate.MediaType == PremiereMediaType.Movie
+            ? PremiereItemType.MovieFirstRelease
+            : candidate.IsSeriesEpisode || criteria.Series.SeriesDateMode == SeriesDateMode.AllEpisodes
+                ? PremiereItemType.SeriesEpisode
+                : PremiereItemType.SeriesPremiere;
+        var candidateKey = ExternalCandidateKey(candidate);
+        var sourceNames = CandidateSourceNames(candidate);
+        var posterUrl = CoalesceText(candidate.PosterUrl, candidate.BackdropUrl);
+
+        return new PremiereItem
+        {
+            CanonicalId = UnverifiedCanonicalId(candidate, candidateKey),
+            Type = type,
+            MediaType = candidate.MediaType,
+            TmdbId = 0,
+            ImdbId = NormalizeExternalId(candidate.ImdbId),
+            TvdbId = candidate.TvdbId,
+            VerificationState = PremiereVerificationState.Unverified,
+            VerificationNote = "Could not match to TMDb yet",
+            ExternalProviderId = candidate.ExternalProviderId,
+            ExternalUrl = candidate.ExternalUrl,
+            ExternalCandidateKey = candidateKey,
+            Title = candidate.Title.Trim(),
+            PremiereDate = candidate.PremiereDate,
+            PosterUrl = posterUrl,
+            BackdropUrl = candidate.BackdropUrl,
+            ImageSource = string.IsNullOrWhiteSpace(posterUrl)
+                ? null
+                : $"{sourceNames.FirstOrDefault() ?? candidate.Source} artwork",
+            OriginalLanguage = candidate.OriginalLanguage ?? "",
+            SourceNames = sourceNames,
+            Sources = SourceEntriesWithCandidate([], candidate),
+            EpisodeTitle = candidate.EpisodeTitle,
+            SeasonNumber = candidate.SeasonNumber,
+            EpisodeNumber = candidate.EpisodeNumber,
+            EpisodeSource = candidate.Source,
+            NetworkName = candidate.MediaType == PremiereMediaType.Series ? candidate.Source : null
+        };
+    }
+
     private static ExternalPremiereCandidate MergeExternalCandidateGroup(IGrouping<string, ExternalPremiereCandidate> group)
     {
         var candidates = group.ToArray();
@@ -1854,12 +2077,28 @@ public sealed class PremiereService : IPremiereService
             .ThenBy(candidate => candidate.PremiereDate)
             .Select(candidate => candidate.Title)
             .FirstOrDefault(title => !string.IsNullOrWhiteSpace(title));
+        var posterUrl = candidates
+            .Select(candidate => candidate.PosterUrl)
+            .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url));
+        var backdropUrl = candidates
+            .Select(candidate => candidate.BackdropUrl)
+            .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url));
+        var externalUrl = candidates
+            .Select(candidate => candidate.ExternalUrl)
+            .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url));
+        var externalProviderId = candidates
+            .Select(candidate => candidate.ExternalProviderId)
+            .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
 
         return selected with
         {
             Title = title ?? selected.Title,
             Source = sourceNames.FirstOrDefault() ?? selected.Source,
-            SourceNames = sourceNames
+            SourceNames = sourceNames,
+            PosterUrl = posterUrl ?? selected.PosterUrl,
+            BackdropUrl = backdropUrl ?? selected.BackdropUrl,
+            ExternalUrl = externalUrl ?? selected.ExternalUrl,
+            ExternalProviderId = externalProviderId ?? selected.ExternalProviderId
         };
     }
 
@@ -1872,6 +2111,7 @@ public sealed class PremiereService : IPremiereService
         foreach (var cachedItem in cachedEnrichment.Values)
         {
             if (!IsFreshReusableEnrichment(cachedItem)
+                || cachedItem.VerificationState != PremiereVerificationState.Verified
                 || cachedItem.MediaType != candidate.MediaType
                 || cachedItem.PremiereDate != candidate.PremiereDate
                 || !ExternalCandidateMatchesCachedItem(candidate, cachedItem)
@@ -2103,12 +2343,12 @@ public sealed class PremiereService : IPremiereService
             }
         }
 
-        if (matches.Count == 0)
+        var distinctIds = matches.Select(match => match.Id).Distinct().ToArray();
+        if (distinctIds.Length == 0)
         {
-            return null;
+            return await TryResolveCandidateByStrictTitleAsync(candidate, cancellationToken, forceRefresh);
         }
 
-        var distinctIds = matches.Select(match => match.Id).Distinct().ToArray();
         if (distinctIds.Length > 1)
         {
             _logger.LogWarning(
@@ -2116,10 +2356,105 @@ public sealed class PremiereService : IPremiereService
                 candidate.Source,
                 candidate.Title,
                 string.Join(", ", matches.Select(match => $"{match.Source}:{match.Id}")));
-            return null;
+            return ConflictingExternalIdsTmdbId;
         }
 
         return distinctIds[0];
+    }
+
+    private async Task<int?> TryResolveCandidateByStrictTitleAsync(
+        ExternalPremiereCandidate candidate,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        if (string.IsNullOrWhiteSpace(candidate.Title))
+        {
+            return null;
+        }
+
+        var candidateYear = CandidateYear(candidate);
+        try
+        {
+            var results = await _tmdbClient.SearchTitlesAsync(
+                candidate.MediaType,
+                candidate.Title,
+                candidateYear,
+                cancellationToken,
+                forceRefresh);
+            var candidateTitleKey = NormalizeTitleForIdentity(candidate.Title);
+            var matchingIds = results
+                .Where(result => TitleSearchResultMatches(candidate.MediaType, result, candidateTitleKey, candidateYear))
+                .Select(result => result.Id)
+                .Where(id => id > 0)
+                .Distinct()
+                .ToArray();
+
+            if (matchingIds.Length == 1)
+            {
+                return matchingIds[0];
+            }
+
+            if (matchingIds.Length > 1)
+            {
+                _logger.LogInformation(
+                    "Keeping {ProviderName} candidate {Title} unverified because strict TMDb title search returned multiple exact {Year} matches.",
+                    candidate.Source,
+                    candidate.Title,
+                    candidateYear);
+            }
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                ex,
+                "Skipping strict TMDb title lookup for {ProviderName} candidate {Title} after a request timeout.",
+                candidate.Source,
+                candidate.Title);
+        }
+        catch (ExternalApiException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Skipping strict TMDb title lookup for {ProviderName} candidate {Title}.",
+                candidate.Source,
+                candidate.Title);
+        }
+
+        return null;
+    }
+
+    private static int CandidateYear(ExternalPremiereCandidate candidate)
+    {
+        return candidate.ReleaseYear
+            ?? candidate.SeriesPremiereDate?.Year
+            ?? candidate.PremiereDate.Year;
+    }
+
+    private static bool TitleSearchResultMatches(
+        PremiereMediaType mediaType,
+        TmdbTitleSearchResult result,
+        string candidateTitleKey,
+        int candidateYear)
+    {
+        if (result.Id <= 0 || string.IsNullOrWhiteSpace(candidateTitleKey))
+        {
+            return false;
+        }
+
+        var title = mediaType == PremiereMediaType.Movie
+            ? result.Title
+            : result.Name;
+        var originalTitle = mediaType == PremiereMediaType.Movie
+            ? result.OriginalTitle
+            : result.OriginalName;
+        var dateText = mediaType == PremiereMediaType.Movie
+            ? result.ReleaseDate
+            : result.FirstAirDate;
+
+        return (string.Equals(NormalizeTitleForIdentity(title), candidateTitleKey, StringComparison.Ordinal)
+                || string.Equals(NormalizeTitleForIdentity(originalTitle), candidateTitleKey, StringComparison.Ordinal))
+            && TryParseTmdbDate(dateText, out var resultDate)
+            && resultDate.Year == candidateYear;
     }
 
     private async Task<int?> TryFindTmdbIdAsync(
@@ -2186,7 +2521,65 @@ public sealed class PremiereService : IPremiereService
                 : $"{candidate.MediaType}:imdb:{candidate.ImdbId}";
         }
 
-        return $"{candidate.MediaType}:title:{candidate.PremiereDate:yyyyMMdd}:{candidate.Title}";
+        if (!string.IsNullOrWhiteSpace(candidate.ExternalProviderId))
+        {
+            return candidate.IsSeriesEpisode
+                ? $"{candidate.MediaType}:provider:{candidate.Source}:{candidate.ExternalProviderId}:{candidate.PremiereDate:yyyyMMdd}:{candidate.SeasonNumber}:{candidate.EpisodeNumber}"
+                : $"{candidate.MediaType}:provider:{candidate.Source}:{candidate.ExternalProviderId}";
+        }
+
+        var year = CandidateYear(candidate);
+        return $"{candidate.MediaType}:title:{candidate.PremiereDate:yyyyMMdd}:{year}:{NormalizeTitleForIdentity(candidate.Title)}";
+    }
+
+    private static string UnverifiedCanonicalId(ExternalPremiereCandidate candidate, string candidateKey)
+    {
+        var media = candidate.MediaType == PremiereMediaType.Movie ? "movie" : "series";
+        var titleSegment = SlugForCanonicalId(candidate.Title);
+        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(candidateKey));
+        var hash = Convert.ToHexString(hashBytes)[..16].ToLowerInvariant();
+        return $"unverified:{media}:{titleSegment}:{hash}";
+    }
+
+    private static string SlugForCanonicalId(string? value)
+    {
+        var normalized = NormalizeTitleForIdentity(value).ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return "external";
+        }
+
+        return normalized.Length <= 48 ? normalized : normalized[..48];
+    }
+
+    private static string NormalizeTitleForIdentity(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value.Normalize(NormalizationForm.FormD))
+        {
+            var category = CharUnicodeInfo.GetUnicodeCategory(character);
+            if (category == UnicodeCategory.NonSpacingMark)
+            {
+                continue;
+            }
+
+            if (char.IsLetterOrDigit(character))
+            {
+                builder.Append(char.ToUpperInvariant(character));
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static string? NormalizeExternalId(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
     private static bool CandidateMatchesKnownRequestFilters(
@@ -2370,13 +2763,21 @@ public sealed class PremiereService : IPremiereService
     {
         var total = Math.Max(0, candidateCount);
         var completed = Math.Clamp(batch.CompletedWork ?? total, 0, Math.Max(1, total));
+        var unmapped = CountUnverified(batch.Items);
+        var progressText = total == 1
+            ? "resolved 1 of 1 candidate"
+            : $"resolved {completed:N0} of {total:N0} candidates";
+        if (unmapped > 0)
+        {
+            progressText = $"{progressText} · {unmapped:N0} unverified";
+        }
+
         return batch with
         {
             CompletedWork = completed,
             TotalWork = total,
-            ProgressText = total == 1
-                ? "resolved 1 of 1 candidate"
-                : $"resolved {completed:N0} of {total:N0} candidates"
+            ProgressText = progressText,
+            UnmappedCount = unmapped
         };
     }
 
@@ -3348,7 +3749,8 @@ public sealed class PremiereService : IPremiereService
         IReadOnlyList<PremiereItem> Items,
         int? CompletedWork = null,
         int? TotalWork = null,
-        string? ProgressText = null);
+        string? ProgressText = null,
+        int? UnmappedCount = null);
 
     private sealed record PremiereSourceBatch(
         string Name,
@@ -3358,5 +3760,6 @@ public sealed class PremiereService : IPremiereService
         int? TotalWork = null,
         string? ProgressText = null,
         long? ElapsedMilliseconds = null,
-        bool IsComplete = false);
+        bool IsComplete = false,
+        int? UnmappedCount = null);
 }

@@ -141,6 +141,23 @@ public static class TmdbQueryBuilder
         });
     }
 
+    public static string BuildSearchTitlePath(
+        PremiereCalendar.Models.PremiereMediaType mediaType,
+        string query,
+        int? year)
+    {
+        var isMovie = mediaType == PremiereCalendar.Models.PremiereMediaType.Movie;
+        return BuildPath(isMovie ? "search/movie" : "search/tv", new Dictionary<string, string?>
+        {
+            ["query"] = query,
+            [isMovie ? "year" : "first_air_date_year"] = year is > 0
+                ? year.Value.ToString(CultureInfo.InvariantCulture)
+                : null,
+            ["include_adult"] = "false",
+            ["page"] = "1"
+        });
+    }
+
     public static string BuildCountriesPath()
     {
         return BuildPath("configuration/countries", new Dictionary<string, string?>

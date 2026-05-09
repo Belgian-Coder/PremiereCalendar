@@ -1130,6 +1130,36 @@ h1:focus {
     align-items: start;
 }
 
+.unverified-day-section {
+    margin-top: 1rem;
+}
+
+.unverified-day-separator {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin: 0 0 0.7rem;
+    padding-top: 0.85rem;
+    border-top: 1px dashed color-mix(in srgb, var(--amber) 70%, transparent);
+    color: var(--muted);
+    font-size: 0.84rem;
+    font-weight: 800;
+}
+
+.unverified-day-separator span {
+    color: #8a6f20;
+    text-transform: uppercase;
+}
+
+.unverified-day-separator small {
+    padding: 0.14rem 0.4rem;
+    border-radius: 999px;
+    background: var(--amber-soft);
+    color: #8a5620;
+}
+
 .day-virtualized-list {
     display: grid;
     gap: 0.85rem;
@@ -1200,6 +1230,11 @@ h1:focus {
     box-shadow: 0 2px 12px rgba(13, 118, 109, 0.13);
 }
 
+.premiere-card.unverified-card {
+    border-left-color: #8a6f20;
+    background: color-mix(in srgb, var(--surface-strong) 88%, #f1c84b 12%);
+}
+
 .poster-frame {
     width: 104px;
     aspect-ratio: 2 / 3;
@@ -1248,6 +1283,17 @@ h1:focus {
     padding: 0.18rem 0.5rem;
     border-radius: 4px;
     background: var(--teal);
+    color: white;
+    font-size: 0.7rem;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+
+.verification-badge {
+    width: fit-content;
+    padding: 0.18rem 0.5rem;
+    border-radius: 4px;
+    background: #8a6f20;
     color: white;
     font-size: 0.7rem;
     font-weight: 800;
@@ -1446,6 +1492,13 @@ h1:focus {
     white-space: normal;
 }
 
+.verification-note {
+    margin: 0.45rem 0 0;
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 750;
+}
+
 .links a,
 .links span {
     padding: 0.25rem 0.45rem;
@@ -1560,6 +1613,11 @@ html[data-theme="dark"] .premiere-card.series-card {
     border-left-color: var(--teal);
     background: linear-gradient(90deg, rgba(20, 59, 56, 0.98) 0%, rgba(31, 43, 54, 0.96) 48%, rgba(23, 33, 43, 0.96) 100%);
     box-shadow: 0 2px 14px rgba(0, 0, 0, 0.28);
+}
+
+html[data-theme="dark"] .premiere-card.unverified-card {
+    border-left-color: #d7aa41;
+    background: linear-gradient(90deg, rgba(76, 57, 16, 0.72) 0%, rgba(31, 43, 54, 0.96) 48%, rgba(23, 33, 43, 0.96) 100%);
 }
 
 html[data-theme="dark"] .movie-card .card-title-row h3,

@@ -91,7 +91,8 @@ public sealed class TraktDiscoveryProvider : IStreamingPremiereDiscoveryProvider
             item.Movie?.Ids?.Tmdb,
             item.Movie?.Ids?.Imdb,
             item.Movie?.Ids?.Tvdb,
-            "Trakt");
+            "Trakt",
+            ReleaseYear: date.Year);
     }
 
     private static ExternalPremiereCandidate? ToShowCandidate(TraktShowCalendarItem item)
@@ -109,7 +110,8 @@ public sealed class TraktDiscoveryProvider : IStreamingPremiereDiscoveryProvider
             item.Show?.Ids?.Imdb,
             item.Show?.Ids?.Tvdb,
             "Trakt",
-            SeriesPremiereDate: date);
+            SeriesPremiereDate: date,
+            ReleaseYear: date.Year);
     }
 
     private static bool TryParseDate(string? value, out DateOnly date)

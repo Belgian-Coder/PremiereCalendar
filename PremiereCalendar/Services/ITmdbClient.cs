@@ -50,6 +50,13 @@ public interface ITmdbClient
         CancellationToken cancellationToken,
         bool forceRefresh = false);
 
+    Task<IReadOnlyList<TmdbTitleSearchResult>> SearchTitlesAsync(
+        PremiereMediaType mediaType,
+        string query,
+        int? year,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false);
+
     Task<IReadOnlyList<TmdbGenre>> GetGenresAsync(PremiereMediaType mediaType, CancellationToken cancellationToken, bool forceRefresh = false);
 
     Task<IReadOnlyList<TmdbConfigurationLanguage>> GetLanguagesAsync(CancellationToken cancellationToken, bool forceRefresh = false);

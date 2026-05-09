@@ -297,9 +297,15 @@ public static class PremiereFilter
                 .ThenBy(item => item.PremiereDate)
                 .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase),
             _ => SortBy(items, sortDirection, item => item.PremiereDate)
+                .ThenBy(VerificationSortRank)
                 .ThenBy(item => item.MediaType)
                 .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
         };
+    }
+
+    private static int VerificationSortRank(PremiereItem item)
+    {
+        return item.VerificationState == PremiereVerificationState.Unverified ? 1 : 0;
     }
 
     private static IOrderedEnumerable<PremiereItem> SortBy<TKey>(

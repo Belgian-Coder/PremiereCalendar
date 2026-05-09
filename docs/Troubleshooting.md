@@ -32,7 +32,7 @@ If a value looks correct in `appsettings.json` but not in the app, the SQLite va
 | TMDb | Required | V4 read token | Canonical movie/series identity, discovery, details, posters, trailers, watch providers | Memory cache plus persisted week cache | Without it, live discovery cannot work | Calendar discovery |
 | TVmaze | Enabled | None | TV enrichment, series-only schedule candidates, fallback TV image | 60-minute schedule cache, 7-day enrichment/image cache | Skipped candidates or `0 cards` source chip on series/all views | Calendar discovery / artwork |
 | Trakt | Enabled when client ID exists | Client ID | Movie and new-show calendar candidates | Memory cache | Source chip can fail without dropping TMDb rows | Calendar discovery |
-| Watchmode | Disabled until key | API key | Streaming availability and release candidates | Memory cache, coalesced misses | Source fallback is skipped; cards remain | Streaming availability / calendar discovery |
+| Watchmode | Disabled until key | API key | Streaming availability fallback only | Memory cache, coalesced misses | Availability fallback is skipped; cards remain | Streaming availability |
 | SIMKL | Disabled until OAuth token | Client ID, client secret, OAuth access token | Account/library sync state only | Activity-gated sync state cache | Sync remains idle until authorized | Watch-state sync |
 | OMDb | Disabled | API key | IMDb, Rotten Tomatoes, Metacritic, plot, poster candidate | 7-day memory cache | Scores show `n/a`; poster fallback skipped | Score provider |
 | Fanart.tv | Disabled until key | API key | Artwork-only fallback | 7-day memory cache | Artwork provider skipped | Artwork provider |
@@ -43,16 +43,15 @@ If a value looks correct in `appsettings.json` but not in the app, the SQLite va
 
 ## Source Merge
 
-TMDb remains canonical. External discovery providers may add candidates, but only TMDb-backed candidates become cards. Equivalent external candidates are collapsed before rendering, and provider/source names are unioned.
+TMDb remains canonical. External discovery providers may add candidates. TMDb-mapped candidates become verified cards; candidates that cannot map yet are retained as unverified external cards below verified results. Equivalent external candidates are collapsed before rendering, and provider/source names are unioned.
 
 ```mermaid
 flowchart TD
     Tmdb["TMDb discover rows"] --> Normalize["Normalize to PremiereItem"]
     Trakt["Trakt candidates"] --> Candidate["External candidate gate"]
     Tvmaze["TVmaze schedule candidates"] --> Candidate
-    Watchmode["Watchmode release candidates"] --> Candidate
     Candidate --> HasId{"Has or resolves to TMDb ID?"}
-    HasId -- "No" --> Skip["Skip candidate"]
+    HasId -- "No" --> Unverified["Render as unverified external card"]
     HasId -- "Yes" --> Map["Fetch/merge TMDb-backed details"]
     Normalize --> Merge["Canonical merge by TMDb identity"]
     Map --> Merge

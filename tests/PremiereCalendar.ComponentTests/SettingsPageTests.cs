@@ -222,7 +222,11 @@ public sealed class SettingsPageTests : BunitContext
             var discovery = component.Find("[aria-label='Movie and series provider settings']").TextContent;
             Assert.Contains("TMDb: Configured", discovery);
             Assert.Contains("Trakt: Needs setup", discovery);
-            Assert.Contains("Watchmode releases: Configured", discovery);
+            Assert.DoesNotContain("Watchmode releases", discovery);
+
+            var availability = component.Find("[aria-label='Watch availability provider settings']").TextContent;
+            Assert.Contains("Watchmode availability: Configured", availability);
+            Assert.Contains("Used only as a fallback for streaming availability", availability);
 
             var scores = component.Find("[aria-label='Score provider settings']").TextContent;
             Assert.Contains("OMDb: Disabled", scores);

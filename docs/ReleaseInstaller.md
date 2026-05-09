@@ -2,7 +2,7 @@
 
 Premiere Calendar ships as a self-contained Windows x64 release zip. The target machine does not need a separate .NET runtime because the release package includes the runtime files produced by `dotnet publish --self-contained true`.
 
-The installer is designed for a Windows VM or LAN machine that hosts the app as a Windows Service.
+The installer is designed for a Windows machine that hosts the app as a Windows Service.
 
 ## Build A Release Package
 
@@ -96,8 +96,8 @@ Pass a secret parameter again when you want to rotate it:
 ```powershell
 .\Install-PremiereCalendar.ps1 `
   -Port 8080 `
-  -InstallDirectory 'D:\Apps\PremiereCalendar' `
-  -DataDirectory 'D:\Data\PremiereCalendar'
+  -InstallDirectory '<install-directory>' `
+  -DataDirectory '<data-directory>'
 ```
 
 When the port changes, the installer updates `ASPNETCORE_URLS`, the app `Urls` setting, and the Windows firewall rule.

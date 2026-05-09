@@ -389,7 +389,9 @@ public sealed class WatchmodeClientIntegrationTests
             {
                 Enabled = true,
                 ApiKey = apiKey,
-                Regions = ["BE", "NL"]
+                Regions = ["BE", "NL"],
+                EnableReleaseDiscovery = true,
+                EnableAvailabilityEnrichment = true
             }));
     }
 }

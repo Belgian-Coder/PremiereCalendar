@@ -1734,7 +1734,7 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
-    public async Task GetPremieresAsync_SkipsExternalDiscoveryRowsThatCannotResolveToTmdb()
+    public async Task GetPremieresAsync_KeepsExternalDiscoveryRowsThatCannotResolveToTmdbAsUnverified()
     {
         var tmdb = new FakeTmdbClient();
         var discovery = new FakeDiscoveryProvider
@@ -1761,9 +1761,303 @@ public sealed class PremiereServiceTests
             CancellationToken.None,
             filters: NewSeriesOnlyFilters());
 
-        Assert.Empty(items);
+        var item = Assert.Single(items);
+        Assert.Equal(PremiereVerificationState.Unverified, item.VerificationState);
+        Assert.StartsWith("unverified:series:", item.CanonicalId, StringComparison.Ordinal);
+        Assert.Equal("Unmapped Show", item.Title);
+        Assert.Equal(new DateOnly(2026, 5, 4), item.PremiereDate);
+        Assert.Equal(0, item.TmdbId);
+        Assert.Equal("Could not match to TMDb yet", item.VerificationNote);
+        Assert.Contains("Fake", item.SourceNames);
         Assert.Contains(tmdb.FindCalls, call => call.ExternalSource == "tvdb_id" && call.ExternalId == "9000");
         Assert.Contains(tmdb.FindCalls, call => call.ExternalSource == "imdb_id" && call.ExternalId == "tt-unmapped");
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_CollapsesEquivalentUnverifiedExternalCandidatesAndUnionsSources()
+    {
+        var tmdb = new FakeTmdbClient();
+        var discovery = new FakeDiscoveryProvider
+        {
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Unmapped Movie",
+                    null,
+                    null,
+                    null,
+                    "Watchmode",
+                    ExternalProviderId: "watchmode-1"),
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Unmapped Movie",
+                    null,
+                    null,
+                    null,
+                    "Trakt",
+                    ExternalProviderId: "trakt-2")
+            ]
+        };
+        var service = CreateService(
+            tmdb,
+            discoveryProviders: [discovery]);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(PremiereVerificationState.Unverified, item.VerificationState);
+        Assert.Equal("Unmapped Movie", item.Title);
+        Assert.Contains("Watchmode", item.SourceNames);
+        Assert.Contains("Trakt", item.SourceNames);
+        Assert.Contains(item.Sources, source => source.Name == "Watchmode" && source.Kind == "schedule");
+        Assert.Contains(item.Sources, source => source.Name == "Trakt" && source.Kind == "schedule");
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_SuppressesUnverifiedExternalCandidateMatchingVerifiedTitleAndDate()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            MovieItems =
+            [
+                new TmdbMovieDiscoverItem
+                {
+                    Id = 72,
+                    Title = "Shared Title",
+                    OriginalTitle = "Shared Title",
+                    ReleaseDate = "2026-05-04",
+                    PrimaryReleaseDate = "2026-05-04",
+                    OriginalLanguage = "en"
+                }
+            ]
+        };
+        var discovery = new FakeDiscoveryProvider
+        {
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Shared Title",
+                    null,
+                    null,
+                    null,
+                    "Watchmode")
+            ]
+        };
+        var service = CreateService(
+            tmdb,
+            discoveryProviders: [discovery]);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(PremiereVerificationState.Verified, item.VerificationState);
+        Assert.Equal("movie:72", item.CanonicalId);
+        Assert.Contains("Watchmode", item.SourceNames);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_SuppressesUnverifiedExternalCandidateMatchingVerifiedImdbId()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            MovieItems =
+            [
+                new TmdbMovieDiscoverItem
+                {
+                    Id = 76,
+                    Title = "Verified IMDb Movie",
+                    OriginalTitle = "Verified IMDb Movie",
+                    ReleaseDate = "2026-05-04",
+                    PrimaryReleaseDate = "2026-05-04",
+                    OriginalLanguage = "en"
+                }
+            ]
+        };
+        tmdb.MovieDetailsById[76] = new TmdbDetailsWithExtras
+        {
+            Id = 76,
+            ExternalIds = new TmdbExternalIds { ImdbId = "tt-shared-imdb" }
+        };
+        var discovery = new FakeDiscoveryProvider
+        {
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Provider IMDb Movie",
+                    null,
+                    "tt-shared-imdb",
+                    null,
+                    "Watchmode")
+            ]
+        };
+        var service = CreateService(
+            tmdb,
+            discoveryProviders: [discovery]);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(PremiereVerificationState.Verified, item.VerificationState);
+        Assert.Equal("movie:76", item.CanonicalId);
+        Assert.Equal("tt-shared-imdb", item.ImdbId);
+        Assert.Contains("Watchmode", item.SourceNames);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_StrictTitleSearchResolvesSingleExternalCandidateMatch()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            MovieTitleSearchResults =
+            [
+                new TmdbTitleSearchResult
+                {
+                    Id = 73,
+                    Title = "Fallback Movie",
+                    OriginalTitle = "Fallback Movie",
+                    ReleaseDate = "2026-05-04"
+                }
+            ]
+        };
+        var discovery = new FakeDiscoveryProvider
+        {
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Fallback Movie",
+                    null,
+                    null,
+                    null,
+                    "Watchmode")
+            ]
+        };
+        var service = CreateService(
+            tmdb,
+            discoveryProviders: [discovery]);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(PremiereVerificationState.Verified, item.VerificationState);
+        Assert.Equal("movie:73", item.CanonicalId);
+        Assert.Equal(73, item.TmdbId);
+        Assert.Contains(tmdb.TitleSearchCalls, call =>
+            call.MediaType == PremiereMediaType.Movie
+            && call.Query == "Fallback Movie"
+            && call.Year == 2026);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_StrictTitleSearchKeepsAmbiguousExternalCandidateUnverified()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            MovieTitleSearchResults =
+            [
+                new TmdbTitleSearchResult
+                {
+                    Id = 74,
+                    Title = "Ambiguous Movie",
+                    OriginalTitle = "Ambiguous Movie",
+                    ReleaseDate = "2026-05-04"
+                },
+                new TmdbTitleSearchResult
+                {
+                    Id = 75,
+                    Title = "Ambiguous Movie",
+                    OriginalTitle = "Ambiguous Movie",
+                    ReleaseDate = "2026-07-01"
+                }
+            ]
+        };
+        var discovery = new FakeDiscoveryProvider
+        {
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Ambiguous Movie",
+                    null,
+                    null,
+                    null,
+                    "Watchmode")
+            ]
+        };
+        var service = CreateService(
+            tmdb,
+            discoveryProviders: [discovery]);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(PremiereVerificationState.Unverified, item.VerificationState);
+        Assert.Equal(0, item.TmdbId);
+        Assert.StartsWith("unverified:movie:", item.CanonicalId, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_WritesUnverifiedExternalCardsToWeekCache()
+    {
+        var cache = new FakeCalendarCache();
+        var discovery = new FakeDiscoveryProvider
+        {
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Cached Unverified Movie",
+                    null,
+                    null,
+                    null,
+                    "Watchmode")
+            ]
+        };
+        var service = CreateService(
+            new FakeTmdbClient(),
+            discoveryProviders: [discovery],
+            calendarCache: cache);
+
+        await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var setCall = Assert.Single(cache.SetCalls);
+        var item = Assert.Single(setCall.Items);
+        Assert.Equal(PremiereVerificationState.Unverified, item.VerificationState);
+        Assert.Equal("Cached Unverified Movie", item.Title);
     }
 
     [Fact]
@@ -1809,8 +2103,13 @@ public sealed class PremiereServiceTests
             progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
             filters: NewSeriesOnlyFilters());
 
-        var item = Assert.Single(items);
-        Assert.Equal("Resolved Show", item.Title);
+        Assert.Equal(2, items.Count);
+        Assert.Contains(items, item =>
+            item.Title == "Resolved Show"
+            && item.VerificationState == PremiereVerificationState.Verified);
+        Assert.Contains(items, item =>
+            item.Title == "Timed Out Show"
+            && item.VerificationState == PremiereVerificationState.Unverified);
         Assert.DoesNotContain(reports, report => report.HasSourceErrors);
         Assert.Contains(tmdb.FindCalls, call => call.ExternalId == "9001");
         Assert.Contains(tmdb.FindCalls, call => call.ExternalId == "9002");
@@ -3003,6 +3302,9 @@ public sealed class PremiereServiceTests
         public ConcurrentBag<DiscoverCall> TvCalls { get; } = [];
         public ConcurrentBag<NetworkDiscoverCall> TvNetworkCalls { get; } = [];
         public ConcurrentBag<DiscoverCall> MovieCalls { get; } = [];
+        public IReadOnlyList<TmdbTitleSearchResult> MovieTitleSearchResults { get; init; } = [];
+        public IReadOnlyList<TmdbTitleSearchResult> TvTitleSearchResults { get; init; } = [];
+        public ConcurrentBag<TitleSearchCall> TitleSearchCalls { get; } = [];
         private int _activeMovieDiscoveries;
         private int _maxConcurrentMovieDiscoveries;
         public int MaxConcurrentMovieDiscoveries => _maxConcurrentMovieDiscoveries;
@@ -3185,6 +3487,19 @@ public sealed class PremiereServiceTests
             }
 
             return Task.FromResult(FindResults.GetValueOrDefault((mediaType, externalSource, externalId)));
+        }
+
+        public Task<IReadOnlyList<TmdbTitleSearchResult>> SearchTitlesAsync(
+            PremiereMediaType mediaType,
+            string query,
+            int? year,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            TitleSearchCalls.Add(new TitleSearchCall(mediaType, query, year, forceRefresh));
+            return Task.FromResult(mediaType == PremiereMediaType.Movie
+                ? MovieTitleSearchResults
+                : TvTitleSearchResults);
         }
 
         public Task<IReadOnlyList<TmdbGenre>> GetGenresAsync(PremiereMediaType mediaType, CancellationToken cancellationToken, bool forceRefresh = false)
@@ -3383,6 +3698,8 @@ public sealed class PremiereServiceTests
     public sealed record TvmazeScheduleCall(DateOnly Date, string? Country, bool WebSchedule, bool ForceRefresh);
 
     public sealed record FindCall(PremiereMediaType MediaType, string ExternalId, string ExternalSource, bool ForceRefresh);
+
+    public sealed record TitleSearchCall(PremiereMediaType MediaType, string Query, int? Year, bool ForceRefresh);
 
     public sealed record WatchmodeSourceCall(
         PremiereMediaType MediaType,
