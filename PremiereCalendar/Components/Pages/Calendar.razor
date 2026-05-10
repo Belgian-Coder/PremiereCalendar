@@ -359,7 +359,7 @@
             || _viewSyncOverview?.Device.SyncEnabled != true
             || string.IsNullOrWhiteSpace(_viewSyncDeviceId)
             || routeKey is null
-            || HasAnyQuery(location)
+            || HasMeaningfulFilterQuery(location)
             || await ViewSyncService.GetLatestStateForDeviceAsync(
                 _viewSyncDeviceId,
                 routeKey,

@@ -104,16 +104,25 @@ public sealed class ViewSyncService : IViewSyncService
         CancellationToken cancellationToken)
     {
         var groups = await _store.GetGroupsAsync(cancellationToken);
-        var groupDevices = string.IsNullOrWhiteSpace(device.GroupId)
-            ? []
-            : await _store.GetGroupDevicesAsync(device.GroupId, cancellationToken);
+        var groupOverviews = new List<ViewSyncGroupOverview>(groups.Count);
+        foreach (var group in groups)
+        {
+            groupOverviews.Add(new ViewSyncGroupOverview(
+                group,
+                await _store.GetGroupDevicesAsync(group.GroupId, cancellationToken),
+                await _store.GetGroupStatesAsync(group.GroupId, cancellationToken)));
+        }
+
+        var currentGroupOverview = string.IsNullOrWhiteSpace(device.GroupId)
+            ? null
+            : groupOverviews.FirstOrDefault(group =>
+                string.Equals(group.Group.GroupId, device.GroupId, StringComparison.Ordinal));
+        var groupDevices = currentGroupOverview?.Devices ?? [];
         var groupState = string.IsNullOrWhiteSpace(device.GroupId)
             ? null
             : await _store.GetGroupStateAsync(device.GroupId, cancellationToken);
-        var groupStates = string.IsNullOrWhiteSpace(device.GroupId)
-            ? []
-            : await _store.GetGroupStatesAsync(device.GroupId, cancellationToken);
+        var groupStates = currentGroupOverview?.States ?? [];
 
-        return new ViewSyncOverview(device, groups, groupDevices, groupState, groupStates);
+        return new ViewSyncOverview(device, groups, groupDevices, groupState, groupStates, groupOverviews);
     }
 }

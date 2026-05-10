@@ -69,6 +69,39 @@ public sealed class ViewSyncServiceTests
         }
     }
 
+    [Fact]
+    public async Task GetOverviewAsync_ReturnsDevicesAndRouteStatesGroupedByGroup()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var service = CreateService(root, new TestTimeProvider(DateTimeOffset.Parse("2026-05-10T10:00:00Z")));
+            var livingRoom = await service.CreateGroupAsync("Living room", CancellationToken.None);
+            var bedroom = await service.CreateGroupAsync("Bedroom", CancellationToken.None);
+            await service.SaveDeviceAsync("device-a", "Office PC", syncEnabled: true, livingRoom.GroupId, CancellationToken.None);
+            await service.SaveDeviceAsync("device-b", "Kitchen tablet", syncEnabled: true, livingRoom.GroupId, CancellationToken.None);
+            await service.SaveDeviceAsync("device-c", "Bedroom TV", syncEnabled: true, bedroom.GroupId, CancellationToken.None);
+            await service.PublishUrlAsync("device-b", "/series?week=2026-05-04&day=2026-05-05", CancellationToken.None);
+            await service.PublishUrlAsync("device-c", "/movies?week=2026-05-11&day=2026-05-12", CancellationToken.None);
+
+            var overview = await service.GetOverviewAsync("device-a", CancellationToken.None);
+
+            Assert.Equal(2, overview.GroupOverviews?.Count);
+            var livingRoomOverview = Assert.Single(overview.GroupOverviews!, group => group.Group.GroupId == livingRoom.GroupId);
+            var bedroomOverview = Assert.Single(overview.GroupOverviews!, group => group.Group.GroupId == bedroom.GroupId);
+            Assert.Contains(livingRoomOverview.Devices, device => device.DisplayName == "Office PC");
+            Assert.Contains(livingRoomOverview.Devices, device => device.DisplayName == "Kitchen tablet");
+            Assert.Contains(livingRoomOverview.States, state => state.RelativeUrl == "/series?week=2026-05-04&day=2026-05-05");
+            Assert.Contains(bedroomOverview.Devices, device => device.DisplayName == "Bedroom TV");
+            Assert.Contains(bedroomOverview.States, state => state.RelativeUrl == "/movies?week=2026-05-11&day=2026-05-12");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            TryDelete(root);
+        }
+    }
+
     private static ViewSyncService CreateService(string root, TimeProvider timeProvider)
     {
         return new ViewSyncService(

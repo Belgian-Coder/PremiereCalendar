@@ -92,7 +92,8 @@ public static class FilterStorageQueryComposer
 
     private static bool IsNavigationOnlyKey(string key)
     {
-        return key.Equals("week", StringComparison.OrdinalIgnoreCase);
+        return key.Equals("week", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("day", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsDefaultFilterValue(string key, string? value)

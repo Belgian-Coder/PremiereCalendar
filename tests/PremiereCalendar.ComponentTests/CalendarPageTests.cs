@@ -1361,7 +1361,7 @@ public sealed class CalendarPageTests : BunitContext
         JSInterop.Setup<string?>(
                 "premiereFilterStorage.get",
                 "premiere-calendar:filters:v2:series")
-            .SetResult("week=2026-05-04&day=2026-05-05&seriesLang=nl");
+            .SetResult("seriesLang=nl");
         var navigation = Services.GetRequiredService<NavigationManager>();
         _viewSyncService.SetGroupState(new ViewSyncGroupState(
             "group-a",
@@ -1381,6 +1381,57 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Contains("day=2026-05-19", navigation.Uri);
             Assert.Contains("seriesLang=en", navigation.Uri);
             Assert.DoesNotContain("seriesLang=nl", navigation.Uri);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_NavigationOnlyUrlPrefersGroupStateOverLocalSavedFilters()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        JSInterop.Setup<string?>(
+                "premiereFilterStorage.get",
+                "premiere-calendar:filters:v2:series")
+            .SetResult("seriesLang=nl");
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        _viewSyncService.SetGroupState(new ViewSyncGroupState(
+            "group-a",
+            "series",
+            "/series?week=2026-05-18&day=2026-05-19&seriesLang=en",
+            4,
+            DateTimeOffset.Parse("2026-05-10T10:00:00Z"),
+            "device-b",
+            "Office PC"));
+        navigation.NavigateTo("/series?week=2026-05-04&day=2026-05-05");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("week=2026-05-18", navigation.Uri);
+            Assert.Contains("day=2026-05-19", navigation.Uri);
+            Assert.Contains("seriesLang=en", navigation.Uri);
+            Assert.DoesNotContain("seriesLang=nl", navigation.Uri);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_PlainCalendarUrlFallsBackToLocalSavedFiltersWhenGroupRouteIsMissing()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        JSInterop.Setup<string?>(
+                "premiereFilterStorage.get",
+                "premiere-calendar:filters:v2:series")
+            .SetResult("week=2026-05-04&day=2026-05-05&seriesLang=nl");
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("seriesLang=nl", navigation.Uri);
         });
     }
 

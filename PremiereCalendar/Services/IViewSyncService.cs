@@ -5,7 +5,13 @@ public sealed record ViewSyncOverview(
     IReadOnlyList<ViewSyncGroup> Groups,
     IReadOnlyList<ViewSyncDevice> GroupDevices,
     ViewSyncGroupState? GroupState,
-    IReadOnlyList<ViewSyncGroupState>? GroupStates = null);
+    IReadOnlyList<ViewSyncGroupState>? GroupStates = null,
+    IReadOnlyList<ViewSyncGroupOverview>? GroupOverviews = null);
+
+public sealed record ViewSyncGroupOverview(
+    ViewSyncGroup Group,
+    IReadOnlyList<ViewSyncDevice> Devices,
+    IReadOnlyList<ViewSyncGroupState> States);
 
 public sealed record ViewSyncStateChangedEventArgs(
     string GroupId,

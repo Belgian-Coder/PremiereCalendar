@@ -94,6 +94,8 @@ This is why changing `appsettings.json` may not change the running app after you
 
 View sync is off until a browser joins a group in Settings.
 
+Settings shows one block per group. Each block shows the attached browsers and the latest saved All, Series, and Movies URLs. The current browser has a `me` badge.
+
 | Problem | Try this |
 | --- | --- |
 | Another computer does not follow | Check both browsers use the same View sync group |
@@ -101,6 +103,7 @@ View sync is off until a browser joins a group in Settings.
 | You want to stop syncing | Click Ungroup this device |
 | A copied URL does not follow the group | URLs with filters are treated as intentional and become the newest group view |
 | Series does not follow Movies | This is expected. All, Series, and Movies sync separately |
+| Local filters appear instead | The group has no saved URL for that route, or this browser is not in a group |
 
 Only `/`, `/series`, and `/movies` URLs are synced. Settings, About, and external links are ignored.
 

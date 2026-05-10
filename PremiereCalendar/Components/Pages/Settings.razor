@@ -98,42 +98,78 @@
                                 </button>
                             </div>
 
-                            @if (!string.IsNullOrWhiteSpace(_selectedViewSyncGroupId))
+                            @if (_viewSyncGroupOverviews.Count > 0)
                             {
-                                <div class="view-sync-routes" aria-label="Latest synced calendar routes">
-                                    @foreach (var route in ViewSyncRouteSummaries())
+                                <section class="view-sync-groups" aria-label="View sync groups">
+                                    <div class="view-sync-groups-heading">
+                                        <strong>Groups and synced URLs</strong>
+                                        <small>Devices in the same group follow that group's latest calendar URLs.</small>
+                                    </div>
+                                    @foreach (var groupOverview in _viewSyncGroupOverviews)
                                     {
-                                        <div class="view-sync-route-row">
-                                            <strong>@route.Label</strong>
-                                            @if (route.State is { } state)
+                                        var isSelectedGroup = IsSelectedViewSyncGroup(groupOverview.Group);
+                                        <article class="@ViewSyncGroupBlockClass(groupOverview.Group)" aria-label="@($"View sync group {groupOverview.Group.Name}")">
+                                            <div class="view-sync-group-header">
+                                                <div>
+                                                    <h3>@groupOverview.Group.Name</h3>
+                                                    <small>@(groupOverview.Devices.Count == 1 ? "1 device" : $"{groupOverview.Devices.Count.ToString("N0", CultureInfo.InvariantCulture)} devices")</small>
+                                                </div>
+                                                @if (isSelectedGroup)
+                                                {
+                                                    <span class="integration-status online">Current group</span>
+                                                }
+                                                else
+                                                {
+                                                    <button type="button"
+                                                            class="tool-button settings-secondary"
+                                                            aria-label="@($"Select view sync group {groupOverview.Group.Name}")"
+                                                            @onclick="() => SelectViewSyncGroup(groupOverview.Group.GroupId)">
+                                                        Select group
+                                                    </button>
+                                                }
+                                            </div>
+
+                                            @if (groupOverview.Devices.Count > 0)
                                             {
-                                                <span>@state.RelativeUrl</span>
-                                                <small>By @state.UpdatedByDeviceName · @FormatViewSyncLastSeen(state.UpdatedUtc)</small>
+                                                <div class="view-sync-device-list" aria-label="@($"Devices in {groupOverview.Group.Name}")">
+                                                    @foreach (var device in groupOverview.Devices)
+                                                    {
+                                                        <span>
+                                                            <strong>@device.DisplayName</strong>
+                                                            @if (IsCurrentViewSyncDevice(device))
+                                                            {
+                                                                <em class="view-sync-me-badge" data-testid="view-sync-me-badge">me</em>
+                                                            }
+                                                            <small>@FormatViewSyncLastSeen(device.LastSeenUtc)</small>
+                                                        </span>
+                                                    }
+                                                </div>
                                             }
                                             else
                                             {
-                                                <span class="muted">Not synced yet</span>
+                                                <p class="settings-help">No devices are attached to this group yet.</p>
                                             }
-                                        </div>
-                                    }
-                                </div>
-                            }
 
-                            @if (_viewSyncGroupDevices.Count > 0)
-                            {
-                                <div class="settings-options-list" aria-label="Devices in view sync group">
-                                    @foreach (var device in _viewSyncGroupDevices)
-                                    {
-                                        <span>
-                                            @device.DisplayName
-                                            @if (IsCurrentViewSyncDevice(device))
-                                            {
-                                                <strong class="view-sync-me-badge" data-testid="view-sync-me-badge">me</strong>
-                                            }
-                                            · @FormatViewSyncLastSeen(device.LastSeenUtc)
-                                        </span>
+                                            <div class="view-sync-routes" aria-label="@(isSelectedGroup ? "Latest synced calendar routes" : $"Latest synced calendar routes for {groupOverview.Group.Name}")">
+                                                @foreach (var route in ViewSyncRouteSummaries(groupOverview.States))
+                                                {
+                                                    <div class="view-sync-route-row">
+                                                        <strong>@route.Label</strong>
+                                                        @if (route.State is { } state)
+                                                        {
+                                                            <span>@state.RelativeUrl</span>
+                                                            <small>By @state.UpdatedByDeviceName · @FormatViewSyncLastSeen(state.UpdatedUtc)</small>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="muted">Not synced yet</span>
+                                                        }
+                                                    </div>
+                                                }
+                                            </div>
+                                        </article>
                                     }
-                                </div>
+                                </section>
                             }
                         </div>
 
@@ -644,6 +680,7 @@
     private IReadOnlyList<ViewSyncGroup> _viewSyncGroups = [];
     private IReadOnlyList<ViewSyncDevice> _viewSyncGroupDevices = [];
     private IReadOnlyList<ViewSyncGroupState> _viewSyncGroupStates = [];
+    private IReadOnlyList<ViewSyncGroupOverview> _viewSyncGroupOverviews = [];
 
     private bool HasSimklAccessToken => !string.IsNullOrWhiteSpace(_settings.Sources.Simkl.AccessToken);
 
@@ -917,20 +954,41 @@
             : overview.GroupState is null
                 ? []
                 : [overview.GroupState];
+        _viewSyncGroupOverviews = overview.GroupOverviews is { Count: > 0 }
+            ? overview.GroupOverviews
+            : BuildFallbackViewSyncGroupOverviews(overview);
     }
 
-    private IEnumerable<ViewSyncRouteSummary> ViewSyncRouteSummaries()
+    private IReadOnlyList<ViewSyncGroupOverview> BuildFallbackViewSyncGroupOverviews(ViewSyncOverview overview)
     {
-        yield return ViewSyncRouteSummaryFor("All", "all");
-        yield return ViewSyncRouteSummaryFor("Movies", "movies");
-        yield return ViewSyncRouteSummaryFor("Series", "series");
+        if (overview.Groups.Count == 0)
+        {
+            return [];
+        }
+
+        return overview.Groups
+            .Select(group => new ViewSyncGroupOverview(
+                group,
+                IsSelectedViewSyncGroup(group) ? _viewSyncGroupDevices : [],
+                IsSelectedViewSyncGroup(group) ? _viewSyncGroupStates : []))
+            .ToArray();
     }
 
-    private ViewSyncRouteSummary ViewSyncRouteSummaryFor(string label, string routeKey)
+    private IEnumerable<ViewSyncRouteSummary> ViewSyncRouteSummaries(IReadOnlyList<ViewSyncGroupState> states)
+    {
+        yield return ViewSyncRouteSummaryFor("All", "all", states);
+        yield return ViewSyncRouteSummaryFor("Movies", "movies", states);
+        yield return ViewSyncRouteSummaryFor("Series", "series", states);
+    }
+
+    private ViewSyncRouteSummary ViewSyncRouteSummaryFor(
+        string label,
+        string routeKey,
+        IReadOnlyList<ViewSyncGroupState> states)
     {
         return new ViewSyncRouteSummary(
             label,
-            _viewSyncGroupStates.FirstOrDefault(state =>
+            states.FirstOrDefault(state =>
                 string.Equals(state.RouteKey, routeKey, StringComparison.OrdinalIgnoreCase)));
     }
 
@@ -939,6 +997,24 @@
     private bool IsCurrentViewSyncDevice(ViewSyncDevice device)
     {
         return string.Equals(device.DeviceId, _viewSyncDeviceId, StringComparison.Ordinal);
+    }
+
+    private bool IsSelectedViewSyncGroup(ViewSyncGroup group)
+    {
+        return string.Equals(group.GroupId, _selectedViewSyncGroupId, StringComparison.Ordinal);
+    }
+
+    private string ViewSyncGroupBlockClass(ViewSyncGroup group)
+    {
+        return IsSelectedViewSyncGroup(group)
+            ? "view-sync-group-block selected"
+            : "view-sync-group-block";
+    }
+
+    private void SelectViewSyncGroup(string groupId)
+    {
+        _selectedViewSyncGroupId = groupId;
+        _viewSyncEnabled = true;
     }
 
     private async Task SaveViewSyncSettingsAsync()

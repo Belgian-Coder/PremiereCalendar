@@ -460,7 +460,7 @@ public sealed class SettingsPageTests : BunitContext
         component.WaitForElement("input[aria-label='New view sync group name']");
         component.WaitForAssertion(() =>
         {
-            var devices = component.Find("[aria-label='Devices in view sync group']");
+            var devices = component.Find("[aria-label='Devices in Living room']");
             Assert.Contains("Office PC", devices.TextContent);
             Assert.Contains("me", devices.TextContent);
             Assert.NotEmpty(component.FindAll("[data-testid='view-sync-me-badge']"));
@@ -538,6 +538,82 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Contains("/movies?week=2026-05-11&day=2026-05-12", routes.TextContent);
             Assert.Contains("Series", routes.TextContent);
             Assert.Contains("/series?week=2026-05-04&day=2026-05-05", routes.TextContent);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_GroupsViewSyncDevicesAndUrlsByGroup()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        var livingRoom = new ViewSyncGroup("group-a", "Living room", DateTimeOffset.Parse("2026-05-10T09:00:00Z"));
+        var bedroom = new ViewSyncGroup("group-b", "Bedroom", DateTimeOffset.Parse("2026-05-10T09:30:00Z"));
+        var currentDevice = new ViewSyncDevice("device-a", "Office PC", true, "group-a", DateTimeOffset.Parse("2026-05-10T10:00:00Z"));
+        _viewSyncService.Overview = new ViewSyncOverview(
+            currentDevice,
+            [livingRoom, bedroom],
+            [currentDevice],
+            null,
+            [],
+            [
+                new ViewSyncGroupOverview(
+                    livingRoom,
+                    [
+                        currentDevice,
+                        new ViewSyncDevice("device-b", "Kitchen tablet", true, "group-a", DateTimeOffset.Parse("2026-05-10T10:02:00Z"))
+                    ],
+                    [
+                        new ViewSyncGroupState(
+                            "group-a",
+                            "all",
+                            "/?week=2026-05-04&day=2026-05-04",
+                            1,
+                            DateTimeOffset.Parse("2026-05-10T10:01:00Z"),
+                            "device-b",
+                            "Kitchen tablet"),
+                        new ViewSyncGroupState(
+                            "group-a",
+                            "series",
+                            "/series?week=2026-05-04&day=2026-05-05",
+                            2,
+                            DateTimeOffset.Parse("2026-05-10T10:03:00Z"),
+                            "device-a",
+                            "Office PC")
+                    ]),
+                new ViewSyncGroupOverview(
+                    bedroom,
+                    [new ViewSyncDevice("device-c", "Bedroom TV", true, "group-b", DateTimeOffset.Parse("2026-05-10T10:04:00Z"))],
+                    [
+                        new ViewSyncGroupState(
+                            "group-b",
+                            "movies",
+                            "/movies?week=2026-05-11&day=2026-05-12",
+                            1,
+                            DateTimeOffset.Parse("2026-05-10T10:05:00Z"),
+                            "device-c",
+                            "Bedroom TV")
+                    ])
+            ]);
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            var groups = component.Find("[aria-label='View sync groups']");
+            var livingRoomCard = component.Find("[aria-label='View sync group Living room']");
+            var bedroomCard = component.Find("[aria-label='View sync group Bedroom']");
+            Assert.Contains("Living room", groups.TextContent);
+            Assert.Contains("Office PC", livingRoomCard.TextContent);
+            Assert.Contains("me", livingRoomCard.TextContent);
+            Assert.Contains("Kitchen tablet", livingRoomCard.TextContent);
+            Assert.Contains("/?week=2026-05-04&day=2026-05-04", livingRoomCard.TextContent);
+            Assert.Contains("/series?week=2026-05-04&day=2026-05-05", livingRoomCard.TextContent);
+            Assert.Contains("Bedroom", groups.TextContent);
+            Assert.Contains("Bedroom TV", bedroomCard.TextContent);
+            Assert.Contains("/movies?week=2026-05-11&day=2026-05-12", bedroomCard.TextContent);
+            Assert.DoesNotContain("Kitchen tablet", bedroomCard.TextContent);
         });
     }
 

@@ -79,7 +79,9 @@ View sync is optional. It lets two or more browsers follow the same calendar URL
 
 Do the same on another computer and choose the same group. When one grouped browser changes day, week, route, or filters, the other grouped browsers follow the latest view. Use Ungroup this device to stop syncing that browser.
 
-All, Series, and Movies keep separate synced views. A browser on Series follows only the latest Series URL, not Movies or All. Only calendar URLs are synced. Settings, About, external links, credentials, and host names are not synced.
+Settings shows one block per sync group. Each block lists the attached browsers and the latest saved URLs for All, Series, and Movies. The current browser is marked `me`, and the active group is highlighted.
+
+All, Series, and Movies keep separate synced views. A browser on Series follows only the latest Series URL, not Movies or All. Opening All, Series, or Movies without filters first uses that group's saved URL for the same route. Local saved filters are only the fallback when the browser is not in a group or that group has no saved URL for the route. Settings, About, external links, credentials, and host names are not synced.
 
 ## What The Cards Mean
 
