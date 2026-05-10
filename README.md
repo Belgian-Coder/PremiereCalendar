@@ -21,32 +21,59 @@ TMDb is required for live data. Everything else is optional.
 | --- | --- |
 | ![Movie calendar in dark mode](docs/images/readme/movies-dark.png) | ![Filter drawer in dark mode](docs/images/readme/filters-dark.png) |
 
-## First Setup
+## Install On Windows
 
-1. Start the app.
-2. Open `http://localhost:5298`.
-3. Click the cog icon.
-4. Paste your TMDb API read access token.
-5. Click Save.
-6. Go back to All, Series, or Movies.
+For a normal Windows install, use the release zip.
 
-No TMDb token means the app cannot load real calendar data.
+1. Download the `PremiereCalendar-...-win-x64.zip` release.
+2. Right-click the zip and choose Extract All.
+3. Open the extracted folder.
+4. Double-click `Install-PremiereCalendar.cmd`.
+5. Click Yes when Windows asks for administrator permission.
+6. When the installer asks for a TMDb token, paste it. If you do not have one yet, press Enter and add it later in Settings.
+7. Open `http://localhost:5298`.
 
-## Run It
+The app starts automatically after the computer reboots.
 
-For a quick local run:
+## TMDb Token
+
+TMDb is required. Without it, the app opens but cannot load real calendar data.
+
+1. Create or sign in to a TMDb account.
+2. Open your TMDb account API settings.
+3. Copy the API Read Access Token, not the short API key.
+4. Paste it in the installer, or open the app, click the cog icon, paste it in Settings, and click Save.
+
+## Check It Worked
+
+| Check | Good result |
+| --- | --- |
+| Installer window | Ends with a success message |
+| App page | `http://localhost:5298` opens |
+| Health page | `http://localhost:5298/health` says Healthy |
+| Calendar | All, Series, or Movies loads cards after the TMDb token is saved |
+
+## Open From Another Computer
+
+1. Leave the computer running Premiere Calendar turned on.
+2. Find that computer's local network IP address.
+3. On another computer, open `http://IP-ADDRESS:5298`.
+
+If it does not open, check that both computers are on the same network and that Windows allowed the Premiere Calendar firewall prompt.
+
+## Run From Source
+
+Use this only when you cloned the repository instead of downloading a release zip.
 
 ```powershell
-.\Run-PremiereCalendar.ps1
+.\Run-PremiereCalendar.cmd
 ```
 
-To install or update the Windows service:
+To build and install the service from the source tree:
 
 ```powershell
-.\Install-PremiereCalendar.ps1
+.\Install-PremiereCalendar.cmd
 ```
-
-The service starts automatically after a reboot.
 
 ## Navigation And Shortcuts
 
