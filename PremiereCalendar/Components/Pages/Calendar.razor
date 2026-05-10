@@ -12,6 +12,8 @@
 @inject IFilterCatalogService FilterCatalogService
 @inject IIntegrationSettingsStore IntegrationSettingsStore
 @inject IArrIntegrationService ArrIntegrationService
+@inject IViewSyncService ViewSyncService
+@inject ICalendarCacheMaintenance CalendarCacheMaintenance
 @inject Microsoft.Extensions.Options.IOptions<PremiereCalendar.Options.CalendarLoadOptions> CalendarLoadOptions
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
@@ -48,6 +50,28 @@
             Refresh
         </button>
     </section>
+
+    @if (_cacheFreshness.Count > 0)
+    {
+        <section class="cache-freshness" data-testid="cache-freshness" aria-label="Calendar cache freshness">
+            @foreach (var entry in _cacheFreshness)
+            {
+                <span class="@CacheFreshnessClass(entry)">
+                    <strong>@entry.Label cache</strong>
+                    <span>@CacheFreshnessText(entry)</span>
+                </span>
+            }
+        </section>
+    }
+
+    @if (_queuedViewSyncState is not null)
+    {
+        <section class="status-panel refreshing" data-testid="view-sync-queued" aria-live="polite">
+            <span>Synced view available from @_queuedViewSyncState.UpdatedByDeviceName.</span>
+            <button class="tool-button primary-action" type="button" @onclick="ApplyQueuedViewSyncAsync">Open synced view</button>
+            <button class="tool-button" type="button" @onclick="DismissQueuedViewSync">Stay here</button>
+        </section>
+    }
 
     @if (_isFilterPaneOpen)
     {
@@ -178,6 +202,7 @@
     private readonly List<LoadProgressEntry> _loadProgress = [];
     private readonly HashSet<string> _arrAddInProgress = [];
     private readonly List<ToastMessage> _toasts = [];
+    private IReadOnlyList<CacheFreshnessEntry> _cacheFreshness = [];
     private readonly CancellationTokenSource _disposeCancellation = new();
     private CancellationTokenSource? _loadCancellation;
     private bool _isFilterPaneOpen;
@@ -191,6 +216,13 @@
     private bool _hasRendered;
     private bool _forceLoadOnNextLocationChange;
     private bool _isDisposed;
+    private bool _viewSyncInitialized;
+    private bool _applyingViewSyncNavigation;
+    private string? _viewSyncDeviceId;
+    private ViewSyncOverview? _viewSyncOverview;
+    private ViewSyncGroupState? _queuedViewSyncState;
+    private string? _lastPublishedViewSyncUrl;
+    private readonly Dictionary<string, long> _lastAppliedViewSyncRevisions = new(StringComparer.OrdinalIgnoreCase);
 
     private string PageTitleText()
     {
@@ -254,6 +286,7 @@
         ApplyPageMode();
         RecalculateVisibleItems();
         Navigation.LocationChanged += OnLocationChanged;
+        ViewSyncService.StateChanged += OnViewSyncStateChanged;
         await Task.CompletedTask;
     }
 
@@ -265,11 +298,18 @@
         }
 
         _hasRendered = true;
+        await InitializeViewSyncAsync();
+        if (await ApplyLatestSyncedUrlIfNeededAsync(Navigation.Uri))
+        {
+            return;
+        }
+
         if (await RestoreSavedFiltersIfNeededAsync(Navigation.Uri))
         {
             return;
         }
 
+        await PublishCurrentViewSyncUrlAsync(Navigation.Uri, requireQuery: true);
         await Task.WhenAll(
             LoadFilterCatalogAsync(),
             LoadIntegrationSettingsAsync(),
@@ -288,6 +328,202 @@
         }
     }
 
+    private async Task InitializeViewSyncAsync()
+    {
+        if (_viewSyncInitialized)
+        {
+            return;
+        }
+
+        try
+        {
+            _viewSyncDeviceId = await JS.InvokeAsync<string?>("premiereViewSync.getOrCreateDeviceId");
+            if (string.IsNullOrWhiteSpace(_viewSyncDeviceId))
+            {
+                _viewSyncDeviceId = Guid.NewGuid().ToString("N");
+            }
+
+            _viewSyncOverview = await ViewSyncService.GetOverviewAsync(_viewSyncDeviceId, _disposeCancellation.Token);
+            _viewSyncInitialized = true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JSException or JSDisconnectedException or OperationCanceledException)
+        {
+            _viewSyncInitialized = false;
+        }
+    }
+
+    private async Task<bool> ApplyLatestSyncedUrlIfNeededAsync(string location)
+    {
+        var routeKey = ViewSyncRouteKeyFor(location);
+        if (!_viewSyncInitialized
+            || _viewSyncOverview?.Device.SyncEnabled != true
+            || string.IsNullOrWhiteSpace(_viewSyncDeviceId)
+            || routeKey is null
+            || HasAnyQuery(location)
+            || await ViewSyncService.GetLatestStateForDeviceAsync(
+                _viewSyncDeviceId,
+                routeKey,
+                _disposeCancellation.Token) is not { } state
+            || string.Equals(state.UpdatedByDeviceId, _viewSyncDeviceId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return await ApplyViewSyncStateAsync(state, force: true);
+    }
+
+    private void OnViewSyncStateChanged(object? sender, ViewSyncStateChangedEventArgs args)
+    {
+        _ = HandleViewSyncStateChangedAsync(args);
+    }
+
+    private async Task HandleViewSyncStateChangedAsync(ViewSyncStateChangedEventArgs args)
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                if (_isDisposed
+                    || !_viewSyncInitialized
+                    || _viewSyncOverview?.Device.SyncEnabled != true
+                    || !string.Equals(_viewSyncOverview.Device.GroupId, args.GroupId, StringComparison.Ordinal)
+                    || !string.Equals(args.State.RouteKey, ViewSyncRouteKeyFor(Navigation.Uri), StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args.State.UpdatedByDeviceId, _viewSyncDeviceId, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                await ApplyViewSyncStateAsync(args.State);
+            });
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task<bool> ApplyViewSyncStateAsync(ViewSyncGroupState state, bool force = false)
+    {
+        _lastAppliedViewSyncRevisions.TryGetValue(state.RouteKey, out var lastAppliedRevision);
+        if (!force && state.Revision <= lastAppliedRevision)
+        {
+            return false;
+        }
+
+        if (!ViewSyncUrlPolicy.TryNormalize(state.RelativeUrl, out var relativeUrl)
+            || string.IsNullOrWhiteSpace(relativeUrl))
+        {
+            return false;
+        }
+
+        if (!force && _isFilterPaneOpen)
+        {
+            _queuedViewSyncState = state;
+            StateHasChanged();
+            return true;
+        }
+
+        _queuedViewSyncState = null;
+        _lastAppliedViewSyncRevisions[state.RouteKey] = Math.Max(lastAppliedRevision, state.Revision);
+        if (string.Equals(ToRelativeCalendarUrl(Navigation.Uri), relativeUrl, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        _applyingViewSyncNavigation = true;
+        Navigation.NavigateTo(relativeUrl, replace: true);
+        await Task.CompletedTask;
+        return true;
+    }
+
+    private async Task PublishCurrentViewSyncUrlAsync(string location, bool requireQuery = false)
+    {
+        if (!_viewSyncInitialized
+            || string.IsNullOrWhiteSpace(_viewSyncDeviceId)
+            || _viewSyncOverview?.Device.SyncEnabled != true
+            || string.IsNullOrWhiteSpace(_viewSyncOverview.Device.GroupId)
+            || (requireQuery && !HasAnyQuery(location)))
+        {
+            return;
+        }
+
+        var relativeUrl = ToRelativeCalendarUrl(location);
+        if (string.IsNullOrWhiteSpace(relativeUrl)
+            || string.Equals(relativeUrl, _lastPublishedViewSyncUrl, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        try
+        {
+            var result = await ViewSyncService.PublishUrlAsync(_viewSyncDeviceId, relativeUrl, _disposeCancellation.Token);
+            if (result.State is not null)
+            {
+                _viewSyncOverview = _viewSyncOverview with { GroupState = result.State };
+            }
+
+            if (result.Published || result.State is not null)
+            {
+                _lastPublishedViewSyncUrl = relativeUrl;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Console.WriteLine($"View sync publish failed: {ex.Message}");
+        }
+    }
+
+    private string? ToRelativeCalendarUrl(string location)
+    {
+        try
+        {
+            var uri = Navigation.ToAbsoluteUri(location);
+            var candidate = string.IsNullOrWhiteSpace(uri.Query)
+                ? uri.AbsolutePath
+                : $"{uri.AbsolutePath}{uri.Query}";
+            return ViewSyncUrlPolicy.TryNormalize(candidate, out var normalized) ? normalized : null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private string? ViewSyncRouteKeyFor(string location)
+    {
+        return ToRelativeCalendarUrl(location) is { } relativeUrl
+            ? ViewSyncUrlPolicy.RouteKeyFor(relativeUrl)
+            : null;
+    }
+
+    private bool HasAnyQuery(string location)
+    {
+        try
+        {
+            return !string.IsNullOrWhiteSpace(Navigation.ToAbsoluteUri(location).Query);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private async Task ApplyQueuedViewSyncAsync()
+    {
+        if (_queuedViewSyncState is not { } state)
+        {
+            return;
+        }
+
+        _queuedViewSyncState = null;
+        _isFilterPaneOpen = false;
+        await ApplyViewSyncStateAsync(state, force: true);
+    }
+
+    private void DismissQueuedViewSync()
+    {
+        _queuedViewSyncState = null;
+    }
+
     private void OnLocationChanged(object? sender, LocationChangedEventArgs args)
     {
         _ = HandleLocationChangedAsync(args);
@@ -304,6 +540,8 @@
                     return;
                 }
 
+                var suppressViewSyncPublish = _applyingViewSyncNavigation;
+                _applyingViewSyncNavigation = false;
                 if (await RestoreSavedFiltersIfNeededAsync(args.Location))
                 {
                     return;
@@ -319,6 +557,11 @@
                 ApplyPageMode();
                 RecalculateVisibleItems();
                 var nextCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+
+                if (!suppressViewSyncPublish)
+                {
+                    await PublishCurrentViewSyncUrlAsync(args.Location);
+                }
 
                 if (forceLoad
                     || _filters.WeekStart != previousWeekStart
@@ -518,6 +761,7 @@
 
             if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
             {
+                await RefreshCacheFreshnessAsync(_disposeCancellation.Token);
                 _isLoading = false;
                 _loadCancellation = null;
                 await InvokeAsync(() =>
@@ -536,6 +780,89 @@
         {
             AdjacentWeekPrefetcher.PrefetchAdjacentWeeks(prefetchWeekStart, prefetchFilters);
         }
+    }
+
+    private async Task RefreshCacheFreshnessAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var start = _filters.WeekStart;
+            var end = start.AddDays(6);
+            var entries = new List<CacheFreshnessEntry>();
+            foreach (var (mode, label) in CacheFreshnessModes())
+            {
+                var filters = FiltersForCacheFreshness(mode);
+                var cacheKey = PremiereDiscoveryCriteria.FromFilters(filters).CacheKey();
+                var metadata = await CalendarCacheMaintenance.GetWeekMetadataAsync(
+                    start,
+                    end,
+                    cacheKey,
+                    cancellationToken);
+                entries.Add(new CacheFreshnessEntry(label, metadata));
+            }
+
+            _cacheFreshness = entries;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _cacheFreshness = [];
+        }
+    }
+
+    private IReadOnlyList<(CalendarPageMode Mode, string Label)> CacheFreshnessModes()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => [(CalendarPageMode.Series, "Series")],
+            CalendarPageMode.Movies => [(CalendarPageMode.Movies, "Movies")],
+            _ => AllCacheFreshnessModes()
+        };
+    }
+
+    private IReadOnlyList<(CalendarPageMode Mode, string Label)> AllCacheFreshnessModes()
+    {
+        if (_filters.ShowSeries && !_filters.ShowMovies)
+        {
+            return [(CalendarPageMode.Series, "Series")];
+        }
+
+        if (!_filters.ShowSeries && _filters.ShowMovies)
+        {
+            return [(CalendarPageMode.Movies, "Movies")];
+        }
+
+        return [(CalendarPageMode.Series, "Series"), (CalendarPageMode.Movies, "Movies")];
+    }
+
+    private CalendarFilters FiltersForCacheFreshness(CalendarPageMode mode)
+    {
+        var filters = CalendarFilterState.Clone(_filters);
+        CalendarFilterState.ApplyPageMode(filters, mode);
+        CalendarFilterState.Normalize(filters);
+        return filters;
+    }
+
+    private static string CacheFreshnessClass(CacheFreshnessEntry entry)
+    {
+        return entry.Metadata is null
+            ? "cache-freshness-pill missing"
+            : entry.Metadata.Completeness == CalendarCacheCompleteness.Partial
+                ? "cache-freshness-pill partial"
+                : "cache-freshness-pill";
+    }
+
+    private static string CacheFreshnessText(CacheFreshnessEntry entry)
+    {
+        if (entry.Metadata is not { } metadata)
+        {
+            return "not cached yet";
+        }
+
+        var local = metadata.CachedAtUtc.ToLocalTime();
+        var completeness = metadata.Completeness == CalendarCacheCompleteness.Partial
+            ? "partial"
+            : "complete";
+        return $"{local:dd MMM HH:mm} · {metadata.ItemCount.ToString(CultureInfo.InvariantCulture)} items · {completeness}";
     }
 
     private void AddLoadBudgetProgressEntry(int budgetSeconds)
@@ -1028,9 +1355,13 @@
         }
     }
 
-    private void CloseFilters()
+    private async Task CloseFilters()
     {
         _isFilterPaneOpen = false;
+        if (_queuedViewSyncState is not null)
+        {
+            await ApplyQueuedViewSyncAsync();
+        }
     }
 
     private async Task SaveFilters(CalendarFilters savedFilters)
@@ -1041,6 +1372,7 @@
         _filters = CalendarFilterState.Clone(savedFilters);
         _filters.WeekStart = weekStart;
         _isFilterPaneOpen = false;
+        _queuedViewSyncState = null;
         RecalculateVisibleItems();
         var navigationChanged = UpdateUrl(replace: true);
         await PersistCurrentFiltersAsync();
@@ -1316,12 +1648,6 @@
         }
 
         await PersistFiltersForModeAsync(_pageMode, _filters);
-
-        if (_pageMode == CalendarPageMode.All)
-        {
-            await PersistFiltersForModeAsync(CalendarPageMode.Series, _filters);
-            await PersistFiltersForModeAsync(CalendarPageMode.Movies, _filters);
-        }
     }
 
     private async Task PersistFiltersForModeAsync(CalendarPageMode mode, CalendarFilters filters)
@@ -1382,16 +1708,7 @@
 
     private async Task<string?> GetSavedFilterQueryAsync(CalendarPageMode mode)
     {
-        if (mode != CalendarPageMode.All)
-        {
-            return await JS.InvokeAsync<string?>("premiereFilterStorage.get", StorageKey(mode));
-        }
-
-        var allQuery = await JS.InvokeAsync<string?>("premiereFilterStorage.get", StorageKey(CalendarPageMode.All));
-        var seriesQuery = await JS.InvokeAsync<string?>("premiereFilterStorage.get", StorageKey(CalendarPageMode.Series));
-        var movieQuery = await JS.InvokeAsync<string?>("premiereFilterStorage.get", StorageKey(CalendarPageMode.Movies));
-
-        return FilterStorageQueryComposer.ComposeAllQuery(allQuery, seriesQuery, movieQuery);
+        return await JS.InvokeAsync<string?>("premiereFilterStorage.get", StorageKey(mode));
     }
 
     private static bool HasMeaningfulFilterQuery(string location)
@@ -1748,6 +2065,7 @@
     {
         _isDisposed = true;
         Navigation.LocationChanged -= OnLocationChanged;
+        ViewSyncService.StateChanged -= OnViewSyncStateChanged;
         _disposeCancellation.Cancel();
         _loadCancellation?.Cancel();
         _loadCancellation?.Dispose();
@@ -1768,4 +2086,8 @@
         long? ElapsedMilliseconds,
         string Phase,
         int? UnmappedCount);
+
+    private sealed record CacheFreshnessEntry(
+        string Label,
+        CalendarCacheMetadata? Metadata);
 }

@@ -188,6 +188,8 @@ builder.Services.AddSingleton<ISimklSyncStateStore, SqliteSimklSyncStateStore>()
 builder.Services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();
 builder.Services.AddSingleton<IOmdbCacheStore, SqliteOmdbCacheStore>();
 builder.Services.AddSingleton<IProviderCacheStateStore, SqliteProviderCacheStateStore>();
+builder.Services.AddSingleton<IViewSyncStore, SqliteViewSyncStore>();
+builder.Services.AddSingleton<IViewSyncService, ViewSyncService>();
 builder.Services.AddSingleton<ISingleFlightCoordinator, SingleFlightCoordinator>();
 builder.Services.AddSingleton<ProviderRequestThrottler>();
 builder.Services.AddSingleton<CalendarLoadCoordinator>();

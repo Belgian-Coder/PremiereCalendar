@@ -60,10 +60,26 @@ The service starts automatically after a reboot.
 | Move from the bottom of a day to tomorrow | Keep scrolling downward until the message appears |
 | See which sources loaded | Click Show sources in Loaded-source filters |
 | Hide source details again | Click Hide sources |
+| See cache age | Check the cache pills under the toolbar |
 | Change filters | Click the filter button |
 | Change settings | Click the cog icon |
 
 The arrow keys do not take over while you are typing in a text box.
+
+## Sync Viewing Between Devices
+
+View sync is optional. It lets two or more browsers follow the same calendar URL.
+
+1. Open Settings.
+2. Find View sync.
+3. Give this browser a name, such as `Office PC`.
+4. Create or select a group.
+5. Turn on Sync this browser.
+6. Save view sync.
+
+Do the same on another computer and choose the same group. When one grouped browser changes day, week, route, or filters, the other grouped browsers follow the latest view. Use Ungroup this device to stop syncing that browser.
+
+All, Series, and Movies keep separate synced views. A browser on Series follows only the latest Series URL, not Movies or All. Only calendar URLs are synced. Settings, About, external links, credentials, and host names are not synced.
 
 ## What The Cards Mean
 
@@ -88,7 +104,7 @@ The arrow keys do not take over while you are typing in a text box.
 
 ## Cache
 
-The app keeps calendar data, images, IMDb scores, OMDb responses, and small provider sync markers on disk. This means cached data survives restarts, crashes, and updates.
+The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync groups, and small provider sync markers on disk. This means cached data survives restarts, crashes, and updates.
 
 Click Refresh when you want the current week checked again. Refresh keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 

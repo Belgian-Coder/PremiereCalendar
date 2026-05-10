@@ -12,16 +12,21 @@ namespace PremiereCalendar.ComponentTests;
 public sealed class CalendarPageTests : BunitContext
 {
     private readonly FakeAdjacentWeekPrefetcher _prefetcher = new();
+    private readonly FakeViewSyncService _viewSyncService = new();
+    private readonly FakeCalendarCacheMaintenance _cacheMaintenance = new();
 
     public CalendarPageTests()
     {
         JSInterop.Mode = JSRuntimeMode.Loose;
+        JSInterop.Setup<string>("premiereViewSync.getOrCreateDeviceId").SetResult("device-a");
         Services.AddSingleton<IAdjacentWeekPrefetcher>(_prefetcher);
         Services.AddSingleton<CalendarLoadCoordinator>();
         Services.AddSingleton<ICalendarFilterUsageStore, FakeCalendarFilterUsageStore>();
         Services.AddSingleton<IFilterCatalogService, FakeFilterCatalogService>();
         Services.AddSingleton<IIntegrationSettingsStore, FakeIntegrationSettingsStore>();
         Services.AddSingleton<IArrIntegrationService, FakeArrIntegrationService>();
+        Services.AddSingleton<IViewSyncService>(_viewSyncService);
+        Services.AddSingleton<ICalendarCacheMaintenance>(_cacheMaintenance);
         Services.Configure<CalendarLoadOptions>(_ => { });
     }
 
@@ -839,6 +844,60 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_PlainAllUrlDoesNotRestoreSeriesOrMovieSavedFilters()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        JSInterop.Setup<string?>(
+                "premiereFilterStorage.get",
+                "premiere-calendar:filters:v2:all")
+            .SetResult(null);
+        JSInterop.Setup<string?>(
+                "premiereFilterStorage.get",
+                "premiere-calendar:filters:v2:series")
+            .SetResult("week=2026-05-04&seriesLang=nl&seriesScope=new");
+        JSInterop.Setup<string?>(
+                "premiereFilterStorage.get",
+                "premiere-calendar:filters:v2:movies")
+            .SetResult("week=2026-05-04&movieLang=en&movieRuntimeMin=45");
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(service.Calls);
+            Assert.DoesNotContain("seriesLang=", navigation.Uri);
+            Assert.DoesNotContain("movieLang=", navigation.Uri);
+            Assert.DoesNotContain("movieRuntimeMin=", navigation.Uri);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_ShowsRouteScopedCacheFreshness()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        _cacheMaintenance.DefaultMetadata = new CalendarCacheMetadata(
+            DateTimeOffset.Parse("2026-05-10T08:15:00Z"),
+            ItemCount: 12,
+            SchemaVersion: 3,
+            CalendarCacheCompleteness.Complete);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var freshness = component.Find("[data-testid='cache-freshness']");
+            Assert.Contains("Series cache", freshness.TextContent);
+            Assert.Contains("10 May", freshness.TextContent);
+            Assert.DoesNotContain("Movies cache", freshness.TextContent);
+        });
+    }
+
+    [Fact]
     public void CalendarPage_ClearFiltersRemovesSeriesScopeFromUrl()
     {
         var service = new FakePremiereService();
@@ -1204,6 +1263,114 @@ public sealed class CalendarPageTests : BunitContext
         Assert.Equal("2026-05-11", query["day"].ToString());
     }
 
+    [Fact]
+    public void CalendarPage_ExplicitCalendarUrlPublishesRelativeViewSyncUrl()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&day=2026-05-06&seriesLang=en,nl");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains(
+                "/series?week=2026-05-04&day=2026-05-06&seriesLang=en,nl",
+                _viewSyncService.PublishedUrls);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_PlainCalendarUrlAppliesLatestSyncedUrlBeforeLoading()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        _viewSyncService.SetGroupState(new ViewSyncGroupState(
+            "group-a",
+            "movies",
+            "/movies?week=2026-04-27&day=2026-04-28&movieRuntimeMin=45",
+            4,
+            DateTimeOffset.Parse("2026-05-10T10:00:00Z"),
+            "device-b",
+            "Living room"));
+        navigation.NavigateTo("/movies");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("week=2026-04-27", navigation.Uri);
+            Assert.Contains("day=2026-04-28", navigation.Uri);
+            Assert.Equal(new DateOnly(2026, 4, 27), service.Calls.Last().Start);
+            Assert.Equal(new DateOnly(2026, 4, 28), service.Calls.Last().PriorityDate);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_PlainSeriesUrlAppliesLatestSeriesViewInsteadOfLatestMovieView()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        _viewSyncService.SetGroupState(new ViewSyncGroupState(
+            "group-a",
+            "movies",
+            "/movies?week=2026-04-27&day=2026-04-28",
+            5,
+            DateTimeOffset.Parse("2026-05-10T10:00:00Z"),
+            "device-b",
+            "Living room"));
+        _viewSyncService.SetGroupState(new ViewSyncGroupState(
+            "group-a",
+            "series",
+            "/series?week=2026-05-11&day=2026-05-12",
+            2,
+            DateTimeOffset.Parse("2026-05-10T09:00:00Z"),
+            "device-b",
+            "Living room"));
+        navigation.NavigateTo("/series");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("/series?", navigation.Uri);
+            Assert.Contains("week=2026-05-11", navigation.Uri);
+            Assert.Contains("day=2026-05-12", navigation.Uri);
+            Assert.Equal(new DateOnly(2026, 5, 11), service.Calls.Last().Start);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_RemoteViewSyncEventNavigatesWithoutRepublishing()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&day=2026-05-05");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        _viewSyncService.PublishedUrls.Clear();
+
+        component.InvokeAsync(() => _viewSyncService.RaiseStateChanged(new ViewSyncGroupState(
+            "group-a",
+            "series",
+            "/series?week=2026-05-11&day=2026-05-12",
+            10,
+            DateTimeOffset.Parse("2026-05-10T10:01:00Z"),
+            "device-b",
+            "Tablet")));
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("week=2026-05-11", navigation.Uri);
+            Assert.Contains("day=2026-05-12", navigation.Uri);
+            Assert.DoesNotContain("/series?week=2026-05-11&day=2026-05-12", _viewSyncService.PublishedUrls);
+        });
+    }
+
     private static void AssertDelimitedValues(string actual, char separator, params string[] expected)
     {
         Assert.Equal(
@@ -1452,6 +1619,31 @@ public sealed class CalendarPageTests : BunitContext
         CalendarFilters? Filters,
         bool WasForegroundActive);
 
+    private sealed class FakeCalendarCacheMaintenance : ICalendarCacheMaintenance
+    {
+        public CalendarCacheMetadata? DefaultMetadata { get; set; }
+
+        public List<(DateOnly Start, DateOnly End, string CacheKey)> MetadataCalls { get; } = [];
+
+        public Task<CalendarCacheMetadata?> GetWeekMetadataAsync(
+            DateOnly start,
+            DateOnly end,
+            string cacheKey,
+            CancellationToken cancellationToken)
+        {
+            MetadataCalls.Add((start, end, cacheKey));
+            return Task.FromResult(DefaultMetadata);
+        }
+
+        public Task<int> CleanupAsync(
+            DateTimeOffset nowUtc,
+            TimeSpan retention,
+            CancellationToken cancellationToken)
+        {
+            return Task.FromResult(0);
+        }
+    }
+
     private sealed class FakeFilterCatalogService : IFilterCatalogService
     {
         public Task<FilterCatalog> GetCatalogAsync(CancellationToken cancellationToken, bool forceRefresh = false)
@@ -1525,6 +1717,94 @@ public sealed class CalendarPageTests : BunitContext
             CancellationToken cancellationToken)
         {
             return Task.FromResult(0);
+        }
+    }
+
+    private sealed class FakeViewSyncService : IViewSyncService
+    {
+        public event EventHandler<ViewSyncStateChangedEventArgs>? StateChanged;
+
+        public List<string> PublishedUrls { get; } = [];
+
+        public ViewSyncGroupState? GroupState { get; set; }
+
+        private readonly Dictionary<string, ViewSyncGroupState> _statesByRoute = new(StringComparer.OrdinalIgnoreCase);
+
+        public Task<ViewSyncOverview> GetOverviewAsync(string deviceId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(Overview(deviceId));
+        }
+
+        public Task<ViewSyncOverview> SaveDeviceAsync(
+            string deviceId,
+            string displayName,
+            bool syncEnabled,
+            string? groupId,
+            CancellationToken cancellationToken)
+        {
+            return Task.FromResult(Overview(deviceId));
+        }
+
+        public Task<ViewSyncGroup> CreateGroupAsync(string name, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new ViewSyncGroup("group-a", name, DateTimeOffset.Parse("2026-05-10T10:00:00Z")));
+        }
+
+        public Task<ViewSyncOverview> UngroupDeviceAsync(string deviceId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(Overview(deviceId));
+        }
+
+        public Task<ViewSyncPublishResult> PublishUrlAsync(string deviceId, string relativeUrl, CancellationToken cancellationToken)
+        {
+            PublishedUrls.Add(relativeUrl);
+            var routeKey = ViewSyncUrlPolicy.RouteKeyFor(relativeUrl) ?? "all";
+            GroupState = new ViewSyncGroupState(
+                "group-a",
+                routeKey,
+                relativeUrl,
+                (GroupState?.Revision ?? 0) + 1,
+                DateTimeOffset.Parse("2026-05-10T10:00:00Z"),
+                deviceId,
+                "Office PC");
+            _statesByRoute[routeKey] = GroupState;
+            return Task.FromResult(new ViewSyncPublishResult(true, GroupState));
+        }
+
+        public Task<ViewSyncGroupState?> GetLatestStateForDeviceAsync(string deviceId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(GroupState);
+        }
+
+        public Task<ViewSyncGroupState?> GetLatestStateForDeviceAsync(string deviceId, string? routeKey, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(routeKey is null
+                ? GroupState
+                : _statesByRoute.GetValueOrDefault(routeKey));
+        }
+
+        public void RaiseStateChanged(ViewSyncGroupState state)
+        {
+            SetGroupState(state);
+            StateChanged?.Invoke(this, new ViewSyncStateChangedEventArgs(state.GroupId, state));
+        }
+
+        public void SetGroupState(ViewSyncGroupState state)
+        {
+            GroupState = state;
+            _statesByRoute[state.RouteKey] = state;
+        }
+
+        private ViewSyncOverview Overview(string deviceId)
+        {
+            var device = new ViewSyncDevice(
+                deviceId,
+                "Office PC",
+                SyncEnabled: true,
+                "group-a",
+                DateTimeOffset.Parse("2026-05-10T10:00:00Z"));
+            var group = new ViewSyncGroup("group-a", "Shared", DateTimeOffset.Parse("2026-05-10T10:00:00Z"));
+            return new ViewSyncOverview(device, [group], [device], GroupState);
         }
     }
 

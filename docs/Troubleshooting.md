@@ -90,6 +90,20 @@ flowchart LR
 
 This is why changing `appsettings.json` may not change the running app after you already saved settings in the UI.
 
+## View Sync
+
+View sync is off until a browser joins a group in Settings.
+
+| Problem | Try this |
+| --- | --- |
+| Another computer does not follow | Check both browsers use the same View sync group |
+| The wrong browser name shows | Rename it in Settings, then Save view sync |
+| You want to stop syncing | Click Ungroup this device |
+| A copied URL does not follow the group | URLs with filters are treated as intentional and become the newest group view |
+| Series does not follow Movies | This is expected. All, Series, and Movies sync separately |
+
+Only `/`, `/series`, and `/movies` URLs are synced. Settings, About, and external links are ignored.
+
 ## Providers
 
 | Provider | Use it for |

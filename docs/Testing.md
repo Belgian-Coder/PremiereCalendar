@@ -21,6 +21,7 @@ Unit tests cover pure behavior:
 - Request-storm guards for TMDb concurrency and bounded background warmup windows.
 - Belgium-origin language-free discovery, Belgian TV network discovery, and optional source-region ordering.
 - French-language and Belgium-origin local filtering.
+- View-sync URL validation, device grouping, latest URL persistence, and duplicate publish suppression.
 
 Integration tests cover service and HTTP behavior with fake handlers:
 
@@ -68,6 +69,7 @@ Component tests cover Blazor rendering:
 - Series-only and movie-only routes with route-specific filter copy.
 - Adjacent-week prefetch trigger after visible week load.
 - Incremental loaded-source display while source batches report progress.
+- View sync Settings controls, explicit URL publishing, route-specific plain URL takeover, and same-route live-follow navigation.
 
 ## Run
 

@@ -290,6 +290,42 @@ h1:focus {
     color: #ffffff;
 }
 
+.cache-freshness {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.65rem 0;
+    color: var(--muted);
+}
+
+.cache-freshness-pill {
+    display: inline-flex;
+    min-height: 1.9rem;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.25rem 0.55rem;
+    border: 1px solid rgba(52, 180, 166, 0.45);
+    border-radius: 999px;
+    background: var(--teal-soft);
+    font-size: 0.78rem;
+}
+
+.cache-freshness-pill strong {
+    color: var(--ink);
+    font-weight: 850;
+}
+
+.cache-freshness-pill.partial {
+    border-color: rgba(212, 165, 55, 0.55);
+    background: rgba(212, 165, 55, 0.12);
+}
+
+.cache-freshness-pill.missing {
+    border-color: var(--line);
+    background: var(--surface);
+}
+
 .check-option {
     display: inline-flex;
     align-items: center;
@@ -1994,6 +2030,19 @@ html[data-theme="dark"] .links span {
     gap: 0.8rem;
 }
 
+.settings-inline-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 0.65rem;
+}
+
+.settings-action-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
 .settings-provider-group {
     display: grid;
     gap: 0.8rem;
@@ -2201,6 +2250,33 @@ html[data-theme="dark"] .links span {
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem;
+}
+
+.settings-options-list span {
+    display: inline-flex;
+    min-height: 1.75rem;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface-strong);
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 750;
+}
+
+.view-sync-me-badge {
+    display: inline-flex;
+    min-height: 1.1rem;
+    align-items: center;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: var(--teal);
+    color: var(--ink-inverted);
+    font-size: 0.68rem;
+    font-weight: 850;
+    text-transform: uppercase;
 }
 
 .settings-options-list button {
@@ -2462,6 +2538,12 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     .settings-panel-header {
         align-items: start;
         flex-direction: column;
+    }
+
+    .settings-inline-fields,
+    .settings-action-row {
+        display: grid;
+        grid-template-columns: 1fr;
     }
 
     .toast-host {

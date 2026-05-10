@@ -7,6 +7,15 @@ namespace PremiereCalendar.ComponentTests;
 
 public sealed class SettingsPageTests : BunitContext
 {
+    private readonly FakeViewSyncService _viewSyncService = new();
+
+    public SettingsPageTests()
+    {
+        JSInterop.Mode = JSRuntimeMode.Loose;
+        JSInterop.Setup<string>("premiereViewSync.getOrCreateDeviceId").SetResult("device-a");
+        Services.AddSingleton<IViewSyncService>(_viewSyncService);
+    }
+
     [Fact]
     public void SettingsPage_LoadsQualityProfileNamesOnOpenWhenIntegrationsAreConfigured()
     {
@@ -342,6 +351,131 @@ public sealed class SettingsPageTests : BunitContext
         }, TimeSpan.FromSeconds(3));
     }
 
+    [Fact]
+    public void SettingsPage_RendersViewSyncControlsAndSavesDeviceGroup()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        _viewSyncService.Overview = new ViewSyncOverview(
+            new ViewSyncDevice(
+                "device-a",
+                "Office PC",
+                SyncEnabled: false,
+                GroupId: null,
+                DateTimeOffset.Parse("2026-05-10T10:00:00Z")),
+            [new ViewSyncGroup("group-a", "Living room", DateTimeOffset.Parse("2026-05-10T09:00:00Z"))],
+            [],
+            null);
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.NotEmpty(component.FindAll("[aria-label='View sync settings']"));
+            Assert.Contains("View sync", component.Markup);
+            Assert.Equal(
+                "Office PC",
+                component.Find("input[aria-label='This device name']").GetAttribute("value"));
+            Assert.Contains("Living room", component.Find("select[aria-label='View sync group']").TextContent);
+        });
+
+        component.Find("input[aria-label='Sync viewing on this browser']").Change(true);
+        component.Find("input[aria-label='This device name']").Change("Kitchen tablet");
+        component.Find("select[aria-label='View sync group']").Change("group-a");
+        component.Find("button[aria-label='Save view sync settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("device-a", _viewSyncService.LastSavedDeviceId);
+            Assert.Equal("Kitchen tablet", _viewSyncService.LastSavedName);
+            Assert.True(_viewSyncService.LastSavedEnabled);
+            Assert.Equal("group-a", _viewSyncService.LastSavedGroupId);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_AddsCurrentBrowserToSelectedGroupWithoutSeparateToggle()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        _viewSyncService.Overview = new ViewSyncOverview(
+            new ViewSyncDevice(
+                "device-a",
+                "Office PC",
+                SyncEnabled: false,
+                GroupId: null,
+                DateTimeOffset.Parse("2026-05-10T10:00:00Z")),
+            [new ViewSyncGroup("group-a", "Living room", DateTimeOffset.Parse("2026-05-10T09:00:00Z"))],
+            [],
+            null);
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("select[aria-label='View sync group']");
+        component.Find("select[aria-label='View sync group']").Change("group-a");
+
+        component.WaitForAssertion(() =>
+            Assert.Contains("Add this browser", component.Find("button[aria-label='Save view sync settings']").TextContent));
+
+        component.Find("button[aria-label='Save view sync settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.True(_viewSyncService.LastSavedEnabled);
+            Assert.Equal("group-a", _viewSyncService.LastSavedGroupId);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_CreatesViewSyncGroupAndUngroupsDevice()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        _viewSyncService.Overview = new ViewSyncOverview(
+            new ViewSyncDevice(
+                "device-a",
+                "Office PC",
+                SyncEnabled: true,
+                "group-a",
+                DateTimeOffset.Parse("2026-05-10T10:00:00Z")),
+            [new ViewSyncGroup("group-a", "Living room", DateTimeOffset.Parse("2026-05-10T09:00:00Z"))],
+            [new ViewSyncDevice("device-a", "Office PC", true, "group-a", DateTimeOffset.Parse("2026-05-10T10:00:00Z"))],
+            new ViewSyncGroupState(
+                "group-a",
+                "series",
+                "/series?week=2026-05-04&day=2026-05-05",
+                2,
+                DateTimeOffset.Parse("2026-05-10T10:05:00Z"),
+                "device-a",
+                "Office PC"));
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='New view sync group name']");
+        component.WaitForAssertion(() =>
+        {
+            var devices = component.Find("[aria-label='Devices in view sync group']");
+            Assert.Contains("Office PC", devices.TextContent);
+            Assert.Contains("me", devices.TextContent);
+            Assert.NotEmpty(component.FindAll("[data-testid='view-sync-me-badge']"));
+        });
+        component.Find("input[aria-label='New view sync group name']").Change("Bedroom");
+        component.Find("button[aria-label='Create view sync group']").Click();
+        component.Find("button[aria-label='Ungroup this device']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("Bedroom", _viewSyncService.CreatedGroupName);
+            Assert.Equal("device-a", _viewSyncService.UngroupedDeviceId);
+        });
+    }
+
     private sealed class FakeIntegrationSettingsStore : IIntegrationSettingsStore
     {
         public IntegrationSettings Settings { get; set; } = new();
@@ -415,6 +549,101 @@ public sealed class SettingsPageTests : BunitContext
             return Task.FromResult(PinStatusResults.Count > 0
                 ? PinStatusResults.Dequeue()
                 : PinStatusResult);
+        }
+    }
+
+    private sealed class FakeViewSyncService : IViewSyncService
+    {
+        public event EventHandler<ViewSyncStateChangedEventArgs>? StateChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public ViewSyncOverview Overview { get; set; } = new(
+            new ViewSyncDevice(
+                "device-a",
+                "This browser",
+                SyncEnabled: false,
+                GroupId: null,
+                DateTimeOffset.Parse("2026-05-10T10:00:00Z")),
+            [],
+            [],
+            null);
+
+        public string? LastSavedDeviceId { get; private set; }
+        public string? LastSavedName { get; private set; }
+        public bool LastSavedEnabled { get; private set; }
+        public string? LastSavedGroupId { get; private set; }
+        public string? CreatedGroupName { get; private set; }
+        public string? UngroupedDeviceId { get; private set; }
+
+        public Task<ViewSyncOverview> GetOverviewAsync(string deviceId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(Overview);
+        }
+
+        public Task<ViewSyncOverview> SaveDeviceAsync(
+            string deviceId,
+            string displayName,
+            bool syncEnabled,
+            string? groupId,
+            CancellationToken cancellationToken)
+        {
+            LastSavedDeviceId = deviceId;
+            LastSavedName = displayName;
+            LastSavedEnabled = syncEnabled;
+            LastSavedGroupId = groupId;
+            Overview = Overview with
+            {
+                Device = new ViewSyncDevice(
+                    deviceId,
+                    displayName,
+                    syncEnabled && !string.IsNullOrWhiteSpace(groupId),
+                    groupId,
+                    DateTimeOffset.Parse("2026-05-10T10:00:00Z"))
+            };
+            return Task.FromResult(Overview);
+        }
+
+        public Task<ViewSyncGroup> CreateGroupAsync(string name, CancellationToken cancellationToken)
+        {
+            CreatedGroupName = name;
+            var group = new ViewSyncGroup("group-created", name, DateTimeOffset.Parse("2026-05-10T11:00:00Z"));
+            Overview = Overview with { Groups = [.. Overview.Groups, group] };
+            return Task.FromResult(group);
+        }
+
+        public Task<ViewSyncOverview> UngroupDeviceAsync(string deviceId, CancellationToken cancellationToken)
+        {
+            UngroupedDeviceId = deviceId;
+            Overview = Overview with
+            {
+                Device = Overview.Device with { SyncEnabled = false, GroupId = null },
+                GroupDevices = []
+            };
+            return Task.FromResult(Overview);
+        }
+
+        public Task<ViewSyncPublishResult> PublishUrlAsync(string deviceId, string relativeUrl, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new ViewSyncPublishResult(false, Overview.GroupState));
+        }
+
+        public Task<ViewSyncGroupState?> GetLatestStateForDeviceAsync(string deviceId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(Overview.GroupState);
+        }
+
+        public Task<ViewSyncGroupState?> GetLatestStateForDeviceAsync(
+            string deviceId,
+            string? routeKey,
+            CancellationToken cancellationToken)
+        {
+            return Task.FromResult(routeKey is null
+                || string.Equals(Overview.GroupState?.RouteKey, routeKey, StringComparison.OrdinalIgnoreCase)
+                    ? Overview.GroupState
+                    : null);
         }
     }
 }

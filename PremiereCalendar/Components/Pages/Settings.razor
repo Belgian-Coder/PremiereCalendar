@@ -1,9 +1,12 @@
 @page "/settings"
 @rendermode InteractiveServer
 @implements IDisposable
+@using System.Globalization
 @inject IIntegrationSettingsStore SettingsStore
 @inject IArrIntegrationService ArrService
 @inject ISimklClient SimklClient
+@inject IViewSyncService ViewSyncService
+@inject IJSRuntime JS
 
 <PageTitle>Settings</PageTitle>
 
@@ -25,6 +28,114 @@
     {
         <EditForm EditContext="_editContext">
             <section class="settings-grid">
+                <article class="settings-panel" aria-label="View sync settings">
+                    <div class="settings-panel-header">
+                        <div>
+                            <p class="eyebrow">Experience</p>
+                            <h2>View sync</h2>
+                            <div class="settings-status-row compact" aria-label="View sync status">
+                                @StatusBadge("View sync", ViewSyncProviderStatus())
+                            </div>
+                        </div>
+                        <label class="switch-row">
+                            <input type="checkbox"
+                                   aria-label="Sync viewing on this browser"
+                                   @bind="_viewSyncEnabled"
+                                   disabled="@(!_viewSyncLoaded)" />
+                            <span>Sync this browser</span>
+                        </label>
+                    </div>
+
+                    @if (!_viewSyncLoaded)
+                    {
+                        <div class="status-panel">Loading view sync...</div>
+                    }
+                    else
+                    {
+                        <div class="settings-fields">
+                            <label>
+                                <span>This device name</span>
+                                <input class="settings-input"
+                                       aria-label="This device name"
+                                       @bind="_viewSyncDeviceName" />
+                                <small class="settings-help">Use a friendly name like Office PC or Living room tablet.</small>
+                            </label>
+
+                            <label>
+                                <span>View sync group</span>
+                                <select class="settings-input"
+                                        aria-label="View sync group"
+                                        @bind="_selectedViewSyncGroupId">
+                                    <option value="">No group</option>
+                                    @foreach (var group in _viewSyncGroups)
+                                    {
+                                        <option value="@group.GroupId">@group.Name</option>
+                                    }
+                                </select>
+                                <small class="settings-help">Devices in the same group follow the latest calendar URL.</small>
+                            </label>
+
+                            <div class="settings-inline-fields">
+                                <label>
+                                    <span>New group</span>
+                                    <input class="settings-input"
+                                           aria-label="New view sync group name"
+                                           @bind="_newViewSyncGroupName" />
+                                </label>
+                                <button class="tool-button settings-secondary"
+                                        type="button"
+                                        aria-label="Create view sync group"
+                                        @onclick="CreateViewSyncGroupAsync"
+                                        disabled="@_isCreatingViewSyncGroup">
+                                    @(_isCreatingViewSyncGroup ? "Creating..." : "Create group")
+                                </button>
+                            </div>
+
+                            @if (_viewSyncGroupState is not null)
+                            {
+                                <div class="settings-selected-note" aria-label="Latest synced view">
+                                    <span>Latest: @_viewSyncGroupState.RelativeUrl</span>
+                                    <span>By @_viewSyncGroupState.UpdatedByDeviceName</span>
+                                </div>
+                            }
+
+                            @if (_viewSyncGroupDevices.Count > 0)
+                            {
+                                <div class="settings-options-list" aria-label="Devices in view sync group">
+                                    @foreach (var device in _viewSyncGroupDevices)
+                                    {
+                                        <span>
+                                            @device.DisplayName
+                                            @if (IsCurrentViewSyncDevice(device))
+                                            {
+                                                <strong class="view-sync-me-badge" data-testid="view-sync-me-badge">me</strong>
+                                            }
+                                            · @FormatViewSyncLastSeen(device.LastSeenUtc)
+                                        </span>
+                                    }
+                                </div>
+                            }
+                        </div>
+
+                        <div class="settings-action-row">
+                            <button class="tool-button primary-action"
+                                    type="button"
+                                    aria-label="Save view sync settings"
+                                    @onclick="SaveViewSyncSettingsAsync"
+                                    disabled="@_isSavingViewSync">
+                                @ViewSyncSaveButtonText
+                            </button>
+                            <button class="tool-button settings-secondary"
+                                    type="button"
+                                    aria-label="Ungroup this device"
+                                    @onclick="UngroupViewSyncDeviceAsync"
+                                    disabled="@(_isUngroupingViewSync || string.IsNullOrWhiteSpace(_viewSyncOverview?.Device.GroupId))">
+                                @(_isUngroupingViewSync ? "Ungrouping..." : "Ungroup this device")
+                            </button>
+                        </div>
+                    }
+                </article>
+
                 <article class="settings-panel">
                     <div class="settings-panel-header">
                         <div>
@@ -507,6 +618,19 @@
     private readonly CancellationTokenSource _disposeCancellation = new();
     private EditContext? _editContext;
     private bool _isDirty;
+    private bool _viewSyncLoaded;
+    private bool _viewSyncEnabled;
+    private bool _isSavingViewSync;
+    private bool _isCreatingViewSyncGroup;
+    private bool _isUngroupingViewSync;
+    private string _viewSyncDeviceId = "";
+    private string _viewSyncDeviceName = "This browser";
+    private string? _selectedViewSyncGroupId;
+    private string _newViewSyncGroupName = "";
+    private ViewSyncOverview? _viewSyncOverview;
+    private IReadOnlyList<ViewSyncGroup> _viewSyncGroups = [];
+    private IReadOnlyList<ViewSyncDevice> _viewSyncGroupDevices = [];
+    private ViewSyncGroupState? _viewSyncGroupState;
 
     private bool HasSimklAccessToken => !string.IsNullOrWhiteSpace(_settings.Sources.Simkl.AccessToken);
 
@@ -515,6 +639,21 @@
     private string SettingsDirtyText => _isDirty ? "Unsaved changes" : "All changes saved";
 
     private string SettingsDirtyClass => _isDirty ? "settings-dirty dirty" : "settings-dirty clean";
+
+    private string ViewSyncSaveButtonText
+    {
+        get
+        {
+            if (_isSavingViewSync)
+            {
+                return "Saving...";
+            }
+
+            return !_viewSyncEnabled && !string.IsNullOrWhiteSpace(_selectedViewSyncGroupId)
+                ? "Add this browser"
+                : "Save view sync";
+        }
+    }
 
     private string SimklConnectionSummary
     {
@@ -564,6 +703,23 @@
         builder.AddContent(2, $"{name}: {status.Text}");
         builder.CloseElement();
     };
+
+    private ProviderAvailability ViewSyncProviderStatus()
+    {
+        if (!_viewSyncLoaded)
+        {
+            return new ProviderAvailability("Checking", "configured");
+        }
+
+        if (!_viewSyncEnabled)
+        {
+            return ProviderAvailability.Disabled;
+        }
+
+        return string.IsNullOrWhiteSpace(_selectedViewSyncGroupId)
+            ? ProviderAvailability.NeedsSetup
+            : ProviderAvailability.Online;
+    }
 
     private ProviderAvailability SonarrProviderStatus()
     {
@@ -701,6 +857,144 @@
         }
 
         _isLoading = false;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        await LoadViewSyncOverviewAsync();
+    }
+
+    private async Task LoadViewSyncOverviewAsync()
+    {
+        try
+        {
+            _viewSyncDeviceId = await JS.InvokeAsync<string?>("premiereViewSync.getOrCreateDeviceId")
+                ?? Guid.NewGuid().ToString("N");
+            _viewSyncOverview = await ViewSyncService.GetOverviewAsync(_viewSyncDeviceId, _disposeCancellation.Token);
+            ApplyViewSyncOverview(_viewSyncOverview);
+            _viewSyncLoaded = true;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JSException or JSDisconnectedException)
+        {
+            _viewSyncLoaded = true;
+            _viewSyncEnabled = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ApplyViewSyncOverview(ViewSyncOverview overview)
+    {
+        _viewSyncOverview = overview;
+        _viewSyncDeviceName = overview.Device.DisplayName;
+        _viewSyncEnabled = overview.Device.SyncEnabled;
+        _selectedViewSyncGroupId = overview.Device.GroupId;
+        _viewSyncGroups = overview.Groups;
+        _viewSyncGroupDevices = overview.GroupDevices;
+        _viewSyncGroupState = overview.GroupState;
+    }
+
+    private bool IsCurrentViewSyncDevice(ViewSyncDevice device)
+    {
+        return string.Equals(device.DeviceId, _viewSyncDeviceId, StringComparison.Ordinal);
+    }
+
+    private async Task SaveViewSyncSettingsAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_viewSyncDeviceId))
+        {
+            return;
+        }
+
+        _isSavingViewSync = true;
+        try
+        {
+            var overview = await ViewSyncService.SaveDeviceAsync(
+                _viewSyncDeviceId,
+                _viewSyncDeviceName,
+                _viewSyncEnabled || !string.IsNullOrWhiteSpace(_selectedViewSyncGroupId),
+                _selectedViewSyncGroupId,
+                _disposeCancellation.Token);
+            ApplyViewSyncOverview(overview);
+            ShowToast(ToastKind.Success, "View sync saved", "This browser's sync settings were saved.");
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "View sync failed", ex.Message);
+        }
+        finally
+        {
+            _isSavingViewSync = false;
+        }
+    }
+
+    private async Task CreateViewSyncGroupAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_viewSyncDeviceId))
+        {
+            return;
+        }
+
+        _isCreatingViewSyncGroup = true;
+        try
+        {
+            var group = await ViewSyncService.CreateGroupAsync(_newViewSyncGroupName, _disposeCancellation.Token);
+            _selectedViewSyncGroupId = group.GroupId;
+            _newViewSyncGroupName = "";
+            var overview = await ViewSyncService.SaveDeviceAsync(
+                _viewSyncDeviceId,
+                _viewSyncDeviceName,
+                syncEnabled: true,
+                _selectedViewSyncGroupId,
+                _disposeCancellation.Token);
+            ApplyViewSyncOverview(overview);
+            ShowToast(ToastKind.Success, "View sync group created", $"Created {group.Name}.");
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "View sync failed", ex.Message);
+        }
+        finally
+        {
+            _isCreatingViewSyncGroup = false;
+        }
+    }
+
+    private async Task UngroupViewSyncDeviceAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_viewSyncDeviceId))
+        {
+            return;
+        }
+
+        _isUngroupingViewSync = true;
+        try
+        {
+            var overview = await ViewSyncService.UngroupDeviceAsync(_viewSyncDeviceId, _disposeCancellation.Token);
+            ApplyViewSyncOverview(overview);
+            ShowToast(ToastKind.Success, "View sync disabled", "This browser was removed from its sync group.");
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "View sync failed", ex.Message);
+        }
+        finally
+        {
+            _isUngroupingViewSync = false;
+        }
+    }
+
+    private static string FormatViewSyncLastSeen(DateTimeOffset value)
+    {
+        return value.ToLocalTime().ToString("dd MMM HH:mm", CultureInfo.CurrentCulture);
     }
 
     private async Task ConnectSimklAsync()
