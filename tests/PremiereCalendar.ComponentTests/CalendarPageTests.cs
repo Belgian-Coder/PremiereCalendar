@@ -1240,6 +1240,51 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_ClickingDayPublishesViewSyncUrl()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        _viewSyncService.PublishedUrls.Clear();
+        component.Find("button[data-day-target='premiere-day-20260505']").Click();
+
+        component.WaitForAssertion(() =>
+            Assert.Contains("/series?week=2026-05-04&day=2026-05-05", _viewSyncService.PublishedUrls));
+    }
+
+    [Fact]
+    public void CalendarPage_RemoteViewSyncDayChangeInSameWeekUpdatesSelectedDay()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&day=2026-05-05");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+
+        component.InvokeAsync(() => _viewSyncService.RaiseStateChanged(new ViewSyncGroupState(
+            "group-a",
+            "series",
+            "/series?week=2026-05-04&day=2026-05-06",
+            10,
+            DateTimeOffset.Parse("2026-05-10T10:01:00Z"),
+            "device-b",
+            "Tablet")));
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("day=2026-05-06", navigation.Uri);
+            Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260506']").ClassName);
+            Assert.DoesNotContain("active", component.Find("button[data-day-target='premiere-day-20260505']").ClassName);
+            Assert.Single(service.Calls);
+        });
+    }
+
+    [Fact]
     public async Task CalendarPage_ScrollAdjacentDayAcrossWeekBoundaryLoadsAdjacentWeek()
     {
         var service = new FakePremiereService();

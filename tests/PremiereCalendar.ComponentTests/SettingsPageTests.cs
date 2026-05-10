@@ -476,6 +476,71 @@ public sealed class SettingsPageTests : BunitContext
         });
     }
 
+    [Fact]
+    public void SettingsPage_ShowsLatestViewSyncUrlForEachCalendarRoute()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        _viewSyncService.Overview = new ViewSyncOverview(
+            new ViewSyncDevice(
+                "device-a",
+                "Office PC",
+                SyncEnabled: true,
+                "group-a",
+                DateTimeOffset.Parse("2026-05-10T10:00:00Z")),
+            [new ViewSyncGroup("group-a", "Living room", DateTimeOffset.Parse("2026-05-10T09:00:00Z"))],
+            [new ViewSyncDevice("device-a", "Office PC", true, "group-a", DateTimeOffset.Parse("2026-05-10T10:00:00Z"))],
+            new ViewSyncGroupState(
+                "group-a",
+                "series",
+                "/series?week=2026-05-04&day=2026-05-05",
+                3,
+                DateTimeOffset.Parse("2026-05-10T10:05:00Z"),
+                "device-a",
+                "Office PC"),
+            [
+                new ViewSyncGroupState(
+                    "group-a",
+                    "all",
+                    "/?week=2026-05-04&day=2026-05-04",
+                    1,
+                    DateTimeOffset.Parse("2026-05-10T10:01:00Z"),
+                    "device-b",
+                    "Tablet"),
+                new ViewSyncGroupState(
+                    "group-a",
+                    "movies",
+                    "/movies?week=2026-05-11&day=2026-05-12",
+                    2,
+                    DateTimeOffset.Parse("2026-05-10T10:03:00Z"),
+                    "device-c",
+                    "TV"),
+                new ViewSyncGroupState(
+                    "group-a",
+                    "series",
+                    "/series?week=2026-05-04&day=2026-05-05",
+                    3,
+                    DateTimeOffset.Parse("2026-05-10T10:05:00Z"),
+                    "device-a",
+                    "Office PC")
+            ]);
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            var routes = component.Find("[aria-label='Latest synced calendar routes']");
+            Assert.Contains("All", routes.TextContent);
+            Assert.Contains("/?week=2026-05-04&day=2026-05-04", routes.TextContent);
+            Assert.Contains("Movies", routes.TextContent);
+            Assert.Contains("/movies?week=2026-05-11&day=2026-05-12", routes.TextContent);
+            Assert.Contains("Series", routes.TextContent);
+            Assert.Contains("/series?week=2026-05-04&day=2026-05-05", routes.TextContent);
+        });
+    }
+
     private sealed class FakeIntegrationSettingsStore : IIntegrationSettingsStore
     {
         public IntegrationSettings Settings { get; set; } = new();

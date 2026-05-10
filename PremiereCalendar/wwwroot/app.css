@@ -2284,6 +2284,44 @@ html[data-theme="dark"] .links span {
     text-transform: uppercase;
 }
 
+.view-sync-routes {
+    display: grid;
+    gap: 0.45rem;
+}
+
+.view-sync-route-row {
+    display: grid;
+    gap: 0.2rem;
+    min-width: 0;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-strong);
+}
+
+.view-sync-route-row strong {
+    color: var(--ink);
+    font-size: 0.82rem;
+}
+
+.view-sync-route-row span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--teal-strong);
+    font-size: 0.82rem;
+    font-weight: 800;
+}
+
+.view-sync-route-row span.muted {
+    color: var(--muted);
+}
+
+.view-sync-route-row small {
+    color: var(--muted);
+    font-size: 0.74rem;
+    font-weight: 700;
+}
+
 .settings-options-list button {
     min-height: 1.75rem;
     padding: 0.25rem 0.5rem;

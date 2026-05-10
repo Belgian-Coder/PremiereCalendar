@@ -98,11 +98,24 @@
                                 </button>
                             </div>
 
-                            @if (_viewSyncGroupState is not null)
+                            @if (!string.IsNullOrWhiteSpace(_selectedViewSyncGroupId))
                             {
-                                <div class="settings-selected-note" aria-label="Latest synced view">
-                                    <span>Latest: @_viewSyncGroupState.RelativeUrl</span>
-                                    <span>By @_viewSyncGroupState.UpdatedByDeviceName</span>
+                                <div class="view-sync-routes" aria-label="Latest synced calendar routes">
+                                    @foreach (var route in ViewSyncRouteSummaries())
+                                    {
+                                        <div class="view-sync-route-row">
+                                            <strong>@route.Label</strong>
+                                            @if (route.State is { } state)
+                                            {
+                                                <span>@state.RelativeUrl</span>
+                                                <small>By @state.UpdatedByDeviceName · @FormatViewSyncLastSeen(state.UpdatedUtc)</small>
+                                            }
+                                            else
+                                            {
+                                                <span class="muted">Not synced yet</span>
+                                            }
+                                        </div>
+                                    }
                                 </div>
                             }
 
@@ -630,7 +643,7 @@
     private ViewSyncOverview? _viewSyncOverview;
     private IReadOnlyList<ViewSyncGroup> _viewSyncGroups = [];
     private IReadOnlyList<ViewSyncDevice> _viewSyncGroupDevices = [];
-    private ViewSyncGroupState? _viewSyncGroupState;
+    private IReadOnlyList<ViewSyncGroupState> _viewSyncGroupStates = [];
 
     private bool HasSimklAccessToken => !string.IsNullOrWhiteSpace(_settings.Sources.Simkl.AccessToken);
 
@@ -899,8 +912,29 @@
         _selectedViewSyncGroupId = overview.Device.GroupId;
         _viewSyncGroups = overview.Groups;
         _viewSyncGroupDevices = overview.GroupDevices;
-        _viewSyncGroupState = overview.GroupState;
+        _viewSyncGroupStates = overview.GroupStates is { Count: > 0 }
+            ? overview.GroupStates
+            : overview.GroupState is null
+                ? []
+                : [overview.GroupState];
     }
+
+    private IEnumerable<ViewSyncRouteSummary> ViewSyncRouteSummaries()
+    {
+        yield return ViewSyncRouteSummaryFor("All", "all");
+        yield return ViewSyncRouteSummaryFor("Movies", "movies");
+        yield return ViewSyncRouteSummaryFor("Series", "series");
+    }
+
+    private ViewSyncRouteSummary ViewSyncRouteSummaryFor(string label, string routeKey)
+    {
+        return new ViewSyncRouteSummary(
+            label,
+            _viewSyncGroupStates.FirstOrDefault(state =>
+                string.Equals(state.RouteKey, routeKey, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private sealed record ViewSyncRouteSummary(string Label, ViewSyncGroupState? State);
 
     private bool IsCurrentViewSyncDevice(ViewSyncDevice device)
     {

@@ -551,6 +551,7 @@
 
                 var previousWeekStart = _filters.WeekStart;
                 var previousMode = _pageMode;
+                var previousSelectedDay = _selectedDay;
                 var previousCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
                 var forceLoad = _forceLoadOnNextLocationChange;
                 _forceLoadOnNextLocationChange = false;
@@ -572,6 +573,10 @@
                     await LoadAsync();
                 }
                 else if (_pageMode != previousMode)
+                {
+                    StateHasChanged();
+                }
+                else if (_selectedDay != previousSelectedDay)
                 {
                     StateHasChanged();
                 }
