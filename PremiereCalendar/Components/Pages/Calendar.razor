@@ -363,13 +363,12 @@
             || await ViewSyncService.GetLatestStateForDeviceAsync(
                 _viewSyncDeviceId,
                 routeKey,
-                _disposeCancellation.Token) is not { } state
-            || string.Equals(state.UpdatedByDeviceId, _viewSyncDeviceId, StringComparison.Ordinal))
+                _disposeCancellation.Token) is not { } state)
         {
             return false;
         }
 
-        return await ApplyViewSyncStateAsync(state, force: true);
+        return await ApplyViewSyncStateAsync(state, force: true, blockLocalRestoreWhenAlreadyCurrent: true);
     }
 
     private void OnViewSyncStateChanged(object? sender, ViewSyncStateChangedEventArgs args)
@@ -401,7 +400,10 @@
         }
     }
 
-    private async Task<bool> ApplyViewSyncStateAsync(ViewSyncGroupState state, bool force = false)
+    private async Task<bool> ApplyViewSyncStateAsync(
+        ViewSyncGroupState state,
+        bool force = false,
+        bool blockLocalRestoreWhenAlreadyCurrent = false)
     {
         _lastAppliedViewSyncRevisions.TryGetValue(state.RouteKey, out var lastAppliedRevision);
         if (!force && state.Revision <= lastAppliedRevision)
@@ -426,7 +428,7 @@
         _lastAppliedViewSyncRevisions[state.RouteKey] = Math.Max(lastAppliedRevision, state.Revision);
         if (string.Equals(ToRelativeCalendarUrl(Navigation.Uri), relativeUrl, StringComparison.Ordinal))
         {
-            return false;
+            return blockLocalRestoreWhenAlreadyCurrent;
         }
 
         _applyingViewSyncNavigation = true;

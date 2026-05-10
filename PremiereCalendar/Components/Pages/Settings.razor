@@ -27,6 +27,13 @@
     else
     {
         <EditForm EditContext="_editContext">
+            <div class="settings-actions sticky" aria-live="polite">
+                <span class="@SettingsDirtyClass">@SettingsDirtyText</span>
+                <button class="tool-button primary-action" type="button" title="Save integration settings" @onclick="SaveAsync" disabled="@_isSaving">
+                    @(_isSaving ? "Saving..." : "Save settings")
+                </button>
+            </div>
+
             <section class="settings-grid">
                 <article class="settings-panel" aria-label="View sync settings">
                     <div class="settings-panel-header">
@@ -588,13 +595,6 @@
                     </div>
                 </article>
             </section>
-
-            <div class="settings-actions sticky" aria-live="polite">
-                <span class="@SettingsDirtyClass">@SettingsDirtyText</span>
-                <button class="tool-button primary-action" type="button" title="Save integration settings" @onclick="SaveAsync" disabled="@_isSaving">
-                    @(_isSaving ? "Saving..." : "Save settings")
-                </button>
-            </div>
         </EditForm>
     }
 </div>
