@@ -1,3 +1,4 @@
+using AngleSharp.Dom;
 using Bunit;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.AspNetCore.Components;
@@ -51,6 +52,50 @@ public sealed class CalendarPageTests : BunitContext
         {
             toggle.Click();
         }
+    }
+
+    private static int DirectChildIndex(IElement parent, Func<IElement, bool> predicate)
+    {
+        for (var index = 0; index < parent.Children.Length; index++)
+        {
+            if (predicate(parent.Children[index]))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    [Fact]
+    public void CalendarPage_UsesCompactCommandBarBeforeCalendarBoard()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-11&seriesScope=new");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+            Assert.NotEmpty(component.FindAll("[data-testid='premiere-card']")));
+
+        var commandBar = component.Find("[data-testid='calendar-command-bar']");
+        Assert.Contains("Series", commandBar.TextContent);
+        Assert.Contains("11 May", commandBar.TextContent);
+        Assert.Contains("17 May", commandBar.TextContent);
+        Assert.Contains("New only", commandBar.TextContent);
+        Assert.Empty(component.FindAll(".calendar-header"));
+        Assert.Empty(component.FindAll(".toolbar"));
+
+        var shell = component.Find(".calendar-shell");
+        var commandIndex = DirectChildIndex(shell, element =>
+            element.GetAttribute("data-testid") == "calendar-command-bar");
+        var boardIndex = DirectChildIndex(shell, element =>
+            element.ClassList.Contains("calendar-week-board"));
+
+        Assert.True(commandIndex >= 0);
+        Assert.True(boardIndex >= 0);
+        Assert.True(commandIndex < boardIndex);
     }
 
     [Fact]
@@ -183,7 +228,7 @@ public sealed class CalendarPageTests : BunitContext
         {
             var refresh = component.Find("button[title='Refresh premieres']");
             Assert.Null(refresh.GetAttribute("disabled"));
-            Assert.Contains("Updating results", component.Markup);
+            Assert.Contains("Updating", component.Find("[data-testid='refreshing']").TextContent);
         });
     }
 

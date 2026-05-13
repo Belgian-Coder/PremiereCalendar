@@ -24,46 +24,164 @@
 <ToastStack Messages="_toasts" />
 
 <div class="calendar-shell">
-    <header class="calendar-header">
-        <div>
-            <p class="eyebrow">@EyebrowText()</p>
-            <h1 tabindex="-1" data-testid="calendar-focus-target">@PageTitleText()</h1>
-        </div>
-        <div class="week-range" data-testid="week-range">
-            @_filters.WeekStart.ToString("dd MMM yyyy") - @_filters.WeekStart.AddDays(6).ToString("dd MMM yyyy")
-        </div>
-    </header>
+    @{
+        var activeFilterLabels = ActiveFilterLabels();
+        var scopeBadgeText = CalendarScopeBadgeText();
+        var hasVisibleItemsForCurrentWeek = HasVisibleItemsForCurrentWeek(_visibleItems);
+    }
 
-    <section class="toolbar" aria-label="Calendar controls">
-        <div class="button-group" role="group" aria-label="Week navigation">
-            <button class="tool-button" title="Previous week" @onclick="PreviousWeek">
-                <span aria-hidden="true">&lt;</span>
-                <span>Previous</span>
-            </button>
-            <button class="tool-button" title="This week" @onclick="CurrentWeek">This week</button>
-            <button class="tool-button" title="Next week" @onclick="NextWeek">
-                <span>Next</span>
-                <span aria-hidden="true">&gt;</span>
-            </button>
-        </div>
+    <header class="calendar-command-bar" data-testid="calendar-command-bar">
+        <h1 class="visually-hidden" tabindex="-1" data-testid="calendar-focus-target">@PageTitleText()</h1>
 
-        <button class="tool-button primary-action" title="Refresh premieres" @onclick="RefreshAsync" aria-busy="@_isLoading">
-            Refresh
-        </button>
-    </section>
-
-    @if (_cacheFreshness.Count > 0)
-    {
-        <section class="cache-freshness" data-testid="cache-freshness" aria-label="Calendar cache freshness">
-            @foreach (var entry in _cacheFreshness)
+        <div class="calendar-command-summary">
+            <span class="calendar-mode-pill">@CalendarModeLabel()</span>
+            @if (!string.IsNullOrWhiteSpace(scopeBadgeText))
             {
-                <span class="@CacheFreshnessClass(entry)">
-                    <strong>@entry.Label cache</strong>
-                    <span>@CacheFreshnessText(entry)</span>
+                <span class="calendar-scope-pill">@scopeBadgeText</span>
+            }
+            <span class="command-week-range" data-testid="week-range">@CompactWeekRangeText()</span>
+            <span class="calendar-result-count">@VisibleResultCountText()</span>
+            @if (_isLoading && hasVisibleItemsForCurrentWeek)
+            {
+                <span class="calendar-refresh-status" data-testid="refreshing" aria-live="polite">
+                    Updating
                 </span>
             }
-        </section>
-    }
+
+            @if (_cacheFreshness.Count > 0)
+            {
+                <span class="cache-freshness command-cache-summary" data-testid="cache-freshness" aria-label="Calendar cache freshness">
+                    @foreach (var entry in _cacheFreshness)
+                    {
+                        <span class="@CacheFreshnessClass(entry)">
+                            <strong>@entry.Label cache</strong>
+                            <span>@CacheFreshnessText(entry)</span>
+                        </span>
+                    }
+                </span>
+            }
+
+            @if (activeFilterLabels.Count > 0)
+            {
+                <section class="active-filter-strip compact" data-testid="active-filter-strip" aria-label="Active filters">
+                    <span class="active-filter-title">Filters</span>
+                    @foreach (var label in activeFilterLabels)
+                    {
+                        <span class="active-filter-chip">@label</span>
+                    }
+                    <button class="text-command"
+                            type="button"
+                            title="Clear active filters"
+                            aria-label="Clear active filters"
+                            data-focus-restore="calendar-heading"
+                            @onclick="ClearActiveFiltersAsync">
+                        Clear
+                    </button>
+                </section>
+            }
+        </div>
+
+        <div class="calendar-command-actions" aria-label="Calendar controls">
+            <div class="button-group command-week-nav" role="group" aria-label="Week navigation">
+                <button class="tool-button compact-command" title="Previous week" aria-label="Previous week" @onclick="PreviousWeek">
+                    <span aria-hidden="true">&lt;</span>
+                    <span class="button-label">Previous</span>
+                </button>
+                <button class="tool-button compact-command" title="This week" @onclick="CurrentWeek">This week</button>
+                <button class="tool-button compact-command" title="Next week" aria-label="Next week" @onclick="NextWeek">
+                    <span class="button-label">Next</span>
+                    <span aria-hidden="true">&gt;</span>
+                </button>
+            </div>
+
+            <button class="tool-button primary-action compact-command" title="Refresh premieres" @onclick="RefreshAsync" aria-busy="@_isLoading">
+                Refresh
+            </button>
+        </div>
+
+        @if (_loadProgress.Count > 0)
+        {
+            <section class="@QueryProgressPanelClass()" data-testid="query-progress" aria-live="polite">
+                <div class="query-progress-heading">
+                    <div class="query-progress-summary">
+                        <span>Sources</span>
+                        <strong>@QueryProgressSummaryText()</strong>
+                    </div>
+                    @if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
+                    {
+                        <button type="button"
+                                class="query-progress-clear compact"
+                                title="Show all loaded sources"
+                                aria-label="Clear loaded-source filter"
+                                data-focus-restore="calendar-heading"
+                                @onclick="ClearSourceProgressFilterAsync">
+                            Clear source
+                        </button>
+                    }
+                    <button type="button"
+                            class="query-progress-toggle"
+                            title="@(_isQueryProgressExpanded ? "Hide loaded-source filters" : "Show loaded-source filters")"
+                            aria-expanded="@AriaExpanded(_isQueryProgressExpanded)"
+                            aria-controls="@QueryProgressDetailsId()"
+                            data-testid="query-progress-toggle"
+                            @onclick="ToggleQueryProgressDetails">
+                        @(_isQueryProgressExpanded ? "Hide" : "Details")
+                    </button>
+                </div>
+                @if (_isQueryProgressExpanded)
+                {
+                    <div class="query-progress-list" id="query-progress-details" data-testid="query-progress-details">
+                        @foreach (var entry in GroupedLoadProgressEntries())
+                        {
+                            <button type="button"
+                                    class="@QueryProgressClass(entry)"
+                                    title="@QueryProgressTitle(entry)"
+                                    aria-pressed="@IsSourceProgressFilterActive(entry)"
+                                    @onclick="() => ToggleSourceProgressFilter(entry)">
+                                <span>@entry.SourceName</span>
+                                <strong>@FormatSourceCardCount(entry.SourceItemCount)</strong>
+                                @if (entry.UnmappedCount is > 0)
+                                {
+                                    <small class="query-progress-detail">@FormatUnmappedCount(entry.UnmappedCount.Value)</small>
+                                }
+                                @if (entry.TotalWork is > 0)
+                                {
+                                    <span class="query-progress-meter"
+                                          role="progressbar"
+                                          aria-label="@($"{entry.SourceName} loading progress")"
+                                          aria-valuemin="0"
+                                          aria-valuemax="100"
+                                          aria-valuenow="@QueryProgressPercent(entry)"
+                                          data-testid="query-progress-bar">
+                                        <span style="@($"width: {QueryProgressWidth(entry)}")"></span>
+                                    </span>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(entry.ProgressText))
+                                {
+                                    <small class="query-progress-detail">@entry.ProgressText</small>
+                                }
+                                @if (entry.ElapsedMilliseconds is > 0)
+                                {
+                                    <small class="query-progress-detail">@FormatElapsed(entry.ElapsedMilliseconds.Value)</small>
+                                }
+                            </button>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
+                        {
+                            <button type="button"
+                                    class="query-progress-clear"
+                                    title="Show all loaded sources"
+                                    data-focus-restore="calendar-heading"
+                                    @onclick="ClearSourceProgressFilterAsync">
+                                All loaded sources
+                            </button>
+                        }
+                    </div>
+                }
+            </section>
+        }
+    </header>
 
     @if (_queuedViewSyncState is not null)
     {
@@ -84,116 +202,6 @@
                               OnClose="CloseFilters" />
     }
 
-    @{
-        var activeFilterLabels = ActiveFilterLabels();
-    }
-
-    @if (activeFilterLabels.Count > 0)
-    {
-        <section class="active-filter-strip" data-testid="active-filter-strip" aria-label="Active filters">
-            <span class="active-filter-title">Filters</span>
-            @foreach (var label in activeFilterLabels)
-            {
-                <span class="active-filter-chip">@label</span>
-            }
-            <button class="text-command"
-                    type="button"
-                    title="Clear active filters"
-                    aria-label="Clear active filters"
-                    data-focus-restore="calendar-heading"
-                    @onclick="ClearActiveFiltersAsync">
-                Clear filters
-            </button>
-        </section>
-    }
-
-    @if (_loadProgress.Count > 0)
-    {
-        <section class="@QueryProgressPanelClass()" data-testid="query-progress" aria-live="polite">
-            <div class="query-progress-heading">
-                <div class="query-progress-summary">
-                    <span>Loaded-source filters</span>
-                    <strong>@QueryProgressSummaryText()</strong>
-                </div>
-                @if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
-                {
-                    <button type="button"
-                            class="query-progress-clear compact"
-                            title="Show all loaded sources"
-                            aria-label="Clear loaded-source filter"
-                            data-focus-restore="calendar-heading"
-                            @onclick="ClearSourceProgressFilterAsync">
-                        Clear source
-                    </button>
-                }
-                <button type="button"
-                        class="query-progress-toggle"
-                        title="@(_isQueryProgressExpanded ? "Hide loaded-source filters" : "Show loaded-source filters")"
-                        aria-expanded="@AriaExpanded(_isQueryProgressExpanded)"
-                        aria-controls="@QueryProgressDetailsId()"
-                        data-testid="query-progress-toggle"
-                        @onclick="ToggleQueryProgressDetails">
-                    @(_isQueryProgressExpanded ? "Hide sources" : "Show sources")
-                </button>
-            </div>
-            @if (_isQueryProgressExpanded)
-            {
-                <div class="query-progress-list" id="query-progress-details" data-testid="query-progress-details">
-                    @foreach (var entry in GroupedLoadProgressEntries())
-                    {
-                        <button type="button"
-                                class="@QueryProgressClass(entry)"
-                                title="@QueryProgressTitle(entry)"
-                                aria-pressed="@IsSourceProgressFilterActive(entry)"
-                                @onclick="() => ToggleSourceProgressFilter(entry)">
-                            <span>@entry.SourceName</span>
-                            <strong>@FormatSourceCardCount(entry.SourceItemCount)</strong>
-                            @if (entry.UnmappedCount is > 0)
-                            {
-                                <small class="query-progress-detail">@FormatUnmappedCount(entry.UnmappedCount.Value)</small>
-                            }
-                            @if (entry.TotalWork is > 0)
-                            {
-                                <span class="query-progress-meter"
-                                      role="progressbar"
-                                      aria-label="@($"{entry.SourceName} loading progress")"
-                                      aria-valuemin="0"
-                                      aria-valuemax="100"
-                                      aria-valuenow="@QueryProgressPercent(entry)"
-                                      data-testid="query-progress-bar">
-                                    <span style="@($"width: {QueryProgressWidth(entry)}")"></span>
-                                </span>
-                            }
-                            @if (!string.IsNullOrWhiteSpace(entry.ProgressText))
-                            {
-                                <small class="query-progress-detail">@entry.ProgressText</small>
-                            }
-                            @if (entry.ElapsedMilliseconds is > 0)
-                            {
-                                <small class="query-progress-detail">@FormatElapsed(entry.ElapsedMilliseconds.Value)</small>
-                            }
-                        </button>
-                    }
-
-                    @if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
-                    {
-                        <button type="button"
-                                class="query-progress-clear"
-                                title="Show all loaded sources"
-                                data-focus-restore="calendar-heading"
-                                @onclick="ClearSourceProgressFilterAsync">
-                            All loaded sources
-                        </button>
-                    }
-                </div>
-            }
-        </section>
-    }
-
-    @{
-        var hasVisibleItemsForCurrentWeek = HasVisibleItemsForCurrentWeek(_visibleItems);
-    }
-
     @if (!string.IsNullOrWhiteSpace(_error))
     {
         <div class="status-panel error" role="alert" data-testid="error">@_error</div>
@@ -204,13 +212,6 @@
     }
     else
     {
-        @if (_isLoading)
-        {
-            <div class="status-panel refreshing" data-testid="refreshing" aria-live="polite">
-                Updating results...
-            </div>
-        }
-
         <CalendarWeek WeekStart="_filters.WeekStart"
                       Items="_visibleItems"
                       ScoreSource="_filters.ScoreSource"
@@ -276,6 +277,55 @@
             CalendarPageMode.Movies => "Movie Calendar",
             _ => "Premiere Calendar"
         };
+    }
+
+    private string CalendarModeLabel()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => "Series",
+            CalendarPageMode.Movies => "Movies",
+            _ => "All"
+        };
+    }
+
+    private string CalendarScopeBadgeText()
+    {
+        return _pageMode != CalendarPageMode.Movies
+            && _filters.SeriesFilters.SeriesDateMode == SeriesDateMode.NewSeriesOnly
+                ? "New only"
+                : string.Empty;
+    }
+
+    private string CompactWeekRangeText()
+    {
+        var start = _filters.WeekStart;
+        var end = start.AddDays(6);
+
+        if (start.Year == end.Year && start.Month == end.Month)
+        {
+            return $"{start.ToString("dd MMM", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
+        }
+
+        if (start.Year == end.Year)
+        {
+            return $"{start.ToString("dd MMM", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
+        }
+
+        return $"{start.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
+    }
+
+    private string VisibleResultCountText()
+    {
+        var count = _visibleItems.Count;
+        if (_isLoading && count == 0)
+        {
+            return "Loading";
+        }
+
+        return count == 1
+            ? "1 title"
+            : $"{count.ToString("N0", CultureInfo.InvariantCulture)} titles";
     }
 
     private string EyebrowText()
