@@ -2,6 +2,7 @@ using Bunit;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using PremiereCalendar.Components.Shared;
 using PremiereCalendar.Options;
 using PremiereCalendar.Models;
@@ -19,11 +20,21 @@ public sealed class CalendarPageTests : BunitContext
     {
         JSInterop.Mode = JSRuntimeMode.Loose;
         JSInterop.Setup<string>("premiereViewSync.getOrCreateDeviceId").SetResult("device-a");
+        Services.AddLogging();
         Services.AddSingleton<IAdjacentWeekPrefetcher>(_prefetcher);
         Services.AddSingleton<CalendarLoadCoordinator>();
         Services.AddSingleton<ICalendarFilterUsageStore, FakeCalendarFilterUsageStore>();
         Services.AddSingleton<IFilterCatalogService, FakeFilterCatalogService>();
-        Services.AddSingleton<IIntegrationSettingsStore, FakeIntegrationSettingsStore>();
+        Services.AddSingleton<IIntegrationSettingsStore>(new FakeIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings
+            {
+                Sources = new SourceIntegrationSettings
+                {
+                    Tmdb = new TmdbSourceSettings { BearerToken = "tmdb-token" }
+                }
+            }
+        });
         Services.AddSingleton<IArrIntegrationService, FakeArrIntegrationService>();
         Services.AddSingleton<IViewSyncService>(_viewSyncService);
         Services.AddSingleton<ICalendarCacheMaintenance>(_cacheMaintenance);
@@ -234,6 +245,159 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_FilterCatalogFailureLogsWarning()
+    {
+        var loggerProvider = new CollectingLoggerProvider();
+        var service = new FakePremiereService();
+        Services.AddLogging(builder => builder.AddProvider(loggerProvider));
+        Services.AddSingleton<IPremiereService>(service);
+        Services.AddSingleton<IFilterCatalogService>(new ThrowingFilterCatalogService());
+
+        Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        Assert.Contains(loggerProvider.Entries, entry =>
+            string.Equals(entry.Category, "PremiereCalendar.Components.Pages.Calendar", StringComparison.Ordinal)
+            && entry.Level == LogLevel.Warning
+            && entry.Message.Contains("Filter catalog load failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CalendarPage_MissingTmdbSettingsNavigatesToSettingsBeforeLoading()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.AddSingleton<IIntegrationSettingsStore>(new FakeIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings()
+        });
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var redirected = new Uri(navigation.Uri);
+            var query = QueryHelpers.ParseQuery(redirected.Query);
+            Assert.Equal("/settings", redirected.AbsolutePath);
+            Assert.Equal("tmdb", query["reason"].ToString());
+            Assert.Equal("/series?week=2026-05-04", query["returnUrl"].ToString());
+            Assert.Empty(service.Calls);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_SettingsLoadFailureLogsErrorWithoutRedirectingToSetup()
+    {
+        var loggerProvider = new CollectingLoggerProvider();
+        var service = new FakePremiereService();
+        Services.AddLogging(builder => builder.AddProvider(loggerProvider));
+        Services.AddSingleton<IPremiereService>(service);
+        Services.AddSingleton<IIntegrationSettingsStore>(new ThrowingIntegrationSettingsStore());
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.EndsWith("/series?week=2026-05-04", new Uri(navigation.Uri).PathAndQuery);
+            Assert.Empty(service.Calls);
+            Assert.Contains("Settings could not be loaded", component.Markup);
+            Assert.Contains(loggerProvider.Entries, entry =>
+                string.Equals(entry.Category, "PremiereCalendar.Components.Pages.Calendar", StringComparison.Ordinal)
+                && entry.Level == LogLevel.Error
+                && entry.Message.Contains("Integration settings load failed", StringComparison.Ordinal));
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_SettingsLoadFailureCanRetryWithoutRedirectingToSetup()
+    {
+        var service = new FakePremiereService();
+        var store = new TransientFailingIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings
+            {
+                Sources = new SourceIntegrationSettings
+                {
+                    Tmdb = new TmdbSourceSettings { BearerToken = "tmdb-token" }
+                }
+            }
+        };
+        Services.AddSingleton<IPremiereService>(service);
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("Settings could not be loaded", component.Markup);
+            Assert.Empty(service.Calls);
+        });
+
+        component.Find("button[title='Refresh premieres']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.EndsWith("/series?week=2026-05-04", new Uri(navigation.Uri).PathAndQuery);
+            Assert.Single(service.Calls);
+            Assert.DoesNotContain("/settings?reason=tmdb", navigation.Uri);
+            Assert.DoesNotContain("Settings could not be loaded", component.Markup);
+        });
+        Assert.Equal(2, store.GetCallCount);
+    }
+
+    [Fact]
+    public void CalendarPage_SameUrlViewSyncStateStillLoadsInitialCalendar()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        _viewSyncService.SetGroupState(new ViewSyncGroupState(
+            "group-a",
+            "series",
+            "/series",
+            4,
+            DateTimeOffset.Parse("2026-05-10T10:00:00Z"),
+            "device-b",
+            "Kitchen tablet"));
+        navigation.NavigateTo("/series");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(service.Calls);
+            Assert.Single(component.FindAll("[data-testid='calendar-week']"));
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_DefaultOnlyStoredFiltersDoNotBlockInitialLoad()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        JSInterop.Setup<string?>(
+                "premiereFilterStorage.get",
+                "premiere-calendar:filters:v2:series")
+            .SetResult("sort=date&dir=asc&score=tmdb&min=0.0&max=10.0&minVotes=0&lang=both&origin=all&runtimeMin=0&runtimeMax=360&seriesScope=episodes");
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(service.Calls);
+            Assert.DoesNotContain("sort=date", navigation.Uri);
+            Assert.Single(component.FindAll("[data-testid='calendar-week']"));
+        });
+    }
+
+    [Fact]
     public void CalendarPage_ReadsFiltersFromQueryStringAndKeepsUrlShareable()
     {
         var service = new FakePremiereService();
@@ -299,6 +463,149 @@ public sealed class CalendarPageTests : BunitContext
             var card = Assert.Single(component.FindAll("[data-testid='premiere-card']"));
             Assert.Contains("North Star", card.TextContent);
         });
+    }
+
+    [Fact]
+    public void CalendarPage_DayTabsOnlyReferenceMountedPanel()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var tabs = component.FindAll("button[role='tab']");
+            Assert.Equal(7, tabs.Count);
+
+            var selected = Assert.Single(tabs, tab => tab.GetAttribute("aria-selected") == "true");
+            var controlledPanel = selected.GetAttribute("aria-controls");
+            Assert.False(string.IsNullOrWhiteSpace(controlledPanel));
+            Assert.Single(component.FindAll($"#{controlledPanel}"));
+
+            Assert.All(
+                tabs.Where(tab => tab.GetAttribute("aria-selected") != "true"),
+                tab => Assert.Null(tab.GetAttribute("aria-controls")));
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_SortOnlyRouteChangeReordersVisibleCardsWithoutReloading()
+    {
+        var weekStart = new DateOnly(2026, 5, 4);
+        var service = new FakePremiereService
+        {
+            Items =
+            [
+                new PremiereItem
+                {
+                    CanonicalId = "series:zulu",
+                    Type = PremiereItemType.SeriesPremiere,
+                    MediaType = PremiereMediaType.Series,
+                    TmdbId = 10,
+                    Title = "Zulu",
+                    PremiereDate = weekStart,
+                    OriginalLanguage = "en",
+                    TmdbScore = 9.2,
+                    TmdbVoteCount = 300
+                },
+                new PremiereItem
+                {
+                    CanonicalId = "series:alpha",
+                    Type = PremiereItemType.SeriesPremiere,
+                    MediaType = PremiereMediaType.Series,
+                    TmdbId = 11,
+                    Title = "Alpha",
+                    PremiereDate = weekStart,
+                    OriginalLanguage = "en",
+                    TmdbScore = 5.1,
+                    TmdbVoteCount = 30
+                }
+            ]
+        };
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&sort=title");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var cards = component.FindAll("[data-testid='premiere-card']");
+            Assert.Equal(2, cards.Count);
+            Assert.Contains("Alpha", cards[0].TextContent);
+            Assert.Contains("Zulu", cards[1].TextContent);
+            Assert.Single(service.Calls);
+        });
+
+        navigation.NavigateTo("/series?week=2026-05-04&sort=score&dir=desc");
+
+        component.WaitForAssertion(() =>
+        {
+            var cards = component.FindAll("[data-testid='premiere-card']");
+            Assert.Equal(2, cards.Count);
+            Assert.Contains("Zulu", cards[0].TextContent);
+            Assert.Contains("Alpha", cards[1].TextContent);
+            Assert.Single(service.Calls);
+        });
+    }
+
+    [Fact]
+    public async Task CalendarPage_SaveSortOnlyFilterChangeReordersExistingResultsWithoutReloading()
+    {
+        var weekStart = new DateOnly(2026, 5, 4);
+        var service = new FakePremiereService
+        {
+            Items =
+            [
+                new PremiereItem
+                {
+                    CanonicalId = "series:zulu",
+                    Type = PremiereItemType.SeriesPremiere,
+                    MediaType = PremiereMediaType.Series,
+                    TmdbId = 10,
+                    Title = "Zulu",
+                    PremiereDate = weekStart,
+                    OriginalLanguage = "en",
+                    TmdbScore = 9.2,
+                    TmdbVoteCount = 300
+                },
+                new PremiereItem
+                {
+                    CanonicalId = "series:alpha",
+                    Type = PremiereItemType.SeriesPremiere,
+                    MediaType = PremiereMediaType.Series,
+                    TmdbId = 11,
+                    Title = "Alpha",
+                    PremiereDate = weekStart,
+                    OriginalLanguage = "en",
+                    TmdbScore = 5.1,
+                    TmdbVoteCount = 30
+                }
+            ]
+        };
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        component.Find("button[title='Open filters']").Click();
+        component.Find("select").Change("Title");
+        component.Find("button[title='Save filters']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var cards = component.FindAll("[data-testid='premiere-card']");
+            Assert.Equal(2, cards.Count);
+            Assert.Contains("Alpha", cards[0].TextContent);
+            Assert.Contains("Zulu", cards[1].TextContent);
+            Assert.Contains("sort=title", navigation.Uri);
+        });
+        await Task.Delay(200);
+        Assert.Single(service.Calls);
     }
 
     [Fact]
@@ -718,7 +1025,7 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
-    public void CalendarPage_RoundTripsVisibleFiltersThroughQueryParameters()
+    public async Task CalendarPage_RoundTripsVisibleFiltersThroughQueryParameters()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
@@ -771,8 +1078,6 @@ public sealed class CalendarPageTests : BunitContext
         component.Find("button[title='Open filters']").Click();
         component.Find("button[title='Save filters']").Click();
 
-        component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
-
         var roundTrip = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
         Assert.Equal("2026-05-04", roundTrip["week"].ToString());
         Assert.False(roundTrip.ContainsKey("media"));
@@ -809,10 +1114,120 @@ public sealed class CalendarPageTests : BunitContext
         Assert.Equal("180", roundTrip["movieRuntimeMax"].ToString());
         Assert.Equal("south", roundTrip["movieKeywords"].ToString());
         Assert.Equal("south", roundTrip["movieQ"].ToString());
+        await Task.Delay(200);
+        Assert.Single(service.Calls);
     }
 
     [Fact]
-    public void CalendarPage_SaveCanonicalizesUrlByOmittingDefaultFilterParameters()
+    public void CalendarPage_InvalidMovieReleaseTypeQueryDoesNotBreakFilterPane()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/movies?week=2026-05-04&movieReleaseTypes=99");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        component.Find("button[title='Open filters']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(component.FindAll("[data-testid='filter-pane']"));
+            Assert.Contains("All releases", component.Markup);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_ActiveFilterStripIncludesWatchRegionAndCertificationFilters()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/?week=2026-05-04&seriesWatchRegion=BE&movieCertifications=US%3APG-13&movieCertificationCountry=US");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var strip = component.Find("[data-testid='active-filter-strip']");
+            Assert.Contains("Series: watch region BE", strip.TextContent);
+            Assert.Contains("Movies: 1 certification", strip.TextContent);
+            Assert.Contains("Movies: certification country US", strip.TextContent);
+            Assert.Single(strip.QuerySelectorAll("button[aria-label='Clear active filters']"));
+            Assert.Single(strip.QuerySelectorAll("button[data-focus-restore='calendar-heading']"));
+            var heading = component.Find("[data-testid='calendar-focus-target']");
+            Assert.Equal("-1", heading.GetAttribute("tabindex"));
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_ActiveFilterStripIncludesGlobalFiltersWhenMediaFiltersAreActive()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&q=north&seriesWatchRegion=BE");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var strip = component.Find("[data-testid='active-filter-strip']");
+            Assert.Contains("All: title \"north\"", strip.TextContent);
+            Assert.Contains("Series: watch region BE", strip.TextContent);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_ActiveFilterStripUsesReadablePlurals()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/?week=2026-05-04&seriesOrigins=BE,US&seriesAvailabilities=flatrate,free&seriesStatuses=Returning%20Series%7CEnded");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var strip = component.Find("[data-testid='active-filter-strip']");
+            Assert.Contains("Series: 2 countries", strip.TextContent);
+            Assert.Contains("Series: 2 availabilities", strip.TextContent);
+            Assert.Contains("Series: 2 statuses", strip.TextContent);
+            Assert.DoesNotContain("countrys", strip.TextContent);
+            Assert.DoesNotContain("availabilitys", strip.TextContent);
+            Assert.DoesNotContain("statuss", strip.TextContent);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_FilterDialogUsesSelectedScoreCopy()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+
+        component.Find("button[title='Open filters']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var pane = component.Find("[data-testid='filter-pane']");
+            Assert.Equal("filter-pane-summary", pane.GetAttribute("aria-describedby"));
+            Assert.Equal("status", component.Find("#filter-pane-summary").GetAttribute("role"));
+            Assert.Equal("polite", component.Find("#filter-pane-summary").GetAttribute("aria-live"));
+            Assert.Contains("Selected score", pane.TextContent);
+            Assert.Contains("Selected-source votes", pane.TextContent);
+            Assert.Contains("Vote count", pane.TextContent);
+            Assert.DoesNotContain("TMDb user score", pane.TextContent);
+            Assert.DoesNotContain("TMDb votes", pane.TextContent);
+        });
+    }
+
+    [Fact]
+    public async Task CalendarPage_SaveCanonicalizesUrlByOmittingDefaultFilterParameters()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
@@ -825,8 +1240,6 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() => Assert.Single(service.Calls));
         component.Find("button[title='Open filters']").Click();
         component.Find("button[title='Save filters']").Click();
-
-        component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
 
         var uri = new Uri(navigation.Uri);
         var query = QueryHelpers.ParseQuery(uri.Query);
@@ -841,6 +1254,8 @@ public sealed class CalendarPageTests : BunitContext
         Assert.DoesNotContain("origin=", navigation.Uri);
         Assert.DoesNotContain("runtimeMin=", navigation.Uri);
         Assert.DoesNotContain("runtimeMax=", navigation.Uri);
+        await Task.Delay(200);
+        Assert.Single(service.Calls);
     }
 
     [Fact]
@@ -939,6 +1354,7 @@ public sealed class CalendarPageTests : BunitContext
             var progress = component.Find("[data-testid='query-progress']");
             Assert.Contains("2 total", progress.TextContent);
             Assert.Empty(component.FindAll("[data-testid='query-progress-details']"));
+            Assert.Null(component.Find("[data-testid='query-progress-toggle']").GetAttribute("aria-controls"));
             Assert.Single(component.FindAll("[data-testid='premiere-card']"));
         });
 
@@ -949,6 +1365,43 @@ public sealed class CalendarPageTests : BunitContext
         Assert.Contains("Fake source two", expandedProgress.TextContent);
         Assert.Contains("Complete", expandedProgress.TextContent);
         Assert.Single(component.FindAll("[data-testid='query-progress-details']"));
+        Assert.Equal(
+            "query-progress-details",
+            component.Find("[data-testid='query-progress-toggle']").GetAttribute("aria-controls"));
+    }
+
+    [Fact]
+    public void CalendarPage_CollapsedQueryProgressShowsActiveSourceAndClearAction()
+    {
+        var service = new FakePremiereService
+        {
+            ReportPartialProgress = true
+        };
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        ExpandQueryProgress(component);
+
+        component.WaitForAssertion(() => Assert.NotEmpty(component.FindAll(".query-progress-entry")));
+        component.FindAll(".query-progress-entry")[0].Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var progress = component.Find("[data-testid='query-progress']");
+            Assert.Contains("Fake source one", progress.TextContent);
+            Assert.NotEmpty(progress.QuerySelectorAll("button[aria-label='Clear loaded-source filter']"));
+            Assert.NotEmpty(progress.QuerySelectorAll("button[data-focus-restore='calendar-heading']"));
+        });
+
+        component.Find("[data-testid='query-progress-toggle']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var progress = component.Find("[data-testid='query-progress']");
+            Assert.Empty(component.FindAll("[data-testid='query-progress-details']"));
+            Assert.Contains("Fake source one", progress.TextContent);
+            Assert.NotEmpty(progress.QuerySelectorAll("button[aria-label='Clear loaded-source filter']"));
+        });
     }
 
     [Fact]
@@ -1416,6 +1869,36 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_DateOnlyViewSyncUrlDoesNotMergeLocalSavedFilters()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        JSInterop.Setup<string?>(
+                "premiereFilterStorage.get",
+                "premiere-calendar:filters:v2:series")
+            .SetResult("seriesLang=nl");
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        _viewSyncService.SetGroupState(new ViewSyncGroupState(
+            "group-a",
+            "series",
+            "/series?week=2026-05-18&day=2026-05-19",
+            4,
+            DateTimeOffset.Parse("2026-05-10T10:00:00Z"),
+            "device-b",
+            "Office PC"));
+        navigation.NavigateTo("/series");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("week=2026-05-18", navigation.Uri);
+            Assert.Contains("day=2026-05-19", navigation.Uri);
+            Assert.DoesNotContain("seriesLang=nl", navigation.Uri);
+        });
+    }
+
+    [Fact]
     public void CalendarPage_PlainCalendarUrlFallsBackToLocalSavedFiltersWhenGroupRouteIsMissing()
     {
         var service = new FakePremiereService();
@@ -1495,6 +1978,38 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Contains("week=2026-05-11", navigation.Uri);
             Assert.Contains("day=2026-05-12", navigation.Uri);
             Assert.DoesNotContain("/series?week=2026-05-11&day=2026-05-12", _viewSyncService.PublishedUrls);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_ClosingFiltersLeavesQueuedViewSyncForExplicitChoice()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&day=2026-05-05");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+
+        component.Find("button[title='Open filters']").Click();
+        component.InvokeAsync(() => _viewSyncService.RaiseStateChanged(new ViewSyncGroupState(
+            "group-a",
+            "series",
+            "/series?week=2026-05-11&day=2026-05-12",
+            10,
+            DateTimeOffset.Parse("2026-05-10T10:01:00Z"),
+            "device-b",
+            "Tablet")));
+
+        component.WaitForAssertion(() => Assert.Single(component.FindAll("[data-testid='filter-pane']")));
+        component.Find("button[title='Cancel filter changes']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("week=2026-05-04", navigation.Uri);
+            Assert.Contains("day=2026-05-05", navigation.Uri);
+            Assert.Single(component.FindAll("[data-testid='view-sync-queued']"));
+            Assert.DoesNotContain("week=2026-05-11", navigation.Uri);
         });
     }
 
@@ -1746,6 +2261,55 @@ public sealed class CalendarPageTests : BunitContext
         CalendarFilters? Filters,
         bool WasForegroundActive);
 
+    private sealed class CollectingLoggerProvider : ILoggerProvider
+    {
+        public List<LogEntry> Entries { get; } = [];
+
+        public ILogger CreateLogger(string categoryName)
+        {
+            return new CollectingLogger(categoryName, Entries);
+        }
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class CollectingLogger(string categoryName, List<LogEntry> entries) : ILogger
+        {
+            public IDisposable BeginScope<TState>(TState state)
+                where TState : notnull
+            {
+                return NullScope.Instance;
+            }
+
+            public bool IsEnabled(LogLevel logLevel)
+            {
+                return true;
+            }
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                entries.Add(new LogEntry(categoryName, logLevel, formatter(state, exception), exception));
+            }
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+
+            public void Dispose()
+            {
+            }
+        }
+    }
+
+    private sealed record LogEntry(string Category, LogLevel Level, string Message, Exception? Exception);
+
     private sealed class FakeCalendarCacheMaintenance : ICalendarCacheMaintenance
     {
         public CalendarCacheMetadata? DefaultMetadata { get; set; }
@@ -1945,10 +2509,50 @@ public sealed class CalendarPageTests : BunitContext
 
     private sealed class FakeIntegrationSettingsStore : IIntegrationSettingsStore
     {
-        public IntegrationSettings Settings { get; private set; } = new();
+        public IntegrationSettings Settings { get; set; } = new();
 
         public Task<IntegrationSettings> GetAsync(CancellationToken cancellationToken = default)
         {
+            return Task.FromResult(Settings);
+        }
+
+        public Task SaveAsync(IntegrationSettings settings, CancellationToken cancellationToken = default)
+        {
+            Settings = settings;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ThrowingIntegrationSettingsStore : IIntegrationSettingsStore
+    {
+        public Task<IntegrationSettings> GetAsync(CancellationToken cancellationToken = default)
+        {
+            throw new IOException("Settings database is unavailable.");
+        }
+
+        public Task SaveAsync(IntegrationSettings settings, CancellationToken cancellationToken = default)
+        {
+            throw new IOException("Settings database is unavailable.");
+        }
+    }
+
+    private sealed class TransientFailingIntegrationSettingsStore : IIntegrationSettingsStore
+    {
+        private bool _hasFailed;
+
+        public IntegrationSettings Settings { get; set; } = new();
+
+        public int GetCallCount { get; private set; }
+
+        public Task<IntegrationSettings> GetAsync(CancellationToken cancellationToken = default)
+        {
+            GetCallCount++;
+            if (!_hasFailed)
+            {
+                _hasFailed = true;
+                throw new IOException("Settings database is temporarily unavailable.");
+            }
+
             return Task.FromResult(Settings);
         }
 

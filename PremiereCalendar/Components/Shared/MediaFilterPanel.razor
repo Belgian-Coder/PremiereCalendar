@@ -1,4 +1,5 @@
 @using System.Globalization
+@using System.Runtime.CompilerServices
 
 <div class="filter-section media-filter-set" data-testid="@($"{MediaSlug}-filter-set")">
     <div class="filter-section-heading">
@@ -9,6 +10,28 @@
                 @onclick="ClearFilterSet">
             Clear
         </button>
+    </div>
+
+    <div class="filter-search-pair">
+        <label>
+            Title
+            <input class="search-input"
+                   placeholder="Filter by title..."
+                   aria-label="@($"{Title} title")"
+                   @bind="Filters.SearchText"
+                   @bind:event="oninput"
+                   @bind:after="NotifyChanged" />
+        </label>
+
+        <label>
+            Keywords
+            <input class="search-input"
+                   placeholder="Filter by keywords..."
+                   aria-label="@($"{Title} keywords")"
+                   @bind="Filters.KeywordText"
+                   @bind:event="oninput"
+                   @bind:after="NotifyChanged" />
+        </label>
     </div>
 
     <details class="filter-dropdown" data-testid="@($"{MediaSlug}-where-to-watch-filter")">
@@ -326,12 +349,6 @@
         </label>
     </div>
 
-    <input class="search-input"
-           placeholder="Filter by keywords..."
-           aria-label="@($"{Title} keywords")"
-           @bind="Filters.KeywordText"
-           @bind:event="oninput"
-           @bind:after="NotifyChanged" />
 </div>
 
 @code {
@@ -359,21 +376,83 @@
     private string _sourceSearch = "";
     private string _languageSearch = "";
     private string _countrySearch = "";
+    private IReadOnlyList<FilterOption> _genreOptions = [];
+    private IReadOnlyList<FilterOption> _sourceOptions = [];
+    private IReadOnlyList<FilterOption> _certificationOptions = [];
+    private IReadOnlyList<FilterOption> _languageOptions = [];
+    private IReadOnlyList<FilterOption> _countryOptions = [];
+    private IReadOnlyDictionary<string, string> _sourceLabelsByValue = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyDictionary<string, string> _languageLabelsByValue = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyDictionary<string, string> _countryLabelsByValue = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyDictionary<int, string> _genreLabelsById = new Dictionary<int, string>();
+    private readonly Dictionary<VisibleFilterOptionsCacheKey, IReadOnlyList<FilterOption>> _visibleOptionsCache = [];
+    private IReadOnlyList<PremiereItem>? _cachedItems;
+    private FilterCatalog? _cachedCatalog;
+    private PremiereMediaType _cachedMediaType;
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(_cachedItems, Items)
+            && ReferenceEquals(_cachedCatalog, Catalog)
+            && _cachedMediaType == MediaType)
+        {
+            return;
+        }
+
+        _cachedItems = Items;
+        _cachedCatalog = Catalog;
+        _cachedMediaType = MediaType;
+        _visibleOptionsCache.Clear();
+
+        var mediaItems = Items
+            .Where(item => item.MediaType == MediaType)
+            .ToArray();
+
+        _genreOptions = MergeOptions(
+            MediaType == PremiereMediaType.Series ? Catalog.SeriesGenres : Catalog.MovieGenres,
+            mediaItems.SelectMany(item => item.GenreIds.Zip(
+                item.Genres,
+                (id, name) => new FilterOption(id.ToString(CultureInfo.InvariantCulture), name))));
+        _sourceOptions = MergeOptions(
+            MediaType == PremiereMediaType.Series ? Catalog.SeriesProviders : Catalog.MovieProviders,
+            mediaItems.SelectMany(ItemSourceOptions),
+            collapseDuplicateLabels: true);
+        _certificationOptions = MergeOptions(
+            MediaType == PremiereMediaType.Series ? Catalog.SeriesCertifications : Catalog.MovieCertifications,
+            mediaItems
+                .SelectMany(item => item.Certifications)
+                .Select(value => new FilterOption(value, value.Replace(':', ' '))));
+        _languageOptions = MergeOptions(
+            Catalog.Languages,
+            mediaItems
+                .Select(item => item.OriginalLanguage)
+                .Where(language => !string.IsNullOrWhiteSpace(language))
+                .Select(language => new FilterOption(language, language.ToUpperInvariant())));
+        _countryOptions = MergeOptions(
+            Catalog.Countries,
+            mediaItems
+                .SelectMany(item => item.OriginCountries)
+                .Where(country => !string.IsNullOrWhiteSpace(country))
+                .Select(country => new FilterOption(country, country.ToUpperInvariant())));
+
+        _sourceLabelsByValue = BuildLabelMap(_sourceOptions);
+        _languageLabelsByValue = BuildLabelMap(_languageOptions);
+        _countryLabelsByValue = BuildLabelMap(_countryOptions);
+        _genreLabelsById = _genreOptions
+            .Select(option => (Id: ParseInt(option.Value), option.Label))
+            .Where(entry => entry.Id > 0)
+            .GroupBy(entry => entry.Id)
+            .ToDictionary(group => group.Key, group => group.First().Label);
+    }
 
     private IReadOnlyList<FilterOption> GenreOptions()
     {
-        return MergeOptions(
-            MediaType == PremiereMediaType.Series ? Catalog.SeriesGenres : Catalog.MovieGenres,
-            ItemsForMedia()
-                .SelectMany(item => item.GenreIds.Zip(item.Genres, (id, name) => new FilterOption(id.ToString(CultureInfo.InvariantCulture), name))));
+        return _genreOptions;
     }
 
     private IReadOnlyList<FilterOption> SourceOptions()
     {
-        return MergeOptions(
-            MediaType == PremiereMediaType.Series ? Catalog.SeriesProviders : Catalog.MovieProviders,
-            ItemsForMedia().SelectMany(ItemSourceOptions),
-            collapseDuplicateLabels: true);
+        return _sourceOptions;
     }
 
     private static IEnumerable<FilterOption> ItemSourceOptions(PremiereItem item)
@@ -391,36 +470,24 @@
 
     private IReadOnlyList<FilterOption> CertificationOptions()
     {
-        return MergeOptions(
-            MediaType == PremiereMediaType.Series ? Catalog.SeriesCertifications : Catalog.MovieCertifications,
-            ItemsForMedia()
-                .SelectMany(item => item.Certifications)
-                .Select(value => new FilterOption(value, value.Replace(':', ' '))));
+        return _certificationOptions;
     }
 
     private IReadOnlyList<FilterOption> LanguageOptions()
     {
-        return MergeOptions(
-            Catalog.Languages,
-            ItemsForMedia()
-                .Select(item => item.OriginalLanguage)
-                .Where(language => !string.IsNullOrWhiteSpace(language))
-                .Select(language => new FilterOption(language, language.ToUpperInvariant())));
+        return _languageOptions;
     }
 
     private IReadOnlyList<FilterOption> CountryOptions()
     {
-        return MergeOptions(
-            Catalog.Countries,
-            ItemsForMedia()
-                .SelectMany(item => item.OriginCountries)
-                .Where(country => !string.IsNullOrWhiteSpace(country))
-                .Select(country => new FilterOption(country, country.ToUpperInvariant())));
+        return _countryOptions;
     }
 
-    private IEnumerable<PremiereItem> ItemsForMedia()
+    private static IReadOnlyDictionary<string, string> BuildLabelMap(IReadOnlyList<FilterOption> options)
     {
-        return Items.Where(item => item.MediaType == MediaType);
+        return options
+            .GroupBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().Label, StringComparer.OrdinalIgnoreCase);
     }
 
     private static IReadOnlyList<FilterOption> MergeOptions(
@@ -458,11 +525,45 @@
             .ToArray();
     }
 
-    private static IReadOnlyList<FilterOption> VisibleFilterOptions(
+    private IReadOnlyList<FilterOption> VisibleFilterOptions(
         IReadOnlyList<FilterOption> options,
         IReadOnlyCollection<string> selectedValues,
         string searchText)
     {
+        var trimmedSearch = string.IsNullOrWhiteSpace(searchText) ? "" : searchText.Trim();
+        var key = new VisibleFilterOptionsCacheKey(
+            RuntimeHelpers.GetHashCode(options),
+            options.Count,
+            trimmedSearch.ToUpperInvariant(),
+            SelectedValuesSignature(selectedValues));
+
+        if (_visibleOptionsCache.TryGetValue(key, out var cachedOptions))
+        {
+            return cachedOptions;
+        }
+
+        var visibleOptions = BuildVisibleFilterOptions(options, selectedValues, trimmedSearch);
+        if (_visibleOptionsCache.Count > 64)
+        {
+            _visibleOptionsCache.Clear();
+        }
+
+        _visibleOptionsCache[key] = visibleOptions;
+        return visibleOptions;
+    }
+
+    private static IReadOnlyList<FilterOption> BuildVisibleFilterOptions(
+        IReadOnlyList<FilterOption> options,
+        IReadOnlyCollection<string> selectedValues,
+        string searchText)
+    {
+        if (selectedValues.Count == 0 && string.IsNullOrWhiteSpace(searchText))
+        {
+            return options.Count <= MaxVisibleDropdownOptions
+                ? options
+                : options.Take(MaxVisibleDropdownOptions).ToArray();
+        }
+
         var selected = selectedValues.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var matching = MatchingFilterOptions(options, searchText);
 
@@ -472,6 +573,13 @@
             .DistinctBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
             .Take(MaxVisibleDropdownOptions)
             .ToArray();
+    }
+
+    private static string SelectedValuesSignature(IReadOnlyCollection<string> selectedValues)
+    {
+        return selectedValues.Count == 0
+            ? ""
+            : string.Join('\u001f', selectedValues.Order(StringComparer.OrdinalIgnoreCase));
     }
 
     private static IReadOnlyList<FilterOption> MatchingFilterOptions(
@@ -650,10 +758,7 @@
         return Filters.SelectedSources.Count switch
         {
             0 => "All sources",
-            1 => SourceOptions().FirstOrDefault(option => string.Equals(
-                    option.Value,
-                    Filters.SelectedSources[0],
-                    StringComparison.OrdinalIgnoreCase))?.Label
+            1 => _sourceLabelsByValue.GetValueOrDefault(Filters.SelectedSources[0])
                 ?? SourceFilterValue.Label(Filters.SelectedSources[0]),
             _ => $"{Filters.SelectedSources.Count} sources"
         };
@@ -669,7 +774,11 @@
         return Filters.MovieReleaseTypes.Count switch
         {
             0 => "All releases",
-            1 => MovieReleaseTypeOptions.First(option => option.Value == Filters.MovieReleaseTypes[0]).Label,
+            1 => MovieReleaseTypeOptions
+                .Where(option => option.Value == Filters.MovieReleaseTypes[0])
+                .Select(option => option.Label)
+                .FirstOrDefault()
+                ?? "All releases",
             _ => $"{Filters.MovieReleaseTypes.Count} releases"
         };
     }
@@ -694,7 +803,7 @@
         return Filters.GenreIds.Count switch
         {
             0 => "All genres",
-            1 => GenreOptions().FirstOrDefault(genre => ParseInt(genre.Value) == Filters.GenreIds[0])?.Label ?? "1 genre",
+            1 => _genreLabelsById.GetValueOrDefault(Filters.GenreIds[0]) ?? "1 genre",
             _ => $"{Filters.GenreIds.Count} genres"
         };
     }
@@ -726,16 +835,12 @@
 
     private string LanguageLabel(string language)
     {
-        return LanguageOptions()
-            .FirstOrDefault(option => string.Equals(option.Value, language, StringComparison.OrdinalIgnoreCase))
-            ?.Label ?? language.ToUpperInvariant();
+        return _languageLabelsByValue.GetValueOrDefault(language) ?? language.ToUpperInvariant();
     }
 
     private string CountryLabel(string country)
     {
-        return CountryOptions()
-            .FirstOrDefault(option => string.Equals(option.Value, country, StringComparison.OrdinalIgnoreCase))
-            ?.Label ?? country.ToUpperInvariant();
+        return _countryLabelsByValue.GetValueOrDefault(country) ?? country.ToUpperInvariant();
     }
 
     private static string SelectedStringSummary(IReadOnlyCollection<string> values, string emptyText)
@@ -801,4 +906,9 @@
         new("Video", "Video")
     ];
 
+    private readonly record struct VisibleFilterOptionsCacheKey(
+        int OptionsReference,
+        int OptionsCount,
+        string SearchText,
+        string SelectedValues);
 }

@@ -1,0 +1,76 @@
+using System.Runtime.CompilerServices;
+
+namespace PremiereCalendar.UnitTests;
+
+public sealed class InstallerScriptTests
+{
+    [Theory]
+    [InlineData("deploy/Install-PremiereCalendarService.ps1")]
+    [InlineData("deploy/release/Install-PremiereCalendar.ps1")]
+    [InlineData("deploy/release/Uninstall-PremiereCalendar.ps1")]
+    public void FirewallScriptsRemoveStaleRulesForTheConfiguredDisplayName(string relativePath)
+    {
+        var script = ReadRepoFile(relativePath);
+
+        Assert.Contains("function Remove-PremiereCalendarFirewallRules", script, StringComparison.Ordinal);
+        Assert.Contains("[regex]::Escape($DisplayName)", script, StringComparison.Ordinal);
+        Assert.Contains("Remove-PremiereCalendarFirewallRules -DisplayName $DisplayName", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ServiceInstallerFirewallRuleNameUsesConfiguredDisplayNameAndPort()
+    {
+        var script = ReadRepoFile("deploy/Install-PremiereCalendarService.ps1");
+
+        Assert.DoesNotContain(
+            "$firewallRuleName = 'Premiere Calendar 5298'",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$firewallRuleName = \"$DisplayName $Port\"",
+            script,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReleaseInstallerRemovesLegacyServiceCredentialEnvironmentKeys()
+    {
+        var script = ReadRepoFile("deploy/release/Install-PremiereCalendar.ps1");
+
+        Assert.Contains("$legacyCredentialEnvironmentKeys = @(", script, StringComparison.Ordinal);
+        Assert.Contains("'Tmdb__BearerToken'", script, StringComparison.Ordinal);
+        Assert.Contains("'Omdb__ApiKey'", script, StringComparison.Ordinal);
+        Assert.Contains("'Fanart__ApiKey'", script, StringComparison.Ordinal);
+        Assert.Contains("'TheTvdb__ApiKey'", script, StringComparison.Ordinal);
+        Assert.Contains("'Watchmode__ApiKey'", script, StringComparison.Ordinal);
+        Assert.Contains("'Trakt__ClientSecret'", script, StringComparison.Ordinal);
+        Assert.Contains("'Simkl__ClientSecret'", script, StringComparison.Ordinal);
+        Assert.Contains("'Simkl__AccessToken'", script, StringComparison.Ordinal);
+        Assert.Contains("$environment.Remove($key)", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildReleasePackageClearsSettingsOnlyCredentialKeys()
+    {
+        var script = ReadRepoFile("deploy/Build-ReleasePackage.ps1");
+
+        Assert.Contains("Get-ChildItem -LiteralPath $publishDirectory -Filter 'appsettings*.json'", script, StringComparison.Ordinal);
+        Assert.Contains("Clear-ReleaseSecrets $_.FullName", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Tmdb', 'BearerToken') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Omdb', 'ApiKey') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Fanart', 'ApiKey') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Trakt', 'ClientId') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Trakt', 'ClientSecret') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('TheTvdb', 'ApiKey') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Watchmode', 'ApiKey') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Simkl', 'ClientId') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Simkl', 'ClientSecret') ''", script, StringComparison.Ordinal);
+        Assert.Contains("Set-HashtableValue $config @('Simkl', 'AccessToken') ''", script, StringComparison.Ordinal);
+    }
+
+    private static string ReadRepoFile(string relativePath, [CallerFilePath] string sourceFile = "")
+    {
+        var repoRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourceFile)!, "..", ".."));
+        return File.ReadAllText(Path.Combine(repoRoot, relativePath));
+    }
+}

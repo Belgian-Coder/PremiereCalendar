@@ -90,6 +90,12 @@ function Clear-ReleaseSecrets {
     Set-HashtableValue $config @('Trakt', 'ClientSecret') ''
     Set-HashtableValue $config @('TheTvdb', 'ApiKey') ''
     Set-HashtableValue $config @('TheTvdb', 'Enabled') $false
+    Set-HashtableValue $config @('Watchmode', 'ApiKey') ''
+    Set-HashtableValue $config @('Watchmode', 'Enabled') $false
+    Set-HashtableValue $config @('Simkl', 'ClientId') ''
+    Set-HashtableValue $config @('Simkl', 'ClientSecret') ''
+    Set-HashtableValue $config @('Simkl', 'AccessToken') ''
+    Set-HashtableValue $config @('Simkl', 'Enabled') $false
 
     $config | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $AppSettingsPath -Encoding UTF8
 }
@@ -134,7 +140,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE"
 }
 
-Clear-ReleaseSecrets (Join-Path $publishDirectory 'appsettings.json')
+Get-ChildItem -LiteralPath $publishDirectory -Filter 'appsettings*.json' | ForEach-Object {
+    Clear-ReleaseSecrets $_.FullName
+}
 
 $publishedAppDataDirectory = Join-Path $publishDirectory 'App_Data'
 if (Test-Path -LiteralPath $publishedAppDataDirectory) {

@@ -27,7 +27,12 @@ public sealed class CalendarWeekTests : BunitContext
         Assert.Empty(component.FindAll("[data-testid='week-scroll-control']"));
         Assert.NotEmpty(component.FindAll(".calendar-grid"));
         Assert.NotEmpty(component.FindAll("button[data-day-target='premiere-day-20260504']"));
+        Assert.Equal(
+            "Monday, 04 May 2026, no premieres",
+            component.Find("button[data-day-target='premiere-day-20260504']").GetAttribute("aria-label"));
         Assert.NotEmpty(component.FindAll("#premiere-day-20260504"));
+        Assert.Equal("tabpanel", component.Find("[data-testid='calendar-day']").GetAttribute("role"));
+        Assert.Equal("premiere-day-tab-20260504", component.Find("[data-testid='calendar-day']").GetAttribute("aria-labelledby"));
         Assert.Single(component.FindAll(".empty-day"));
         Assert.Contains("No premieres", component.Markup);
     }
@@ -59,6 +64,9 @@ public sealed class CalendarWeekTests : BunitContext
         Assert.Single(component.FindAll("[data-testid='premiere-card']"));
         Assert.Contains("Monday Launch", component.Markup);
         Assert.Contains("1 series", component.Markup);
+        Assert.Equal(
+            "Monday, 04 May 2026, 1 series",
+            component.Find("button[data-day-target='premiere-day-20260504']").GetAttribute("aria-label"));
         Assert.Contains("w=185&amp;v=abc123", component.Markup);
         Assert.DoesNotContain("ImageCacheVersion", component.Markup);
         Assert.Empty(component.FindAll(".empty-day"));
@@ -269,6 +277,32 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
+    public void CalendarWeek_VirtualizedRowsContainOneCardForStableResponsiveHeight()
+    {
+        var items = Enumerable.Range(1, 45)
+            .Select(index => new PremiereItem
+            {
+                CanonicalId = $"tv:{index}",
+                Type = PremiereItemType.SeriesEpisode,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = index,
+                Title = $"Episode {index}",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7
+            })
+            .ToArray();
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        var rows = component.FindAll(".day-card-row");
+        Assert.NotEmpty(rows);
+        Assert.All(rows, row => Assert.True(row.QuerySelectorAll("[data-testid='premiere-card']").Length <= 1));
+    }
+
+    [Fact]
     public void CalendarDay_ShowAllLoadsRemainingSmallDayItemsAtOnce()
     {
         var items = Enumerable.Range(1, 12)
@@ -447,5 +481,47 @@ public sealed class CalendarWeekTests : BunitContext
 
         Assert.True(component.RenderCount > renderCount);
         Assert.NotEmpty(component.FindAll(".selected-score"));
+    }
+
+    [Fact]
+    public void CalendarDay_RerendersWhenItemContentChangesForSameCanonicalId()
+    {
+        var firstItems = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "movie:1",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                Title = "Original Title",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                Overview = "Original description"
+            }
+        };
+        var updatedItems = new[]
+        {
+            firstItems[0] with
+            {
+                Title = "Updated Title",
+                Overview = "Updated description"
+            }
+        };
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, firstItems)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        component.Render(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, updatedItems)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Contains("Updated Title", component.Markup);
+        Assert.Contains("Updated description", component.Markup);
+        Assert.DoesNotContain("Original Title", component.Markup);
     }
 }

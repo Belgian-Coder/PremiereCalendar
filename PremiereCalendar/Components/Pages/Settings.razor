@@ -2,10 +2,12 @@
 @rendermode InteractiveServer
 @implements IDisposable
 @using System.Globalization
+@using Microsoft.AspNetCore.WebUtilities
 @inject IIntegrationSettingsStore SettingsStore
 @inject IArrIntegrationService ArrService
 @inject ISimklClient SimklClient
 @inject IViewSyncService ViewSyncService
+@inject NavigationManager Navigation
 @inject IJSRuntime JS
 
 <PageTitle>Settings</PageTitle>
@@ -20,9 +22,24 @@
         </div>
     </header>
 
+    @if (_showTmdbRequiredNotice)
+    {
+        <section class="status-panel setup-required" role="alert" data-testid="tmdb-required-notice">
+            <strong>TMDb token required.</strong>
+            Add a TMDb API read access token under <a href="#tmdb-token">Source APIs</a>, then Save settings before using the calendar.
+        </section>
+    }
+
     @if (_isLoading)
     {
         <div class="status-panel">Loading settings...</div>
+    }
+    else if (!string.IsNullOrWhiteSpace(_loadError))
+    {
+        <section class="status-panel error" role="alert" data-testid="settings-load-error">
+            <strong>Settings could not be loaded.</strong>
+            Check local database access, then reopen Settings.
+        </section>
     }
     else
     {
@@ -446,7 +463,7 @@
 
                             <label>
                                 <span>TMDb API read access token</span>
-                                <InputText type="password" class="settings-input" aria-label="TMDb API read access token" @bind-Value="_settings.Sources.Tmdb.BearerToken" />
+                                <InputText id="tmdb-token" type="password" class="settings-input" aria-label="TMDb API read access token" @bind-Value="_settings.Sources.Tmdb.BearerToken" />
                                 <small class="settings-help">Required for live calendar data.</small>
                             </label>
 
@@ -545,7 +562,10 @@
                                         <span class="simkl-connect-title">SIMKL account</span>
                                         <small class="settings-help">@SimklConnectionSummary</small>
                                     </div>
-                                    <span class="simkl-status @SimklStatusClass">@SimklStatusText</span>
+                                    <span class="simkl-status @SimklStatusClass"
+                                          role="status"
+                                          aria-live="polite"
+                                          data-testid="simkl-auth-status">@SimklStatusText</span>
                                 </div>
 
                                 <button class="tool-button primary-action settings-secondary" type="button" aria-label="Connect SIMKL" @onclick="ConnectSimklAsync" disabled="@_isRequestingSimklPin">
@@ -554,13 +574,18 @@
 
                                 @if (_simklPinCode is { Success: true } simklPinCode)
                                 {
-                                    <div class="simkl-pin-panel" aria-label="SIMKL authorization code">
-                                        <div class="simkl-pin-row">
+                                    <div class="simkl-pin-panel"
+                                         aria-label="SIMKL authorization code"
+                                         data-testid="simkl-pin-panel">
+                                        <div class="simkl-pin-row"
+                                             role="status"
+                                             aria-live="polite"
+                                             data-testid="simkl-pin-status">
                                             <span class="simkl-pin-label">Code</span>
                                             <strong class="simkl-pin-code">@simklPinCode.UserCode</strong>
-                                            <a class="tool-button settings-secondary simkl-pin-link" href="@simklPinCode.VerificationUrl" target="_blank" rel="noopener">Open SIMKL authorization page</a>
                                         </div>
                                         <small class="settings-help">After you approve the app on SIMKL, this page will save the token automatically. Use the button below if it has not updated yet.</small>
+                                        <a class="tool-button settings-secondary simkl-pin-link" href="@simklPinCode.VerificationUrl" target="_blank" rel="noopener">Open SIMKL authorization page</a>
                                         <button class="tool-button settings-secondary" type="button" aria-label="Save SIMKL token after authorization" @onclick="SaveSimklTokenAfterAuthorizationAsync" disabled="@_isCheckingSimklPin">
                                             @(_isCheckingSimklPin ? "Checking SIMKL..." : "I authorized SIMKL - save token")
                                         </button>
@@ -663,6 +688,8 @@
     private bool _isCheckingSimklPin;
     private SimklPinCodeResult? _simklPinCode;
     private string? _simklAuthorizationStatus;
+    private string? _loadError;
+    private string? _tmdbReturnUrl;
     private CancellationTokenSource? _simklPinPollingCancellation;
     private readonly CancellationTokenSource _disposeCancellation = new();
     private EditContext? _editContext;
@@ -672,6 +699,7 @@
     private bool _isSavingViewSync;
     private bool _isCreatingViewSyncGroup;
     private bool _isUngroupingViewSync;
+    private bool _showTmdbRequiredNotice;
     private string _viewSyncDeviceId = "";
     private string _viewSyncDeviceName = "This browser";
     private string? _selectedViewSyncGroupId;
@@ -729,6 +757,11 @@
                 return _simklAuthorizationStatus ?? "Waiting for authorization";
             }
 
+            if (!string.IsNullOrWhiteSpace(_simklAuthorizationStatus))
+            {
+                return _simklAuthorizationStatus;
+            }
+
             return HasSimklAccessToken ? "Connected" : "Not connected";
         }
     }
@@ -740,6 +773,11 @@
             if (_simklPinCode is not null)
             {
                 return "pending";
+            }
+
+            if (!string.IsNullOrWhiteSpace(_simklAuthorizationStatus))
+            {
+                return "idle";
             }
 
             return HasSimklAccessToken ? "connected" : "idle";
@@ -884,29 +922,80 @@
 
     protected override async Task OnInitializedAsync()
     {
-        _settings = await SettingsStore.GetAsync();
-        CreateEditContext();
-        EnsureSimklActivityCheckInterval();
-        _tvmazeScheduleCountries = string.Join(", ", _settings.Sources.Tvmaze.ScheduleCountries);
-        _watchmodeRegions = string.Join(", ", _settings.Sources.Watchmode.Regions);
-
-        var optionLoadTasks = new List<Task>();
-        if (CanLoadSonarrOptions())
+        var showTmdbRequiredNotice = HasTmdbRequiredReason();
+        _tmdbReturnUrl = showTmdbRequiredNotice ? TmdbReturnUrl() : null;
+        try
         {
-            optionLoadTasks.Add(LoadSonarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
-        }
+            _settings = await SettingsStore.GetAsync();
+            _showTmdbRequiredNotice = showTmdbRequiredNotice && HasMissingTmdbToken();
+            CreateEditContext();
+            EnsureSimklActivityCheckInterval();
+            _tvmazeScheduleCountries = string.Join(", ", _settings.Sources.Tvmaze.ScheduleCountries);
+            _watchmodeRegions = string.Join(", ", _settings.Sources.Watchmode.Regions);
 
-        if (CanLoadRadarrOptions())
+            var optionLoadTasks = new List<Task>();
+            if (CanLoadSonarrOptions())
+            {
+                optionLoadTasks.Add(LoadSonarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+            }
+
+            if (CanLoadRadarrOptions())
+            {
+                optionLoadTasks.Add(LoadRadarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+            }
+
+            if (optionLoadTasks.Count > 0)
+            {
+                await Task.WhenAll(optionLoadTasks);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            optionLoadTasks.Add(LoadRadarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+            _loadError = "Settings could not be loaded.";
+            _showTmdbRequiredNotice = false;
         }
-
-        if (optionLoadTasks.Count > 0)
+        finally
         {
-            await Task.WhenAll(optionLoadTasks);
+            _isLoading = false;
         }
+    }
 
-        _isLoading = false;
+    private bool HasMissingTmdbToken()
+    {
+        return string.IsNullOrWhiteSpace(_settings.Sources.Tmdb.BearerToken);
+    }
+
+    private bool HasTmdbRequiredReason()
+    {
+        try
+        {
+            var query = QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(Navigation.Uri).Query);
+            return query.TryGetValue("reason", out var reason)
+                && string.Equals(reason.ToString(), "tmdb", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private string? TmdbReturnUrl()
+    {
+        try
+        {
+            var query = QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(Navigation.Uri).Query);
+            if (!query.TryGetValue("returnUrl", out var returnUrl))
+            {
+                return null;
+            }
+
+            var value = returnUrl.ToString();
+            return LocalReturnUrl.IsSafe(value) ? value : null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -1194,10 +1283,22 @@
                     return;
                 }
 
-                var completed = await CheckSimklAuthorizationCoreAsync(userCode, showToast: false, cancellationToken);
-                if (completed)
+                try
                 {
-                    return;
+                    var completed = await CheckSimklAuthorizationCoreAsync(userCode, showToast: false, cancellationToken);
+                    if (completed)
+                    {
+                        return;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _simklAuthorizationStatus = $"Waiting for authorization. Last check failed: {ex.Message}";
+                    await InvokeAsync(StateHasChanged);
                 }
             }
 
@@ -1251,13 +1352,15 @@
                 return false;
             default:
                 _simklAuthorizationStatus = result.Message ?? "Authorization failed";
+                _simklPinCode = null;
+                StopSimklAuthorizationPolling();
                 if (showToast)
                 {
                     ShowToast(ToastKind.Error, "SIMKL authorization failed", result.Message ?? "SIMKL did not authorize this PIN.");
                 }
 
                 await InvokeAsync(StateHasChanged);
-                return false;
+                return true;
         }
     }
 
@@ -1282,7 +1385,16 @@
             NormalizeSettings();
             await SettingsStore.SaveAsync(_settings);
             _isDirty = false;
+            if (!HasMissingTmdbToken())
+            {
+                _showTmdbRequiredNotice = false;
+            }
+
             ShowToast(ToastKind.Success, "Settings saved", "Integration and source API parameters were saved to the local database.");
+            if (!HasMissingTmdbToken() && !string.IsNullOrWhiteSpace(_tmdbReturnUrl))
+            {
+                Navigation.NavigateTo(_tmdbReturnUrl, replace: true);
+            }
         }
         catch (Exception ex)
         {

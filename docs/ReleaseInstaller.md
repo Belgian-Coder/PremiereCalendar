@@ -13,10 +13,12 @@ Use these steps on the computer that should host Premiere Calendar.
 3. Open the extracted folder.
 4. Double-click `Install-PremiereCalendar.cmd`.
 5. Click Yes when Windows asks for administrator permission.
-6. Paste the TMDb API Read Access Token when asked. Press Enter to skip this and add it later in Settings.
-7. Open `http://localhost:5298`.
+6. Open `http://localhost:5298`.
+7. Add the TMDb API Read Access Token in Settings when the app redirects you there.
 
-To use the app from another computer on the same network, open `http://HOST-IP:5298`.
+To use the app from another computer on the same network, open `http://HOST-IP:5298`. For a friendly LAN name, add a DNS record on your router or local DNS server that points to the host computer's LAN IP, then open `http://NAME:5298`.
+
+Premiere Calendar does not include user authentication. The default firewall rule is scoped to the local subnet; keep the app behind a trusted LAN or VPN and do not expose the port directly to the public internet.
 
 Good signs after install:
 
@@ -54,13 +56,13 @@ Use `-SkipTests` only when tests have already been run for the exact commit/pack
 
 ## Advanced Install Command
 
-The double-click installer is the recommended path. Use PowerShell only when you need to pass values up front.
+The double-click installer is the recommended path. Use PowerShell only when you need a custom port, install folder, data folder, firewall scope, or service name.
 
 ```powershell
-.\Install-PremiereCalendar.ps1 -TmdbBearerToken 'YOUR_TMDB_V4_READ_ACCESS_TOKEN'
+.\Install-PremiereCalendar.ps1 -Port 8080 -InstallDirectory 'D:\Apps\PremiereCalendar' -DataDirectory 'D:\Data\PremiereCalendar'
 ```
 
-You can install without source keys and enter them later on the app's Settings page. Installer-provided keys are first-run fallback values. Values saved in the Settings page take precedence after they are saved there.
+API credentials are not installer parameters. Add TMDb and optional source keys in the app Settings page so they are stored in the SQLite settings database and preserved across app updates.
 
 By default this installs:
 
@@ -71,24 +73,9 @@ By default this installs:
 - URL: `http://0.0.0.0:5298`
 - firewall: inbound TCP `5298` from `LocalSubnet`
 
-The installer verifies `http://localhost:5298/health` before it finishes.
+The installer verifies `http://localhost:5298/health` before it finishes. The health endpoint only proves the service is responding; the calendar still needs the TMDb token saved in Settings before cards can load.
 
 The installer also removes old user Startup-folder shortcuts for Premiere Calendar. The Windows Service is the only supported automatic-start mechanism, because it starts after reboot even before the user logs in and it has restart-on-failure recovery.
-
-## Optional Source Keys
-
-Optional free-source keys can be passed during install:
-
-```powershell
-.\Install-PremiereCalendar.ps1 `
-  -TmdbBearerToken 'YOUR_TMDB_V4_READ_ACCESS_TOKEN' `
-  -TraktClientId 'YOUR_TRAKT_CLIENT_ID' `
-  -FanartApiKey 'YOUR_FANART_TV_KEY' `
-  -OmdbApiKey 'YOUR_OMDB_KEY' `
-  -TheTvdbApiKey 'YOUR_THETVDB_KEY'
-```
-
-These values are stored in the Windows Service `Environment` registry value as ASP.NET Core environment variables. They are not written into packaged `appsettings.json`. After installation, the Settings page can edit the same source API values into the SQLite settings database, which overrides the service-environment fallback.
 
 ## Update
 
@@ -100,15 +87,11 @@ PowerShell alternative:
 .\Install-PremiereCalendar.ps1
 ```
 
-The installer stops the service, replaces the installed binaries, preserves the existing service secrets when matching parameters are omitted, preserves `C:\ProgramData\PremiereCalendar`, restarts the service, and health-checks the app.
+The installer stops the service, replaces the installed binaries, preserves `C:\ProgramData\PremiereCalendar`, restarts the service, and health-checks the app.
 
 If an older install has an in-place `App_Data` folder under the binary directory, the installer excludes that folder from the mirror copy so upgrades do not delete it.
 
-Pass a secret parameter again when you want to rotate it:
-
-```powershell
-.\Install-PremiereCalendar.ps1 -TmdbBearerToken 'NEW_TMDB_TOKEN'
-```
+Rotate source API tokens in the app Settings page, then click Save.
 
 ## Custom Port Or Paths
 

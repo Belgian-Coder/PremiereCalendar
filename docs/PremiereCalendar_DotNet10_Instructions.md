@@ -251,7 +251,9 @@ Hard rule: **do not call live TMDb, OMDb, TVmaze, JustWatch or Watchmode endpoin
 
 ## 5. Prerequisites
 
-Install:
+This section is historical. For the current worktree, use the SDK from `global.json` and the maintained setup docs listed at the top of this file.
+
+Install for this historical brief:
 
 - .NET 10 SDK
 - Visual Studio 2026 / Rider / VS Code with C# tooling
@@ -265,7 +267,7 @@ dotnet --list-sdks
 dotnet --version
 ```
 
-You want a `10.x` SDK.
+For this historical brief you want a `10.x` SDK. For the current repo, use the `11.x` preview SDK pinned by `global.json`.
 
 ## 6. Create the project
 
@@ -332,27 +334,11 @@ Run everything regularly:
 dotnet test
 ```
 
-## 7. Store API keys with user-secrets
+## 7. Configure API keys in Settings
 
-Do not put API keys in `appsettings.json`.
+Current builds store integration credentials in the app Settings page and persist them in the local SQLite settings database. TMDb is required before the calendar can load; if the token is missing, the app sends the user to `/settings?reason=tmdb`.
 
-Initialize user-secrets:
-
-```bash
-dotnet user-secrets init
-```
-
-Set your TMDb bearer token:
-
-```bash
-dotnet user-secrets set "Tmdb:BearerToken" "YOUR_TMDB_V4_READ_ACCESS_TOKEN"
-```
-
-Optional OMDb key:
-
-```bash
-dotnet user-secrets set "Omdb:ApiKey" "YOUR_OMDB_API_KEY"
-```
+Do not put API keys in `appsettings.json`, release installers, or Windows Service environment variables. Use Settings for TMDb, OMDb, Fanart.tv, TheTVDB, Watchmode, Trakt, SIMKL, Sonarr, and Radarr credentials.
 
 Your `appsettings.json` should contain non-secret defaults only:
 
@@ -683,7 +669,7 @@ builder.Services.AddHttpClient<TmdbClient>((sp, client) =>
 
     if (string.IsNullOrWhiteSpace(options.BearerToken))
     {
-        throw new InvalidOperationException("Missing TMDb bearer token. Set user-secret Tmdb:BearerToken.");
+        throw new InvalidOperationException("Missing TMDb bearer token. Configure it in the Settings page.");
     }
 
     client.BaseAddress = new Uri(options.BaseUrl);
@@ -1059,12 +1045,7 @@ public sealed class RatingMapper
 }
 ```
 
-Enable OMDb in `appsettings.Development.json` or user-secrets:
-
-```bash
-dotnet user-secrets set "Omdb:Enabled" "true"
-dotnet user-secrets set "Omdb:ApiKey" "YOUR_OMDB_KEY"
-```
+Enable OMDb from the Settings page and save the OMDb API key there.
 
 If you do not configure OMDb, the app should still work with TMDb scores.
 

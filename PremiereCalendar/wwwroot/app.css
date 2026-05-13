@@ -200,9 +200,9 @@ h1:focus {
 .calendar-header h1,
 .about-page h1 {
     margin: 0;
-    font-size: clamp(2rem, 4vw, 3.25rem);
+    font-size: 2.35rem;
     font-weight: 750;
-    line-height: 1;
+    line-height: 1.05;
     color: var(--ink);
 }
 
@@ -380,6 +380,55 @@ h1:focus {
     box-shadow: 0 4px 14px rgba(14, 70, 65, 0.12);
     color: var(--teal-strong);
     font-size: 0.9rem;
+}
+
+.status-panel.setup-required {
+    display: grid;
+    gap: 0.25rem;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--amber-soft) 70%, var(--surface-strong));
+    color: var(--ink);
+}
+
+.status-panel.setup-required strong {
+    color: var(--ink);
+}
+
+.active-filter-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.active-filter-title,
+.active-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    max-width: 100%;
+    min-height: 1.8rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 800;
+    overflow-wrap: anywhere;
+}
+
+.active-filter-title {
+    background: #23323f;
+    color: #ffffff;
+    text-transform: uppercase;
+}
+
+.active-filter-chip {
+    border: 1px solid color-mix(in srgb, var(--teal) 28%, var(--line));
+    background: color-mix(in srgb, var(--teal-soft) 70%, var(--surface-strong));
+    color: var(--teal-strong);
 }
 
 .query-progress {
@@ -587,6 +636,21 @@ h1:focus {
     font-weight: 800;
 }
 
+.filter-pane-summary,
+.filter-footer-summary {
+    display: block;
+    margin-top: 0.25rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.3;
+}
+
+.filter-footer-summary {
+    max-width: 15rem;
+    margin-top: 0;
+}
+
 .filter-pane-body {
     display: grid;
     align-content: start;
@@ -638,6 +702,12 @@ h1:focus {
 }
 
 .range-pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+}
+
+.filter-search-pair {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.65rem;
@@ -858,6 +928,10 @@ h1:focus {
 
 .filter-pane .filter-dropdown-menu label.dropdown-check-option:has(input:checked) span {
     color: var(--teal-strong);
+}
+
+.filter-pane .score-filter {
+    grid-template-columns: minmax(0, 1.2fr) repeat(2, minmax(0, 0.9fr));
 }
 
 .filter-pane .score-filter input[type="number"] {
@@ -1292,7 +1366,7 @@ h1:focus {
 
 .day-card-row {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--card-grid-gap);
     align-items: start;
     padding-bottom: var(--card-grid-gap);
@@ -1344,14 +1418,14 @@ h1:focus {
 .premiere-card.movie-card {
     border-color: var(--line);
     border-left-color: #c84f2f;
-    background: linear-gradient(90deg, #d8fff5 0%, #effffb 44%, #fbfffd 100%);
-    box-shadow: 0 2px 12px rgba(13, 118, 109, 0.13);
+    background: linear-gradient(90deg, #fff1e9 0%, #fff8f4 48%, #ffffff 100%);
+    box-shadow: 0 2px 12px rgba(154, 69, 44, 0.12);
 }
 
 .premiere-card.series-card {
     border-color: var(--line);
     border-left-color: #0d766d;
-    background: linear-gradient(90deg, #d8fff5 0%, #effffb 44%, #fbfffd 100%);
+    background: linear-gradient(90deg, #e0fbf6 0%, #f2fffc 48%, #ffffff 100%);
     box-shadow: 0 2px 12px rgba(13, 118, 109, 0.13);
 }
 
@@ -1769,6 +1843,11 @@ html[data-theme="dark"] .theme-toggle {
     color: #f2c766;
 }
 
+html[data-theme="dark"] .status-panel.setup-required {
+    border-color: rgba(242, 199, 102, 0.42);
+    background: rgba(242, 199, 102, 0.14);
+}
+
 html[data-theme="dark"] .primary-action,
 html[data-theme="dark"] .filter-open-button {
     border-color: rgba(82, 199, 184, 0.34);
@@ -1842,7 +1921,7 @@ html[data-theme="dark"] .calendar-day {
 html[data-theme="dark"] .premiere-card.movie-card {
     border-color: #3f5360;
     border-left-color: var(--coral);
-    background: linear-gradient(90deg, rgba(20, 59, 56, 0.98) 0%, rgba(31, 43, 54, 0.96) 48%, rgba(23, 33, 43, 0.96) 100%);
+    background: linear-gradient(90deg, rgba(89, 43, 35, 0.86) 0%, rgba(41, 43, 51, 0.96) 48%, rgba(23, 33, 43, 0.96) 100%);
     box-shadow: 0 2px 14px rgba(0, 0, 0, 0.28);
 }
 
@@ -2600,6 +2679,11 @@ html[data-theme="dark"] .source-status-item strong.inactive {
         align-items: start;
     }
 
+    .calendar-header h1,
+    .about-page h1 {
+        font-size: 2rem;
+    }
+
     .week-sticky-controls {
         top: 99px;
         margin-right: -1.25rem;
@@ -2609,11 +2693,34 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     }
 
     .day-jump-nav {
-        grid-auto-columns: minmax(6.5rem, 1fr);
+        grid-auto-columns: minmax(6.75rem, 1fr);
         grid-auto-flow: column;
         grid-template-columns: none;
         overflow-x: auto;
         scrollbar-width: none;
+    }
+
+    .day-jump-link {
+        grid-template-columns: minmax(0, 1fr);
+        align-content: center;
+        gap: 0.2rem;
+        min-height: 3.1rem;
+        padding: 0.4rem 0.55rem;
+    }
+
+    .day-jump-main {
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 0.1rem;
+        line-height: 1.05;
+    }
+
+    .day-jump-count {
+        justify-self: start;
+        max-width: 100%;
+        line-height: 1.05;
+        white-space: normal;
     }
 
     .day-jump-nav::-webkit-scrollbar {
@@ -2683,9 +2790,27 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     }
 
     .settings-inline-fields,
-    .settings-action-row {
+    .settings-action-row,
+    .filter-search-pair,
+    .filter-pane .score-filter {
         display: grid;
         grid-template-columns: 1fr;
+    }
+
+    .filter-pane-footer {
+        display: grid;
+        grid-template-columns: 1fr;
+        align-items: stretch;
+        gap: 0.65rem;
+    }
+
+    .filter-footer-summary {
+        max-width: none;
+    }
+
+    .filter-footer-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     .settings-actions.sticky {

@@ -17,6 +17,125 @@ public sealed class SettingsPageTests : BunitContext
     }
 
     [Fact]
+    public void SettingsPage_ShowsRequiredTmdbNoticeWhenCalendarRedirectsForMissingToken()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+        Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>()
+            .NavigateTo("/settings?reason=tmdb&returnUrl=%2Fmovies%3Fweek%3D2026-05-04%26score%3Dimdb");
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            var notice = component.Find("[data-testid='tmdb-required-notice']");
+            Assert.Contains("TMDb token required", notice.TextContent);
+            Assert.Contains("Save settings", notice.TextContent);
+            Assert.Equal("alert", notice.GetAttribute("role"));
+            Assert.Single(notice.QuerySelectorAll("a[href='#tmdb-token']"));
+            Assert.Empty(notice.QuerySelectorAll("a[href='/movies?week=2026-05-04&score=imdb']"));
+            Assert.Single(component.FindAll("#tmdb-token"));
+            Assert.Contains("TMDb API read access token", component.Markup);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_HidesRequiredTmdbNoticeWhenTokenAlreadyExists()
+    {
+        var store = new FakeIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings
+            {
+                Sources = new SourceIntegrationSettings
+                {
+                    Tmdb = new TmdbSourceSettings { BearerToken = "tmdb-token" }
+                }
+            }
+        };
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+        Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>()
+            .NavigateTo("/settings?reason=tmdb");
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Empty(component.FindAll("[data-testid='tmdb-required-notice']"));
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_SaveAfterTmdbSetupReturnsToOriginalCalendarUrl()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+        var navigation = Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        navigation.NavigateTo("/settings?reason=tmdb&returnUrl=%2Fmovies%3Fweek%3D2026-05-04%26score%3Dimdb");
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='TMDb API read access token']");
+        component.Find("input[aria-label='TMDb API read access token']").Change("tmdb-token");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("tmdb-token", store.Settings.Sources.Tmdb.BearerToken);
+            Assert.EndsWith("/movies?week=2026-05-04&score=imdb", new Uri(navigation.Uri).PathAndQuery);
+        });
+    }
+
+    [Theory]
+    [InlineData("%2F%5Cevil.example")]
+    [InlineData("%5C%5Cevil.example")]
+    [InlineData("%2Fmovies%0AHost%3A%20evil.example")]
+    public void SettingsPage_SaveAfterTmdbSetupRejectsUnsafeReturnUrl(string encodedReturnUrl)
+    {
+        var store = new FakeIntegrationSettingsStore();
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+        var navigation = Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        navigation.NavigateTo($"/settings?reason=tmdb&returnUrl={encodedReturnUrl}");
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='TMDb API read access token']");
+        component.Find("input[aria-label='TMDb API read access token']").Change("tmdb-token");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("tmdb-token", store.Settings.Sources.Tmdb.BearerToken);
+            Assert.Equal("/settings", new Uri(navigation.Uri).AbsolutePath);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_SettingsLoadFailureShowsErrorPanel()
+    {
+        Services.AddSingleton<IIntegrationSettingsStore>(new ThrowingIntegrationSettingsStore());
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            var error = component.Find("[data-testid='settings-load-error']");
+            Assert.Equal("alert", error.GetAttribute("role"));
+            Assert.Contains("Settings could not be loaded", error.TextContent);
+            Assert.Empty(component.FindAll("form"));
+        });
+    }
+
+    [Fact]
     public void SettingsPage_LoadsQualityProfileNamesOnOpenWhenIntegrationsAreConfigured()
     {
         JSInterop.Mode = JSRuntimeMode.Loose;
@@ -290,6 +409,13 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Contains("ABCD-EFGH", component.Markup);
             Assert.Contains("https://simkl.com/pin/", component.Markup);
             Assert.Contains("Waiting for authorization", component.Markup);
+            Assert.Equal("status", component.Find("[data-testid='simkl-auth-status']").GetAttribute("role"));
+            Assert.Equal("polite", component.Find("[data-testid='simkl-auth-status']").GetAttribute("aria-live"));
+            Assert.Null(component.Find("[data-testid='simkl-pin-panel']").GetAttribute("role"));
+            Assert.Null(component.Find("[data-testid='simkl-pin-panel']").GetAttribute("aria-live"));
+            Assert.Equal("status", component.Find("[data-testid='simkl-pin-status']").GetAttribute("role"));
+            Assert.Equal("polite", component.Find("[data-testid='simkl-pin-status']").GetAttribute("aria-live"));
+            Assert.Empty(component.Find("[data-testid='simkl-pin-status']").QuerySelectorAll("a,button"));
             Assert.Contains("this page will save the token automatically", component.Markup);
             Assert.Equal(1, simklClient.RequestPinCodeCallCount);
         });
@@ -349,6 +475,102 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Equal("ABCD-EFGH", simklClient.LastCheckedUserCode);
             Assert.True(simklClient.CheckPinCodeCallCount >= 1);
         }, TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public void SettingsPage_AutoPollsSimklAuthorizationAfterTransientFailure()
+    {
+        JSInterop.Mode = JSRuntimeMode.Loose;
+        var store = new FakeIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings
+            {
+                Sources = new SourceIntegrationSettings
+                {
+                    Simkl = new SimklSourceSettings
+                    {
+                        Enabled = true,
+                        ClientId = "simkl-client-id",
+                        ClientSecret = "simkl-client-secret"
+                    }
+                }
+            }
+        };
+        var simklClient = new FakeSimklClient
+        {
+            PinCodeResult = new SimklPinCodeResult(
+                Success: true,
+                UserCode: "ABCD-EFGH",
+                VerificationUrl: "https://simkl.com/pin/",
+                ExpiresInSeconds: 10,
+                IntervalSeconds: 1)
+        };
+        simklClient.PinStatusFailures.Enqueue(new TimeoutException("Temporary SIMKL timeout."));
+        simklClient.PinStatusResults.Enqueue(new SimklPinStatusResult(
+            SimklPinStatus.Authorized,
+            AccessToken: "simkl-access-token"));
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(simklClient);
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.Find("button[aria-label='Connect SIMKL']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("simkl-access-token", store.Settings.Sources.Simkl.AccessToken);
+            Assert.True(simklClient.CheckPinCodeCallCount >= 2);
+        }, TimeSpan.FromSeconds(4));
+    }
+
+    [Fact]
+    public async Task SettingsPage_StopsSimklPollingAfterTerminalFailure()
+    {
+        JSInterop.Mode = JSRuntimeMode.Loose;
+        var store = new FakeIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings
+            {
+                Sources = new SourceIntegrationSettings
+                {
+                    Simkl = new SimklSourceSettings
+                    {
+                        Enabled = true,
+                        ClientId = "simkl-client-id",
+                        ClientSecret = "simkl-client-secret"
+                    }
+                }
+            }
+        };
+        var simklClient = new FakeSimklClient
+        {
+            PinCodeResult = new SimklPinCodeResult(
+                Success: true,
+                UserCode: "ABCD-EFGH",
+                VerificationUrl: "https://simkl.com/pin/",
+                ExpiresInSeconds: 10,
+                IntervalSeconds: 1),
+            PinStatusResult = new SimklPinStatusResult(SimklPinStatus.Failed, Message: "PIN rejected.")
+        };
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(simklClient);
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.Find("button[aria-label='Connect SIMKL']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(1, simklClient.CheckPinCodeCallCount);
+            Assert.Contains("PIN rejected.", component.Markup);
+            Assert.Empty(component.FindAll("[aria-label='SIMKL authorization code']"));
+        }, TimeSpan.FromSeconds(3));
+
+        await Task.Delay(TimeSpan.FromMilliseconds(1300));
+
+        Assert.Equal(1, simklClient.CheckPinCodeCallCount);
     }
 
     [Fact]
@@ -633,6 +855,19 @@ public sealed class SettingsPageTests : BunitContext
         }
     }
 
+    private sealed class ThrowingIntegrationSettingsStore : IIntegrationSettingsStore
+    {
+        public Task<IntegrationSettings> GetAsync(CancellationToken cancellationToken = default)
+        {
+            throw new IOException("Settings database is unavailable.");
+        }
+
+        public Task SaveAsync(IntegrationSettings settings, CancellationToken cancellationToken = default)
+        {
+            throw new IOException("Settings database is unavailable.");
+        }
+    }
+
     private sealed class FakeArrIntegrationService : IArrIntegrationService
     {
         public Task<ArrAddResult> AddAsync(PremiereItem item, CancellationToken cancellationToken = default)
@@ -667,6 +902,7 @@ public sealed class SettingsPageTests : BunitContext
 
         public SimklPinStatusResult PinStatusResult { get; set; } = new(SimklPinStatus.Pending);
         public Queue<SimklPinStatusResult> PinStatusResults { get; } = new();
+        public Queue<Exception> PinStatusFailures { get; } = new();
 
         public int RequestPinCodeCallCount { get; private set; }
         public int CheckPinCodeCallCount { get; private set; }
@@ -687,6 +923,11 @@ public sealed class SettingsPageTests : BunitContext
         {
             CheckPinCodeCallCount++;
             LastCheckedUserCode = userCode;
+            if (PinStatusFailures.Count > 0)
+            {
+                throw PinStatusFailures.Dequeue();
+            }
+
             return Task.FromResult(PinStatusResults.Count > 0
                 ? PinStatusResults.Dequeue()
                 : PinStatusResult);

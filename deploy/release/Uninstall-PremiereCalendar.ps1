@@ -46,6 +46,15 @@ function Assert-RemovablePath {
     return $fullPath
 }
 
+function Remove-PremiereCalendarFirewallRules {
+    param([Parameter(Mandatory)][string]$DisplayName)
+
+    $displayNamePattern = '^' + [regex]::Escape($DisplayName) + ' \d+$'
+    Get-NetFirewallRule -DisplayName "$DisplayName *" -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match $displayNamePattern } |
+        Remove-NetFirewallRule
+}
+
 $resolvedInstallDirectory = Assert-RemovablePath $InstallDirectory 'InstallDirectory'
 $resolvedDataDirectory = Assert-RemovablePath $DataDirectory 'DataDirectory'
 $targetExe = Join-Path $resolvedInstallDirectory 'PremiereCalendar.exe'
@@ -67,8 +76,7 @@ Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue |
     Stop-Process -Force
 
 if (-not $SkipFirewall) {
-    $firewallRuleName = "$DisplayName $Port"
-    Get-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    Remove-PremiereCalendarFirewallRules -DisplayName $DisplayName
 }
 
 if (-not $KeepBinaries -and (Test-Path -LiteralPath $resolvedInstallDirectory)) {

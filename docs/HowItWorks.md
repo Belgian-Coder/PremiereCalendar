@@ -25,7 +25,7 @@ flowchart LR
     Cards --> ImageCache["/cached-image"]
 ```
 
-TMDb is the canonical identity source. TMDb Discover creates the primary verified rows. Trakt and optional TVmaze schedules can add candidates; mapped candidates become verified cards, while unmapped candidates are retained as unverified external cards below the verified results. In the new-series view, TVmaze later episodes are filtered out before TMDb mapping; `S01E01` candidates can still support a series-premiere card. Watchmode is streaming availability fallback only. SIMKL is account/library sync state, not calendar discovery. Draft filter changes never call external APIs; saved filters do. Runtime API and integration settings are read from the local SQLite settings database first, with ASP.NET Core configuration used only as a fallback.
+TMDb is the canonical identity source. TMDb Discover creates the primary verified rows. Trakt and optional TVmaze schedules can add candidates; mapped candidates become verified cards, while unmapped candidates are retained as unverified external cards below the verified results. In the new-series view, TVmaze later episodes are filtered out before TMDb mapping; `S01E01` candidates can still support a series-premiere card. Watchmode is streaming availability fallback only. SIMKL is account/library sync state, not calendar discovery. Draft filter changes never call external APIs; saved filters do. Runtime API and integration credentials are read from the local SQLite settings database.
 
 ## Request Flow
 
@@ -45,7 +45,7 @@ TMDb is the canonical identity source. TMDb Discover creates the primary verifie
 
 ## External Sources
 
-TMDb is required. It provides discovery, core metadata, TMDb scores, posters/backdrops, videos, genres, keywords, external IDs, TV networks, and watch providers. The TMDb API read access token is stored from the Settings page in the local database, or read from configuration fallback when the database value is empty.
+TMDb is required. It provides discovery, core metadata, TMDb scores, posters/backdrops, videos, genres, keywords, external IDs, TV networks, and watch providers. The TMDb API read access token is stored from the Settings page in the local database.
 
 IMDb datasets are included. The app imports IMDb's non-commercial ratings dataset into SQLite and uses it for IMDb scores and vote counts when a card has an IMDb ID.
 
@@ -128,7 +128,7 @@ When external schedules provide exact season and episode numbers for a show/day,
 
 ## Filtering
 
-Filters are draft UI state until Save is clicked. Closing or canceling the pane discards draft changes. Save updates the URL, reloads the visible week with TMDb-supported filters in the request, and then applies any remaining local filters in memory. The pane has a page-level `Clear filters` action, and each series/movie filter section has its own `Clear` action for resetting just that media group.
+Filters are draft UI state until Save is clicked. Closing or canceling the pane discards draft changes. Save updates the URL and applies the saved filter state. Source-affecting filters reload the visible week with TMDb-supported filters in the request, then apply any remaining local filters in memory. View-only changes such as sort mode or URL canonicalization are applied locally and do not start a new source load. The pane has a page-level `Clear filters` action, and each series/movie filter section has its own `Clear` action for resetting just that media group.
 
 The combined calendar at `/` supports:
 

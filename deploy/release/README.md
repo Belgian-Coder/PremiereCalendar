@@ -6,9 +6,8 @@ This folder contains everything needed for Windows. You do not need to install .
 
 1. Double-click `Install-PremiereCalendar.cmd`.
 2. Click Yes when Windows asks for administrator permission.
-3. Paste the TMDb API Read Access Token when asked.
-4. If you do not have the token yet, press Enter and add it later in Settings.
-5. When the installer finishes, open `http://localhost:5298`.
+3. When the installer finishes, open `http://localhost:5298`.
+4. Add the TMDb API Read Access Token in Settings when the app redirects you there.
 
 Premiere Calendar starts automatically after the computer reboots.
 
@@ -27,8 +26,8 @@ TMDb is required for live calendar data. You need the API Read Access Token, not
 After install, you can change it in the app:
 
 1. Open `http://localhost:5298`.
-2. Click the cog icon.
-3. Paste the token.
+2. Click the cog icon, or follow the automatic Settings redirect.
+3. Paste the token in Source APIs.
 4. Click Save.
 
 ## Open From Another Computer
@@ -39,9 +38,13 @@ After install, you can change it in the app:
 
 If it does not open, check that both computers are on the same network and that Windows allowed the Premiere Calendar firewall prompt.
 
+For a friendly LAN name, add a DNS record on your router or local DNS server that points to the host computer's LAN IP, then open `http://NAME:5298`.
+
+The app has no built-in user login. Keep it on a trusted LAN or VPN and do not expose TCP `5298` directly to the public internet.
+
 ## Update
 
-Extract the new release zip and double-click `Install-PremiereCalendar.cmd` again. Existing settings, tokens, cache, and local data are kept.
+Extract the new release zip and double-click `Install-PremiereCalendar.cmd` again. Existing app-database settings, cache, and local data are kept. Older Windows Service environment credential variables are removed during update; re-enter any missing API credentials in the Settings page.
 
 ## Uninstall
 

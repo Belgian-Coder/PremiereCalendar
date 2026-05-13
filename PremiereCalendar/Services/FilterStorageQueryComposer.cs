@@ -28,12 +28,19 @@ public static class FilterStorageQueryComposer
     {
         var parameters = ToDictionary(savedQuery);
         parameters.Remove("week");
+        parameters.Remove("day");
 
         var currentParameters = ToDictionary(currentQuery);
         if (currentParameters.TryGetValue("week", out var week)
             && !string.IsNullOrWhiteSpace(week))
         {
             parameters["week"] = week;
+        }
+
+        if (currentParameters.TryGetValue("day", out var day)
+            && !string.IsNullOrWhiteSpace(day))
+        {
+            parameters["day"] = day;
         }
 
         return ToQueryString(parameters);
@@ -178,11 +185,31 @@ public static class FilterStorageQueryComposer
         }
 
         var trimmed = query.Trim().TrimStart('?');
-        return QueryHelpers.ParseQuery($"?{trimmed}")
-            .ToDictionary(
-                pair => pair.Key,
-                pair => (string?)pair.Value.ToString(),
-                QueryKeyComparer);
+        var parameters = new Dictionary<string, string?>(QueryKeyComparer);
+        foreach (var pair in QueryHelpers.ParseQuery($"?{trimmed}"))
+        {
+            parameters[pair.Key] = LastNonBlankOrLast(pair.Value);
+        }
+
+        return parameters;
+    }
+
+    private static string? LastNonBlankOrLast(IReadOnlyList<string?> values)
+    {
+        if (values.Count == 0)
+        {
+            return null;
+        }
+
+        for (var index = values.Count - 1; index >= 0; index--)
+        {
+            if (!string.IsNullOrWhiteSpace(values[index]))
+            {
+                return values[index];
+            }
+        }
+
+        return values[values.Count - 1];
     }
 
     private static string ToQueryString(IDictionary<string, string?> parameters)

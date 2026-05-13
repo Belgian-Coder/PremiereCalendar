@@ -114,9 +114,9 @@ The current day-by-day budget is:
 - No literal image-cache parameter names appear in rendered image URLs.
 - Clicking another day changes the selected day and moves the selected day board back into view.
 
-Latest local Playwright validation on 2026-05-08 after source diagnostics and nearby-week prefetch:
+Latest local Playwright validation on 2026-05-13 after the UX, performance, and documentation refresh:
 
-- Forced refresh for `/series?week=2026-05-04&seriesScope=new` at desktop `1920x1080`: complete refresh in about 1.5 seconds, 92 final cards, 17 mounted cards, no horizontal overflow; Trakt reported no candidates and TVmaze contributed 2 source cards.
-- Forced refresh for `/series?week=2026-05-04&seriesLang=en%2Cnl` at desktop `1920x1080`: complete refresh in about 11.3 seconds, 823 final cards, 38 mounted cards, 1,928 DOM nodes, no horizontal overflow; TVmaze contributed 80 source cards.
-- Forced refresh for broad `/series?week=2026-04-27` at desktop `1920x1080`: complete refresh in about 115 seconds, 2,219 final cards, 38 mounted cards, 1,799 DOM nodes, no horizontal overflow; this intentionally exercises the slowest every-episode path with TVmaze enabled.
-- Cached iPhone-size `390x844` new-series view: 10 mounted cards, no horizontal overflow.
+- README screenshots were regenerated from the current source app at `http://127.0.0.1:5302` and saved under `docs/images/readme/`.
+- Desktop `1920x1080` checks covered `/series?week=2026-05-11&seriesScope=new` in dark and light themes, `/movies?week=2026-05-11` in dark theme, and the movie filter pane in dark theme.
+- Mobile `390x844` checks covered the same series and movies routes in dark theme.
+- All checked pages rendered cards, loaded poster images, showed no `Updating results...` state, reported no horizontal overflow, and produced no browser console errors.

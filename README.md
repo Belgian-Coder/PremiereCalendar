@@ -15,11 +15,11 @@ TMDb is required for live data. Everything else is optional.
 
 | Dark mode | Light mode |
 | --- | --- |
-| ![Series calendar in dark mode](docs/images/readme/series-dark.png) | ![Series calendar in light mode](docs/images/readme/series-light.png) |
+| ![New-series calendar in dark mode](docs/images/readme/series-dark.png) | ![New-series calendar in light mode](docs/images/readme/series-light.png) |
 
 | Movies | Filters |
 | --- | --- |
-| ![Movie calendar in dark mode](docs/images/readme/movies-dark.png) | ![Filter drawer in dark mode](docs/images/readme/filters-dark.png) |
+| ![Movie calendar in dark mode](docs/images/readme/movies-dark.png) | ![Filter pane in dark mode](docs/images/readme/filters-dark.png) |
 
 ## Install On Windows
 
@@ -30,10 +30,12 @@ For a normal Windows install, use the release zip.
 3. Open the extracted folder.
 4. Double-click `Install-PremiereCalendar.cmd`.
 5. Click Yes when Windows asks for administrator permission.
-6. When the installer asks for a TMDb token, paste it. If you do not have one yet, press Enter and add it later in Settings.
-7. Open `http://localhost:5298`.
+6. Open `http://localhost:5298`.
+7. Add the TMDb token in Settings when the app redirects you there.
 
 The app starts automatically after the computer reboots.
+
+If TMDb settings are missing, the calendar automatically opens Settings and shows a setup notice until the required token is saved.
 
 ## TMDb Token
 
@@ -42,7 +44,7 @@ TMDb is required. Without it, the app opens but cannot load real calendar data.
 1. Create or sign in to a TMDb account.
 2. Open your TMDb account API settings.
 3. Copy the API Read Access Token, not the short API key.
-4. Paste it in the installer, or open the app, click the cog icon, paste it in Settings, and click Save.
+4. Paste it in the app Settings page and click Save.
 
 ## Check It Worked
 
@@ -59,7 +61,11 @@ TMDb is required. Without it, the app opens but cannot load real calendar data.
 2. Find that computer's local network IP address.
 3. On another computer, open `http://IP-ADDRESS:5298`.
 
+For a friendly LAN name, add a DNS record on your router or local DNS server that points to the host computer's LAN IP, then open `http://NAME:5298`.
+
 If it does not open, check that both computers are on the same network and that Windows allowed the Premiere Calendar firewall prompt.
+
+Premiere Calendar has no built-in user login. Keep the service on a trusted LAN or VPN, and avoid exposing it directly to the public internet.
 
 ## Run From Source
 

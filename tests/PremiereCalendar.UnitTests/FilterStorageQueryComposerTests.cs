@@ -73,6 +73,14 @@ public sealed class FilterStorageQueryComposerTests
     }
 
     [Fact]
+    public void HasMeaningfulFilterQuery_UsesEarlierNonBlankDuplicateValues()
+    {
+        var result = FilterStorageQueryComposer.HasMeaningfulFilterQuery("?seriesLang=nl&seriesLang=");
+
+        Assert.True(result);
+    }
+
+    [Fact]
     public void ComposeRestoredQuery_PreservesCurrentWeekButDropsStoredWeek()
     {
         var result = FilterStorageQueryComposer.ComposeRestoredQuery(
@@ -84,5 +92,42 @@ public sealed class FilterStorageQueryComposerTests
         Assert.Equal("2026-05-04", query["week"].ToString());
         Assert.Equal("nl", query["seriesLang"].ToString());
         Assert.Equal("Netflix", query["movieSources"].ToString());
+    }
+
+    [Fact]
+    public void ComposeRestoredQuery_DropsStoredDayWhenCurrentUrlHasNoDay()
+    {
+        var result = FilterStorageQueryComposer.ComposeRestoredQuery(
+            "?week=2026-05-11",
+            "week=2026-05-04&day=2026-05-05&seriesLang=nl");
+
+        var query = QueryHelpers.ParseQuery($"?{result}");
+
+        Assert.Equal("2026-05-11", query["week"].ToString());
+        Assert.Equal("nl", query["seriesLang"].ToString());
+        Assert.False(query.ContainsKey("day"));
+    }
+
+    [Fact]
+    public void ComposeRestoredQuery_PreservesCurrentDayWhenCurrentUrlHasDay()
+    {
+        var result = FilterStorageQueryComposer.ComposeRestoredQuery(
+            "?week=2026-05-11&day=2026-05-13",
+            "week=2026-05-04&day=2026-05-05&seriesLang=nl");
+
+        var query = QueryHelpers.ParseQuery($"?{result}");
+
+        Assert.Equal("2026-05-11", query["week"].ToString());
+        Assert.Equal("2026-05-13", query["day"].ToString());
+        Assert.Equal("nl", query["seriesLang"].ToString());
+    }
+
+    [Fact]
+    public void HasMeaningfulFilterQuery_HandlesDuplicateKeysWithDifferentCasing()
+    {
+        var result = FilterStorageQueryComposer.HasMeaningfulFilterQuery(
+            "?week=2026-05-04&WEEK=2026-05-11&sort=date&SORT=date");
+
+        Assert.False(result);
     }
 }

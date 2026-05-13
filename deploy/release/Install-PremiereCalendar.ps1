@@ -8,11 +8,6 @@ param(
     [int]$Port = 5298,
     [string]$ServiceName = 'PremiereCalendar',
     [string]$DisplayName = 'Premiere Calendar',
-    [string]$TmdbBearerToken,
-    [string]$TraktClientId,
-    [string]$OmdbApiKey,
-    [string]$FanartApiKey,
-    [string]$TheTvdbApiKey,
     [string]$FirewallRemoteAddress = 'LocalSubnet',
     [switch]$SkipFirewall,
     [switch]$NoStart,
@@ -61,18 +56,6 @@ function Convert-EnvironmentListToMap {
     return $map
 }
 
-function Set-NonEmptyEnvironmentValue {
-    param(
-        [Parameter(Mandatory)]$Map,
-        [Parameter(Mandatory)][string]$Name,
-        [AllowNull()][string]$Value
-    )
-
-    if (-not [string]::IsNullOrWhiteSpace($Value)) {
-        $Map[$Name] = $Value
-    }
-}
-
 function Remove-PremiereCalendarStartupEntries {
     $startupDirectory = [Environment]::GetFolderPath('Startup')
     if ([string]::IsNullOrWhiteSpace($startupDirectory) -or -not (Test-Path -LiteralPath $startupDirectory)) {
@@ -89,6 +72,15 @@ function Remove-PremiereCalendarStartupEntries {
             )
         } |
         Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+function Remove-PremiereCalendarFirewallRules {
+    param([Parameter(Mandatory)][string]$DisplayName)
+
+    $displayNamePattern = '^' + [regex]::Escape($DisplayName) + ' \d+$'
+    Get-NetFirewallRule -DisplayName "$DisplayName *" -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match $displayNamePattern } |
+        Remove-NetFirewallRule
 }
 
 $resolvedPayloadDirectory = Get-FullPath $PayloadDirectory
@@ -138,6 +130,25 @@ foreach ($key in $existingEnvironment.Keys) {
     $environment[$key] = $existingEnvironment[$key]
 }
 
+$legacyCredentialEnvironmentKeys = @(
+    'Tmdb__BearerToken',
+    'Omdb__ApiKey',
+    'Fanart__ApiKey',
+    'TheTvdb__ApiKey',
+    'Watchmode__ApiKey',
+    'Trakt__ClientId',
+    'Trakt__ClientSecret',
+    'Simkl__ClientId',
+    'Simkl__ClientSecret',
+    'Simkl__AccessToken',
+    'Sonarr__ApiKey',
+    'Radarr__ApiKey'
+)
+
+foreach ($key in $legacyCredentialEnvironmentKeys) {
+    [void]$environment.Remove($key)
+}
+
 $environment['ASPNETCORE_URLS'] = "http://0.0.0.0:$Port"
 $environment['ASPNETCORE_ENVIRONMENT'] = 'Production'
 $environment['DOTNET_ENVIRONMENT'] = 'Production'
@@ -146,36 +157,7 @@ $environment['AppDatabase__Path'] = Join-Path $resolvedDataDirectory 'data\premi
 $environment['CalendarCache__Directory'] = Join-Path $resolvedDataDirectory 'cache\calendar'
 $environment['ImageCache__Directory'] = Join-Path $resolvedDataDirectory 'cache\images'
 
-if ($PSBoundParameters.ContainsKey('TmdbBearerToken')) {
-    Set-NonEmptyEnvironmentValue $environment 'Tmdb__BearerToken' $TmdbBearerToken
-}
-elseif (-not $environment.Contains('Tmdb__BearerToken') -and -not $NonInteractive) {
-    $enteredToken = Read-Host 'TMDb API read access token'
-    Set-NonEmptyEnvironmentValue $environment 'Tmdb__BearerToken' $enteredToken
-}
-
-if ($PSBoundParameters.ContainsKey('TraktClientId')) {
-    Set-NonEmptyEnvironmentValue $environment 'Trakt__ClientId' $TraktClientId
-}
-
-if ($PSBoundParameters.ContainsKey('OmdbApiKey') -and -not [string]::IsNullOrWhiteSpace($OmdbApiKey)) {
-    $environment['Omdb__ApiKey'] = $OmdbApiKey
-    $environment['Omdb__Enabled'] = 'true'
-}
-
-if ($PSBoundParameters.ContainsKey('FanartApiKey') -and -not [string]::IsNullOrWhiteSpace($FanartApiKey)) {
-    $environment['Fanart__ApiKey'] = $FanartApiKey
-    $environment['Fanart__Enabled'] = 'true'
-}
-
-if ($PSBoundParameters.ContainsKey('TheTvdbApiKey') -and -not [string]::IsNullOrWhiteSpace($TheTvdbApiKey)) {
-    $environment['TheTvdb__ApiKey'] = $TheTvdbApiKey
-    $environment['TheTvdb__Enabled'] = 'true'
-}
-
-if (-not $environment.Contains('Tmdb__BearerToken')) {
-    Write-Warning 'No TMDb token is configured. The service can start, but live calendar data will not load until Tmdb__BearerToken is set.'
-}
+Write-Host 'API credentials are configured in the app Settings page, not in the installer or service environment.'
 
 $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($service) {
@@ -203,7 +185,7 @@ Remove-PremiereCalendarStartupEntries
 if (-not $SkipFirewall) {
     $firewallRuleName = "$DisplayName $Port"
     Write-Host "Configuring firewall rule $firewallRuleName..."
-    Get-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    Remove-PremiereCalendarFirewallRules -DisplayName $DisplayName
     New-NetFirewallRule `
         -DisplayName $firewallRuleName `
         -Direction Inbound `
@@ -245,3 +227,5 @@ Write-Host "Install directory: $resolvedInstallDirectory"
 Write-Host "Data directory:    $resolvedDataDirectory"
 Write-Host "Local URL:         http://localhost:$Port/"
 Write-Host "LAN URL:           http://<this-machine-ip>:$Port/"
+Write-Host "Settings:          open http://localhost:$Port/settings to add the TMDb token before using the calendar."
+Write-Host "LAN DNS:           point a local DNS name at this machine IP and browse to http://<name>:$Port/."
