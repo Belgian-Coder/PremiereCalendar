@@ -46,13 +46,13 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                     await Task.Delay(delay, stoppingToken);
                 }
 
-                await RunOnceAsync(stoppingToken);
+                await RunOnceSafelyAsync(stoppingToken);
             }
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 await Task.Delay(TimeSpan.FromMinutes(Math.Max(15, _options.CurrentValue.WakeIntervalMinutes)), stoppingToken);
-                await RunOnceAsync(stoppingToken);
+                await RunOnceSafelyAsync(stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -74,6 +74,22 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         }
     }
 
+    private async Task RunOnceSafelyAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunOnceAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Provider delta sync cycle failed.");
+        }
+    }
+
     private async Task SyncTmdbChangesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
         try
@@ -83,6 +99,10 @@ public sealed class ProviderDeltaSyncService : BackgroundService
             var start = end.AddDays(-lookbackDays);
             await SyncTmdbMediaChangesAsync(PremiereMediaType.Movie, start, end, nowUtc, cancellationToken);
             await SyncTmdbMediaChangesAsync(PremiereMediaType.Series, start, end, nowUtc, cancellationToken);
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "TMDb change tracking sync timed out or was canceled by an external dependency.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -133,7 +153,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                     watermark,
                     null,
                     null),
-                cancellationToken);
+                    cancellationToken);
         }
     }
 
@@ -166,8 +186,12 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                         "day",
                         null,
                         null),
-                    cancellationToken);
+                cancellationToken);
             }
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "TVmaze update tracking sync timed out or was canceled by an external dependency.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
