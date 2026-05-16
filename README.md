@@ -21,6 +21,10 @@ TMDb is required for live data. Everything else is optional.
 | --- | --- |
 | ![Movie calendar in dark mode](docs/images/readme/movies-dark.png) | ![Filter pane in dark mode](docs/images/readme/filters-dark.png) |
 
+| Local status |
+| --- |
+| ![Settings local status center](docs/images/readme/settings-local-status-light.png) |
+
 ## Install On Windows
 
 For a normal Windows install, use the release zip.
@@ -91,9 +95,12 @@ To build and install the service from the source tree:
 | Go to another week | Use Previous, This week, or Next |
 | Move from the top of a day to yesterday | Keep scrolling upward until the message appears |
 | Move from the bottom of a day to tomorrow | Keep scrolling downward until the message appears |
-| See which sources loaded | Click Show sources in Loaded-source filters |
-| Hide source details again | Click Hide sources |
-| See cache age | Check the cache pills under the toolbar |
+| See which sources loaded | Click Sources or Details above the day strip |
+| See cache age | Check the data freshness pill above the day strip |
+| Save filter combinations | Enter a preset name and click Save |
+| Apply a saved filter preset | Choose a preset and click Apply |
+| Open the command palette | Press Ctrl+K, or Cmd+K on macOS |
+| Close the command palette | Press Escape |
 | Change filters | Click the filter button |
 | Change settings | Click the cog icon |
 
@@ -141,7 +148,9 @@ All, Series, and Movies keep separate synced views. A browser on Series follows 
 
 The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync groups, and small provider sync markers on disk. This means cached data survives restarts, crashes, and updates.
 
-Click Refresh when you want the current week checked again. Refresh keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
+Use Quick when you want to reuse fresh local cache where possible. Use Full when you want the visible week checked against providers again. Full keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
+
+Settings includes a Local status center with a cache inspector, background job timeline, release/update checker, and settings backup/restore box. The release checker only reports available GitHub releases; it never installs updates silently.
 
 ## Common Problems
 

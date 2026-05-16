@@ -114,9 +114,10 @@ The current day-by-day budget is:
 - No literal image-cache parameter names appear in rendered image URLs.
 - Clicking another day changes the selected day and moves the selected day board back into view.
 
-Latest local Playwright validation on 2026-05-13 after the UX, performance, and documentation refresh:
+Latest local Playwright validation on 2026-05-16 after the local observability and productivity refresh:
 
-- README screenshots were regenerated from the current source app at `http://127.0.0.1:5302` and saved under `docs/images/readme/`.
-- Desktop `1920x1080` checks covered `/series?week=2026-05-11&seriesScope=new` in dark and light themes, `/movies?week=2026-05-11` in dark theme, and the movie filter pane in dark theme.
-- Mobile `390x844` checks covered the same series and movies routes in dark theme.
-- All checked pages rendered cards, loaded poster images, showed no `Updating results...` state, reported no horizontal overflow, and produced no browser console errors.
+- README screenshots were regenerated from the deployed app at `http://localhost:5298` and saved under `docs/images/readme/`.
+- Desktop checks covered `/series?week=2026-05-11` in dark and light themes, `/movies?week=2026-05-11` in dark theme, the movie filter pane in dark theme, and `/settings` with the Local status center.
+- Mobile `390x844` checks covered `/series?week=2026-05-11`, including the compact day jump strip and command-bar controls.
+- Command palette checks pressed `Ctrl+K`, verified the palette opened, captured screenshots, pressed Escape, and verified the palette closed.
+- Layout checks reported no horizontal overflow. The deployed first-viewport measurements were command bar `82.75px` and calendar top `209.125px` on desktop, and command bar `219.8125px` and calendar top `411.359375px` on mobile.

@@ -175,6 +175,12 @@ builder.Services.AddHttpClient<IArrIntegrationService, ArrIntegrationService>(cl
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.Timeout = TimeSpan.FromSeconds(20);
 });
+builder.Services.AddHttpClient<ReleaseUpdateService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.github.com/");
+    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<FileCalendarCache>();
@@ -183,6 +189,12 @@ builder.Services.AddSingleton<ICalendarCacheMaintenance>(sp => sp.GetRequiredSer
 builder.Services.AddTransient<IImageCache>(sp => sp.GetRequiredService<FileImageCache>());
 builder.Services.AddTransient<IImageCacheMaintenance>(sp => sp.GetRequiredService<FileImageCache>());
 builder.Services.AddSingleton<IIntegrationSettingsStore, SqliteIntegrationSettingsStore>();
+builder.Services.AddSingleton<IAppStateStore, SqliteAppStateStore>();
+builder.Services.AddSingleton<CacheInspectorService>();
+builder.Services.AddSingleton<BackgroundJobTimelineService>();
+builder.Services.AddSingleton<CalendarPresetService>();
+builder.Services.AddSingleton<CalendarVisitChangeService>();
+builder.Services.AddSingleton<SettingsBackupService>();
 builder.Services.AddSingleton<ICalendarFilterUsageStore, SqliteCalendarFilterUsageStore>();
 builder.Services.AddSingleton<ISimklSyncStateStore, SqliteSimklSyncStateStore>();
 builder.Services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();

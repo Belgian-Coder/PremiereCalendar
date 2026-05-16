@@ -1,5 +1,11 @@
 using Bunit;
+using System.Net;
+using System.Text;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using PremiereCalendar.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Services;
 
@@ -8,12 +14,37 @@ namespace PremiereCalendar.ComponentTests;
 public sealed class SettingsPageTests : BunitContext
 {
     private readonly FakeViewSyncService _viewSyncService = new();
+    private readonly InMemoryAppStateStore _appStateStore = new();
+    private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-settings-tests-{Guid.NewGuid():N}");
 
     public SettingsPageTests()
     {
+        Directory.CreateDirectory(_root);
         JSInterop.Mode = JSRuntimeMode.Loose;
         JSInterop.Setup<string>("premiereViewSync.getOrCreateDeviceId").SetResult("device-a");
         Services.AddSingleton<IViewSyncService>(_viewSyncService);
+        Services.AddSingleton<IAppStateStore>(_appStateStore);
+        Services.AddSingleton(TimeProvider.System);
+        Services.AddSingleton(sp => new CacheInspectorService(
+            Microsoft.Extensions.Options.Options.Create(new CalendarCacheOptions { Directory = "cache/calendar" }),
+            Microsoft.Extensions.Options.Options.Create(new ImageCacheOptions { Directory = "cache/images" }),
+            new FakeWebHostEnvironment(_root)));
+        Services.AddSingleton<BackgroundJobTimelineService>();
+        Services.AddSingleton<SettingsBackupService>();
+        Services.AddSingleton(new ReleaseUpdateService(
+            new HttpClient(new StaticHttpMessageHandler(
+                """
+                {
+                  "tag_name": "v1.2.0",
+                  "html_url": "https://github.com/Belgian-Coder/PremiereCalendar/releases/tag/v1.2.0",
+                  "published_at": "2026-05-16T10:00:00Z",
+                  "name": "Premiere Calendar 1.2.0"
+                }
+                """))
+            {
+                BaseAddress = new Uri("https://api.github.com/")
+            },
+            "1.0.0"));
     }
 
     [Fact]
@@ -133,6 +164,32 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Contains("Settings could not be loaded", error.TextContent);
             Assert.Empty(component.FindAll("form"));
         });
+    }
+
+    [Fact]
+    public void SettingsPage_ShowsLocalStatusCenterAndChecksForUpdates()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "cache", "calendar"));
+        File.WriteAllText(Path.Combine(_root, "cache", "calendar", "20260511-20260517-default.json"), "{}");
+        var store = new FakeIntegrationSettingsStore();
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            var status = component.Find("[data-testid='local-status-center']");
+            Assert.Contains("Local status", status.TextContent);
+            Assert.Contains("Calendar cache", status.TextContent);
+            Assert.Contains("Backup", status.TextContent);
+        });
+
+        component.Find("button[title='Check for application updates']").Click();
+
+        component.WaitForAssertion(() =>
+            Assert.Contains("1.2.0", component.Find("[data-testid='release-update-result']").TextContent));
     }
 
     [Fact]
@@ -1026,6 +1083,66 @@ public sealed class SettingsPageTests : BunitContext
                 || string.Equals(Overview.GroupState?.RouteKey, routeKey, StringComparison.OrdinalIgnoreCase)
                     ? Overview.GroupState
                     : null);
+        }
+    }
+
+    private sealed class InMemoryAppStateStore : IAppStateStore
+    {
+        private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
+
+        public Task<string?> GetValueAsync(string key, CancellationToken cancellationToken)
+        {
+            _values.TryGetValue(key, out var value);
+            return Task.FromResult(value);
+        }
+
+        public Task SetValueAsync(string key, string value, CancellationToken cancellationToken)
+        {
+            _values[key] = value;
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteValueAsync(string key, CancellationToken cancellationToken)
+        {
+            _values.Remove(key);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyDictionary<string, string>> GetValuesByPrefixAsync(string prefix, CancellationToken cancellationToken)
+        {
+            IReadOnlyDictionary<string, string> values = _values
+                .Where(entry => entry.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+            return Task.FromResult(values);
+        }
+    }
+
+    private sealed class FakeWebHostEnvironment : IWebHostEnvironment
+    {
+        public FakeWebHostEnvironment(string root)
+        {
+            ContentRootPath = root;
+            WebRootPath = root;
+            ContentRootFileProvider = new PhysicalFileProvider(root);
+            WebRootFileProvider = new PhysicalFileProvider(root);
+        }
+
+        public string EnvironmentName { get; set; } = "Development";
+        public string ApplicationName { get; set; } = "PremiereCalendar.Tests";
+        public string WebRootPath { get; set; }
+        public IFileProvider WebRootFileProvider { get; set; }
+        public string ContentRootPath { get; set; }
+        public IFileProvider ContentRootFileProvider { get; set; }
+    }
+
+    private sealed class StaticHttpMessageHandler(string content) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(content, Encoding.UTF8, "application/json")
+            });
         }
     }
 }

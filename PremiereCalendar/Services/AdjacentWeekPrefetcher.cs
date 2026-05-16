@@ -12,6 +12,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
     private readonly CalendarCacheOptions _options;
     private readonly ILogger<AdjacentWeekPrefetcher> _logger;
     private readonly CalendarLoadCoordinator? _loadCoordinator;
+    private readonly BackgroundJobTimelineService? _timeline;
     private readonly ConcurrentDictionary<string, byte> _scheduledWeeks = [];
     private readonly object _queueGate = new();
     private readonly PriorityQueue<PrefetchRequest, PrefetchPriority> _queue = new();
@@ -27,13 +28,15 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         IHostApplicationLifetime applicationLifetime,
         IOptions<CalendarCacheOptions> options,
         ILogger<AdjacentWeekPrefetcher> logger,
-        CalendarLoadCoordinator? loadCoordinator = null)
+        CalendarLoadCoordinator? loadCoordinator = null,
+        BackgroundJobTimelineService? timeline = null)
     {
         _scopeFactory = scopeFactory;
         _applicationLifetime = applicationLifetime;
         _options = options.Value;
         _logger = logger;
         _loadCoordinator = loadCoordinator;
+        _timeline = timeline;
     }
 
     public void PrefetchAdjacentWeeks(DateOnly weekStart, CalendarFilters? filters = null)
@@ -213,6 +216,8 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         CancellationToken cancellationToken)
     {
         CalendarLoadCoordinator.BackgroundLoadLease? backgroundLoad = null;
+        var startedUtc = DateTimeOffset.UtcNow;
+        var startedTimestamp = TimeProvider.System.GetTimestamp();
         try
         {
             backgroundLoad = _loadCoordinator is null
@@ -231,7 +236,19 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
             using var linkedTimeout = CancellationTokenSource.CreateLinkedTokenSource(runToken, timeout.Token);
             await using var scope = _scopeFactory.CreateAsyncScope();
             var service = scope.ServiceProvider.GetRequiredService<IPremiereService>();
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Started,
+                $"Started adjacent week prefetch for {weekStart:yyyy-MM-dd}.",
+                startedUtc,
+                null,
+                cancellationToken);
             await service.GetPremieresAsync(weekStart, weekStart.AddDays(6), linkedTimeout.Token, filters: filters);
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Succeeded,
+                $"Finished adjacent week prefetch for {weekStart:yyyy-MM-dd}.",
+                DateTimeOffset.UtcNow,
+                TimeProvider.System.GetElapsedTime(startedTimestamp),
+                cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested
             || backgroundLoad?.Token.IsCancellationRequested == true)
@@ -243,15 +260,49 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
                 "Adjacent week prefetch timed out for week starting {WeekStart} after {TimeoutSeconds}s.",
                 weekStart,
                 _options.AdjacentWeekPrefetchTimeoutSeconds);
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Failed,
+                $"Adjacent week prefetch timed out for {weekStart:yyyy-MM-dd}.",
+                DateTimeOffset.UtcNow,
+                TimeProvider.System.GetElapsedTime(startedTimestamp),
+                CancellationToken.None);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Adjacent week prefetch failed for week starting {WeekStart}.", weekStart);
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Failed,
+                ex.Message,
+                DateTimeOffset.UtcNow,
+                TimeProvider.System.GetElapsedTime(startedTimestamp),
+                CancellationToken.None);
         }
         finally
         {
             backgroundLoad?.Dispose();
             _scheduledWeeks.TryRemove(key, out _);
+        }
+    }
+
+    private async Task RecordTimelineAsync(
+        BackgroundJobStatus status,
+        string message,
+        DateTimeOffset occurredUtc,
+        TimeSpan? duration,
+        CancellationToken cancellationToken)
+    {
+        if (_timeline is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _timeline.RecordAsync("Adjacent week prefetch", status, message, occurredUtc, duration, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not record adjacent prefetch timeline event.");
         }
     }
 

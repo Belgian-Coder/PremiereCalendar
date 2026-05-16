@@ -16,6 +16,7 @@ public sealed class CalendarPageTests : BunitContext
     private readonly FakeAdjacentWeekPrefetcher _prefetcher = new();
     private readonly FakeViewSyncService _viewSyncService = new();
     private readonly FakeCalendarCacheMaintenance _cacheMaintenance = new();
+    private readonly InMemoryAppStateStore _appStateStore = new();
 
     public CalendarPageTests()
     {
@@ -39,6 +40,10 @@ public sealed class CalendarPageTests : BunitContext
         Services.AddSingleton<IArrIntegrationService, FakeArrIntegrationService>();
         Services.AddSingleton<IViewSyncService>(_viewSyncService);
         Services.AddSingleton<ICalendarCacheMaintenance>(_cacheMaintenance);
+        Services.AddSingleton<IAppStateStore>(_appStateStore);
+        Services.AddSingleton(TimeProvider.System);
+        Services.AddSingleton<CalendarPresetService>();
+        Services.AddSingleton<CalendarVisitChangeService>();
         Services.Configure<CalendarLoadOptions>(_ => { });
     }
 
@@ -198,7 +203,7 @@ public sealed class CalendarPageTests : BunitContext
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
         component.WaitForAssertion(() => Assert.Single(service.Calls));
 
-        component.Find("button[title='Refresh premieres']").Click();
+        component.Find("button[title='Full provider refresh']").Click();
 
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.True(service.Calls[1].ForceRefresh);
@@ -226,7 +231,7 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
         {
-            var refresh = component.Find("button[title='Refresh premieres']");
+            var refresh = component.Find("button[title='Full provider refresh']");
             Assert.Null(refresh.GetAttribute("disabled"));
             Assert.Contains("Updating", component.Find("[data-testid='refreshing']").TextContent);
         });
@@ -383,7 +388,7 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Empty(service.Calls);
         });
 
-        component.Find("button[title='Refresh premieres']").Click();
+        component.Find("button[title='Full provider refresh']").Click();
 
         component.WaitForAssertion(() =>
         {
@@ -638,7 +643,7 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
         component.Find("button[title='Open filters']").Click();
-        component.Find("select").Change("Title");
+        component.Find("select[aria-label='Sort results by']").Change("Title");
         component.Find("button[title='Save filters']").Click();
 
         component.WaitForAssertion(() =>
@@ -1350,7 +1355,7 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
         {
-            var freshness = component.Find("[data-testid='cache-freshness']");
+            var freshness = component.Find("[data-testid='data-freshness-card']");
             Assert.Contains("Series cache", freshness.TextContent);
             Assert.Contains("10 May", freshness.TextContent);
             Assert.DoesNotContain("Movies cache", freshness.TextContent);
@@ -1695,10 +1700,66 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
         component.Find("button[data-day-target='premiere-day-20260505']").Click();
-        component.Find("button[title='Refresh premieres']").Click();
+        component.Find("button[title='Full provider refresh']").Click();
 
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.Equal(new DateOnly(2026, 5, 5), service.Calls.Last().PriorityDate);
+    }
+
+    [Fact]
+    public void CalendarPage_OffersQuickAndFullRefreshModes()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        component.Find("button[title='Quick refresh']").Click();
+        component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
+        Assert.False(service.Calls.Last().ForceRefresh);
+
+        component.Find("button[title='Full provider refresh']").Click();
+        component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 3));
+        Assert.True(service.Calls.Last().ForceRefresh);
+    }
+
+    [Fact]
+    public void CalendarPage_SavesAndAppliesFilterPresets()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04&movieWatchRegion=be");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        component.Find("input[aria-label='Preset name']").Input("Belgian movies");
+        component.Find("button[title='Save current filters as preset']").Click();
+
+        component.WaitForAssertion(() =>
+            Assert.Contains("Belgian movies", component.Find("select[aria-label='Saved filter presets']").TextContent));
+    }
+
+    [Fact]
+    public void CalendarPage_ShowsCommandPalette()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        component.Find("button[title='Open command palette (Ctrl+K)']").Click();
+
+        var palette = component.Find("[data-testid='command-palette']");
+        Assert.Single(component.FindAll("[data-command-palette-toggle]"));
+        Assert.Single(component.FindAll("[data-command-palette-panel]"));
+        Assert.Contains("Filters", palette.TextContent);
+        Assert.Contains("Settings", palette.TextContent);
+        Assert.Contains("Quick refresh", palette.TextContent);
     }
 
     [Fact]
@@ -2627,6 +2688,37 @@ public sealed class CalendarPageTests : BunitContext
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult(new ArrConnectionOptions([], []));
+        }
+    }
+
+    private sealed class InMemoryAppStateStore : IAppStateStore
+    {
+        private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
+
+        public Task<string?> GetValueAsync(string key, CancellationToken cancellationToken)
+        {
+            _values.TryGetValue(key, out var value);
+            return Task.FromResult(value);
+        }
+
+        public Task SetValueAsync(string key, string value, CancellationToken cancellationToken)
+        {
+            _values[key] = value;
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteValueAsync(string key, CancellationToken cancellationToken)
+        {
+            _values.Remove(key);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyDictionary<string, string>> GetValuesByPrefixAsync(string prefix, CancellationToken cancellationToken)
+        {
+            IReadOnlyDictionary<string, string> values = _values
+                .Where(entry => entry.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+            return Task.FromResult(values);
         }
     }
 }

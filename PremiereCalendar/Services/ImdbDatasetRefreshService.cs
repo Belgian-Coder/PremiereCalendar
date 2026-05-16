@@ -10,19 +10,22 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
     private readonly IOptionsMonitor<ImdbDatasetOptions> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ImdbDatasetRefreshService> _logger;
+    private readonly BackgroundJobTimelineService? _timeline;
 
     public ImdbDatasetRefreshService(
         IImdbDatasetImporter importer,
         IImdbRatingsStore ratingsStore,
         IOptionsMonitor<ImdbDatasetOptions> options,
         TimeProvider timeProvider,
-        ILogger<ImdbDatasetRefreshService> logger)
+        ILogger<ImdbDatasetRefreshService> logger,
+        BackgroundJobTimelineService? timeline = null)
     {
         _importer = importer;
         _ratingsStore = ratingsStore;
         _options = options;
         _timeProvider = timeProvider;
         _logger = logger;
+        _timeline = timeline;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -59,6 +62,8 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
 
     private async Task ImportIfDueAsync(CancellationToken cancellationToken)
     {
+        var startedUtc = _timeProvider.GetUtcNow();
+        var startedTimestamp = _timeProvider.GetTimestamp();
         try
         {
             var state = await _ratingsStore.GetStateAsync(cancellationToken);
@@ -66,10 +71,28 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
             if (state.LastImportedUtc is { } lastImported
                 && _timeProvider.GetUtcNow() - lastImported < interval)
             {
+                await RecordTimelineAsync(
+                    BackgroundJobStatus.Skipped,
+                    "IMDb ratings import is still fresh.",
+                    _timeProvider.GetUtcNow(),
+                    null,
+                    cancellationToken);
                 return;
             }
 
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Started,
+                "Started IMDb ratings import.",
+                startedUtc,
+                null,
+                cancellationToken);
             await _importer.ImportRatingsAsync(cancellationToken);
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Succeeded,
+                "Finished IMDb ratings import.",
+                _timeProvider.GetUtcNow(),
+                _timeProvider.GetElapsedTime(startedTimestamp),
+                cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -78,6 +101,34 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "IMDb ratings refresh failed.");
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Failed,
+                ex.Message,
+                _timeProvider.GetUtcNow(),
+                _timeProvider.GetElapsedTime(startedTimestamp),
+                CancellationToken.None);
+        }
+    }
+
+    private async Task RecordTimelineAsync(
+        BackgroundJobStatus status,
+        string message,
+        DateTimeOffset occurredUtc,
+        TimeSpan? duration,
+        CancellationToken cancellationToken)
+    {
+        if (_timeline is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _timeline.RecordAsync("IMDb ratings import", status, message, occurredUtc, duration, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not record IMDb timeline event.");
         }
     }
 }

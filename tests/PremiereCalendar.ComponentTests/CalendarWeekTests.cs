@@ -23,6 +23,8 @@ public sealed class CalendarWeekTests : BunitContext
         Assert.Single(component.FindAll("[data-testid='calendar-day']"));
         Assert.Equal(7, component.FindAll(".day-jump-link").Count);
         Assert.Equal(7, component.FindAll("[data-day-button]").Count);
+        Assert.Equal(7, component.FindAll(".day-jump-compact-date").Count);
+        Assert.NotEmpty(component.FindAll(".mobile-day-jump-strip"));
         Assert.Single(component.FindAll("button[title='Open filters']"));
         Assert.Empty(component.FindAll("[data-testid='week-scroll-control']"));
         Assert.NotEmpty(component.FindAll(".calendar-grid"));

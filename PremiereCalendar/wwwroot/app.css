@@ -222,6 +222,93 @@ h1:focus {
     justify-content: flex-end;
 }
 
+.refresh-mode-group {
+    flex-wrap: nowrap;
+}
+
+.preset-command-row {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.preset-name-input,
+.preset-select {
+    min-height: 2rem;
+    max-width: 9.5rem;
+    min-width: 0;
+    padding: 0.26rem 0.45rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-strong);
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 700;
+}
+
+.preset-name-input {
+    width: 8.5rem;
+}
+
+.preset-select {
+    width: 7.5rem;
+}
+
+.command-palette,
+.data-freshness-card {
+    grid-column: 1 / -1;
+}
+
+.command-palette {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0.45rem;
+    border: 1px solid color-mix(in srgb, var(--teal) 22%, var(--line));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-strong) 90%, var(--teal-soft));
+}
+
+.command-palette-item {
+    min-height: 2rem;
+    padding: 0.28rem 0.55rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--teal-strong);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 800;
+}
+
+.command-palette-label-short {
+    display: none;
+}
+
+.data-freshness-card {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: center;
+    padding: 0.2rem 0;
+}
+
+.visit-change-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.75rem;
+    padding: 0.16rem 0.45rem;
+    border: 1px solid color-mix(in srgb, var(--amber) 34%, var(--line));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--amber-soft) 58%, var(--surface-strong));
+    color: #75501c;
+    font-size: 0.78rem;
+    font-weight: 850;
+}
+
 .calendar-mode-pill {
     color: var(--ink);
     font-size: 0.98rem;
@@ -406,13 +493,6 @@ h1:focus {
     border-radius: 999px;
     background: var(--teal-soft);
     font-size: 0.78rem;
-}
-
-.command-cache-summary .cache-freshness-pill {
-    min-height: 1.65rem;
-    gap: 0.32rem;
-    padding: 0.16rem 0.45rem;
-    font-size: 0.72rem;
 }
 
 .cache-freshness-pill strong {
@@ -1212,6 +1292,10 @@ h1:focus {
     align-items: center;
     justify-content: space-between;
     gap: 0.4rem;
+}
+
+.day-jump-compact-date {
+    display: none;
 }
 
 .day-jump-link:hover,
@@ -2273,6 +2357,110 @@ html[data-theme="dark"] .links span {
     font-size: 1.45rem;
 }
 
+.local-status-center {
+    column-span: all;
+}
+
+.local-status-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+}
+
+.status-mini-panel {
+    display: grid;
+    align-content: start;
+    gap: 0.65rem;
+    min-width: 0;
+    padding: 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-strong);
+}
+
+.status-mini-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.status-mini-heading strong {
+    color: var(--ink);
+    font-size: 0.92rem;
+}
+
+.cache-inspector-list,
+.cache-inspector-row {
+    display: grid;
+    gap: 0.35rem;
+}
+
+.cache-inspector-row {
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.cache-inspector-row:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+
+.cache-inspector-row strong {
+    color: var(--ink);
+    font-size: 0.84rem;
+}
+
+.cache-inspector-row span,
+.cache-inspector-row small,
+.job-timeline small {
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.job-timeline {
+    display: grid;
+    gap: 0.45rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.job-timeline li {
+    display: grid;
+    gap: 0.2rem;
+}
+
+.job-status {
+    width: fit-content;
+    padding: 0.1rem 0.38rem;
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 850;
+    text-transform: uppercase;
+}
+
+.job-status.succeeded {
+    background: var(--teal-soft);
+    color: var(--teal-strong);
+}
+
+.job-status.failed {
+    background: #ffe9e9;
+    color: #a33a3a;
+}
+
+.backup-json {
+    min-height: 7.5rem;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 0.76rem;
+}
+
 .settings-fields {
     display: grid;
     gap: 0.8rem;
@@ -2858,6 +3046,52 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     }
 
     .command-week-nav {
+        order: 1;
+    }
+
+    .refresh-mode-group {
+        order: 2;
+    }
+
+    [data-command-palette-toggle] {
+        order: 3;
+    }
+
+    .preset-command-row {
+        order: 4;
+        flex: 1 1 100%;
+    }
+
+    .refresh-mode-group,
+    .preset-command-row {
+        flex-wrap: nowrap;
+        max-width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+
+    .refresh-mode-group::-webkit-scrollbar,
+    .preset-command-row::-webkit-scrollbar {
+        display: none;
+    }
+
+    .preset-name-input {
+        width: 7.25rem;
+    }
+
+    .preset-select {
+        width: 6.75rem;
+    }
+
+    .command-palette-label-full {
+        display: none;
+    }
+
+    .command-palette-label-short {
+        display: inline;
+    }
+
+    .command-week-nav {
         flex-wrap: nowrap;
         overflow-x: auto;
         scrollbar-width: none;
@@ -2890,6 +3124,7 @@ html[data-theme="dark"] .source-status-item strong.inactive {
         grid-template-columns: none;
         overflow-x: auto;
         scrollbar-width: none;
+        scroll-snap-type: x proximity;
     }
 
     .day-jump-link {
@@ -2898,6 +3133,8 @@ html[data-theme="dark"] .source-status-item strong.inactive {
         gap: 0.2rem;
         min-height: 2.75rem;
         padding: 0.34rem 0.5rem;
+        position: relative;
+        scroll-snap-align: start;
     }
 
     .day-jump-main {
@@ -2913,6 +3150,16 @@ html[data-theme="dark"] .source-status-item strong.inactive {
         max-width: 100%;
         line-height: 1.05;
         white-space: normal;
+    }
+
+    .day-jump-compact-date {
+        display: inline-flex;
+        position: absolute;
+        top: 0.35rem;
+        right: 0.45rem;
+        color: color-mix(in srgb, var(--teal-strong) 60%, var(--muted));
+        font-size: 0.72rem;
+        font-weight: 900;
     }
 
     .day-jump-nav::-webkit-scrollbar {
@@ -2966,6 +3213,10 @@ html[data-theme="dark"] .source-status-item strong.inactive {
 
     .settings-grid {
         columns: 1;
+    }
+
+    .local-status-grid {
+        grid-template-columns: 1fr;
     }
 
     .settings-panel-header {

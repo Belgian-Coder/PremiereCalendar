@@ -38,7 +38,7 @@
                 <h3>Sort</h3>
                 <label>
                     Sort results by
-                    <select @bind="_draftFilters.SortMode" @bind:after="NotifyDraftChanged">
+                    <select aria-label="Sort results by" @bind="_draftFilters.SortMode" @bind:after="NotifyDraftChanged">
                         <option value="@PremiereSortMode.PremiereDate">Premiere date</option>
                         <option value="@PremiereSortMode.Title">Title</option>
                         <option value="@PremiereSortMode.Score">Selected score</option>
@@ -48,7 +48,7 @@
 
                 <label>
                     Direction
-                    <select @bind="_draftFilters.SortDirection" @bind:after="NotifyDraftChanged">
+                    <select aria-label="Sort direction" @bind="_draftFilters.SortDirection" @bind:after="NotifyDraftChanged">
                         <option value="@SortDirection.Ascending">Ascending</option>
                         <option value="@SortDirection.Descending">Descending</option>
                     </select>

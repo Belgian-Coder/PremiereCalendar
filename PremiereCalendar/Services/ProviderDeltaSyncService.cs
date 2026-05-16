@@ -12,6 +12,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
     private readonly IOptionsMonitor<ProviderDeltaSyncOptions> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ProviderDeltaSyncService> _logger;
+    private readonly BackgroundJobTimelineService? _timeline;
 
     public ProviderDeltaSyncService(
         ITmdbClient tmdbClient,
@@ -19,7 +20,8 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         IProviderCacheStateStore stateStore,
         IOptionsMonitor<ProviderDeltaSyncOptions> options,
         TimeProvider timeProvider,
-        ILogger<ProviderDeltaSyncService> logger)
+        ILogger<ProviderDeltaSyncService> logger,
+        BackgroundJobTimelineService? timeline = null)
     {
         _tmdbClient = tmdbClient;
         _tvmazeClient = tvmazeClient;
@@ -27,6 +29,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         _options = options;
         _timeProvider = timeProvider;
         _logger = logger;
+        _timeline = timeline;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -76,9 +79,23 @@ public sealed class ProviderDeltaSyncService : BackgroundService
 
     private async Task RunOnceSafelyAsync(CancellationToken cancellationToken)
     {
+        var startedUtc = _timeProvider.GetUtcNow();
+        var startedTimestamp = _timeProvider.GetTimestamp();
         try
         {
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Started,
+                "Started provider delta sync.",
+                startedUtc,
+                null,
+                cancellationToken);
             await RunOnceAsync(cancellationToken);
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Succeeded,
+                "Finished provider delta sync.",
+                _timeProvider.GetUtcNow(),
+                _timeProvider.GetElapsedTime(startedTimestamp),
+                cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -87,6 +104,34 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Provider delta sync cycle failed.");
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Failed,
+                ex.Message,
+                _timeProvider.GetUtcNow(),
+                _timeProvider.GetElapsedTime(startedTimestamp),
+                CancellationToken.None);
+        }
+    }
+
+    private async Task RecordTimelineAsync(
+        BackgroundJobStatus status,
+        string message,
+        DateTimeOffset occurredUtc,
+        TimeSpan? duration,
+        CancellationToken cancellationToken)
+    {
+        if (_timeline is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _timeline.RecordAsync("Provider delta sync", status, message, occurredUtc, duration, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not record provider delta sync timeline event.");
         }
     }
 

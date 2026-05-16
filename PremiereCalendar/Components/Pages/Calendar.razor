@@ -14,6 +14,8 @@
 @inject IArrIntegrationService ArrIntegrationService
 @inject IViewSyncService ViewSyncService
 @inject ICalendarCacheMaintenance CalendarCacheMaintenance
+@inject CalendarPresetService CalendarPresetService
+@inject CalendarVisitChangeService CalendarVisitChangeService
 @inject Microsoft.Extensions.Options.IOptions<PremiereCalendar.Options.CalendarLoadOptions> CalendarLoadOptions
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
@@ -45,19 +47,6 @@
             {
                 <span class="calendar-refresh-status" data-testid="refreshing" aria-live="polite">
                     Updating
-                </span>
-            }
-
-            @if (_cacheFreshness.Count > 0)
-            {
-                <span class="cache-freshness command-cache-summary" data-testid="cache-freshness" aria-label="Calendar cache freshness">
-                    @foreach (var entry in _cacheFreshness)
-                    {
-                        <span class="@CacheFreshnessClass(entry)">
-                            <strong>@entry.Label cache</strong>
-                            <span>@CacheFreshnessText(entry)</span>
-                        </span>
-                    }
                 </span>
             }
 
@@ -94,10 +83,73 @@
                 </button>
             </div>
 
-            <button class="tool-button primary-action compact-command" title="Refresh premieres" @onclick="RefreshAsync" aria-busy="@_isLoading">
-                Refresh
+            <div class="button-group refresh-mode-group" role="group" aria-label="Refresh mode">
+                <button class="tool-button compact-command" title="Quick refresh" @onclick="QuickRefreshAsync" aria-busy="@_isLoading">
+                    Quick
+                </button>
+                <button class="tool-button primary-action compact-command" title="Full provider refresh" @onclick="RefreshAsync" aria-busy="@_isLoading">
+                    Full
+                </button>
+            </div>
+
+            <div class="preset-command-row" aria-label="Saved filter presets">
+                <input class="preset-name-input"
+                       aria-label="Preset name"
+                       placeholder="Preset name"
+                       @bind="_presetName"
+                       @bind:event="oninput" />
+                <button class="tool-button compact-command"
+                        type="button"
+                        title="Save current filters as preset"
+                        @onclick="SavePresetAsync"
+                        disabled="@_isSavingPreset">
+                    Save
+                </button>
+                <select class="preset-select"
+                        aria-label="Saved filter presets"
+                        @bind="_selectedPresetId">
+                    <option value="">Presets</option>
+                    @foreach (var preset in _filterPresets)
+                    {
+                        <option value="@preset.Id">@preset.Name</option>
+                    }
+                </select>
+                <button class="tool-button compact-command"
+                        type="button"
+                        title="Apply saved filter preset"
+                        @onclick="ApplySelectedPresetAsync"
+                        disabled="@string.IsNullOrWhiteSpace(_selectedPresetId)">
+                    Apply
+                </button>
+            </div>
+
+            <button class="tool-button compact-command"
+                    type="button"
+                    title="Open command palette (Ctrl+K)"
+                    aria-label="Open command palette"
+                    data-command-palette-toggle
+                    aria-expanded="@AriaExpanded(_isCommandPaletteOpen)"
+                    aria-controls="calendar-command-palette"
+                    @onclick="ToggleCommandPalette">
+                <span class="command-palette-label-full">Command</span>
+                <span class="command-palette-label-short" aria-hidden="true">Cmd</span>
             </button>
         </div>
+
+        @if (_isCommandPaletteOpen)
+        {
+            <section class="command-palette" id="calendar-command-palette" data-testid="command-palette" data-command-palette-panel aria-label="Command palette">
+                <button type="button" class="command-palette-item" @onclick="QuickRefreshFromCommandPaletteAsync">Quick refresh</button>
+                <button type="button" class="command-palette-item" @onclick="FullRefreshFromCommandPaletteAsync">Full refresh</button>
+                <button type="button" class="command-palette-item" @onclick="OpenFilters">Filters</button>
+                <button type="button" class="command-palette-item" @onclick="CurrentWeekFromCommandPaletteAsync">This week</button>
+                <button type="button" class="command-palette-item" @onclick="OpenSettings">Settings</button>
+                @foreach (var preset in _filterPresets)
+                {
+                    <button type="button" class="command-palette-item" @onclick="() => ApplyPresetAsync(preset)">@preset.Name</button>
+                }
+            </section>
+        }
 
         @if (_loadProgress.Count > 0)
         {
@@ -181,6 +233,25 @@
                 }
             </section>
         }
+
+        @if (_cacheFreshness.Count > 0 || ShouldShowVisitChangeSummary())
+        {
+            <section class="data-freshness-card" data-testid="data-freshness-card" aria-label="Visible week data freshness">
+                @foreach (var entry in _cacheFreshness)
+                {
+                    <span class="@CacheFreshnessClass(entry)">
+                        <strong>@entry.Label cache</strong>
+                        <span>@CacheFreshnessText(entry)</span>
+                    </span>
+                }
+                @if (ShouldShowVisitChangeSummary())
+                {
+                    <span class="visit-change-pill" data-testid="visit-change-summary">
+                        @VisitChangeText()
+                    </span>
+                }
+            </section>
+        }
     </header>
 
     @if (_queuedViewSyncState is not null)
@@ -244,6 +315,8 @@
     private readonly HashSet<string> _arrAddInProgress = [];
     private readonly List<ToastMessage> _toasts = [];
     private IReadOnlyList<CacheFreshnessEntry> _cacheFreshness = [];
+    private IReadOnlyList<CalendarFilterPreset> _filterPresets = [];
+    private CalendarVisitChangeSummary? _visitChangeSummary;
     private readonly CancellationTokenSource _disposeCancellation = new();
     private CancellationTokenSource? _loadCancellation;
     private bool _isFilterPaneOpen;
@@ -254,10 +327,14 @@
     private DateOnly? _selectedDay;
     private bool _isLoading = true;
     private bool _isQueryProgressExpanded;
+    private bool _isCommandPaletteOpen;
+    private bool _isSavingPreset;
     private bool _hasRendered;
     private bool _focusCalendarHeadingAfterRender;
     private bool _integrationSettingsLoaded;
     private bool _hasLoadedAtLeastOnce;
+    private string _presetName = "";
+    private string? _selectedPresetId;
     private bool _forceLoadOnNextLocationChange;
     private bool _isDisposed;
     private bool _viewSyncInitialized;
@@ -381,7 +458,7 @@
         RecalculateVisibleItems();
         Navigation.LocationChanged += OnLocationChanged;
         ViewSyncService.StateChanged += OnViewSyncStateChanged;
-        await Task.CompletedTask;
+        await LoadPresetsAsync();
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -734,6 +811,11 @@
                 _pageMode = ResolvePageMode(args.Location);
                 ApplyQueryParameters(args.Location);
                 ApplyPageMode();
+                if (_pageMode != previousMode)
+                {
+                    await LoadPresetsAsync();
+                }
+
                 var nextCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
                 var sortChanged = _filters.SortMode != previousSortMode
                     || _filters.SortDirection != previousSortDirection;
@@ -801,6 +883,11 @@
     private async Task RefreshAsync()
     {
         await LoadAsync(forceRefresh: true);
+    }
+
+    private async Task QuickRefreshAsync()
+    {
+        await LoadAsync(forceRefresh: false);
     }
 
     private async Task LoadAsync(bool forceRefresh)
@@ -967,6 +1054,7 @@
             if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
             {
                 await RefreshCacheFreshnessAsync(_disposeCancellation.Token);
+                await RefreshVisitChangeSummaryAsync(_disposeCancellation.Token);
                 _isLoading = false;
                 _loadCancellation = null;
                 await InvokeAsync(() =>
@@ -1012,6 +1100,49 @@
         {
             _cacheFreshness = [];
         }
+    }
+
+    private async Task RefreshVisitChangeSummaryAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var cacheKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+            _visitChangeSummary = await CalendarVisitChangeService.RecordVisitAsync(
+                new CalendarVisitScope(_pageMode, _filters.WeekStart, cacheKey),
+                _items.Select(item => item.CanonicalId).ToArray(),
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _visitChangeSummary = null;
+        }
+    }
+
+    private bool ShouldShowVisitChangeSummary()
+    {
+        return _visitChangeSummary is { HasPreviousVisit: true }
+            && (_visitChangeSummary.NewCount > 0 || _visitChangeSummary.RemovedCount > 0);
+    }
+
+    private string VisitChangeText()
+    {
+        if (_visitChangeSummary is not { } summary)
+        {
+            return "";
+        }
+
+        var parts = new List<string>();
+        if (summary.NewCount > 0)
+        {
+            parts.Add(summary.NewCount == 1 ? "1 new" : $"{summary.NewCount.ToString("N0", CultureInfo.InvariantCulture)} new");
+        }
+
+        if (summary.RemovedCount > 0)
+        {
+            parts.Add(summary.RemovedCount == 1 ? "1 removed" : $"{summary.RemovedCount.ToString("N0", CultureInfo.InvariantCulture)} removed");
+        }
+
+        return string.Join(" · ", parts);
     }
 
     private IReadOnlyList<(CalendarPageMode Mode, string Label)> CacheFreshnessModes()
@@ -1369,6 +1500,35 @@
         _isQueryProgressExpanded = !_isQueryProgressExpanded;
     }
 
+    private void ToggleCommandPalette()
+    {
+        _isCommandPaletteOpen = !_isCommandPaletteOpen;
+    }
+
+    private async Task QuickRefreshFromCommandPaletteAsync()
+    {
+        _isCommandPaletteOpen = false;
+        await QuickRefreshAsync();
+    }
+
+    private async Task FullRefreshFromCommandPaletteAsync()
+    {
+        _isCommandPaletteOpen = false;
+        await RefreshAsync();
+    }
+
+    private async Task CurrentWeekFromCommandPaletteAsync()
+    {
+        _isCommandPaletteOpen = false;
+        await CurrentWeek();
+    }
+
+    private void OpenSettings()
+    {
+        _isCommandPaletteOpen = false;
+        Navigation.NavigateTo("/settings");
+    }
+
     private string QueryProgressClass(LoadProgressEntry entry)
     {
         var classes = new List<string> { "query-progress-entry" };
@@ -1518,7 +1678,82 @@
 
     private void OpenFilters()
     {
+        _isCommandPaletteOpen = false;
         _isFilterPaneOpen = true;
+    }
+
+    private async Task LoadPresetsAsync()
+    {
+        try
+        {
+            _filterPresets = await CalendarPresetService.GetPresetsAsync(_pageMode, _disposeCancellation.Token);
+            if (_selectedPresetId is not null && !_filterPresets.Any(preset => preset.Id == _selectedPresetId))
+            {
+                _selectedPresetId = null;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _filterPresets = [];
+        }
+    }
+
+    private async Task SavePresetAsync()
+    {
+        if (_isSavingPreset)
+        {
+            return;
+        }
+
+        _isSavingPreset = true;
+        try
+        {
+            var preset = await CalendarPresetService.SaveAsync(_presetName, _pageMode, _filters, _disposeCancellation.Token);
+            _presetName = preset.Name;
+            _selectedPresetId = preset.Id;
+            await LoadPresetsAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowToast(ToastKind.Error, "Preset failed", ex.Message);
+        }
+        finally
+        {
+            _isSavingPreset = false;
+        }
+    }
+
+    private async Task ApplySelectedPresetAsync()
+    {
+        var preset = _filterPresets.FirstOrDefault(candidate => candidate.Id == _selectedPresetId);
+        if (preset is not null)
+        {
+            await ApplyPresetAsync(preset);
+        }
+    }
+
+    private async Task ApplyPresetAsync(CalendarFilterPreset preset)
+    {
+        var weekStart = _filters.WeekStart;
+        var selectedDay = _selectedDay;
+        var previousCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+        var filters = CalendarFilterState.Clone(preset.Filters);
+        filters.WeekStart = weekStart;
+        CalendarFilterState.ApplyPageMode(filters, _pageMode);
+        CalendarFilterState.Normalize(filters);
+        _filters = filters;
+        _selectedDay = selectedDay;
+        _selectedPresetId = preset.Id;
+        _isCommandPaletteOpen = false;
+        RecalculateVisibleItems();
+        var nextCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+        var forceLoadOnChange = !string.Equals(previousCriteriaKey, nextCriteriaKey, StringComparison.Ordinal);
+        var navigationChanged = UpdateUrl(replace: true, forceLoadOnChange);
+        await PersistCurrentFiltersAsync();
+        if (!navigationChanged && forceLoadOnChange)
+        {
+            await LoadAsync();
+        }
     }
 
     private async Task AddToArrAsync(PremiereItem item)

@@ -16,7 +16,7 @@
                 <span class="visually-hidden">Filters</span>
             </button>
 
-            <nav class="day-jump-nav" aria-label="Week days" role="tablist">
+            <nav class="day-jump-nav mobile-day-jump-strip" aria-label="Week days" role="tablist">
                 @for (var index = 0; index < 7; index++)
                 {
                     var day = WeekStart.AddDays(index);
@@ -36,6 +36,7 @@
                             <span>@day.ToString("ddd", CultureInfo.CurrentCulture)</span>
                             <span>@day.ToString("dd MMM", CultureInfo.CurrentCulture)</span>
                         </span>
+                        <span class="day-jump-compact-date" aria-hidden="true">@day.ToString("dd", CultureInfo.CurrentCulture)</span>
                         <small class="day-jump-count">@DayCountLabel(day)</small>
                     </button>
                 }

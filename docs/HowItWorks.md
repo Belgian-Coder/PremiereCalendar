@@ -221,11 +221,18 @@ GET /health
 - `PremiereCalendar/Components/Shared/CalendarFilterDialog.razor` - filter pane with local draft state, Save/Cancel behavior, and page-mode-aware clearing.
 - `PremiereCalendar/Services/CalendarFilterState.cs` - filter clone, normalize, and route-mode locking helpers.
 - `PremiereCalendar/Services/AdjacentWeekPrefetcher.cs` - background warming for nearby full-week caches around the visible week.
+- `PremiereCalendar/Services/BackgroundJobTimelineService.cs` - bounded local history for warmup, prefetch, IMDb import, provider sync, and cache-maintenance work.
+- `PremiereCalendar/Services/CacheInspectorService.cs` - file counts, sizes, and newest-write timestamps for calendar and image caches.
+- `PremiereCalendar/Services/CalendarPresetService.cs` - route-scoped saved filter presets that preserve the current week when applied.
+- `PremiereCalendar/Services/CalendarVisitChangeService.cs` - subtle per-week change summaries comparing the current visible IDs to the last visit.
+- `PremiereCalendar/Services/ReleaseUpdateService.cs` - on-demand GitHub latest-release check used by Settings.
+- `PremiereCalendar/Services/SettingsBackupService.cs` - JSON export/import for integration settings and local app state.
 - `PremiereCalendar/Components/Shared/MediaFilterPanel.razor` - TMDb-style per-media filter groups for series and movies.
 - `PremiereCalendar/Components/Shared/CalendarWeek.razor` - sticky day selector and one mounted selected-day section.
 - `PremiereCalendar/Components/Shared/CalendarDay.razor` - per-day grouping, render fingerprinting, 10-card batching, scroll auto-load sentinels, and .NET 11 Blazor `Virtualize` for dense days.
 - `PremiereCalendar/Components/Shared/PremiereCard.razor` - poster, metadata, source chips, scores, links, description, and card-level render fingerprinting.
 - `PremiereCalendar/wwwroot/dom-observer.js` - shared batched DOM initializer for lazy images, filter-pane swipe setup, and day auto-loading.
+- `PremiereCalendar/wwwroot/command-palette.js` - global Ctrl+K/Cmd+K and Escape handling for the calendar command palette.
 - `PremiereCalendar/Services/PremiereService.cs` - orchestration, normalization, enrichment, de-duplication, and week cache writes.
 - `PremiereCalendar/Services/PremiereDiscoveryCriteria.cs` - converts saved UI filters to TMDb-supported request filters and cache keys.
 - `PremiereCalendar/Services/PremiereLoadProgress.cs` - source-batch progress messages used by the page during fresh loads.
