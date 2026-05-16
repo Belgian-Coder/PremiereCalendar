@@ -1859,21 +1859,6 @@
             count++;
         }
 
-        if (_filters.SortMode != PremiereSortMode.PremiereDate)
-        {
-            count++;
-        }
-
-        if (_filters.SortDirection != SortDirection.Ascending)
-        {
-            count++;
-        }
-
-        if (_filters.ScoreSource != ScoreSource.Tmdb)
-        {
-            count++;
-        }
-
         if (_filters.MinScore > 0 || _filters.MaxScore < 10)
         {
             count++;
@@ -1924,20 +1909,32 @@
     private static int MediaFilterCount(MediaFilterSet filters, CalendarFilters globalFilters)
     {
         var count = 0;
-        count += CountCriteria(filters.OriginalLanguages.Count > 0);
-        count += CountCriteria(filters.OriginCountries.Count > 0);
-        count += CountCriteria(filters.GenreIds.Count > 0);
-        count += CountCriteria(filters.SelectedSources.Count > 0);
-        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.WatchRegion));
+        count += CountCriteria(
+            filters.OriginalLanguages.Count > 0
+            && !MatchesGlobalLanguageFilter(filters, globalFilters));
+        count += CountCriteria(
+            filters.OriginCountries.Count > 0
+            && !MatchesGlobalOriginFilter(filters, globalFilters));
+        count += CountCriteria(
+            filters.GenreIds.Count > 0
+            && !MatchesGlobalGenreFilter(filters, globalFilters));
+        count += CountCriteria(
+            !string.IsNullOrWhiteSpace(filters.WatchRegion)
+            || (filters.SelectedSources.Count > 0 && !MatchesGlobalSourcesFilter(filters, globalFilters)));
         count += CountCriteria(filters.MonetizationTypes.Count > 0);
         count += CountCriteria(filters.MovieReleaseTypes.Count > 0);
-        count += CountCriteria(filters.Certifications.Count > 0);
-        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.CertificationCountry));
+        count += CountCriteria(filters.Certifications.Count > 0 || !string.IsNullOrWhiteSpace(filters.CertificationCountry));
         count += CountCriteria(filters.TvStatuses.Count > 0);
         count += CountCriteria(filters.TvTypes.Count > 0);
-        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.SearchText));
-        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.KeywordText));
-        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.SourceText));
+        count += CountCriteria(
+            !string.IsNullOrWhiteSpace(filters.SearchText)
+            && !MatchesGlobalSearchFilter(filters, globalFilters));
+        count += CountCriteria(
+            !string.IsNullOrWhiteSpace(filters.KeywordText)
+            && !MatchesGlobalKeywordFilter(filters, globalFilters));
+        count += CountCriteria(
+            !string.IsNullOrWhiteSpace(filters.SourceText)
+            && !MatchesGlobalNetworkFilter(filters, globalFilters));
         count += CountCriteria(
             HasRuntimeFilter(filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes)
             && !MatchesGlobalRuntimeFilter(filters, globalFilters));
@@ -1947,6 +1944,45 @@
     private static int CountCriteria(bool condition)
     {
         return condition ? 1 : 0;
+    }
+
+    private static bool MatchesGlobalLanguageFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        var language = LanguageValue(globalFilters.Language);
+        return !string.Equals(language, "both", StringComparison.Ordinal)
+            && filters.OriginalLanguages.Count == 1
+            && string.Equals(filters.OriginalLanguages[0].Trim(), language, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesGlobalOriginFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        var countries = OriginCountryValues(globalFilters.OriginGroup);
+        return countries.Count > 0 && SameStringSet(filters.OriginCountries, countries);
+    }
+
+    private static bool MatchesGlobalGenreFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return globalFilters.GenreIds.Count > 0 && SameIntSet(filters.GenreIds, globalFilters.GenreIds);
+    }
+
+    private static bool MatchesGlobalSourcesFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return globalFilters.SelectedSources.Count > 0 && SameStringSet(filters.SelectedSources, globalFilters.SelectedSources);
+    }
+
+    private static bool MatchesGlobalNetworkFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return SameNonEmptyText(filters.SourceText, globalFilters.NetworkText);
+    }
+
+    private static bool MatchesGlobalSearchFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return SameNonEmptyText(filters.SearchText, globalFilters.SearchText);
+    }
+
+    private static bool MatchesGlobalKeywordFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return SameNonEmptyText(filters.KeywordText, globalFilters.KeywordText);
     }
 
     private static bool MatchesGlobalRuntimeFilter(MediaFilterSet filters, CalendarFilters globalFilters)
@@ -1959,6 +1995,36 @@
     private static bool HasRuntimeFilter(int minMinutes, int maxMinutes)
     {
         return minMinutes > 0 || maxMinutes < 360;
+    }
+
+    private static bool SameNonEmptyText(string value, string globalValue)
+    {
+        return !string.IsNullOrWhiteSpace(globalValue)
+            && string.Equals(value.Trim(), globalValue.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool SameStringSet(IReadOnlyCollection<string> values, IReadOnlyCollection<string> globalValues)
+    {
+        var normalizedValues = values
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var normalizedGlobalValues = globalValues
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return normalizedGlobalValues.Count > 0 && normalizedValues.SetEquals(normalizedGlobalValues);
+    }
+
+    private static bool SameIntSet(IReadOnlyCollection<int> values, IReadOnlyCollection<int> globalValues)
+    {
+        var normalizedValues = values
+            .Where(id => id > 0)
+            .ToHashSet();
+        var normalizedGlobalValues = globalValues
+            .Where(id => id > 0)
+            .ToHashSet();
+        return normalizedGlobalValues.Count > 0 && normalizedValues.SetEquals(normalizedGlobalValues);
     }
 
     private async Task PreviousWeek()

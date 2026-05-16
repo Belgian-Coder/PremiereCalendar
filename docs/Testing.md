@@ -119,7 +119,7 @@ Latest local Playwright validation on 2026-05-16 after the quiet filter/header r
 - README screenshots were regenerated from the deployed app at `http://localhost:5298` and saved under `docs/images/readme/`.
 - Desktop checks covered `/series?week=2026-05-11` in dark and light themes, `/movies?week=2026-05-11` in dark theme, the movie filter pane in dark theme, and `/settings` with the Local status center.
 - Mobile `390x844` checks covered `/series?week=2026-05-11`, including the compact day jump strip and command-bar controls.
-- Filter checks covered an active four-filter URL, verified the filter button badge rendered `4`, verified the old active-filter chip strip was absent, and verified there was no header-level clear-filters button.
+- Filter checks covered active filter URLs, verified `q=24` renders badge `1`, verified `q=24` plus runtime renders badge `2`, verified sort-only changes do not render a filter badge, verified the old active-filter chip strip was absent, and verified there was no header-level clear-filters button.
 - Filter pane checks verified runtime fields and the in-pane clear controls are present.
 - Actions palette checks pressed `Ctrl+K`, verified the palette opened, pressed Escape, and verified the palette closed.
 - Settings checks verified the Local status center rendered and provider delta failures stay visible above routine job entries.

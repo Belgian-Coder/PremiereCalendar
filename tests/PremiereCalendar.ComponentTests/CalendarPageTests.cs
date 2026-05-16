@@ -1238,8 +1238,8 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Empty(component.FindAll("[data-testid='active-filter-strip']"));
             Assert.Empty(component.FindAll("button[aria-label='Clear active filters']"));
             var filterButton = component.Find("button[title='Open filters']");
-            Assert.Equal("4", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
-            Assert.Equal("Open filters, 4 active filters", filterButton.GetAttribute("aria-label"));
+            Assert.Equal("3", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+            Assert.Equal("Open filters, 3 active filters", filterButton.GetAttribute("aria-label"));
             var heading = component.Find("[data-testid='calendar-focus-target']");
             Assert.Equal("-1", heading.GetAttribute("tabindex"));
         });
@@ -1252,6 +1252,54 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Contains("Runtime from", pane.TextContent);
             Assert.Contains("Runtime to", pane.TextContent);
             Assert.Contains("Clear filters", pane.TextContent);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_FilterButtonCountGroupsSupportingFieldsWithVisibleFilterControls()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/movies?week=2026-05-04&movieSources=Netflix&movieWatchRegion=BE&movieCertifications=US%3APG-13&movieCertificationCountry=US");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("2", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_FilterButtonCountDoesNotDoubleCountMirroredLegacyGlobalFilters()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&q=north&runtimeMin=80&runtimeMax=150");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("2", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_FilterButtonCountIgnoresSortAndScoreSourceSelection()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&sort=title&dir=desc&score=imdb");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Empty(component.FindAll("[data-testid='active-filter-count']"));
         });
     }
 
