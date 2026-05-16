@@ -128,10 +128,17 @@
                             else
                             {
                                 <p class="settings-help" data-testid="release-update-result">
-                                    Current @_releaseResult.CurrentVersion · latest @_releaseResult.LatestVersion.
-                                    @if (_releaseResult.IsUpdateAvailable && !string.IsNullOrWhiteSpace(_releaseResult.ReleaseUrl))
+                                    @if (!_releaseResult.HasPublishedRelease)
                                     {
-                                        <a href="@_releaseResult.ReleaseUrl" target="_blank" rel="noopener">Open release</a>
+                                        <span>@_releaseResult.ReleaseName Current @_releaseResult.CurrentVersion.</span>
+                                    }
+                                    else
+                                    {
+                                        <span>Current @_releaseResult.CurrentVersion · latest @_releaseResult.LatestVersion.</span>
+                                        @if (_releaseResult.IsUpdateAvailable && !string.IsNullOrWhiteSpace(_releaseResult.ReleaseUrl))
+                                        {
+                                            <a href="@_releaseResult.ReleaseUrl" target="_blank" rel="noopener">Open release</a>
+                                        }
                                     }
                                 </p>
                             }
@@ -1071,7 +1078,9 @@
         try
         {
             _releaseResult = await ReleaseUpdateService.CheckLatestAsync(_disposeCancellation.Token);
-            var message = _releaseResult.IsUpdateAvailable
+            var message = !_releaseResult.HasPublishedRelease
+                ? "No published GitHub releases were found."
+                : _releaseResult.IsUpdateAvailable
                 ? $"Version {_releaseResult.LatestVersion} is available."
                 : "This install is up to date.";
             ShowToast(ToastKind.Info, "Update check complete", message);

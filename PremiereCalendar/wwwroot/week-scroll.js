@@ -12,6 +12,7 @@ const focusRestoreStorageKey = "premiereCalendar:restoreFocus";
 const dayTabNavigationKeys = new Set(["ArrowLeft", "ArrowRight", "Home", "End"]);
 let focusRestoreReady = false;
 let topbarOffsetReady = false;
+let topbarOffsetHeight = 0;
 const focusableSelector = [
     "a[href]",
     "button:not([disabled])",
@@ -311,7 +312,13 @@ function initializeTopbarOffset() {
 
     topbarOffsetReady = true;
     const update = () => {
-        document.documentElement.style.setProperty("--app-topbar-current-height", `${topbar.offsetHeight}px`);
+        const nextHeight = topbar.offsetHeight;
+        if (nextHeight === topbarOffsetHeight) {
+            return;
+        }
+
+        topbarOffsetHeight = nextHeight;
+        document.documentElement.style.setProperty("--app-topbar-current-height", `${nextHeight}px`);
     };
 
     update();

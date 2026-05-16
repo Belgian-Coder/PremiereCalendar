@@ -34,7 +34,7 @@
         @if (UseVirtualizedRows)
         {
             <div class="day-virtualized-list" data-testid="virtualized-day">
-                <div class="day-load-controls" aria-label="@($"Virtualized items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
+                <div class="day-load-controls visually-hidden" aria-label="@($"Virtualized items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
                     <span class="day-visible-count">Showing all @Items.Count with virtual scrolling</span>
                 </div>
 
@@ -43,14 +43,17 @@
                             ItemSize="VirtualizedRowItemSize"
                             OverscanCount="VirtualizedOverscanRows">
                     <div class="day-card-row" @key="row.Index">
-                        <PremiereCard @key="row.Item.CanonicalId"
-                                      Item="row.Item"
-                                      ScoreSource="ScoreSource"
-                                      ImageCacheVersion="@ImageCacheVersion"
-                                      RefreshImageCache="RefreshImageCache"
-                                      IntegrationSettings="IntegrationSettings"
-                                      OnAddToArr="OnAddToArr"
-                                      IsArrActionBusy="IsArrActionBusy" />
+                        @foreach (var item in row.Items)
+                        {
+                            <PremiereCard @key="item.CanonicalId"
+                                          Item="item"
+                                          ScoreSource="ScoreSource"
+                                          ImageCacheVersion="@ImageCacheVersion"
+                                          RefreshImageCache="RefreshImageCache"
+                                          IntegrationSettings="IntegrationSettings"
+                                          OnAddToArr="OnAddToArr"
+                                          IsArrActionBusy="IsArrActionBusy" />
+                        }
                     </div>
                 </Virtualize>
             </div>
@@ -267,9 +270,22 @@
 
     private List<CardRow> CreateCardRows()
     {
-        return Items
-            .Select((item, index) => new CardRow(index, item))
-            .ToList();
+        var rows = new List<CardRow>((Items.Count + 1) / 2);
+        for (var index = 0; index < Items.Count; index += 2)
+        {
+            var rowItems = new List<PremiereItem>(2)
+            {
+                Items[index]
+            };
+            if (index + 1 < Items.Count)
+            {
+                rowItems.Add(Items[index + 1]);
+            }
+
+            rows.Add(new CardRow(rows.Count, rowItems));
+        }
+
+        return rows;
     }
 
     private void RebuildItemCounts()
@@ -379,5 +395,5 @@
         }
     }
 
-    private sealed record CardRow(int Index, PremiereItem Item);
+    private sealed record CardRow(int Index, IReadOnlyList<PremiereItem> Items);
 }

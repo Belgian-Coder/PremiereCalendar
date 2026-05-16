@@ -1579,7 +1579,7 @@ h1:focus {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--card-grid-gap);
-    align-items: start;
+    align-items: stretch;
 }
 
 .unverified-day-section {
@@ -1619,9 +1619,9 @@ h1:focus {
 
 .day-card-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--card-grid-gap);
-    align-items: start;
+    align-items: stretch;
     padding-bottom: var(--card-grid-gap);
 }
 
@@ -1659,6 +1659,8 @@ h1:focus {
     grid-template-columns: 104px minmax(0, 1fr);
     gap: 0.85rem;
     contain: layout paint;
+    min-width: 0;
+    height: 100%;
     margin-bottom: 0;
     padding: 0.8rem;
     border: 1px solid var(--line);
@@ -1688,14 +1690,6 @@ h1:focus {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-    .calendar-day {
-        animation: calendar-day-enter 180ms ease-out both;
-    }
-
-    .premiere-card {
-        animation: premiere-card-enter 180ms ease-out both;
-    }
-
     .query-progress-entry:not(.final):not(.cache) .query-progress-meter span {
         background-size: 180% 100%;
         animation: query-progress-flow 1.05s linear infinite;
@@ -3048,36 +3042,42 @@ html[data-theme="dark"] .source-status-item strong.inactive {
 
     .calendar-command-actions {
         justify-content: flex-start;
+        flex-wrap: nowrap;
+        max-width: 100%;
+        overflow-x: auto;
+        padding-bottom: 0.1rem;
+        scrollbar-width: none;
+    }
+
+    .calendar-command-actions::-webkit-scrollbar {
+        display: none;
     }
 
     .command-week-nav {
         order: 1;
+        flex: 0 0 auto;
     }
 
     .refresh-mode-group {
         order: 2;
+        flex: 0 0 auto;
     }
 
     [data-command-palette-toggle] {
         order: 3;
+        flex: 0 0 auto;
     }
 
     .preset-command-row {
         order: 4;
-        flex: 1 1 100%;
+        flex: 0 0 auto;
     }
 
     .refresh-mode-group,
     .preset-command-row {
         flex-wrap: nowrap;
-        max-width: 100%;
-        overflow-x: auto;
-        scrollbar-width: none;
-    }
-
-    .refresh-mode-group::-webkit-scrollbar,
-    .preset-command-row::-webkit-scrollbar {
-        display: none;
+        max-width: none;
+        overflow: visible;
     }
 
     .preset-name-input {

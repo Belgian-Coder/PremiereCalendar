@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text.Json;
@@ -31,10 +32,20 @@ public sealed class ReleaseUpdateService
     public async Task<ReleaseUpdateResult> CheckLatestAsync(CancellationToken cancellationToken)
     {
         using var response = await _httpClient.GetAsync("repos/Belgian-Coder/PremiereCalendar/releases/latest", cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return NoPublishedReleaseResult();
+        }
+
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var latest = await JsonSerializer.DeserializeAsync<GitHubReleaseResponse>(stream, JsonOptions, cancellationToken);
         var latestVersion = NormalizeVersion(latest?.TagName ?? "");
+        if (latestVersion == "0.0.0")
+        {
+            return NoPublishedReleaseResult();
+        }
+
         return new ReleaseUpdateResult(
             _currentVersion,
             latestVersion,
@@ -42,6 +53,17 @@ public sealed class ReleaseUpdateService
             latest?.HtmlUrl ?? "",
             latest?.Name ?? latestVersion,
             latest?.PublishedAt);
+    }
+
+    private ReleaseUpdateResult NoPublishedReleaseResult()
+    {
+        return new ReleaseUpdateResult(
+            _currentVersion,
+            _currentVersion,
+            false,
+            "",
+            "No published releases found.",
+            null);
     }
 
     private static bool IsNewer(string latest, string current)
@@ -227,4 +249,7 @@ public sealed record ReleaseUpdateResult(
     bool IsUpdateAvailable,
     string ReleaseUrl,
     string ReleaseName,
-    DateTimeOffset? PublishedUtc);
+    DateTimeOffset? PublishedUtc)
+{
+    public bool HasPublishedRelease => !string.IsNullOrWhiteSpace(ReleaseUrl);
+}

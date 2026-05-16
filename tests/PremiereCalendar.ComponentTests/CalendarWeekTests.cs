@@ -416,11 +416,12 @@ public sealed class CalendarWeekTests : BunitContext
 
         Assert.Single(component.FindAll("[data-testid='virtualized-day']"));
         Assert.Contains("Showing all 45 with virtual scrolling", component.Markup);
+        Assert.Contains("visually-hidden", component.Find(".day-virtualized-list .day-load-controls").ClassName);
         Assert.Empty(component.FindAll("[data-day-load-more]"));
     }
 
     [Fact]
-    public void CalendarWeek_VirtualizedRowsContainOneCardForStableResponsiveHeight()
+    public void CalendarWeek_VirtualizedRowsPackTwoCardsForDesktopDensity()
     {
         var items = Enumerable.Range(1, 45)
             .Select(index => new PremiereItem
@@ -442,7 +443,9 @@ public sealed class CalendarWeekTests : BunitContext
 
         var rows = component.FindAll(".day-card-row");
         Assert.NotEmpty(rows);
-        Assert.All(rows, row => Assert.True(row.QuerySelectorAll("[data-testid='premiere-card']").Length <= 1));
+        Assert.Equal(2, rows[0].QuerySelectorAll("[data-testid='premiere-card']").Length);
+        Assert.Equal(2, rows[1].QuerySelectorAll("[data-testid='premiere-card']").Length);
+        Assert.All(rows, row => Assert.InRange(row.QuerySelectorAll("[data-testid='premiere-card']").Length, 1, 2));
     }
 
     [Fact]

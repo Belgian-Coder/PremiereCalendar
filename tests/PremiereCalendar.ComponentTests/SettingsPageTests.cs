@@ -193,6 +193,33 @@ public sealed class SettingsPageTests : BunitContext
     }
 
     [Fact]
+    public void SettingsPage_ShowsNoReleaseMessageWhenGitHubHasNoPublishedReleases()
+    {
+        Services.AddSingleton(new ReleaseUpdateService(
+            new HttpClient(new StaticHttpMessageHandler("{}", HttpStatusCode.NotFound))
+            {
+                BaseAddress = new Uri("https://api.github.com/")
+            },
+            "1.0.0"));
+        var store = new FakeIntegrationSettingsStore();
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("button[title='Check for application updates']");
+        component.Find("button[title='Check for application updates']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var result = component.Find("[data-testid='release-update-result']").TextContent;
+            Assert.Contains("No published releases found.", result);
+            Assert.Contains("Current 1.0.0", result);
+        });
+    }
+
+    [Fact]
     public void SettingsPage_BackupExportRedactsSecretsByDefault()
     {
         var store = new FakeIntegrationSettingsStore
@@ -1217,11 +1244,11 @@ public sealed class SettingsPageTests : BunitContext
         public IFileProvider ContentRootFileProvider { get; set; }
     }
 
-    private sealed class StaticHttpMessageHandler(string content) : HttpMessageHandler
+    private sealed class StaticHttpMessageHandler(string content, HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            return Task.FromResult(new HttpResponseMessage(statusCode)
             {
                 Content = new StringContent(content, Encoding.UTF8, "application/json")
             });
