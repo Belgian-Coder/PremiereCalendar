@@ -33,21 +33,48 @@ public sealed class CacheInspectorService
             return new CacheBucketSummary(label, directory, Exists: false, FileCount: 0, TotalBytes: 0, LastWriteUtc: null);
         }
 
-        var files = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
-            .Select(path => new FileInfo(path))
-            .Where(info => info.Exists)
-            .ToArray();
+        var fileCount = 0;
+        var totalBytes = 0L;
+        DateTimeOffset? lastWriteUtc = null;
 
-        var lastWriteUtc = files.Length == 0
-            ? (DateTimeOffset?)null
-            : files.Max(info => new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero));
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    var info = new FileInfo(path);
+                    if (!info.Exists)
+                    {
+                        continue;
+                    }
+
+                    fileCount++;
+                    totalBytes += info.Length;
+                    var writeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero);
+                    lastWriteUtc = lastWriteUtc is null || writeUtc > lastWriteUtc
+                        ? writeUtc
+                        : lastWriteUtc;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return new CacheBucketSummary(label, directory, Exists: false, FileCount: 0, TotalBytes: 0, LastWriteUtc: null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
 
         return new CacheBucketSummary(
             label,
             directory,
             Exists: true,
-            files.Length,
-            files.Sum(info => info.Length),
+            fileCount,
+            totalBytes,
             lastWriteUtc);
     }
 

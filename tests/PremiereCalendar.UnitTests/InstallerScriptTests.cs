@@ -68,6 +68,29 @@ public sealed class InstallerScriptTests
         Assert.Contains("Set-HashtableValue $config @('Simkl', 'AccessToken') ''", script, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SourceInstallScriptsAreWindowsPowerShellFriendlyAndHonorCustomUrls()
+    {
+        var rootInstaller = ReadRepoFile("Install-PremiereCalendar.ps1");
+        var serviceInstaller = ReadRepoFile("deploy/Install-PremiereCalendarService.ps1");
+        var publishScript = ReadRepoFile("deploy/Publish-PremiereCalendar.ps1");
+
+        Assert.DoesNotContain("??", rootInstaller, StringComparison.Ordinal);
+        Assert.Contains("$environment.Add(\"Urls=http://0.0.0.0:$Port\")", serviceInstaller, StringComparison.Ordinal);
+        Assert.Contains("$env:Urls = \"http://0.0.0.0:$Port\"", publishScript, StringComparison.Ordinal);
+        Assert.Contains("Stop-Process -Id $startedProcess.Id -Force", publishScript, StringComparison.Ordinal);
+        Assert.Contains("robocopy $resolvedPublishOutput $resolvedTargetDirectory /MIR /XD App_Data", publishScript, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildReleasePackagePublishesRequestedVersionMetadata()
+    {
+        var script = ReadRepoFile("deploy/Build-ReleasePackage.ps1");
+
+        Assert.Contains("/p:Version=$Version", script, StringComparison.Ordinal);
+        Assert.Contains("/p:InformationalVersion=$Version", script, StringComparison.Ordinal);
+    }
+
     private static string ReadRepoFile(string relativePath, [CallerFilePath] string sourceFile = "")
     {
         var repoRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourceFile)!, "..", ".."));

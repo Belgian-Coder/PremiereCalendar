@@ -135,7 +135,13 @@ if (-not $SkipTests) {
     }
 }
 
-& $dotnetPath publish $resolvedProjectPath -c Release -r $Runtime --self-contained true -o $publishDirectory
+& $dotnetPath publish $resolvedProjectPath `
+    -c Release `
+    -r $Runtime `
+    --self-contained true `
+    -o $publishDirectory `
+    /p:Version=$Version `
+    /p:InformationalVersion=$Version
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE"
 }

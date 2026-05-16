@@ -65,19 +65,33 @@ public sealed class ProviderDeltaSyncService : BackgroundService
 
     internal async Task RunOnceAsync(CancellationToken cancellationToken)
     {
+        await RunOnceCoreAsync(cancellationToken);
+    }
+
+    private async Task<ProviderDeltaSyncResult> RunOnceCoreAsync(CancellationToken cancellationToken)
+    {
         var nowUtc = _timeProvider.GetUtcNow();
+        var failedProviders = new List<string>();
         if (_options.CurrentValue.UseTmdbChanges)
         {
-            await SyncTmdbChangesAsync(nowUtc, cancellationToken);
+            if (!await SyncTmdbChangesAsync(nowUtc, cancellationToken))
+            {
+                failedProviders.Add("TMDb");
+            }
         }
 
         if (_options.CurrentValue.UseTvmazeUpdates)
         {
-            await SyncTvmazeUpdatesAsync(nowUtc, cancellationToken);
+            if (!await SyncTvmazeUpdatesAsync(nowUtc, cancellationToken))
+            {
+                failedProviders.Add("TVmaze");
+            }
         }
+
+        return new ProviderDeltaSyncResult(failedProviders);
     }
 
-    private async Task RunOnceSafelyAsync(CancellationToken cancellationToken)
+    internal async Task RunOnceSafelyAsync(CancellationToken cancellationToken)
     {
         var startedUtc = _timeProvider.GetUtcNow();
         var startedTimestamp = _timeProvider.GetTimestamp();
@@ -89,7 +103,18 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                 startedUtc,
                 null,
                 cancellationToken);
-            await RunOnceAsync(cancellationToken);
+            var result = await RunOnceCoreAsync(cancellationToken);
+            if (result.FailedProviders.Count > 0)
+            {
+                await RecordTimelineAsync(
+                    BackgroundJobStatus.Failed,
+                    $"Provider delta sync completed with failures: {string.Join(", ", result.FailedProviders)}.",
+                    _timeProvider.GetUtcNow(),
+                    _timeProvider.GetElapsedTime(startedTimestamp),
+                    cancellationToken);
+                return;
+            }
+
             await RecordTimelineAsync(
                 BackgroundJobStatus.Succeeded,
                 "Finished provider delta sync.",
@@ -135,7 +160,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         }
     }
 
-    private async Task SyncTmdbChangesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
+    private async Task<bool> SyncTmdbChangesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
         try
         {
@@ -144,14 +169,17 @@ public sealed class ProviderDeltaSyncService : BackgroundService
             var start = end.AddDays(-lookbackDays);
             await SyncTmdbMediaChangesAsync(PremiereMediaType.Movie, start, end, nowUtc, cancellationToken);
             await SyncTmdbMediaChangesAsync(PremiereMediaType.Series, start, end, nowUtc, cancellationToken);
+            return true;
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "TMDb change tracking sync timed out or was canceled by an external dependency.");
+            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "TMDb change tracking sync failed.");
+            return false;
         }
     }
 
@@ -169,8 +197,9 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         var watermark = end.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
         var globalKey = $"{keyPrefix}-changes";
 
-        await _stateStore.SaveAsync(
-            new ProviderCacheState(
+        var states = new List<ProviderCacheState>
+        {
+            new(
                 "tmdb",
                 ProviderCacheScope.Global,
                 globalKey,
@@ -178,8 +207,8 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                 nowUtc,
                 watermark,
                 changes.Count,
-                null),
-            cancellationToken);
+                null)
+        };
 
         foreach (var change in changes)
         {
@@ -188,8 +217,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                 continue;
             }
 
-            await _stateStore.SaveAsync(
-                new ProviderCacheState(
+            states.Add(new ProviderCacheState(
                     "tmdb",
                     ProviderCacheScope.Item,
                     $"{keyPrefix}:{change.Id}",
@@ -197,18 +225,20 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                     nowUtc,
                     watermark,
                     null,
-                    null),
-                    cancellationToken);
+                    null));
         }
+
+        await _stateStore.SaveManyAsync(states, cancellationToken);
     }
 
-    private async Task SyncTvmazeUpdatesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
+    private async Task<bool> SyncTvmazeUpdatesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
         try
         {
             var updates = await _tvmazeClient.GetShowUpdatesAsync(TvmazeUpdateWindow.Day, cancellationToken);
-            await _stateStore.SaveAsync(
-                new ProviderCacheState(
+            var states = new List<ProviderCacheState>
+            {
+                new(
                     "tvmaze",
                     ProviderCacheScope.Global,
                     "show-updates",
@@ -216,13 +246,12 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                     updates.Count > 0 ? updates.Max(update => update.UpdatedAtUtc) : null,
                     "day",
                     updates.Count,
-                    null),
-                cancellationToken);
+                    null)
+            };
 
             foreach (var update in updates)
             {
-                await _stateStore.SaveAsync(
-                    new ProviderCacheState(
+                states.Add(new ProviderCacheState(
                         "tvmaze",
                         ProviderCacheScope.Item,
                         $"show:{update.ShowId}",
@@ -230,17 +259,23 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                         update.UpdatedAtUtc,
                         "day",
                         null,
-                        null),
-                cancellationToken);
+                        null));
             }
+
+            await _stateStore.SaveManyAsync(states, cancellationToken);
+            return true;
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "TVmaze update tracking sync timed out or was canceled by an external dependency.");
+            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "TVmaze update tracking sync failed.");
+            return false;
         }
     }
+
+    private sealed record ProviderDeltaSyncResult(IReadOnlyList<string> FailedProviders);
 }

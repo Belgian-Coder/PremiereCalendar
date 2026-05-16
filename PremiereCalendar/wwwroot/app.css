@@ -19,6 +19,9 @@ html {
     --blue: #496fb4;
     --blue-soft: #e7eefc;
     --violet-soft: #eee9ff;
+    --ink-inverted: #ffffff;
+    --app-topbar-height: 3.35rem;
+    --week-sticky-top: calc(var(--app-topbar-current-height, var(--app-topbar-height)) + 0.15rem);
     --shadow: 0 10px 28px rgba(23, 33, 43, 0.08);
 }
 
@@ -41,6 +44,7 @@ html[data-theme="dark"] {
     --blue: #86aaf2;
     --blue-soft: #1d2f52;
     --violet-soft: #2f294e;
+    --ink-inverted: #071612;
     --shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
 }
 
@@ -78,7 +82,7 @@ a:hover {
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    min-height: 3.35rem;
+    min-height: var(--app-topbar-height);
     padding: 0.45rem 1rem;
     border-bottom: 1px solid var(--line);
     background: rgba(255, 252, 246, 0.94);
@@ -1202,7 +1206,7 @@ h1:focus {
 
 .week-sticky-controls {
     position: sticky;
-    top: 56px;
+    top: var(--week-sticky-top);
     z-index: 20;
     display: grid;
     gap: 0.4rem;
@@ -3026,6 +3030,7 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     html {
         --page-x: 1.25rem;
         --card-grid-gap: 0.9rem;
+        --app-topbar-height: 5.9rem;
     }
 
     .calendar-command-bar {
@@ -3111,7 +3116,6 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     }
 
     .week-sticky-controls {
-        top: 99px;
         margin-right: -1.25rem;
         margin-left: -1.25rem;
         padding-right: 1rem;

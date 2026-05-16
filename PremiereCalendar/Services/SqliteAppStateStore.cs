@@ -96,10 +96,10 @@ public sealed class SqliteAppStateStore : IAppStateStore
             command.CommandText = """
                 SELECT Key, Value
                 FROM AppParameters
-                WHERE Key LIKE $prefix
+                WHERE substr(Key, 1, length($prefix)) = $prefix
                 ORDER BY Key
                 """;
-            command.Parameters.AddWithValue("$prefix", $"{prefix}%");
+            command.Parameters.AddWithValue("$prefix", prefix);
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -108,6 +108,61 @@ public sealed class SqliteAppStateStore : IAppStateStore
             }
 
             return values;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task ReplaceValuesByPrefixAsync(
+        IReadOnlyList<string> prefixes,
+        IReadOnlyDictionary<string, string> values,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureInitializedAsync(cancellationToken);
+            await using var connection = CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+            foreach (var prefix in prefixes)
+            {
+                await using var delete = connection.CreateCommand();
+                delete.Transaction = transaction;
+                delete.CommandText = """
+                    DELETE FROM AppParameters
+                    WHERE substr(Key, 1, length($prefix)) = $prefix
+                    """;
+                delete.Parameters.AddWithValue("$prefix", prefix);
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO AppParameters (Key, Value, UpdatedUtc)
+                VALUES ($key, $value, $updatedUtc)
+                ON CONFLICT(Key) DO UPDATE SET
+                    Value = excluded.Value,
+                    UpdatedUtc = excluded.UpdatedUtc
+                """;
+            var keyParameter = insert.Parameters.Add("$key", SqliteType.Text);
+            var valueParameter = insert.Parameters.Add("$value", SqliteType.Text);
+            var updatedUtcParameter = insert.Parameters.Add("$updatedUtc", SqliteType.Text);
+            updatedUtcParameter.Value = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+
+            foreach (var entry in values.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                keyParameter.Value = entry.Key;
+                valueParameter.Value = entry.Value;
+                await insert.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
         }
         finally
         {

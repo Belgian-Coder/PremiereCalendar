@@ -38,9 +38,14 @@ public sealed class CurrentWeekCalendarWarmupRunner
 
     public async Task RunOnceAsync(CancellationToken cancellationToken)
     {
+        await RunOnceWithResultAsync(cancellationToken);
+    }
+
+    public async Task<CalendarWarmupRunResult> RunOnceWithResultAsync(CancellationToken cancellationToken)
+    {
         if (!_options.Enabled)
         {
-            return;
+            return new CalendarWarmupRunResult(Skipped: true, WarmedProfiles: 0, FailedProfiles: 0);
         }
 
         using var loadLease = await _loadCoordinator.TryBeginBackgroundLoadAsync(
@@ -49,7 +54,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
         if (loadLease is null)
         {
             _logger.LogDebug("Skipping current-week calendar warmup because another calendar load is active.");
-            return;
+            return new CalendarWarmupRunResult(Skipped: true, WarmedProfiles: 0, FailedProfiles: 0);
         }
 
         var runToken = loadLease.Token;
@@ -83,6 +88,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
         var maximumRemoteWindows = Math.Max(1, _options.MaximumRemoteWindowsPerWake);
         var minimumRefreshAge = TimeSpan.FromMinutes(Math.Max(1, _options.MinimumRemoteRefreshMinutes));
         var warmedProfiles = 0;
+        var failedProfiles = 0;
         var remoteWindowsStarted = 0;
 
         foreach (var profile in profiles
@@ -196,6 +202,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
 
             if (failures.Count > 0)
             {
+                failedProfiles++;
                 await _usageStore.MarkWarmFailedAsync(
                     profile.ProfileKey,
                     profile.PageMode,
@@ -208,6 +215,8 @@ public sealed class CurrentWeekCalendarWarmupRunner
 
             warmedProfiles++;
         }
+
+        return new CalendarWarmupRunResult(Skipped: false, warmedProfiles, failedProfiles);
     }
 
     private async Task<bool> IsWarmupWindowFreshAsync(
@@ -300,6 +309,8 @@ public sealed class CurrentWeekCalendarWarmupRunner
             windows.Add(new CalendarWarmupWindow(start, end, priorityDate));
         }
     }
+
+    public sealed record CalendarWarmupRunResult(bool Skipped, int WarmedProfiles, int FailedProfiles);
 
     private static DateOnly Max(DateOnly left, DateOnly right)
     {

@@ -15,6 +15,16 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Assert-SafeMirrorTarget {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    if ([string]::IsNullOrWhiteSpace($root) -or $fullPath.TrimEnd('\') -eq $root.TrimEnd('\')) {
+        throw "Refusing to mirror publish output into unsafe target path: $fullPath"
+    }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $dotnetPath = Join-Path $repoRoot '.dotnet\dotnet.exe'
 if (-not (Test-Path -LiteralPath $dotnetPath)) {
@@ -34,6 +44,7 @@ if (-not (Test-Path -LiteralPath $TargetDirectory)) {
     New-Item -ItemType Directory -Force -Path $TargetDirectory | Out-Null
 }
 $resolvedTargetDirectory = (Resolve-Path -LiteralPath $TargetDirectory).Path
+Assert-SafeMirrorTarget $resolvedTargetDirectory
 
 & $dotnetPath publish $resolvedProjectPath -c Release -r $Runtime --self-contained true -o $resolvedPublishOutput
 if ($LASTEXITCODE -ne 0) {
@@ -51,8 +62,8 @@ Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -eq $targetExe } |
     Stop-Process -Force
 
-# Keep App_Data because it contains the local calendar and image caches.
-robocopy $resolvedPublishOutput $resolvedTargetDirectory /E /XX /XD App_Data /NFL /NDL /NJH /NJS /NP
+# Mirror published files so removed assets do not remain servable. Keep App_Data because it contains local settings and caches.
+robocopy $resolvedPublishOutput $resolvedTargetDirectory /MIR /XD App_Data /NFL /NDL /NJH /NJS /NP
 $robocopyExitCode = $LASTEXITCODE
 if ($robocopyExitCode -gt 7) {
     throw "robocopy failed with exit code $robocopyExitCode"
@@ -74,12 +85,37 @@ else {
         }
     }
     elseif (-not $NoStart) {
-        Start-Process -FilePath $targetExe -WorkingDirectory $resolvedTargetDirectory -WindowStyle Hidden
+        $previousAspNetCoreUrls = $env:ASPNETCORE_URLS
+        $previousUrls = $env:Urls
+        $previousAspNetCoreEnvironment = $env:ASPNETCORE_ENVIRONMENT
+        $previousDotnetEnvironment = $env:DOTNET_ENVIRONMENT
+        try {
+            $env:ASPNETCORE_URLS = "http://0.0.0.0:$Port"
+            $env:Urls = "http://0.0.0.0:$Port"
+            $env:ASPNETCORE_ENVIRONMENT = 'Production'
+            $env:DOTNET_ENVIRONMENT = 'Production'
+            $startedProcess = Start-Process -FilePath $targetExe -WorkingDirectory $resolvedTargetDirectory -WindowStyle Hidden -PassThru
+        }
+        finally {
+            $env:ASPNETCORE_URLS = $previousAspNetCoreUrls
+            $env:Urls = $previousUrls
+            $env:ASPNETCORE_ENVIRONMENT = $previousAspNetCoreEnvironment
+            $env:DOTNET_ENVIRONMENT = $previousDotnetEnvironment
+        }
     }
 }
 
 if (-not $NoStart) {
     Start-Sleep -Seconds 3
-    Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$Port/health" -TimeoutSec 10 |
-        Select-Object StatusCode, Content
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$Port/health" -TimeoutSec 10 |
+            Select-Object StatusCode, Content
+    }
+    catch {
+        if ($startedProcess -and -not $startedProcess.HasExited) {
+            Stop-Process -Id $startedProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+
+        throw
+    }
 }

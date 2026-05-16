@@ -9,7 +9,9 @@ const autoDayNavigationEdgeTolerance = 4;
 const autoDayNavigation = new WeakMap();
 const focusRestoreSelector = "[data-focus-restore='calendar-heading']";
 const focusRestoreStorageKey = "premiereCalendar:restoreFocus";
+const dayTabNavigationKeys = new Set(["ArrowLeft", "ArrowRight", "Home", "End"]);
 let focusRestoreReady = false;
+let topbarOffsetReady = false;
 const focusableSelector = [
     "a[href]",
     "button:not([disabled])",
@@ -291,9 +293,32 @@ function disposeAutoDayNavigation(element) {
 }
 
 function initializeWeekControls(roots = [document]) {
+    initializeTopbarOffset();
     initializeFocusRestore();
     findElements(roots, dayButtonSelector).forEach(initializeDayButton);
     findElements(roots, filterPaneSelector).forEach(initializeFilterPane);
+}
+
+function initializeTopbarOffset() {
+    if (topbarOffsetReady) {
+        return;
+    }
+
+    const topbar = document.querySelector(".app-topbar");
+    if (!(topbar instanceof HTMLElement)) {
+        return;
+    }
+
+    topbarOffsetReady = true;
+    const update = () => {
+        document.documentElement.style.setProperty("--app-topbar-current-height", `${topbar.offsetHeight}px`);
+    };
+
+    update();
+    window.addEventListener("resize", update, { passive: true });
+    if ("ResizeObserver" in window) {
+        new ResizeObserver(update).observe(topbar);
+    }
 }
 
 function initializeFocusRestore() {
@@ -334,6 +359,11 @@ function initializeDayButton(button) {
     }
 
     button.dataset.dayButtonReady = "true";
+    button.addEventListener("keydown", (event) => {
+        if (dayTabNavigationKeys.has(event.key)) {
+            event.preventDefault();
+        }
+    });
     button.addEventListener("click", () => {
         const board = document.querySelector("[data-testid='calendar-week']");
         if (board instanceof HTMLElement) {

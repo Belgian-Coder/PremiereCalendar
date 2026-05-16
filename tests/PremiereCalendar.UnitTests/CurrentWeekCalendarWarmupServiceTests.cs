@@ -155,6 +155,29 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
         Assert.Empty(premiereService.Calls);
     }
 
+    [Fact]
+    public async Task RunOnceWithResultAsync_ReportsProfileFailures()
+    {
+        var runner = new CurrentWeekCalendarWarmupRunner(
+            new ThrowingPremiereService(),
+            new RecordingFilterUsageStore(),
+            new CalendarLoadCoordinator(),
+            Microsoft.Extensions.Options.Options.Create(new CalendarWarmupOptions
+            {
+                MaximumProfilesPerWake = 1,
+                TopFilterProfileCount = 0,
+                MaximumRemoteWindowsPerWake = 1
+            }),
+            new TestTimeProvider(new DateTimeOffset(2026, 5, 8, 12, 0, 0, TimeSpan.Zero)),
+            NullLogger<CurrentWeekCalendarWarmupRunner>.Instance);
+
+        var result = await runner.RunOnceWithResultAsync(CancellationToken.None);
+
+        Assert.False(result.Skipped);
+        Assert.Equal(1, result.WarmedProfiles);
+        Assert.Equal(1, result.FailedProfiles);
+    }
+
     private static CurrentWeekCalendarWarmupRunner CreateRunner(
         RecordingPremiereService premiereService,
         RecordingFilterUsageStore usageStore,
@@ -255,6 +278,31 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
         {
             var items = await GetPremieresAsync(start, end, cancellationToken, forceRefresh, filters: filters);
             yield return new PremiereLoadProgress("Complete", items.Count, items.Count, items, IsFinal: true);
+        }
+    }
+
+    private sealed class ThrowingPremiereService : IPremiereService
+    {
+        public Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false,
+            IProgress<PremiereLoadProgress>? progress = null,
+            CalendarFilters? filters = null)
+        {
+            throw new IOException("warmup failed");
+        }
+
+        public async IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(
+            DateOnly start,
+            DateOnly end,
+            bool forceRefresh = false,
+            CalendarFilters? filters = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask;
+            yield break;
         }
     }
 

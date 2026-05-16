@@ -14,6 +14,7 @@ public sealed class BackgroundJobTimelineService
 
     private readonly IAppStateStore _store;
     private readonly TimeProvider _timeProvider;
+    private readonly SemaphoreSlim _gate = new(1, 1);
 
     public BackgroundJobTimelineService(IAppStateStore store, TimeProvider timeProvider)
     {
@@ -23,11 +24,19 @@ public sealed class BackgroundJobTimelineService
 
     public async Task<IReadOnlyList<BackgroundJobEvent>> GetRecentAsync(CancellationToken cancellationToken)
     {
-        var events = await LoadAsync(cancellationToken);
-        return events
-            .OrderByDescending(entry => entry.OccurredUtc)
-            .ThenBy(entry => entry.JobName, StringComparer.Ordinal)
-            .ToArray();
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var events = await LoadAsync(cancellationToken);
+            return events
+                .OrderByDescending(entry => entry.OccurredUtc)
+                .ThenBy(entry => entry.JobName, StringComparer.Ordinal)
+                .ToArray();
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     public async Task RecordAsync(
@@ -38,20 +47,28 @@ public sealed class BackgroundJobTimelineService
         TimeSpan? duration = null,
         CancellationToken cancellationToken = default)
     {
-        var events = await LoadAsync(cancellationToken);
-        events.Add(new BackgroundJobEvent(
-            Guid.NewGuid().ToString("N"),
-            jobName,
-            status,
-            message,
-            occurredUtc ?? _timeProvider.GetUtcNow(),
-            duration is null ? null : Convert.ToInt64(duration.Value.TotalMilliseconds)));
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var events = await LoadAsync(cancellationToken);
+            events.Add(new BackgroundJobEvent(
+                Guid.NewGuid().ToString("N"),
+                jobName,
+                status,
+                message,
+                occurredUtc ?? _timeProvider.GetUtcNow(),
+                duration is null ? null : Convert.ToInt64(duration.Value.TotalMilliseconds)));
 
-        var trimmed = events
-            .OrderByDescending(entry => entry.OccurredUtc)
-            .Take(MaximumEvents)
-            .ToArray();
-        await _store.SetValueAsync(StoreKey, JsonSerializer.Serialize(trimmed, JsonOptions), cancellationToken);
+            var trimmed = events
+                .OrderByDescending(entry => entry.OccurredUtc)
+                .Take(MaximumEvents)
+                .ToArray();
+            await _store.SetValueAsync(StoreKey, JsonSerializer.Serialize(trimmed, JsonOptions), cancellationToken);
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     private async Task<List<BackgroundJobEvent>> LoadAsync(CancellationToken cancellationToken)

@@ -14,6 +14,7 @@ public sealed class CalendarPresetService
 
     private readonly IAppStateStore _store;
     private readonly TimeProvider _timeProvider;
+    private readonly SemaphoreSlim _gate = new(1, 1);
 
     public CalendarPresetService(IAppStateStore store, TimeProvider timeProvider)
     {
@@ -25,11 +26,19 @@ public sealed class CalendarPresetService
         CalendarPageMode pageMode,
         CancellationToken cancellationToken)
     {
-        var presets = await LoadAsync(cancellationToken);
-        return presets
-            .Where(preset => preset.PageMode == pageMode)
-            .OrderBy(preset => preset.Name, StringComparer.CurrentCultureIgnoreCase)
-            .ToArray();
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var presets = await LoadAsync(cancellationToken);
+            return presets
+                .Where(preset => preset.PageMode == pageMode)
+                .OrderBy(preset => preset.Name, StringComparer.CurrentCultureIgnoreCase)
+                .ToArray();
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     public async Task<CalendarFilterPreset> SaveAsync(
@@ -38,34 +47,50 @@ public sealed class CalendarPresetService
         CalendarFilters filters,
         CancellationToken cancellationToken)
     {
-        var trimmedName = string.IsNullOrWhiteSpace(name) ? "Saved filters" : name.Trim();
-        var presets = await LoadAsync(cancellationToken);
-        var now = _timeProvider.GetUtcNow();
-        var snapshot = CreatePresetSnapshot(filters, pageMode);
-        var existingIndex = presets.FindIndex(preset =>
-            preset.PageMode == pageMode && string.Equals(preset.Name, trimmedName, StringComparison.CurrentCultureIgnoreCase));
-        var preset = existingIndex >= 0
-            ? presets[existingIndex] with { Filters = snapshot, UpdatedUtc = now, Name = trimmedName }
-            : new CalendarFilterPreset(Guid.NewGuid().ToString("N"), trimmedName, pageMode, snapshot, now, now);
-
-        if (existingIndex >= 0)
+        await _gate.WaitAsync(cancellationToken);
+        try
         {
-            presets[existingIndex] = preset;
-        }
-        else
-        {
-            presets.Add(preset);
-        }
+            var trimmedName = string.IsNullOrWhiteSpace(name) ? "Saved filters" : name.Trim();
+            var presets = await LoadAsync(cancellationToken);
+            var now = _timeProvider.GetUtcNow();
+            var snapshot = CreatePresetSnapshot(filters, pageMode);
+            var existingIndex = presets.FindIndex(preset =>
+                preset.PageMode == pageMode && string.Equals(preset.Name, trimmedName, StringComparison.CurrentCultureIgnoreCase));
+            var preset = existingIndex >= 0
+                ? presets[existingIndex] with { Filters = snapshot, UpdatedUtc = now, Name = trimmedName }
+                : new CalendarFilterPreset(Guid.NewGuid().ToString("N"), trimmedName, pageMode, snapshot, now, now);
 
-        await SaveAllAsync(presets, cancellationToken);
-        return preset;
+            if (existingIndex >= 0)
+            {
+                presets[existingIndex] = preset;
+            }
+            else
+            {
+                presets.Add(preset);
+            }
+
+            await SaveAllAsync(presets, cancellationToken);
+            return preset;
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     public async Task DeleteAsync(string id, CancellationToken cancellationToken)
     {
-        var presets = await LoadAsync(cancellationToken);
-        presets.RemoveAll(preset => string.Equals(preset.Id, id, StringComparison.Ordinal));
-        await SaveAllAsync(presets, cancellationToken);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var presets = await LoadAsync(cancellationToken);
+            presets.RemoveAll(preset => string.Equals(preset.Id, id, StringComparison.Ordinal));
+            await SaveAllAsync(presets, cancellationToken);
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     private static CalendarFilters CreatePresetSnapshot(CalendarFilters filters, CalendarPageMode pageMode)

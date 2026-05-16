@@ -120,6 +120,147 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
+    public void CalendarWeek_ClearsExternalSelectedDayWhenParameterReturnsToNull()
+    {
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "tv:9",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 9,
+                Title = "Monday Launch",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7.1
+            },
+            new PremiereItem
+            {
+                CanonicalId = "tv:10",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 10,
+                Title = "Wednesday Launch",
+                PremiereDate = new DateOnly(2026, 5, 6),
+                TmdbScore = 7.5
+            }
+        };
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.SelectedDay, new DateOnly(2026, 5, 6)));
+
+        Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260506']").ClassName);
+        Assert.Contains("Wednesday Launch", component.Markup);
+
+        component.Render(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.SelectedDay, (DateOnly?)null));
+
+        Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260504']").ClassName);
+        Assert.DoesNotContain("active", component.Find("button[data-day-target='premiere-day-20260506']").ClassName);
+        Assert.Contains("Monday Launch", component.Markup);
+        Assert.DoesNotContain("Wednesday Launch", component.Markup);
+    }
+
+    [Fact]
+    public void CalendarWeek_PreservesInternalSelectionWhenNoExternalSelectionWasProvided()
+    {
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "tv:9",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 9,
+                Title = "Monday Launch",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7.1
+            },
+            new PremiereItem
+            {
+                CanonicalId = "tv:10",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 10,
+                Title = "Tuesday Launch",
+                PremiereDate = new DateOnly(2026, 5, 5),
+                TmdbScore = 7.5
+            }
+        };
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+        component.Find("button[data-day-target='premiere-day-20260505']").Click();
+
+        component.Render(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.ImageCacheVersion, "fresh"));
+
+        Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260505']").ClassName);
+        Assert.Contains("Tuesday Launch", component.Markup);
+    }
+
+    [Fact]
+    public void CalendarWeek_AppliesSortParametersBeforeGrouping()
+    {
+        var items = new[]
+        {
+            new PremiereItem
+            {
+                CanonicalId = "movie:2",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 2,
+                Title = "Beta",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 6
+            },
+            new PremiereItem
+            {
+                CanonicalId = "movie:1",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                Title = "Alpha",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 9
+            }
+        };
+
+        var component = Render<CalendarWeek>(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.SortMode, PremiereSortMode.Title)
+            .Add(x => x.SortDirection, SortDirection.Ascending)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.True(
+            component.Markup.IndexOf("Alpha", StringComparison.Ordinal) <
+            component.Markup.IndexOf("Beta", StringComparison.Ordinal));
+
+        component.Render(parameters => parameters
+            .Add(x => x.WeekStart, new DateOnly(2026, 5, 4))
+            .Add(x => x.Items, items)
+            .Add(x => x.SortMode, PremiereSortMode.Score)
+            .Add(x => x.SortDirection, SortDirection.Ascending)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.True(
+            component.Markup.IndexOf("Beta", StringComparison.Ordinal) <
+            component.Markup.IndexOf("Alpha", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void CalendarWeek_UpdatesSelectedDayAnimationKeyWhenDayChanges()
     {
         var items = new[]

@@ -61,6 +61,7 @@ else {
 
 $environment = New-Object System.Collections.Generic.List[string]
 $environment.Add("ASPNETCORE_URLS=http://0.0.0.0:$Port")
+$environment.Add("Urls=http://0.0.0.0:$Port")
 $environment.Add('ASPNETCORE_ENVIRONMENT=Production')
 $environment.Add('DOTNET_ENVIRONMENT=Production')
 $environment.Add("AppDatabase__Path=$(Join-Path $PublishDirectory 'App_Data\data\premiere-calendar.db')")

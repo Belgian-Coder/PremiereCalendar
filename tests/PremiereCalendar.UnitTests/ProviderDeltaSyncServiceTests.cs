@@ -34,6 +34,37 @@ public sealed class ProviderDeltaSyncServiceTests
         Assert.Equal(1, tmdb.ChangedMovieCalls);
     }
 
+    [Fact]
+    public async Task RunOnceSafelyAsync_RecordsFailureWhenProviderFailsInternally()
+    {
+        var appStateStore = new InMemoryAppStateStore();
+        var timeline = new BackgroundJobTimelineService(appStateStore, TimeProvider.System);
+        var service = new ProviderDeltaSyncService(
+            new TimeoutTmdbClient(),
+            new EmptyTvmazeClient(),
+            new InMemoryProviderCacheStateStore(),
+            new FixedOptionsMonitor<ProviderDeltaSyncOptions>(new ProviderDeltaSyncOptions
+            {
+                Enabled = true,
+                RunOnStartup = true,
+                StartupDelaySeconds = 0,
+                WakeIntervalMinutes = 15,
+                UseTmdbChanges = true,
+                UseTvmazeUpdates = false
+            }),
+            TimeProvider.System,
+            NullLogger<ProviderDeltaSyncService>.Instance,
+            timeline);
+
+        await service.RunOnceSafelyAsync(CancellationToken.None);
+
+        var events = await timeline.GetRecentAsync(CancellationToken.None);
+        Assert.Contains(events, entry =>
+            entry.Status == BackgroundJobStatus.Failed
+            && entry.Message.Contains("TMDb", StringComparison.Ordinal));
+        Assert.DoesNotContain(events, entry => entry.Status == BackgroundJobStatus.Succeeded);
+    }
+
     private sealed class FixedOptionsMonitor<T> : IOptionsMonitor<T>
         where T : class
     {
@@ -69,6 +100,37 @@ public sealed class ProviderDeltaSyncServiceTests
         public Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken)
         {
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class InMemoryAppStateStore : IAppStateStore
+    {
+        private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
+
+        public Task<string?> GetValueAsync(string key, CancellationToken cancellationToken)
+        {
+            _values.TryGetValue(key, out var value);
+            return Task.FromResult(value);
+        }
+
+        public Task SetValueAsync(string key, string value, CancellationToken cancellationToken)
+        {
+            _values[key] = value;
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteValueAsync(string key, CancellationToken cancellationToken)
+        {
+            _values.Remove(key);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyDictionary<string, string>> GetValuesByPrefixAsync(string prefix, CancellationToken cancellationToken)
+        {
+            IReadOnlyDictionary<string, string> values = _values
+                .Where(entry => entry.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+            return Task.FromResult(values);
         }
     }
 

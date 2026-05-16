@@ -28,7 +28,12 @@ function Add-Argument {
     )
 
     $Arguments.Add($Name)
-    $Arguments.Add($Value ?? '')
+    if ($null -eq $Value) {
+        $Arguments.Add('')
+    }
+    else {
+        $Arguments.Add($Value)
+    }
 }
 
 if (-not (Test-IsWindows)) {

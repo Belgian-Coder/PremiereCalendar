@@ -1844,6 +1844,27 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_RemovingDayQueryClearsSameWeekSelectedDay()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&day=2026-05-06");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260506']").ClassName);
+
+        navigation.NavigateTo("/series?week=2026-05-04");
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260504']").ClassName);
+            Assert.DoesNotContain("active", component.Find("button[data-day-target='premiere-day-20260506']").ClassName);
+            Assert.Single(service.Calls);
+        });
+    }
+
+    [Fact]
     public async Task CalendarPage_ScrollAdjacentDayAcrossWeekBoundaryLoadsAdjacentWeek()
     {
         var service = new FakePremiereService();

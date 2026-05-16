@@ -26,4 +26,12 @@ public interface IProviderCacheStateStore
         CancellationToken cancellationToken);
 
     Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken);
+
+    async Task SaveManyAsync(IEnumerable<ProviderCacheState> states, CancellationToken cancellationToken)
+    {
+        foreach (var state in states)
+        {
+            await SaveAsync(state, cancellationToken);
+        }
+    }
 }

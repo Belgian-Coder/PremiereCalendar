@@ -29,7 +29,7 @@ builder.Services.AddRazorComponents()
         options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
         options.HandshakeTimeout = TimeSpan.FromSeconds(30);
         options.KeepAliveInterval = TimeSpan.FromSeconds(15);
-        options.MaximumReceiveMessageSize = 256 * 1024;
+        options.MaximumReceiveMessageSize = 1024 * 1024;
     });
 builder.Services.Configure<CircuitOptions>(options =>
 {

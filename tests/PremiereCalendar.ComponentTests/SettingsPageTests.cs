@@ -193,6 +193,88 @@ public sealed class SettingsPageTests : BunitContext
     }
 
     [Fact]
+    public void SettingsPage_BackupExportRedactsSecretsByDefault()
+    {
+        var store = new FakeIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings
+            {
+                Sonarr = new SonarrIntegrationSettings { ApiKey = "sonarr-secret" },
+                Sources = new SourceIntegrationSettings
+                {
+                    Tmdb = new TmdbSourceSettings { BearerToken = "tmdb-secret" },
+                    Watchmode = new WatchmodeSourceSettings { ApiKey = "watchmode-secret" },
+                    Simkl = new SimklSourceSettings { ClientSecret = "simkl-secret", AccessToken = "simkl-token" }
+                }
+            }
+        };
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("section[aria-label='Backup and restore settings']");
+        component.Find("section[aria-label='Backup and restore settings'] button").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var backupJson = component.Find("textarea[aria-label='Settings backup JSON']").TextContent;
+            Assert.DoesNotContain("sonarr-secret", backupJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("tmdb-secret", backupJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("watchmode-secret", backupJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("simkl-secret", backupJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("simkl-token", backupJson, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task SettingsPage_ImportRehydratesDerivedCountryFieldsBeforeNextSave()
+    {
+        var sourceSettingsStore = new FakeIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings
+            {
+                Sources = new SourceIntegrationSettings
+                {
+                    Tvmaze = new TvmazeSourceSettings { ScheduleCountries = ["BE", "NL"] },
+                    Watchmode = new WatchmodeSourceSettings { Regions = ["BE", "NL"] }
+                }
+            }
+        };
+        var sourceBackup = new SettingsBackupService(sourceSettingsStore, _appStateStore, TimeProvider.System);
+        var backupJson = await sourceBackup.ExportAsync(includeSecrets: true, CancellationToken.None);
+        var targetStore = new FakeIntegrationSettingsStore
+        {
+            Settings = new IntegrationSettings
+            {
+                Sources = new SourceIntegrationSettings
+                {
+                    Tvmaze = new TvmazeSourceSettings { ScheduleCountries = ["US"] },
+                    Watchmode = new WatchmodeSourceSettings { Regions = ["US"] }
+                }
+            }
+        };
+        Services.AddSingleton<IIntegrationSettingsStore>(targetStore);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("textarea[aria-label='Settings backup JSON']");
+        component.Find("textarea[aria-label='Settings backup JSON']").Change(backupJson);
+        component.FindAll("section[aria-label='Backup and restore settings'] button")[1].Click();
+        component.WaitForAssertion(() => Assert.Equal(["BE", "NL"], targetStore.Settings.Sources.Tvmaze.ScheduleCountries));
+
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(["BE", "NL"], targetStore.Settings.Sources.Tvmaze.ScheduleCountries);
+            Assert.Equal(["BE", "NL"], targetStore.Settings.Sources.Watchmode.Regions);
+        });
+    }
+
+    [Fact]
     public void SettingsPage_LoadsQualityProfileNamesOnOpenWhenIntegrationsAreConfigured()
     {
         JSInterop.Mode = JSRuntimeMode.Loose;

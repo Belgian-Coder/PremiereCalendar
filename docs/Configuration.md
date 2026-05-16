@@ -76,7 +76,7 @@ The Settings page persists local app parameters in a SQLite database:
 
 Stored parameters currently include Sonarr and Radarr enable flags, URLs, API keys, root folder paths, quality profile IDs, tag-on-add values, add behavior, and source API settings for TMDb, TVmaze, Trakt, Watchmode, SIMKL, OMDb, Fanart.tv, TheTVDB, and Wikimedia. The same parameter table stores local app state such as saved filter presets, visit-change snapshots, and the background job timeline. In release installs this path is overridden to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db` so updates can replace binaries without touching local settings.
 
-The Settings page can export and import a JSON backup of integration settings and local app state. Export includes saved presets, visit state, and diagnostics; import replaces the saved settings and matching local state keys from the provided JSON.
+The Settings page can export and import a JSON backup of integration settings and local calendar state. Export includes saved presets and visit state. API secrets are redacted by default; enable `Include API secrets` only for a private backup you intend to restore as-is. Import replaces the saved settings and matching local calendar-state keys from the provided JSON without overwriting volatile diagnostics such as the background job timeline.
 
 The same SQLite file also stores IMDb ratings, OMDb response cache, and provider-sync markers such as TMDb/TVmaze change checks.
 
@@ -268,7 +268,7 @@ Poster and backdrop image bytes are cached through a local endpoint by default:
   "Directory": "App_Data/cache/images",
   "CacheDays": 30,
   "MaxBytes": 5242880,
-    "AllowedHosts": [ "image.tmdb.org", ".media-amazon.com", "static.tvmaze.com", "assets.fanart.tv", "webservice.fanart.tv", "artworks.thetvdb.com", "upload.wikimedia.org", "commons.wikimedia.org" ]
+    "AllowedHosts": [ "image.tmdb.org", ".media-amazon.com", "static.tvmaze.com", "assets.fanart.tv", "webservice.fanart.tv", "artworks.thetvdb.com", "upload.wikimedia.org", "commons.wikimedia.org", "cdn.watchmode.com" ]
 }
 ```
 

@@ -57,6 +57,28 @@ public sealed class LocalObservabilityServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task BackgroundJobTimeline_PreservesConcurrentEvents()
+    {
+        var store = new YieldingAppStateStore();
+        var timeline = new BackgroundJobTimelineService(store, TimeProvider.System);
+
+        await Task.WhenAll(Enumerable.Range(0, 20).Select(index =>
+            timeline.RecordAsync(
+                "Prefetch",
+                BackgroundJobStatus.Succeeded,
+                $"run {index}",
+                new DateTimeOffset(2026, 5, 16, 8, index, 0, TimeSpan.Zero),
+                cancellationToken: CancellationToken.None)));
+
+        var events = await timeline.GetRecentAsync(CancellationToken.None);
+
+        Assert.Equal(20, events.Count);
+        Assert.Equal(
+            Enumerable.Range(0, 20).Select(index => $"run {index}").Order(StringComparer.Ordinal),
+            events.Select(entry => entry.Message).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public Task CacheInspector_SummarizesCalendarAndImageCacheDirectories()
     {
         var calendarDirectory = Path.Combine(_root, "cache", "calendar");
@@ -171,11 +193,15 @@ public sealed class LocalObservabilityServiceTests : IDisposable
         var sourceStateStore = new InMemoryAppStateStore();
         sourceSettingsStore.Settings.Sources.Tmdb.BearerToken = "tmdb-token";
         await sourceStateStore.SetValueAsync("Calendar.Presets", """[{"name":"Preset"}]""", CancellationToken.None);
+        await sourceStateStore.SetValueAsync("Diagnostics.BackgroundJobs", """[{"job":"fresh"}]""", CancellationToken.None);
         var sourceBackup = new SettingsBackupService(sourceSettingsStore, sourceStateStore, TimeProvider.System);
         var backupJson = await sourceBackup.ExportAsync(includeSecrets: true, CancellationToken.None);
 
         var targetSettingsStore = new InMemoryIntegrationSettingsStore();
         var targetStateStore = new InMemoryAppStateStore();
+        await targetStateStore.SetValueAsync("Calendar.Obsolete", """{"old":true}""", CancellationToken.None);
+        await targetStateStore.SetValueAsync("Diagnostics.Obsolete", """{"old":true}""", CancellationToken.None);
+        await targetStateStore.SetValueAsync("Other.State", """{"keep":true}""", CancellationToken.None);
         var targetBackup = new SettingsBackupService(targetSettingsStore, targetStateStore, TimeProvider.System);
         await targetBackup.ImportAsync(backupJson, CancellationToken.None);
 
@@ -183,6 +209,90 @@ public sealed class LocalObservabilityServiceTests : IDisposable
         Assert.Equal(
             """[{"name":"Preset"}]""",
             await targetStateStore.GetValueAsync("Calendar.Presets", CancellationToken.None));
+        Assert.Equal(
+            """{"old":true}""",
+            await targetStateStore.GetValueAsync("Diagnostics.Obsolete", CancellationToken.None));
+        Assert.Null(await targetStateStore.GetValueAsync("Calendar.Obsolete", CancellationToken.None));
+        Assert.Null(await targetStateStore.GetValueAsync("Diagnostics.BackgroundJobs", CancellationToken.None));
+        Assert.Equal("""{"keep":true}""", await targetStateStore.GetValueAsync("Other.State", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SettingsBackupService_RedactsSecretsWhenRequested()
+    {
+        var settingsStore = new InMemoryIntegrationSettingsStore();
+        settingsStore.Settings.Sonarr.ApiKey = "sonarr-secret";
+        settingsStore.Settings.Sources.Tmdb.BearerToken = "tmdb-secret";
+        settingsStore.Settings.Sources.Simkl.ClientSecret = "simkl-secret";
+        var backup = new SettingsBackupService(settingsStore, new InMemoryAppStateStore(), TimeProvider.System);
+
+        var backupJson = await backup.ExportAsync(includeSecrets: false, CancellationToken.None);
+
+        Assert.DoesNotContain("sonarr-secret", backupJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("tmdb-secret", backupJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("simkl-secret", backupJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AppStateStore_PrefixReadsAreCaseSensitive()
+    {
+        var store = CreateAppStateStore();
+
+        await store.SetValueAsync("Calendar.Valid", "yes", CancellationToken.None);
+        await store.SetValueAsync("calendar.Hidden", "no", CancellationToken.None);
+
+        var values = await store.GetValuesByPrefixAsync("Calendar.", CancellationToken.None);
+
+        Assert.Single(values);
+        Assert.Equal("yes", values["Calendar.Valid"]);
+    }
+
+    [Fact]
+    public async Task CalendarPresetService_PreservesConcurrentSaves()
+    {
+        var store = new YieldingAppStateStore();
+        var service = new CalendarPresetService(store, TimeProvider.System);
+
+        await Task.WhenAll(Enumerable.Range(0, 20).Select(index =>
+            service.SaveAsync(
+                $"Preset {index:00}",
+                CalendarPageMode.Series,
+                new CalendarFilters { WeekStart = new DateOnly(2026, 5, 11) },
+                CancellationToken.None)));
+
+        var presets = await service.GetPresetsAsync(CalendarPageMode.Series, CancellationToken.None);
+
+        Assert.Equal(20, presets.Count);
+        Assert.Equal(
+            Enumerable.Range(0, 20).Select(index => $"Preset {index:00}"),
+            presets.Select(preset => preset.Name));
+    }
+
+    [Theory]
+    [InlineData("1.4.0-preview.1", "v1.4.0", true)]
+    [InlineData("1.2", "v1.2.0", false)]
+    [InlineData("1.4.0+local", "v1.4.0", false)]
+    public async Task ReleaseUpdateService_UsesSemanticVersionComparison(
+        string currentVersion,
+        string latestTag,
+        bool expectedUpdate)
+    {
+        var handler = new StaticHttpMessageHandler(
+            $$"""
+            {
+              "tag_name": "{{latestTag}}",
+              "html_url": "https://github.com/Belgian-Coder/PremiereCalendar/releases/tag/{{latestTag}}",
+              "published_at": "2026-05-16T10:00:00Z",
+              "name": "Premiere Calendar {{latestTag}}"
+            }
+            """);
+        var service = new ReleaseUpdateService(
+            new HttpClient(handler) { BaseAddress = new Uri("https://api.github.com/") },
+            currentVersion);
+
+        var result = await service.CheckLatestAsync(CancellationToken.None);
+
+        Assert.Equal(expectedUpdate, result.IsUpdateAvailable);
     }
 
     public void Dispose()
@@ -276,6 +386,55 @@ public sealed class LocalObservabilityServiceTests : IDisposable
                 .Where(entry => entry.Key.StartsWith(prefix, StringComparison.Ordinal))
                 .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
             return Task.FromResult(values);
+        }
+    }
+
+    private sealed class YieldingAppStateStore : IAppStateStore
+    {
+        private readonly object _sync = new();
+        private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
+
+        public async Task<string?> GetValueAsync(string key, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                _values.TryGetValue(key, out var value);
+                return value;
+            }
+        }
+
+        public async Task SetValueAsync(string key, string value, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                _values[key] = value;
+            }
+        }
+
+        public async Task DeleteValueAsync(string key, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                _values.Remove(key);
+            }
+        }
+
+        public async Task<IReadOnlyDictionary<string, string>> GetValuesByPrefixAsync(string prefix, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                return _values
+                    .Where(entry => entry.Key.StartsWith(prefix, StringComparison.Ordinal))
+                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+            }
         }
     }
 }

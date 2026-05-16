@@ -5,7 +5,7 @@ namespace PremiereCalendar.Services;
 
 public sealed class SettingsBackupService
 {
-    private static readonly string[] StatePrefixes = ["Calendar.", "Diagnostics."];
+    private static readonly string[] StatePrefixes = ["Calendar."];
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -48,27 +48,63 @@ public sealed class SettingsBackupService
             ExportedUtc: _timeProvider.GetUtcNow(),
             IncludeSecrets: includeSecrets,
             Settings: settings,
-            AppState: state);
+            AppState: state.ToDictionary(entry => entry.Key, entry => (string?)entry.Value, StringComparer.Ordinal));
         return JsonSerializer.Serialize(backup, JsonOptions);
     }
 
     public async Task ImportAsync(string backupJson, CancellationToken cancellationToken)
     {
-        var backup = JsonSerializer.Deserialize<SettingsBackupEnvelope>(backupJson, JsonOptions)
-            ?? throw new InvalidOperationException("Backup file is invalid.");
+        SettingsBackupEnvelope backup;
+        try
+        {
+            backup = JsonSerializer.Deserialize<SettingsBackupEnvelope>(backupJson, JsonOptions)
+                ?? throw new InvalidOperationException("Backup file is invalid.");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("Backup file is invalid.", ex);
+        }
+
         if (backup.SchemaVersion != 1)
         {
             throw new InvalidOperationException("Backup schema is not supported.");
         }
 
-        await _settingsStore.SaveAsync(backup.Settings, cancellationToken);
-        foreach (var entry in backup.AppState)
+        if (backup.Settings is null)
         {
-            if (StatePrefixes.Any(prefix => entry.Key.StartsWith(prefix, StringComparison.Ordinal)))
-            {
-                await _stateStore.SetValueAsync(entry.Key, entry.Value, cancellationToken);
-            }
+            throw new InvalidOperationException("Backup settings are missing.");
         }
+
+        var importedState = ValidateImportedState(backup.AppState);
+
+        await _settingsStore.SaveAsync(backup.Settings, cancellationToken);
+        await _stateStore.ReplaceValuesByPrefixAsync(StatePrefixes, importedState, cancellationToken);
+    }
+
+    private static Dictionary<string, string> ValidateImportedState(IReadOnlyDictionary<string, string?>? appState)
+    {
+        var importedState = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (appState is null)
+        {
+            return importedState;
+        }
+
+        foreach (var entry in appState)
+        {
+            if (!StatePrefixes.Any(prefix => entry.Key.StartsWith(prefix, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            if (entry.Value is null)
+            {
+                throw new InvalidOperationException("Backup state contains empty values.");
+            }
+
+            importedState[entry.Key] = entry.Value;
+        }
+
+        return importedState;
     }
 
     private static IntegrationSettings RedactSecrets(IntegrationSettings settings)
@@ -99,6 +135,6 @@ public sealed class SettingsBackupService
         int SchemaVersion,
         DateTimeOffset ExportedUtc,
         bool IncludeSecrets,
-        IntegrationSettings Settings,
-        IReadOnlyDictionary<string, string> AppState);
+        IntegrationSettings? Settings,
+        IReadOnlyDictionary<string, string?>? AppState);
 }

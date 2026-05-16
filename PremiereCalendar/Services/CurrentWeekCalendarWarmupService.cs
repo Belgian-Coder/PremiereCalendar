@@ -75,37 +75,29 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
                 startedUtc,
                 null,
                 stoppingToken);
-            await scope.ServiceProvider.GetRequiredService<CurrentWeekCalendarWarmupRunner>()
-                .RunOnceAsync(stoppingToken);
+            var warmupResult = await scope.ServiceProvider.GetRequiredService<CurrentWeekCalendarWarmupRunner>()
+                .RunOnceWithResultAsync(stoppingToken);
+            var warmupStatus = warmupResult.Skipped
+                ? BackgroundJobStatus.Skipped
+                : warmupResult.FailedProfiles > 0
+                    ? BackgroundJobStatus.Failed
+                    : BackgroundJobStatus.Succeeded;
+            var warmupMessage = warmupResult.Skipped
+                ? "Skipped current-week calendar warmup."
+                : warmupResult.FailedProfiles > 0
+                    ? $"Current-week calendar warmup completed with {warmupResult.FailedProfiles} profile failure(s)."
+                    : "Finished current-week calendar warmup.";
             await RecordTimelineAsync(
                 "Calendar warmup",
-                BackgroundJobStatus.Succeeded,
-                "Finished current-week calendar warmup.",
+                warmupStatus,
+                warmupMessage,
                 _timeProvider.GetUtcNow(),
                 _timeProvider.GetElapsedTime(startedTimestamp),
                 stoppingToken);
 
             if (MaintenanceIsDue())
             {
-                var maintenanceStartedUtc = _timeProvider.GetUtcNow();
-                var maintenanceStartedTimestamp = _timeProvider.GetTimestamp();
-                await RecordTimelineAsync(
-                    "Cache maintenance",
-                    BackgroundJobStatus.Started,
-                    "Started cache maintenance.",
-                    maintenanceStartedUtc,
-                    null,
-                    stoppingToken);
-                await scope.ServiceProvider.GetRequiredService<CacheMaintenanceRunner>()
-                    .RunOnceAsync(stoppingToken);
-                _lastMaintenanceUtc = _timeProvider.GetUtcNow();
-                await RecordTimelineAsync(
-                    "Cache maintenance",
-                    BackgroundJobStatus.Succeeded,
-                    "Finished cache maintenance.",
-                    _lastMaintenanceUtc.Value,
-                    _timeProvider.GetElapsedTime(maintenanceStartedTimestamp),
-                    stoppingToken);
+                await RunMaintenanceAsync(scope.ServiceProvider, stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -121,6 +113,47 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
                 ex.Message,
                 _timeProvider.GetUtcNow(),
                 _timeProvider.GetElapsedTime(startedTimestamp),
+                CancellationToken.None);
+        }
+    }
+
+    private async Task RunMaintenanceAsync(IServiceProvider serviceProvider, CancellationToken stoppingToken)
+    {
+        var maintenanceStartedUtc = _timeProvider.GetUtcNow();
+        var maintenanceStartedTimestamp = _timeProvider.GetTimestamp();
+        try
+        {
+            await RecordTimelineAsync(
+                "Cache maintenance",
+                BackgroundJobStatus.Started,
+                "Started cache maintenance.",
+                maintenanceStartedUtc,
+                null,
+                stoppingToken);
+            await serviceProvider.GetRequiredService<CacheMaintenanceRunner>()
+                .RunOnceAsync(stoppingToken);
+            _lastMaintenanceUtc = _timeProvider.GetUtcNow();
+            await RecordTimelineAsync(
+                "Cache maintenance",
+                BackgroundJobStatus.Succeeded,
+                "Finished cache maintenance.",
+                _lastMaintenanceUtc.Value,
+                _timeProvider.GetElapsedTime(maintenanceStartedTimestamp),
+                stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Cache maintenance failed.");
+            await RecordTimelineAsync(
+                "Cache maintenance",
+                BackgroundJobStatus.Failed,
+                ex.Message,
+                _timeProvider.GetUtcNow(),
+                _timeProvider.GetElapsedTime(maintenanceStartedTimestamp),
                 CancellationToken.None);
         }
     }

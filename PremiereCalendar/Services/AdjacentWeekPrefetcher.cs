@@ -18,9 +18,11 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
     private readonly PriorityQueue<PrefetchRequest, PrefetchPriority> _queue = new();
     private readonly Dictionary<string, PrefetchRequest> _pendingRequests = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _queueSignal = new(0);
+    private readonly CancellationTokenSource _shutdown = new();
     private long _nextSequence;
     private int _nextGeneration;
     private int _workerStarted;
+    private Task? _workerTask;
     private volatile bool _disposed;
 
     public AdjacentWeekPrefetcher(
@@ -61,10 +63,20 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         Dispose();
-        return Task.CompletedTask;
+        var workerTask = _workerTask;
+        if (workerTask is null)
+        {
+            return;
+        }
+
+        var completed = await Task.WhenAny(workerTask, Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
+        if (completed == workerTask)
+        {
+            await workerTask;
+        }
     }
 
     private void QueuePrefetch(DateOnly weekStart, CalendarFilters? filters, int generation, int rank)
@@ -150,16 +162,20 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
             return;
         }
 
-        _ = Task.Run(ProcessQueueAsync, CancellationToken.None);
+        _workerTask = Task.Run(ProcessQueueAsync, CancellationToken.None);
     }
 
     private async Task ProcessQueueAsync()
     {
         try
         {
-            while (!_disposed && !_applicationLifetime.ApplicationStopping.IsCancellationRequested)
+            using var linkedShutdown = CancellationTokenSource.CreateLinkedTokenSource(
+                _applicationLifetime.ApplicationStopping,
+                _shutdown.Token);
+            var workerToken = linkedShutdown.Token;
+            while (!_disposed && !workerToken.IsCancellationRequested)
             {
-                await _queueSignal.WaitAsync(_applicationLifetime.ApplicationStopping);
+                await _queueSignal.WaitAsync(workerToken);
                 if (_disposed)
                 {
                     break;
@@ -175,10 +191,11 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
                     request.WeekStart,
                     request.Key,
                     request.Filters,
-                    _applicationLifetime.ApplicationStopping);
+                    workerToken);
             }
         }
-        catch (OperationCanceledException) when (_applicationLifetime.ApplicationStopping.IsCancellationRequested)
+        catch (OperationCanceledException) when (_applicationLifetime.ApplicationStopping.IsCancellationRequested
+            || _shutdown.IsCancellationRequested)
         {
         }
         catch (ObjectDisposedException) when (_disposed)
@@ -314,6 +331,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         }
 
         _disposed = true;
+        _shutdown.Cancel();
         _queueSignal.Release();
     }
 
