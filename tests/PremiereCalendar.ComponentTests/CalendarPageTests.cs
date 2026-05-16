@@ -129,6 +129,41 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_HidesNoOpSourceProgressAfterSimpleLoad()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Empty(component.FindAll("[data-testid='query-progress']"));
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_HidesZeroResultSourceProgressWhenCollapsed()
+    {
+        var service = new FakePremiereService
+        {
+            Items = [],
+            ReportPartialProgress = true
+        };
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Empty(component.FindAll("[data-testid='loading']"));
+            Assert.Empty(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Empty(component.FindAll("[data-testid='query-progress']"));
+        });
+    }
+
+    [Fact]
     public void CalendarPage_CloseFiltersDiscardsDraftChanges()
     {
         var service = new FakePremiereService();
@@ -203,7 +238,7 @@ public sealed class CalendarPageTests : BunitContext
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
         component.WaitForAssertion(() => Assert.Single(service.Calls));
 
-        component.Find("button[title='Full provider refresh']").Click();
+        component.Find("button[title='Refresh sources from providers']").Click();
 
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.True(service.Calls[1].ForceRefresh);
@@ -231,7 +266,7 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
         {
-            var refresh = component.Find("button[title='Full provider refresh']");
+            var refresh = component.Find("button[title='Refresh sources from providers']");
             Assert.Null(refresh.GetAttribute("disabled"));
             Assert.Contains("Updating", component.Find("[data-testid='refreshing']").TextContent);
         });
@@ -388,7 +423,7 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Empty(service.Calls);
         });
 
-        component.Find("button[title='Full provider refresh']").Click();
+        component.Find("button[title='Refresh sources from providers']").Click();
 
         component.WaitForAssertion(() =>
         {
@@ -1189,30 +1224,39 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
-    public void CalendarPage_ActiveFilterStripIncludesWatchRegionAndCertificationFilters()
+    public void CalendarPage_FilterButtonShowsActiveFilterCountWithoutHeaderCriteria()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/?week=2026-05-04&seriesWatchRegion=BE&movieCertifications=US%3APG-13&movieCertificationCountry=US");
+        navigation.NavigateTo("/?week=2026-05-04&runtimeMin=80&runtimeMax=150&seriesWatchRegion=BE&movieCertifications=US%3APG-13&movieCertificationCountry=US");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() =>
         {
-            var strip = component.Find("[data-testid='active-filter-strip']");
-            Assert.Contains("Series: watch region BE", strip.TextContent);
-            Assert.Contains("Movies: 1 certification", strip.TextContent);
-            Assert.Contains("Movies: certification country US", strip.TextContent);
-            Assert.Single(strip.QuerySelectorAll("button[aria-label='Clear active filters']"));
-            Assert.Single(strip.QuerySelectorAll("button[data-focus-restore='calendar-heading']"));
+            Assert.Empty(component.FindAll("[data-testid='active-filter-strip']"));
+            Assert.Empty(component.FindAll("button[aria-label='Clear active filters']"));
+            var filterButton = component.Find("button[title='Open filters']");
+            Assert.Equal("4", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+            Assert.Equal("Open filters, 4 active filters", filterButton.GetAttribute("aria-label"));
             var heading = component.Find("[data-testid='calendar-focus-target']");
             Assert.Equal("-1", heading.GetAttribute("tabindex"));
+        });
+
+        component.Find("button[title='Open filters']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var pane = component.Find("[data-testid='filter-pane']");
+            Assert.Contains("Runtime from", pane.TextContent);
+            Assert.Contains("Runtime to", pane.TextContent);
+            Assert.Contains("Clear filters", pane.TextContent);
         });
     }
 
     [Fact]
-    public void CalendarPage_ActiveFilterStripIncludesGlobalFiltersWhenMediaFiltersAreActive()
+    public void CalendarPage_FilterButtonCountIncludesGlobalAndMediaFilters()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
@@ -1223,14 +1267,13 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
         {
-            var strip = component.Find("[data-testid='active-filter-strip']");
-            Assert.Contains("All: title \"north\"", strip.TextContent);
-            Assert.Contains("Series: watch region BE", strip.TextContent);
+            Assert.Empty(component.FindAll("[data-testid='active-filter-strip']"));
+            Assert.Equal("2", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
         });
     }
 
     [Fact]
-    public void CalendarPage_ActiveFilterStripUsesReadablePlurals()
+    public void CalendarPage_FilterButtonCountTreatsPluralCriteriaAsSingleFilters()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
@@ -1241,13 +1284,8 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
         {
-            var strip = component.Find("[data-testid='active-filter-strip']");
-            Assert.Contains("Series: 2 countries", strip.TextContent);
-            Assert.Contains("Series: 2 availabilities", strip.TextContent);
-            Assert.Contains("Series: 2 statuses", strip.TextContent);
-            Assert.DoesNotContain("countrys", strip.TextContent);
-            Assert.DoesNotContain("availabilitys", strip.TextContent);
-            Assert.DoesNotContain("statuss", strip.TextContent);
+            Assert.Empty(component.FindAll("[data-testid='active-filter-strip']"));
+            Assert.Equal("3", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
         });
     }
 
@@ -1700,14 +1738,14 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
         component.Find("button[data-day-target='premiere-day-20260505']").Click();
-        component.Find("button[title='Full provider refresh']").Click();
+        component.Find("button[title='Refresh sources from providers']").Click();
 
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.Equal(new DateOnly(2026, 5, 5), service.Calls.Last().PriorityDate);
     }
 
     [Fact]
-    public void CalendarPage_OffersQuickAndFullRefreshModes()
+    public void CalendarPage_OffersUpdateAndRefreshSourceModes()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
@@ -1716,11 +1754,19 @@ public sealed class CalendarPageTests : BunitContext
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
-        component.Find("button[title='Quick refresh']").Click();
+        var commandBar = component.Find("[data-testid='calendar-command-bar']");
+        Assert.Contains("Update", commandBar.TextContent);
+        Assert.Contains("Refresh sources", commandBar.TextContent);
+        Assert.Contains("Actions", commandBar.TextContent);
+        Assert.DoesNotContain("Quick", commandBar.TextContent);
+        Assert.DoesNotContain("Full", commandBar.TextContent);
+        Assert.DoesNotContain("Command", commandBar.TextContent);
+
+        component.Find("button[title='Update visible week']").Click();
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.False(service.Calls.Last().ForceRefresh);
 
-        component.Find("button[title='Full provider refresh']").Click();
+        component.Find("button[title='Refresh sources from providers']").Click();
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 3));
         Assert.True(service.Calls.Last().ForceRefresh);
     }
@@ -1735,6 +1781,8 @@ public sealed class CalendarPageTests : BunitContext
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
+        Assert.Empty(component.FindAll(".preset-command-row"));
+        component.Find("button[title='Open actions (Ctrl+K)']").Click();
         component.Find("input[aria-label='Preset name']").Input("Belgian movies");
         component.Find("button[title='Save current filters as preset']").Click();
 
@@ -1752,14 +1800,15 @@ public sealed class CalendarPageTests : BunitContext
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
-        component.Find("button[title='Open command palette (Ctrl+K)']").Click();
+        component.Find("button[title='Open actions (Ctrl+K)']").Click();
 
         var palette = component.Find("[data-testid='command-palette']");
         Assert.Single(component.FindAll("[data-command-palette-toggle]"));
         Assert.Single(component.FindAll("[data-command-palette-panel]"));
         Assert.Contains("Filters", palette.TextContent);
         Assert.Contains("Settings", palette.TextContent);
-        Assert.Contains("Quick refresh", palette.TextContent);
+        Assert.Contains("Update visible week", palette.TextContent);
+        Assert.Contains("Saved filter presets", palette.TextContent);
     }
 
     [Fact]

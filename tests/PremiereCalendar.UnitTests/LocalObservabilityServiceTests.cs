@@ -38,21 +38,21 @@ public sealed class LocalObservabilityServiceTests : IDisposable
         var store = CreateAppStateStore();
         var timeline = new BackgroundJobTimelineService(store, TimeProvider.System);
 
-        for (var index = 0; index < 35; index++)
+        for (var index = 0; index < 105; index++)
         {
             await timeline.RecordAsync(
                 "Warmup",
                 BackgroundJobStatus.Succeeded,
                 $"run {index}",
-                new DateTimeOffset(2026, 5, 16, 8, index, 0, TimeSpan.Zero),
+                new DateTimeOffset(2026, 5, 16, 8, 0, 0, TimeSpan.Zero).AddMinutes(index),
                 TimeSpan.FromSeconds(index),
                 CancellationToken.None);
         }
 
         var events = await timeline.GetRecentAsync(CancellationToken.None);
 
-        Assert.Equal(30, events.Count);
-        Assert.Equal("run 34", events[0].Message);
+        Assert.Equal(100, events.Count);
+        Assert.Equal("run 104", events[0].Message);
         Assert.Equal("run 5", events[^1].Message);
     }
 

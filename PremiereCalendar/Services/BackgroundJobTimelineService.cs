@@ -5,7 +5,7 @@ namespace PremiereCalendar.Services;
 public sealed class BackgroundJobTimelineService
 {
     private const string StoreKey = "Diagnostics.BackgroundJobs";
-    private const int MaximumEvents = 30;
+    private const int MaximumEvents = 100;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {

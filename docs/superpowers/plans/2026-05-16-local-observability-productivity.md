@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add cache inspection, background-job history, visible-week freshness, refresh modes, filter presets, command palette, mobile day navigation polish, release checks, settings backup/restore, and subtle changed-since-last-visit indicators.
+**Goal:** Add cache inspection, background-job history, visible-week freshness, refresh modes, filter presets, Actions palette, mobile day navigation polish, release checks, settings backup/restore, and subtle changed-since-last-visit indicators.
 
 **Architecture:** Add focused backend services for local app state, diagnostics, presets, release checks, and backups, backed by the existing SQLite `AppParameters` table where persistence is needed. Keep Calendar changes compact by reusing the existing command bar, cache freshness, query progress, filter state, and selected-day model.
 
@@ -75,9 +75,9 @@
 - Test: `tests/PremiereCalendar.ComponentTests/CalendarWeekTests.cs`
 
 - [ ] Add a compact data freshness card that uses existing cache metadata plus refresh mode state.
-- [ ] Replace the single refresh action with `Quick` and `Full` refresh options.
-- [ ] Add save/apply preset UI to the command bar without moving the calendar down materially.
-- [ ] Add command palette overlay with keyboard shortcut and route/refresh/filter/preset actions.
+- [ ] Replace the single refresh action with `Update` and `Refresh sources` refresh options.
+- [ ] Add save/apply preset UI to the Actions palette without moving the calendar down materially.
+- [ ] Add Actions palette overlay with keyboard shortcut and route/refresh/filter/preset actions.
 - [ ] Add subtle changed-since-last-visit badges.
 - [ ] Add mobile day jump polish: shorter day labels, selected-day affordance, and horizontal snap behavior.
 

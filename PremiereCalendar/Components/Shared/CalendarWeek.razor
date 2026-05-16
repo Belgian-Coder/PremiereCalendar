@@ -8,11 +8,17 @@
             <button class="filter-open-button"
                     type="button"
                     title="Open filters"
-                    aria-label="Open filters"
+                    aria-label="@FilterButtonAriaLabel()"
                     @onclick="OnOpenFilters">
                 <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
                     <path d="M4 5h16l-6.2 7.1v5.1l-3.6 1.8v-6.9L4 5Z" />
                 </svg>
+                @if (ActiveFilterCount > 0)
+                {
+                    <span class="filter-count-badge" data-testid="active-filter-count" aria-hidden="true">
+                        @ActiveFilterCount.ToString(CultureInfo.InvariantCulture)
+                    </span>
+                }
                 <span class="visually-hidden">Filters</span>
             </button>
 
@@ -102,6 +108,9 @@
     public EventCallback OnOpenFilters { get; set; }
 
     [Parameter]
+    public int ActiveFilterCount { get; set; }
+
+    [Parameter]
     public DateOnly? SelectedDay { get; set; }
 
     [Parameter]
@@ -124,6 +133,17 @@
     private bool _focusSelectedDayButton;
 
     private IReadOnlyList<PremiereItem> SelectedDayItems => _dayGroups.TryGetValue(_selectedDay, out var group) ? group.Items : [];
+
+    private string FilterButtonAriaLabel()
+    {
+        if (ActiveFilterCount <= 0)
+        {
+            return "Open filters";
+        }
+
+        var noun = ActiveFilterCount == 1 ? "active filter" : "active filters";
+        return $"Open filters, {ActiveFilterCount.ToString(CultureInfo.InvariantCulture)} {noun}";
+    }
 
     protected override void OnParametersSet()
     {

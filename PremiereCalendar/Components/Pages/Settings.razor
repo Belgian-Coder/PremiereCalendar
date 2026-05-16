@@ -98,7 +98,7 @@
                             else
                             {
                                 <ol class="job-timeline">
-                                    @foreach (var job in _jobEvents.Take(6))
+                                    @foreach (var job in VisibleJobEvents())
                                     {
                                         <li>
                                             <span class="@JobStatusClass(job.Status)">@job.Status</span>
@@ -1140,6 +1140,15 @@
             BackgroundJobStatus.Skipped => "job-status skipped",
             _ => "job-status started"
         };
+    }
+
+    private IEnumerable<BackgroundJobEvent> VisibleJobEvents()
+    {
+        return _jobEvents
+            .OrderBy(entry => entry.Status == BackgroundJobStatus.Failed ? 0 : 1)
+            .ThenByDescending(entry => entry.OccurredUtc)
+            .ThenBy(entry => entry.JobName, StringComparer.Ordinal)
+            .Take(6);
     }
 
     private static string FormatLocalTimestamp(DateTimeOffset value)

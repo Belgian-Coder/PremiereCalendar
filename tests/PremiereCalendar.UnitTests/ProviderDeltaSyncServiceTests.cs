@@ -59,10 +59,38 @@ public sealed class ProviderDeltaSyncServiceTests
         await service.RunOnceSafelyAsync(CancellationToken.None);
 
         var events = await timeline.GetRecentAsync(CancellationToken.None);
-        Assert.Contains(events, entry =>
-            entry.Status == BackgroundJobStatus.Failed
-            && entry.Message.Contains("TMDb", StringComparison.Ordinal));
+        var failure = Assert.Single(events, entry => entry.Status == BackgroundJobStatus.Failed);
+        Assert.Contains("TMDb change tracking timed out", failure.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(events, entry => entry.Status == BackgroundJobStatus.Succeeded);
+    }
+
+    [Fact]
+    public async Task RunOnceAsync_TmdbLookbackUsesInclusiveFourteenDayRange()
+    {
+        var tmdb = new RecordingTmdbClient();
+        var service = new ProviderDeltaSyncService(
+            tmdb,
+            new EmptyTvmazeClient(),
+            new InMemoryProviderCacheStateStore(),
+            new FixedOptionsMonitor<ProviderDeltaSyncOptions>(new ProviderDeltaSyncOptions
+            {
+                Enabled = true,
+                RunOnStartup = true,
+                StartupDelaySeconds = 0,
+                WakeIntervalMinutes = 15,
+                TmdbLookbackDays = 14,
+                UseTmdbChanges = true,
+                UseTvmazeUpdates = false
+            }),
+            new FixedTimeProvider(DateTimeOffset.Parse("2026-05-16T12:00:00Z")),
+            NullLogger<ProviderDeltaSyncService>.Instance);
+
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(new DateOnly(2026, 5, 3), tmdb.MovieStart);
+        Assert.Equal(new DateOnly(2026, 5, 16), tmdb.MovieEnd);
+        Assert.Equal(new DateOnly(2026, 5, 3), tmdb.TvStart);
+        Assert.Equal(new DateOnly(2026, 5, 16), tmdb.TvEnd);
     }
 
     private sealed class FixedOptionsMonitor<T> : IOptionsMonitor<T>
@@ -134,6 +162,14 @@ public sealed class ProviderDeltaSyncServiceTests
         }
     }
 
+    private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow()
+        {
+            return utcNow;
+        }
+    }
+
     private sealed class TimeoutTmdbClient : ITmdbClient
     {
         public int ChangedMovieCalls { get; private set; }
@@ -154,6 +190,55 @@ public sealed class ProviderDeltaSyncServiceTests
             CancellationToken cancellationToken,
             bool forceRefresh = false)
         {
+            return Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
+        }
+
+        public Task<IReadOnlyList<TmdbTvDiscoverItem>> DiscoverTvAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public IAsyncEnumerable<TmdbDiscoverBatch<TmdbTvDiscoverItem>> StreamDiscoverTvAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<IReadOnlyList<TmdbTvDiscoverItem>> DiscoverTvByNetworksAsync(DateOnly start, DateOnly end, IReadOnlyList<int> networkIds, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<IReadOnlyList<TmdbMovieDiscoverItem>> DiscoverMoviesAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public IAsyncEnumerable<TmdbDiscoverBatch<TmdbMovieDiscoverItem>> StreamDiscoverMoviesAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<TmdbDetailsWithExtras?> GetTvDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<int?> FindTmdbIdByExternalIdAsync(PremiereMediaType mediaType, string externalId, string externalSource, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<IReadOnlyList<TmdbTitleSearchResult>> SearchTitlesAsync(PremiereMediaType mediaType, string query, int? year, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<IReadOnlyList<TmdbGenre>> GetGenresAsync(PremiereMediaType mediaType, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<IReadOnlyList<TmdbConfigurationLanguage>> GetLanguagesAsync(CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<IReadOnlyList<TmdbConfigurationCountry>> GetCountriesAsync(CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(PremiereMediaType mediaType, string region, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<TmdbCertificationResponse?> GetCertificationsAsync(PremiereMediaType mediaType, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+        public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
+    }
+
+    private sealed class RecordingTmdbClient : ITmdbClient
+    {
+        public DateOnly? MovieStart { get; private set; }
+
+        public DateOnly? MovieEnd { get; private set; }
+
+        public DateOnly? TvStart { get; private set; }
+
+        public DateOnly? TvEnd { get; private set; }
+
+        public Task<IReadOnlyList<TmdbChangedItem>> GetChangedMovieIdsAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            MovieStart = start;
+            MovieEnd = end;
+            return Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
+        }
+
+        public Task<IReadOnlyList<TmdbChangedItem>> GetChangedTvIdsAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            TvStart = start;
+            TvEnd = end;
             return Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
         }
 

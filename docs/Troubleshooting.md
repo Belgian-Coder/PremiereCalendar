@@ -9,7 +9,7 @@ Use this page when something looks wrong. Start at the top.
 3. Check that TMDb is configured.
 4. Click Save.
 5. Go back to the calendar.
-6. Click Refresh.
+6. Click Refresh sources.
 
 If the app is installed as a service, also open:
 
@@ -27,9 +27,10 @@ You should see a healthy response.
 | Next day | Right Arrow |
 | Yesterday from top edge | Keep scrolling upward |
 | Tomorrow from bottom edge | Keep scrolling downward |
-| Show source details | Show sources |
+| Show source details | Source details |
 | Hide source details | Hide sources |
 | Open filters | Filter button |
+| Open actions | Ctrl+K or Actions |
 | Open settings | Cog icon |
 
 Arrow keys are ignored while you type in an input field.
@@ -38,23 +39,23 @@ Arrow keys are ignored while you type in an input field.
 
 | Problem | What to do |
 | --- | --- |
-| No cards load | Add a TMDb token in Settings, save, then click Refresh |
-| Refresh seems slow | Wait for the 30-second budget, then click Show sources |
+| No cards load | Add a TMDb token in Settings, save, then click Refresh sources |
+| Refresh seems slow | Wait for the foreground budget, then open Source details or check Settings > Local status |
 | TVmaze is always slow | Use new-series mode, choose fewer languages, or disable TVmaze schedule discovery |
 | Watchmode shows no cards | That is expected; Watchmode is used as availability fallback, not broad discovery |
-| IMDb scores are missing | Wait for the IMDb dataset import to finish, then Refresh |
+| IMDb scores are missing | Wait for the IMDb dataset import to finish, then click Refresh sources |
 | Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key; free OMDb keys can hit daily limits |
-| Posters are missing | Check artwork provider settings, then Refresh |
+| Posters are missing | Check artwork provider settings, then click Refresh sources |
 | Settings do not match `appsettings.json` | The Settings page wins; change values in the app |
 | Sonarr add fails | The series needs a TVDB ID and valid Sonarr settings |
 | Radarr add fails | Check Radarr URL, API key, root folder, and quality profile |
 
 ## What The Source Panel Means
 
-The Loaded-source filters box is collapsed by default.
+Source diagnostics are compact by default and appear only when there is useful source progress or cached source detail to show.
 
 - The number is the total cards found.
-- Click Show sources to see each provider.
+- Click Source details to see each provider.
 - A provider with `0 cards` did not add matching cards for the current filters.
 - A timed-out provider was skipped so the page could finish.
 - Clicking a source chip filters the visible cards to that source only.
@@ -63,7 +64,7 @@ The Loaded-source filters box is collapsed by default.
 
 Calendar, image, IMDb rating, OMDb response, and provider-sync cache data are stored on disk. They survive app restarts, crashes, and updates.
 
-Refresh does not delete everything. It checks the week again and reuses useful existing details when it can.
+Refresh sources does not delete everything. It checks the week again and reuses useful existing details when it can.
 
 If the cache looks wrong, delete only the affected week under:
 
@@ -128,4 +129,4 @@ Send:
 - the page URL,
 - which day is selected,
 - which filters are enabled,
-- what the Loaded-source filters panel says after clicking Show sources.
+- what Source details says after opening it.

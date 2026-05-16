@@ -193,6 +193,45 @@ public sealed class SettingsPageTests : BunitContext
     }
 
     [Fact]
+    public async Task SettingsPage_JobTimelineKeepsProviderDeltaFailureVisibleAboveRoutineJobs()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+        var timeline = Services.GetRequiredService<BackgroundJobTimelineService>();
+        var failedAt = DateTimeOffset.Parse("2026-05-16T09:00:00Z");
+
+        await timeline.RecordAsync(
+            "Provider delta sync",
+            BackgroundJobStatus.Failed,
+            "TMDb change tracking timed out after 20 seconds.",
+            failedAt,
+            TimeSpan.FromSeconds(20),
+            CancellationToken.None);
+        for (var index = 0; index < 8; index++)
+        {
+            await timeline.RecordAsync(
+                "Adjacent week prefetch",
+                BackgroundJobStatus.Succeeded,
+                $"Prefetched adjacent week {index.ToString(System.Globalization.CultureInfo.InvariantCulture)}.",
+                failedAt.AddMinutes(index + 1),
+                TimeSpan.FromMilliseconds(100),
+                CancellationToken.None);
+        }
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            var jobTimeline = component.Find(".job-timeline");
+            var firstJob = Assert.Single(jobTimeline.QuerySelectorAll("li").Take(1));
+            Assert.Contains("Provider delta sync", firstJob.TextContent);
+            Assert.Contains("TMDb change tracking timed out", firstJob.TextContent);
+        });
+    }
+
+    [Fact]
     public void SettingsPage_ShowsNoReleaseMessageWhenGitHubHasNoPublishedReleases()
     {
         Services.AddSingleton(new ReleaseUpdateService(

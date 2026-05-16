@@ -27,7 +27,7 @@
 
 <div class="calendar-shell">
     @{
-        var activeFilterLabels = ActiveFilterLabels();
+        var activeFilterCount = ActiveFilterCount();
         var scopeBadgeText = CalendarScopeBadgeText();
         var hasVisibleItemsForCurrentWeek = HasVisibleItemsForCurrentWeek(_visibleItems);
     }
@@ -50,24 +50,6 @@
                 </span>
             }
 
-            @if (activeFilterLabels.Count > 0)
-            {
-                <section class="active-filter-strip compact" data-testid="active-filter-strip" aria-label="Active filters">
-                    <span class="active-filter-title">Filters</span>
-                    @foreach (var label in activeFilterLabels)
-                    {
-                        <span class="active-filter-chip">@label</span>
-                    }
-                    <button class="text-command"
-                            type="button"
-                            title="Clear active filters"
-                            aria-label="Clear active filters"
-                            data-focus-restore="calendar-heading"
-                            @onclick="ClearActiveFiltersAsync">
-                        Clear
-                    </button>
-                </section>
-            }
         </div>
 
         <div class="calendar-command-actions" aria-label="Calendar controls">
@@ -84,74 +66,72 @@
             </div>
 
             <div class="button-group refresh-mode-group" role="group" aria-label="Refresh mode">
-                <button class="tool-button compact-command" title="Quick refresh" @onclick="QuickRefreshAsync" aria-busy="@_isLoading">
-                    Quick
+                <button class="tool-button compact-command" title="Update visible week" aria-label="Update visible week" @onclick="QuickRefreshAsync" aria-busy="@_isLoading">
+                    Update
                 </button>
-                <button class="tool-button primary-action compact-command" title="Full provider refresh" @onclick="RefreshAsync" aria-busy="@_isLoading">
-                    Full
-                </button>
-            </div>
-
-            <div class="preset-command-row" aria-label="Saved filter presets">
-                <input class="preset-name-input"
-                       aria-label="Preset name"
-                       placeholder="Preset name"
-                       @bind="_presetName"
-                       @bind:event="oninput" />
-                <button class="tool-button compact-command"
-                        type="button"
-                        title="Save current filters as preset"
-                        @onclick="SavePresetAsync"
-                        disabled="@_isSavingPreset">
-                    Save
-                </button>
-                <select class="preset-select"
-                        aria-label="Saved filter presets"
-                        @bind="_selectedPresetId">
-                    <option value="">Presets</option>
-                    @foreach (var preset in _filterPresets)
-                    {
-                        <option value="@preset.Id">@preset.Name</option>
-                    }
-                </select>
-                <button class="tool-button compact-command"
-                        type="button"
-                        title="Apply saved filter preset"
-                        @onclick="ApplySelectedPresetAsync"
-                        disabled="@string.IsNullOrWhiteSpace(_selectedPresetId)">
-                    Apply
+                <button class="tool-button primary-action compact-command" title="Refresh sources from providers" aria-label="Refresh sources from providers" @onclick="RefreshAsync" aria-busy="@_isLoading">
+                    Refresh sources
                 </button>
             </div>
 
             <button class="tool-button compact-command"
                     type="button"
-                    title="Open command palette (Ctrl+K)"
-                    aria-label="Open command palette"
+                    title="Open actions (Ctrl+K)"
+                    aria-label="Open actions"
                     data-command-palette-toggle
                     aria-expanded="@AriaExpanded(_isCommandPaletteOpen)"
                     aria-controls="calendar-command-palette"
                     @onclick="ToggleCommandPalette">
-                <span class="command-palette-label-full">Command</span>
-                <span class="command-palette-label-short" aria-hidden="true">Cmd</span>
+                <span class="command-palette-label-full">Actions</span>
+                <span class="command-palette-label-short" aria-hidden="true">More</span>
             </button>
         </div>
 
         @if (_isCommandPaletteOpen)
         {
-            <section class="command-palette" id="calendar-command-palette" data-testid="command-palette" data-command-palette-panel aria-label="Command palette">
-                <button type="button" class="command-palette-item" @onclick="QuickRefreshFromCommandPaletteAsync">Quick refresh</button>
-                <button type="button" class="command-palette-item" @onclick="FullRefreshFromCommandPaletteAsync">Full refresh</button>
+            <section class="command-palette" id="calendar-command-palette" data-testid="command-palette" data-command-palette-panel aria-label="Actions">
+                <button type="button" class="command-palette-item" @onclick="QuickRefreshFromCommandPaletteAsync">Update visible week</button>
+                <button type="button" class="command-palette-item" @onclick="FullRefreshFromCommandPaletteAsync">Refresh sources</button>
                 <button type="button" class="command-palette-item" @onclick="OpenFilters">Filters</button>
                 <button type="button" class="command-palette-item" @onclick="CurrentWeekFromCommandPaletteAsync">This week</button>
                 <button type="button" class="command-palette-item" @onclick="OpenSettings">Settings</button>
-                @foreach (var preset in _filterPresets)
-                {
-                    <button type="button" class="command-palette-item" @onclick="() => ApplyPresetAsync(preset)">@preset.Name</button>
-                }
+                <div class="command-palette-presets" aria-label="Saved filter presets">
+                    <strong>Saved filter presets</strong>
+                    <input class="preset-name-input"
+                           aria-label="Preset name"
+                           placeholder="Preset name"
+                           @bind="_presetName"
+                           @bind:event="oninput" />
+                    <div class="command-palette-preset-actions">
+                        <button class="tool-button compact-command"
+                                type="button"
+                                title="Save current filters as preset"
+                                @onclick="SavePresetAsync"
+                                disabled="@_isSavingPreset">
+                            Save preset
+                        </button>
+                        <select class="preset-select"
+                                aria-label="Saved filter presets"
+                                @bind="_selectedPresetId">
+                            <option value="">Choose preset</option>
+                            @foreach (var preset in _filterPresets)
+                            {
+                                <option value="@preset.Id">@preset.Name</option>
+                            }
+                        </select>
+                        <button class="tool-button compact-command"
+                                type="button"
+                                title="Apply saved filter preset"
+                                @onclick="ApplySelectedPresetAsync"
+                                disabled="@string.IsNullOrWhiteSpace(_selectedPresetId)">
+                            Apply preset
+                        </button>
+                    </div>
+                </div>
             </section>
         }
 
-        @if (_loadProgress.Count > 0)
+        @if (ShouldShowQueryProgress())
         {
             <section class="@QueryProgressPanelClass()" data-testid="query-progress" aria-live="polite">
                 <div class="query-progress-heading">
@@ -172,12 +152,12 @@
                     }
                     <button type="button"
                             class="query-progress-toggle"
-                            title="@(_isQueryProgressExpanded ? "Hide loaded-source filters" : "Show loaded-source filters")"
+                            title="@(_isQueryProgressExpanded ? "Hide loaded-source details" : "Show loaded-source details")"
                             aria-expanded="@AriaExpanded(_isQueryProgressExpanded)"
                             aria-controls="@QueryProgressDetailsId()"
                             data-testid="query-progress-toggle"
                             @onclick="ToggleQueryProgressDetails">
-                        @(_isQueryProgressExpanded ? "Hide" : "Details")
+                        @(_isQueryProgressExpanded ? "Hide sources" : "Source details")
                     </button>
                 </div>
                 @if (_isQueryProgressExpanded)
@@ -291,6 +271,7 @@
                       ImageCacheVersion="@_imageCacheVersion"
                       RefreshImageCache="_refreshImageCache"
                       OnOpenFilters="OpenFilters"
+                      ActiveFilterCount="@activeFilterCount"
                       SelectedDay="_selectedDay"
                       OnSelectedDayChanged="OnSelectedDayChanged"
                       OnAdjacentCalendarDayRequested="NavigateToCalendarDayAsync"
@@ -1475,6 +1456,26 @@
         return _isQueryProgressExpanded ? "query-progress" : "query-progress compact";
     }
 
+    private bool ShouldShowQueryProgress()
+    {
+        var entries = GroupedLoadProgressEntries();
+        var hasMeaningfulSourceEntry = entries.Any(entry =>
+            !entry.IsFinal
+            || !string.Equals(entry.SourceName, "Complete", StringComparison.Ordinal));
+        if (!hasMeaningfulSourceEntry)
+        {
+            return false;
+        }
+
+        if (_isQueryProgressExpanded || !string.IsNullOrWhiteSpace(_sourceProgressFilter))
+        {
+            return true;
+        }
+
+        return _items.Count > 0
+            || entries.Any(entry => entry.SourceItemCount > 0 || entry.TotalItemCount > 0);
+    }
+
     private string QueryProgressSummaryText()
     {
         if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
@@ -1829,29 +1830,6 @@
         return Task.CompletedTask;
     }
 
-    private async Task ClearActiveFiltersAsync()
-    {
-        await FocusCalendarHeadingAsync();
-        var weekStart = _filters.WeekStart;
-        var selectedDay = _selectedDay;
-        _filters = new CalendarFilters
-        {
-            WeekStart = weekStart
-        };
-        _selectedDay = selectedDay;
-        CalendarFilterState.ApplyPageMode(_filters, _pageMode);
-        RecalculateVisibleItems();
-        QueueCalendarHeadingFocus();
-        var navigationChanged = UpdateUrl(replace: true);
-        await PersistCurrentFiltersAsync();
-        if (!navigationChanged)
-        {
-            await LoadAsync();
-        }
-
-        await FocusCalendarHeadingAsync();
-    }
-
     private async Task SaveFilters(CalendarFilters savedFilters)
     {
         var weekStart = _filters.WeekStart;
@@ -1873,197 +1851,114 @@
         }
     }
 
-    private IReadOnlyList<string> ActiveFilterLabels()
+    private int ActiveFilterCount()
     {
-        var labels = new List<string>();
+        var count = 0;
         if (_pageMode == CalendarPageMode.All && MediaValue(_filters) != "all")
         {
-            labels.Add(MediaValue(_filters) == "series" ? "Series only" : "Movies only");
+            count++;
         }
 
         if (_filters.SortMode != PremiereSortMode.PremiereDate)
         {
-            labels.Add($"Sort: {SortModeLabel(_filters.SortMode)}");
+            count++;
         }
 
         if (_filters.SortDirection != SortDirection.Ascending)
         {
-            labels.Add("Descending");
+            count++;
         }
 
         if (_filters.ScoreSource != ScoreSource.Tmdb)
         {
-            labels.Add($"Score: {ScoreSourceLabel(_filters.ScoreSource)}");
+            count++;
         }
 
         if (_filters.MinScore > 0 || _filters.MaxScore < 10)
         {
-            labels.Add($"Score {_filters.MinScore.ToString("0.0", CultureInfo.InvariantCulture)}-{_filters.MaxScore.ToString("0.0", CultureInfo.InvariantCulture)}");
+            count++;
         }
 
         if (_filters.MinVoteCount > 0)
         {
-            labels.Add($"{_filters.MinVoteCount.ToString("N0", CultureInfo.InvariantCulture)}+ votes");
+            count++;
         }
 
-        AddGlobalFilterLabels(labels, _filters);
+        count += GlobalFilterCount(_filters);
 
         if (_pageMode is CalendarPageMode.All or CalendarPageMode.Series)
         {
-            AddMediaFilterLabels(labels, "Series", _filters.SeriesFilters);
+            count += MediaFilterCount(_filters.SeriesFilters, _filters);
         }
 
         if (_pageMode is CalendarPageMode.All or CalendarPageMode.Movies)
         {
-            AddMediaFilterLabels(labels, "Movies", _filters.MovieFilters);
+            count += MediaFilterCount(_filters.MovieFilters, _filters);
         }
 
-        return labels;
+        return count;
     }
 
-    private static void AddGlobalFilterLabels(List<string> labels, CalendarFilters filters)
+    private static int GlobalFilterCount(CalendarFilters filters)
     {
+        var count = 0;
         if (filters.Language != LanguageFilter.Both)
         {
-            labels.Add($"All: language {LanguageValue(filters.Language)}");
+            count++;
         }
 
         if (filters.OriginGroup != OriginGroupFilter.AllConfigured)
         {
-            labels.Add($"All: origin {OriginGroupLabel(filters.OriginGroup)}");
+            count++;
         }
 
-        AddCountLabel(labels, "All", "genre", filters.GenreIds.Count);
-        AddCountLabel(labels, "All", "source", filters.SelectedSources.Count);
-
-        if (!string.IsNullOrWhiteSpace(filters.NetworkText))
-        {
-            labels.Add($"All: source \"{filters.NetworkText.Trim()}\"");
-        }
-
-        if (!string.IsNullOrWhiteSpace(filters.SearchText))
-        {
-            labels.Add($"All: title \"{filters.SearchText.Trim()}\"");
-        }
-
-        if (!string.IsNullOrWhiteSpace(filters.KeywordText))
-        {
-            labels.Add($"All: keywords \"{filters.KeywordText.Trim()}\"");
-        }
-
-        if (filters.RuntimeMinMinutes > 0 || filters.RuntimeMaxMinutes < 360)
-        {
-            labels.Add($"All: {filters.RuntimeMinMinutes.ToString(CultureInfo.InvariantCulture)}-{filters.RuntimeMaxMinutes.ToString(CultureInfo.InvariantCulture)} min");
-        }
+        count += CountCriteria(filters.GenreIds.Count > 0);
+        count += CountCriteria(filters.SelectedSources.Count > 0);
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.NetworkText));
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.SearchText));
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.KeywordText));
+        count += CountCriteria(HasRuntimeFilter(filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes));
+        return count;
     }
 
-    private static void AddMediaFilterLabels(List<string> labels, string label, MediaFilterSet filters)
+    private static int MediaFilterCount(MediaFilterSet filters, CalendarFilters globalFilters)
     {
-        if (!filters.HasCriteria)
-        {
-            return;
-        }
-
-        if (filters.SeriesDateMode == SeriesDateMode.NewSeriesOnly)
-        {
-            labels.Add($"{label}: new only");
-        }
-
-        AddCountLabel(labels, label, "language", filters.OriginalLanguages.Count);
-        AddCountLabel(labels, label, "country", filters.OriginCountries.Count);
-        AddCountLabel(labels, label, "genre", filters.GenreIds.Count);
-        AddCountLabel(labels, label, "source", filters.SelectedSources.Count);
-        if (!string.IsNullOrWhiteSpace(filters.WatchRegion))
-        {
-            labels.Add($"{label}: watch region {filters.WatchRegion.Trim().ToUpperInvariant()}");
-        }
-
-        AddCountLabel(labels, label, "availability", filters.MonetizationTypes.Count);
-        AddCountLabel(labels, label, "release type", filters.MovieReleaseTypes.Count);
-        AddCountLabel(labels, label, "certification", filters.Certifications.Count);
-        if (!string.IsNullOrWhiteSpace(filters.CertificationCountry))
-        {
-            labels.Add($"{label}: certification country {filters.CertificationCountry.Trim().ToUpperInvariant()}");
-        }
-
-        AddCountLabel(labels, label, "status", filters.TvStatuses.Count);
-        AddCountLabel(labels, label, "type", filters.TvTypes.Count);
-
-        if (!string.IsNullOrWhiteSpace(filters.SearchText))
-        {
-            labels.Add($"{label}: title \"{filters.SearchText.Trim()}\"");
-        }
-
-        if (!string.IsNullOrWhiteSpace(filters.KeywordText))
-        {
-            labels.Add($"{label}: keywords \"{filters.KeywordText.Trim()}\"");
-        }
-
-        if (!string.IsNullOrWhiteSpace(filters.SourceText))
-        {
-            labels.Add($"{label}: source \"{filters.SourceText.Trim()}\"");
-        }
-
-        if (filters.RuntimeMinMinutes > 0 || filters.RuntimeMaxMinutes < 360)
-        {
-            labels.Add($"{label}: {filters.RuntimeMinMinutes.ToString(CultureInfo.InvariantCulture)}-{filters.RuntimeMaxMinutes.ToString(CultureInfo.InvariantCulture)} min");
-        }
+        var count = 0;
+        count += CountCriteria(filters.OriginalLanguages.Count > 0);
+        count += CountCriteria(filters.OriginCountries.Count > 0);
+        count += CountCriteria(filters.GenreIds.Count > 0);
+        count += CountCriteria(filters.SelectedSources.Count > 0);
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.WatchRegion));
+        count += CountCriteria(filters.MonetizationTypes.Count > 0);
+        count += CountCriteria(filters.MovieReleaseTypes.Count > 0);
+        count += CountCriteria(filters.Certifications.Count > 0);
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.CertificationCountry));
+        count += CountCriteria(filters.TvStatuses.Count > 0);
+        count += CountCriteria(filters.TvTypes.Count > 0);
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.SearchText));
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.KeywordText));
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.SourceText));
+        count += CountCriteria(
+            HasRuntimeFilter(filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes)
+            && !MatchesGlobalRuntimeFilter(filters, globalFilters));
+        return count;
     }
 
-    private static void AddCountLabel(List<string> labels, string mediaLabel, string noun, int count)
+    private static int CountCriteria(bool condition)
     {
-        if (count > 0)
-        {
-            var filterName = count == 1 ? noun : PluralizeFilterNoun(noun);
-            labels.Add($"{mediaLabel}: {count.ToString(CultureInfo.InvariantCulture)} {filterName}");
-        }
+        return condition ? 1 : 0;
     }
 
-    private static string PluralizeFilterNoun(string noun)
+    private static bool MatchesGlobalRuntimeFilter(MediaFilterSet filters, CalendarFilters globalFilters)
     {
-        return noun switch
-        {
-            "country" => "countries",
-            "availability" => "availabilities",
-            "status" => "statuses",
-            _ => $"{noun}s"
-        };
+        return HasRuntimeFilter(globalFilters.RuntimeMinMinutes, globalFilters.RuntimeMaxMinutes)
+            && filters.RuntimeMinMinutes == globalFilters.RuntimeMinMinutes
+            && filters.RuntimeMaxMinutes == globalFilters.RuntimeMaxMinutes;
     }
 
-    private static string SortModeLabel(PremiereSortMode mode)
+    private static bool HasRuntimeFilter(int minMinutes, int maxMinutes)
     {
-        return mode switch
-        {
-            PremiereSortMode.Title => "title",
-            PremiereSortMode.Score => "score",
-            PremiereSortMode.VoteCount => "votes",
-            PremiereSortMode.Runtime => "runtime",
-            _ => "date"
-        };
-    }
-
-    private static string ScoreSourceLabel(ScoreSource source)
-    {
-        return source switch
-        {
-            ScoreSource.Imdb => "IMDb",
-            ScoreSource.RottenTomatoes => "RT",
-            ScoreSource.Metacritic => "Metacritic",
-            _ => "TMDb"
-        };
-    }
-
-    private static string OriginGroupLabel(OriginGroupFilter originGroup)
-    {
-        return originGroup switch
-        {
-            OriginGroupFilter.Belgium => "Belgium",
-            OriginGroupFilter.UnitedStates => "United States",
-            OriginGroupFilter.UnitedKingdom => "United Kingdom",
-            OriginGroupFilter.Australia => "Australia",
-            OriginGroupFilter.DutchLanguage => "Dutch language",
-            _ => "all configured"
-        };
+        return minMinutes > 0 || maxMinutes < 360;
     }
 
     private async Task PreviousWeek()

@@ -95,13 +95,13 @@ To build and install the service from the source tree:
 | Go to another week | Use Previous, This week, or Next |
 | Move from the top of a day to yesterday | Keep scrolling upward until the message appears |
 | Move from the bottom of a day to tomorrow | Keep scrolling downward until the message appears |
-| See which sources loaded | Click Sources or Details above the day strip |
+| See which sources loaded | Open Source details when source diagnostics are shown |
 | See cache age | Check the data freshness pill above the day strip |
-| Save filter combinations | Enter a preset name and click Save |
-| Apply a saved filter preset | Choose a preset and click Apply |
-| Open the command palette | Press Ctrl+K, or Cmd+K on macOS |
-| Close the command palette | Press Escape |
-| Change filters | Click the filter button |
+| Save filter combinations | Open Actions, enter a preset name, and click Save preset |
+| Apply a saved filter preset | Open Actions, choose a preset, and click Apply preset |
+| Open Actions | Press Ctrl+K, or Cmd+K on macOS |
+| Close Actions | Press Escape |
+| Change filters | Click the filter button; a small badge shows how many filters are active |
 | Change settings | Click the cog icon |
 
 The arrow keys do not take over while you are typing in a text box.
@@ -148,7 +148,7 @@ All, Series, and Movies keep separate synced views. A browser on Series follows 
 
 The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync groups, and small provider sync markers on disk. This means cached data survives restarts, crashes, and updates.
 
-Use Quick when you want to reuse fresh local cache where possible. Use Full when you want the visible week checked against providers again. Full keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
+Use Update when you want to reuse fresh local cache where possible. Use Refresh sources when you want the visible week checked against providers again. Refresh sources keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 
 Settings includes a Local status center with a cache inspector, background job timeline, release/update checker, and settings backup/restore box. The release checker only reports available GitHub releases; it never installs updates silently.
 
@@ -156,13 +156,13 @@ Settings includes a Local status center with a cache inspector, background job t
 
 | Problem | Try this |
 | --- | --- |
-| No cards load | Add a TMDb token in Settings, then click Refresh |
-| IMDb scores are missing | Wait for the IMDb dataset import to finish, then Refresh |
+| No cards load | Add a TMDb token in Settings, then click Refresh sources |
+| IMDb scores are missing | Wait for the IMDb dataset import to finish, then click Refresh sources |
 | Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key; OMDb free keys can hit daily limits |
-| A source looks slow | Click Show sources to see which provider is still loading |
+| A source looks slow | Open Settings and check the Local status background job timeline |
 | TVmaze is slow | Use narrower filters or disable TVmaze schedule discovery in Settings |
 | Settings look wrong | Change them in the app Settings page, not in `appsettings.json` |
-| Posters are missing | Check optional artwork providers, then Refresh |
+| Posters are missing | Check optional artwork providers, then click Refresh sources |
 
 More help: [Troubleshooting](docs/Troubleshooting.md).
 
