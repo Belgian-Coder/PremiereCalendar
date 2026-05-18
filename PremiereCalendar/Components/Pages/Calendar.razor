@@ -1909,6 +1909,7 @@
     private static int MediaFilterCount(MediaFilterSet filters, CalendarFilters globalFilters)
     {
         var count = 0;
+        count += CountCriteria(filters.SeriesDateMode != SeriesDateMode.AllEpisodes);
         count += CountCriteria(
             filters.OriginalLanguages.Count > 0
             && !MatchesGlobalLanguageFilter(filters, globalFilters));

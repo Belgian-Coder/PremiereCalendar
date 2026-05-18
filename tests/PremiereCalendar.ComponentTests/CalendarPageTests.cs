@@ -1304,6 +1304,22 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_FilterButtonCountIncludesSeriesScope()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-11&day=2026-05-17&seriesScope=new&seriesLang=en,nl");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("2", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+        });
+    }
+
+    [Fact]
     public void CalendarPage_FilterButtonCountIncludesGlobalAndMediaFilters()
     {
         var service = new FakePremiereService();
