@@ -73,6 +73,15 @@ public sealed class FilterStorageQueryComposerTests
     }
 
     [Fact]
+    public void HasMeaningfulFilterQuery_IgnoresUnsupportedMediaSpecificKeys()
+    {
+        var result = FilterStorageQueryComposer.HasMeaningfulFilterQuery(
+            "?movieScope=new&seriesReleaseTypes=3&seriesCertifications=US%3APG-13&seriesCertificationCountry=US&movieStatuses=Returning%20Series&movieTypes=Scripted");
+
+        Assert.False(result);
+    }
+
+    [Fact]
     public void HasMeaningfulFilterQuery_UsesEarlierNonBlankDuplicateValues()
     {
         var result = FilterStorageQueryComposer.HasMeaningfulFilterQuery("?seriesLang=nl&seriesLang=");
@@ -120,6 +129,22 @@ public sealed class FilterStorageQueryComposerTests
         Assert.Equal("2026-05-11", query["week"].ToString());
         Assert.Equal("2026-05-13", query["day"].ToString());
         Assert.Equal("nl", query["seriesLang"].ToString());
+    }
+
+    [Fact]
+    public void ComposeRestoredQuery_DropsUnsupportedMediaSpecificKeys()
+    {
+        var result = FilterStorageQueryComposer.ComposeRestoredQuery(
+            "?week=2026-05-11",
+            "week=2026-05-04&seriesLang=nl&movieScope=new&seriesReleaseTypes=3&movieStatuses=Returning%20Series");
+
+        var query = QueryHelpers.ParseQuery($"?{result}");
+
+        Assert.Equal("2026-05-11", query["week"].ToString());
+        Assert.Equal("nl", query["seriesLang"].ToString());
+        Assert.False(query.ContainsKey("movieScope"));
+        Assert.False(query.ContainsKey("seriesReleaseTypes"));
+        Assert.False(query.ContainsKey("movieStatuses"));
     }
 
     [Fact]

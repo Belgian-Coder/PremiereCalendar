@@ -13,6 +13,7 @@
 @inject SettingsBackupService SettingsBackupService
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
+@inject Microsoft.Extensions.Logging.ILogger<PremiereCalendar.Components.Pages.Settings> Logger
 
 <PageTitle>Settings</PageTitle>
 
@@ -1277,6 +1278,13 @@
         }
         catch (Exception ex) when (ex is InvalidOperationException or JSException or JSDisconnectedException)
         {
+            _viewSyncLoaded = true;
+            _viewSyncEnabled = false;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "View sync overview load failed.");
             _viewSyncLoaded = true;
             _viewSyncEnabled = false;
             await InvokeAsync(StateHasChanged);

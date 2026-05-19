@@ -119,8 +119,16 @@ Latest local Playwright validation on 2026-05-16 after the quiet filter/header r
 - README screenshots were regenerated from the deployed app at `http://localhost:5298` and saved under `docs/images/readme/`.
 - Desktop checks covered `/series?week=2026-05-11` in dark and light themes, `/movies?week=2026-05-11` in dark theme, the movie filter pane in dark theme, and `/settings` with the Local status center.
 - Mobile `390x844` checks covered `/series?week=2026-05-11`, including the compact day jump strip and command-bar controls.
-- Filter checks covered active filter URLs, verified `q=24` renders badge `1`, verified `q=24` plus runtime renders badge `2`, verified `seriesScope=new` plus `seriesLang=en,nl` renders badge `2`, verified sort-only changes do not render a filter badge, verified the old active-filter chip strip was absent, and verified there was no header-level clear-filters button.
+- Filter checks covered active filter URLs, verified `q=24` renders badge `1`, verified `q=24` plus runtime renders badge `2`, verified `seriesScope=new` plus `seriesLang=en,nl` renders badge `2`, verified stale unsupported cross-media query parameters do not inflate the filter badge or saved-filter restore state, verified sort-only changes do not render a filter badge, verified the old active-filter chip strip was absent, and verified there was no header-level clear-filters button.
 - Filter pane checks verified runtime fields and the in-pane clear controls are present.
 - Actions palette checks pressed `Ctrl+K`, verified the palette opened, pressed Escape, and verified the palette closed.
 - Settings checks verified the Local status center rendered and provider delta failures stay visible above routine job entries.
 - Layout checks reported no horizontal overflow. The deployed first-viewport measurements were command bar `82.75px` and calendar top `209.125px` on desktop, and command bar `150.8125px` and calendar top `342.359375px` on mobile with source diagnostics visible.
+
+Additional deployed Playwright validation on 2026-05-19 after filter URL and view-sync hardening:
+
+- Desktop `/series?week=2026-05-11&day=2026-05-17&seriesScope=new&seriesLang=en,nl` rendered badge `2`, no horizontal overflow, no console errors, and preserved the two-card desktop grid.
+- Desktop `/movies?week=2026-05-11&movieScope=new&movieLang=en` rendered badge `1`, proving unsupported `movieScope` no longer inflates the count.
+- Mobile `390x844` `/series?week=2026-05-11&day=2026-05-17&seriesScope=new&seriesLang=en,nl` rendered badge `2`, no horizontal overflow, and no console errors.
+- Post-deploy health check returned `200 Healthy`; the Windows Service was `Running` with `Automatic` start type.
+- Regression tests now cover view-sync overview failures so optional sync storage issues do not break Calendar or Settings rendering.

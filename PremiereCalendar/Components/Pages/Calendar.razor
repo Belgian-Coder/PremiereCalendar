@@ -577,6 +577,11 @@
         {
             _viewSyncInitialized = false;
         }
+        catch (Exception ex)
+        {
+            _viewSyncInitialized = false;
+            Logger.LogWarning(ex, "View sync initialization failed.");
+        }
     }
 
     private async Task<bool> ApplyLatestSyncedUrlIfNeededAsync(string location)
@@ -1873,12 +1878,12 @@
 
         if (_pageMode is CalendarPageMode.All or CalendarPageMode.Series)
         {
-            count += MediaFilterCount(_filters.SeriesFilters, _filters);
+            count += MediaFilterCount(PremiereMediaType.Series, _filters.SeriesFilters, _filters);
         }
 
         if (_pageMode is CalendarPageMode.All or CalendarPageMode.Movies)
         {
-            count += MediaFilterCount(_filters.MovieFilters, _filters);
+            count += MediaFilterCount(PremiereMediaType.Movie, _filters.MovieFilters, _filters);
         }
 
         return count;
@@ -1906,10 +1911,10 @@
         return count;
     }
 
-    private static int MediaFilterCount(MediaFilterSet filters, CalendarFilters globalFilters)
+    private static int MediaFilterCount(PremiereMediaType mediaType, MediaFilterSet filters, CalendarFilters globalFilters)
     {
         var count = 0;
-        count += CountCriteria(filters.SeriesDateMode != SeriesDateMode.AllEpisodes);
+        count += CountCriteria(mediaType == PremiereMediaType.Series && filters.SeriesDateMode != SeriesDateMode.AllEpisodes);
         count += CountCriteria(
             filters.OriginalLanguages.Count > 0
             && !MatchesGlobalLanguageFilter(filters, globalFilters));
@@ -1923,10 +1928,12 @@
             !string.IsNullOrWhiteSpace(filters.WatchRegion)
             || (filters.SelectedSources.Count > 0 && !MatchesGlobalSourcesFilter(filters, globalFilters)));
         count += CountCriteria(filters.MonetizationTypes.Count > 0);
-        count += CountCriteria(filters.MovieReleaseTypes.Count > 0);
-        count += CountCriteria(filters.Certifications.Count > 0 || !string.IsNullOrWhiteSpace(filters.CertificationCountry));
-        count += CountCriteria(filters.TvStatuses.Count > 0);
-        count += CountCriteria(filters.TvTypes.Count > 0);
+        count += CountCriteria(mediaType == PremiereMediaType.Movie && filters.MovieReleaseTypes.Count > 0);
+        count += CountCriteria(
+            mediaType == PremiereMediaType.Movie
+            && (filters.Certifications.Count > 0 || !string.IsNullOrWhiteSpace(filters.CertificationCountry)));
+        count += CountCriteria(mediaType == PremiereMediaType.Series && filters.TvStatuses.Count > 0);
+        count += CountCriteria(mediaType == PremiereMediaType.Series && filters.TvTypes.Count > 0);
         count += CountCriteria(
             !string.IsNullOrWhiteSpace(filters.SearchText)
             && !MatchesGlobalSearchFilter(filters, globalFilters));
@@ -2174,8 +2181,8 @@
         _filters.KeywordText = QueryText(query, "keywords");
         _filters.SearchText = QueryText(query, "q");
 
-        ApplyMediaFilterQuery(query, "series", _filters.SeriesFilters);
-        ApplyMediaFilterQuery(query, "movie", _filters.MovieFilters);
+        ApplyMediaFilterQuery(query, PremiereMediaType.Series, "series", _filters.SeriesFilters);
+        ApplyMediaFilterQuery(query, PremiereMediaType.Movie, "movie", _filters.MovieFilters);
         ApplyLegacyMediaQuery(query);
         MirrorSingleMediaLanguageQueryForAllView(query);
         CalendarFilterState.Normalize(_filters);
@@ -2183,10 +2190,11 @@
 
     private void ApplyMediaFilterQuery(
         IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query,
+        PremiereMediaType mediaType,
         string prefix,
         MediaFilterSet filters)
     {
-        if (TryGet(query, $"{prefix}Scope", out var scope))
+        if (mediaType == PremiereMediaType.Series && TryGet(query, $"{prefix}Scope", out var scope))
         {
             filters.SeriesDateMode = ParseSeriesDateMode(scope);
         }
@@ -2210,11 +2218,19 @@
         filters.WatchRegion = QueryText(query, $"{prefix}WatchRegion").ToUpperInvariant();
         filters.SourceText = QueryText(query, $"{prefix}SourceText");
         filters.MonetizationTypes = ParseStringList(query, $"{prefix}Availabilities", ',');
-        filters.MovieReleaseTypes = ParseIntList(query, $"{prefix}ReleaseTypes");
-        filters.Certifications = ParseStringList(query, $"{prefix}Certifications", '|');
-        filters.CertificationCountry = QueryText(query, $"{prefix}CertificationCountry").ToUpperInvariant();
-        filters.TvStatuses = ParseStringList(query, $"{prefix}Statuses", '|');
-        filters.TvTypes = ParseStringList(query, $"{prefix}Types", '|');
+        if (mediaType == PremiereMediaType.Movie)
+        {
+            filters.MovieReleaseTypes = ParseIntList(query, $"{prefix}ReleaseTypes");
+            filters.Certifications = ParseStringList(query, $"{prefix}Certifications", '|');
+            filters.CertificationCountry = QueryText(query, $"{prefix}CertificationCountry").ToUpperInvariant();
+        }
+
+        if (mediaType == PremiereMediaType.Series)
+        {
+            filters.TvStatuses = ParseStringList(query, $"{prefix}Statuses", '|');
+            filters.TvTypes = ParseStringList(query, $"{prefix}Types", '|');
+        }
+
         filters.RuntimeMinMinutes = ParseInt(query, $"{prefix}RuntimeMin", filters.RuntimeMinMinutes);
         filters.RuntimeMaxMinutes = ParseInt(query, $"{prefix}RuntimeMax", filters.RuntimeMaxMinutes);
         filters.KeywordText = QueryText(query, $"{prefix}Keywords");
@@ -2525,20 +2541,24 @@
 
         if (mode is CalendarPageMode.All or CalendarPageMode.Series)
         {
-            AddMediaFilterParameters(parameters, "series", filters.SeriesFilters);
+            AddMediaFilterParameters(parameters, PremiereMediaType.Series, "series", filters.SeriesFilters);
         }
 
         if (mode is CalendarPageMode.All or CalendarPageMode.Movies)
         {
-            AddMediaFilterParameters(parameters, "movie", filters.MovieFilters);
+            AddMediaFilterParameters(parameters, PremiereMediaType.Movie, "movie", filters.MovieFilters);
         }
 
         return parameters;
     }
 
-    private static void AddMediaFilterParameters(IDictionary<string, string?> parameters, string prefix, MediaFilterSet filters)
+    private static void AddMediaFilterParameters(
+        IDictionary<string, string?> parameters,
+        PremiereMediaType mediaType,
+        string prefix,
+        MediaFilterSet filters)
     {
-        if (prefix == "series" && filters.SeriesDateMode != SeriesDateMode.AllEpisodes)
+        if (mediaType == PremiereMediaType.Series && filters.SeriesDateMode != SeriesDateMode.AllEpisodes)
         {
             parameters[$"{prefix}Scope"] = SeriesDateModeValue(filters.SeriesDateMode);
         }
@@ -2550,11 +2570,18 @@
         AddIfNotBlank(parameters, $"{prefix}WatchRegion", filters.WatchRegion);
         AddIfNotBlank(parameters, $"{prefix}SourceText", filters.SourceText);
         AddIfNotEmpty(parameters, $"{prefix}Availabilities", filters.MonetizationTypes, ',');
-        AddIfNotEmpty(parameters, $"{prefix}ReleaseTypes", filters.MovieReleaseTypes, ',');
-        AddIfNotEmpty(parameters, $"{prefix}Certifications", filters.Certifications, '|');
-        AddIfNotBlank(parameters, $"{prefix}CertificationCountry", filters.CertificationCountry);
-        AddIfNotEmpty(parameters, $"{prefix}Statuses", filters.TvStatuses, '|');
-        AddIfNotEmpty(parameters, $"{prefix}Types", filters.TvTypes, '|');
+        if (mediaType == PremiereMediaType.Movie)
+        {
+            AddIfNotEmpty(parameters, $"{prefix}ReleaseTypes", filters.MovieReleaseTypes, ',');
+            AddIfNotEmpty(parameters, $"{prefix}Certifications", filters.Certifications, '|');
+            AddIfNotBlank(parameters, $"{prefix}CertificationCountry", filters.CertificationCountry);
+        }
+
+        if (mediaType == PremiereMediaType.Series)
+        {
+            AddIfNotEmpty(parameters, $"{prefix}Statuses", filters.TvStatuses, '|');
+            AddIfNotEmpty(parameters, $"{prefix}Types", filters.TvTypes, '|');
+        }
 
         if (filters.RuntimeMinMinutes > 0)
         {

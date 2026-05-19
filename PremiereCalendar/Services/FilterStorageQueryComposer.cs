@@ -10,7 +10,9 @@ public static class FilterStorageQueryComposer
     {
         foreach (var (key, value) in ToDictionary(query))
         {
-            if (IsNavigationOnlyKey(key) || IsDefaultFilterValue(key, value))
+            if (IsNavigationOnlyKey(key)
+                || IsUnsupportedMediaSpecificKey(key)
+                || IsDefaultFilterValue(key, value))
             {
                 continue;
             }
@@ -43,6 +45,7 @@ public static class FilterStorageQueryComposer
             parameters["day"] = day;
         }
 
+        RemoveUnsupportedMediaSpecificKeys(parameters);
         return ToQueryString(parameters);
     }
 
@@ -60,6 +63,7 @@ public static class FilterStorageQueryComposer
         OverlayMediaParameters(parameters, "series", seriesQuery);
         OverlayMediaParameters(parameters, "movie", movieQuery);
 
+        RemoveUnsupportedMediaSpecificKeys(parameters);
         return ToQueryString(parameters);
     }
 
@@ -84,7 +88,7 @@ public static class FilterStorageQueryComposer
         }
 
         foreach (var (key, value) in ToDictionary(sourceQuery)
-            .Where(pair => IsMediaSpecificKey(pair.Key, prefix)))
+            .Where(pair => IsMediaSpecificKey(pair.Key, prefix) && !IsUnsupportedMediaSpecificKey(pair.Key)))
         {
             parameters[key] = value;
         }
@@ -101,6 +105,24 @@ public static class FilterStorageQueryComposer
     {
         return key.Equals("week", StringComparison.OrdinalIgnoreCase)
             || key.Equals("day", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUnsupportedMediaSpecificKey(string key)
+    {
+        return key.Equals("movieScope", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("seriesReleaseTypes", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("seriesCertifications", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("seriesCertificationCountry", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("movieStatuses", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("movieTypes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void RemoveUnsupportedMediaSpecificKeys(IDictionary<string, string?> parameters)
+    {
+        foreach (var key in parameters.Keys.Where(IsUnsupportedMediaSpecificKey).ToArray())
+        {
+            parameters.Remove(key);
+        }
     }
 
     private static bool IsDefaultFilterValue(string key, string? value)

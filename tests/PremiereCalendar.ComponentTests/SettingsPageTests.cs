@@ -22,6 +22,7 @@ public sealed class SettingsPageTests : BunitContext
         Directory.CreateDirectory(_root);
         JSInterop.Mode = JSRuntimeMode.Loose;
         JSInterop.Setup<string>("premiereViewSync.getOrCreateDeviceId").SetResult("device-a");
+        Services.AddLogging();
         Services.AddSingleton<IViewSyncService>(_viewSyncService);
         Services.AddSingleton<IAppStateStore>(_appStateStore);
         Services.AddSingleton(TimeProvider.System);
@@ -779,6 +780,24 @@ public sealed class SettingsPageTests : BunitContext
     }
 
     [Fact]
+    public void SettingsPage_ViewSyncOverviewFailureDoesNotBreakSettings()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        _viewSyncService.GetOverviewException = new ArgumentOutOfRangeException("value", "View-sync schema initialization failed.");
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("Settings", component.Markup);
+            Assert.Contains("View sync", component.Markup);
+        });
+    }
+
+    [Fact]
     public void SettingsPage_RendersViewSyncControlsAndSavesDeviceGroup()
     {
         var store = new FakeIntegrationSettingsStore();
@@ -1164,9 +1183,15 @@ public sealed class SettingsPageTests : BunitContext
         public string? LastSavedGroupId { get; private set; }
         public string? CreatedGroupName { get; private set; }
         public string? UngroupedDeviceId { get; private set; }
+        public Exception? GetOverviewException { get; set; }
 
         public Task<ViewSyncOverview> GetOverviewAsync(string deviceId, CancellationToken cancellationToken)
         {
+            if (GetOverviewException is not null)
+            {
+                throw GetOverviewException;
+            }
+
             return Task.FromResult(Overview);
         }
 

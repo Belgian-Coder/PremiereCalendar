@@ -483,6 +483,24 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_ViewSyncOverviewFailureDoesNotBreakCalendarLoad()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        _viewSyncService.GetOverviewException = new ArgumentOutOfRangeException("value", "View-sync schema initialization failed.");
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(service.Calls);
+            Assert.Single(component.FindAll("[data-testid='calendar-week']"));
+        });
+    }
+
+    [Fact]
     public void CalendarPage_ReadsFiltersFromQueryStringAndKeepsUrlShareable()
     {
         var service = new FakePremiereService();
@@ -1316,6 +1334,54 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() =>
         {
             Assert.Equal("2", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_FilterButtonCountIgnoresUnsupportedMovieScopeQuery()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/movies?week=2026-05-11&movieScope=new&movieLang=en");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("1", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_FilterButtonCountIgnoresUnsupportedSeriesMovieFilterQuery()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-11&seriesLang=en&seriesReleaseTypes=3&seriesCertifications=US%3APG-13&seriesCertificationCountry=US");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("1", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_FilterButtonCountIgnoresUnsupportedMovieSeriesFilterQuery()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/movies?week=2026-05-11&movieLang=en&movieStatuses=Returning%20Series&movieTypes=Scripted");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("1", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
         });
     }
 
@@ -2659,10 +2725,17 @@ public sealed class CalendarPageTests : BunitContext
 
         public ViewSyncGroupState? GroupState { get; set; }
 
+        public Exception? GetOverviewException { get; set; }
+
         private readonly Dictionary<string, ViewSyncGroupState> _statesByRoute = new(StringComparer.OrdinalIgnoreCase);
 
         public Task<ViewSyncOverview> GetOverviewAsync(string deviceId, CancellationToken cancellationToken)
         {
+            if (GetOverviewException is not null)
+            {
+                throw GetOverviewException;
+            }
+
             return Task.FromResult(Overview(deviceId));
         }
 
