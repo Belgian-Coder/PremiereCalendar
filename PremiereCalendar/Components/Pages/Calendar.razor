@@ -30,6 +30,7 @@
         var activeFilterCount = ActiveFilterCount();
         var scopeBadgeText = CalendarScopeBadgeText();
         var hasVisibleItemsForCurrentWeek = HasVisibleItemsForCurrentWeek(_visibleItems);
+        var visibleCacheFreshness = VisibleCacheFreshnessEntries();
     }
 
     <header class="calendar-command-bar" data-testid="calendar-command-bar">
@@ -218,10 +219,10 @@
             </section>
         }
 
-        @if (_cacheFreshness.Count > 0 || ShouldShowVisitChangeSummary())
+        @if (visibleCacheFreshness.Count > 0 || ShouldShowVisitChangeSummary())
         {
-            <section class="data-freshness-card" data-testid="data-freshness-card" aria-label="Visible week data freshness">
-                @foreach (var entry in _cacheFreshness)
+            <section class="@DataFreshnessCardClass(visibleCacheFreshness)" data-testid="data-freshness-card" aria-label="Visible week data freshness">
+                @foreach (var entry in visibleCacheFreshness)
                 {
                     <span class="@CacheFreshnessClass(entry)">
                         <strong>@entry.Label cache</strong>
@@ -281,7 +282,8 @@
                       OnAdjacentCalendarDayRequested="NavigateToCalendarDayAsync"
                       IntegrationSettings="_integrationSettings"
                       OnAddToArr="AddToArrAsync"
-                      IsArrActionBusy="_arrAddInProgress.Count > 0" />
+                      IsArrActionBusy="_arrAddInProgress.Count > 0"
+                      IsUpdating="_isLoading" />
     }
 </div>
 
@@ -1114,6 +1116,37 @@
             && (_visitChangeSummary.NewCount > 0 || _visitChangeSummary.RemovedCount > 0);
     }
 
+    private IReadOnlyList<CacheFreshnessEntry> VisibleCacheFreshnessEntries()
+    {
+        if (_cacheFreshness.Count == 0)
+        {
+            return [];
+        }
+
+        if (ShouldShowCompletedCacheFreshness())
+        {
+            return _cacheFreshness;
+        }
+
+        return _cacheFreshness
+            .Where(IsActionableCacheFreshnessEntry)
+            .ToArray();
+    }
+
+    private bool ShouldShowCompletedCacheFreshness()
+    {
+        return _pageMode != CalendarPageMode.All
+            || _isLoading
+            || _isQueryProgressExpanded
+            || !string.IsNullOrWhiteSpace(_sourceProgressFilter);
+    }
+
+    private static bool IsActionableCacheFreshnessEntry(CacheFreshnessEntry entry)
+    {
+        return entry.Metadata is null
+            || entry.Metadata.Completeness == CalendarCacheCompleteness.Partial;
+    }
+
     private string VisitChangeText()
     {
         if (_visitChangeSummary is not { } summary)
@@ -1174,7 +1207,21 @@
             ? "cache-freshness-pill missing"
             : entry.Metadata.Completeness == CalendarCacheCompleteness.Partial
                 ? "cache-freshness-pill partial"
-                : "cache-freshness-pill";
+                : "cache-freshness-pill complete";
+    }
+
+    private string DataFreshnessCardClass(IReadOnlyList<CacheFreshnessEntry> entries)
+    {
+        return IsPassiveDataFreshness(entries)
+            ? "data-freshness-card passive"
+            : "data-freshness-card";
+    }
+
+    private bool IsPassiveDataFreshness(IReadOnlyList<CacheFreshnessEntry> entries)
+    {
+        return !ShouldShowVisitChangeSummary()
+            && entries.Count > 0
+            && entries.All(entry => entry.Metadata is { Completeness: CalendarCacheCompleteness.Complete });
     }
 
     private static string CacheFreshnessText(CacheFreshnessEntry entry)
@@ -1462,7 +1509,10 @@
 
     private string QueryProgressPanelClass()
     {
-        return _isQueryProgressExpanded ? "query-progress" : "query-progress compact";
+        var className = _isQueryProgressExpanded ? "query-progress" : "query-progress compact";
+        return ShouldQuietCompactQueryProgressOnMobile()
+            ? $"{className} mobile-quiet"
+            : className;
     }
 
     private bool ShouldShowQueryProgress()
@@ -1480,6 +1530,11 @@
 
         if (_isLoading)
         {
+            if (_hasLoadedAtLeastOnce)
+            {
+                return false;
+            }
+
             return _items.Count > 0
             || entries.Any(entry => entry.SourceItemCount > 0 || entry.TotalItemCount > 0);
         }
@@ -1510,6 +1565,25 @@
         return entry.IsFinal
             || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase)
             || string.Equals(entry.Phase, "cache", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool ShouldQuietCompactQueryProgressOnMobile()
+    {
+        if (_isLoading
+            || _isQueryProgressExpanded
+            || !string.IsNullOrWhiteSpace(_sourceProgressFilter))
+        {
+            return false;
+        }
+
+        return !GroupedLoadProgressEntries().Any(IsFailureProgressEntry);
+    }
+
+    private static bool IsFailureProgressEntry(LoadProgressEntry entry)
+    {
+        return string.Equals(entry.Phase, "error", StringComparison.OrdinalIgnoreCase)
+            || entry.ProgressText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true
+            || entry.ProgressText?.StartsWith("Skipped", StringComparison.OrdinalIgnoreCase) == true;
     }
 
     private string QueryProgressSummaryText()

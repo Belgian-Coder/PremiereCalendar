@@ -163,6 +163,9 @@
     public bool IsArrActionBusy { get; set; }
 
     [Parameter]
+    public bool IsUpdating { get; set; }
+
+    [Parameter]
     public int InitialVisibleCount { get; set; } = 10;
 
     [Parameter]
@@ -176,6 +179,7 @@
     private bool _autoLoadAll;
     private List<CardRow> _cardRows = [];
     private string _lastRenderFingerprint = "";
+    private bool _lastUseVirtualizedRows;
     private bool _shouldRender = true;
     private IReadOnlyList<PremiereItem> _visibleItems = [];
     private IReadOnlyList<PremiereItem> _visibleVerifiedItems = [];
@@ -203,7 +207,7 @@
 
     private IReadOnlyList<PremiereItem> VisibleUnverifiedItems => _visibleUnverifiedItems;
 
-    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold;
+    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold && !IsUpdating;
 
     protected override void OnParametersSet()
     {
@@ -212,15 +216,22 @@
             && !string.IsNullOrEmpty(_itemsSignature);
         var signature = canReuseItemsSignature ? _itemsSignature : BuildItemsSignature();
         var itemsChanged = !string.Equals(signature, _itemsSignature, StringComparison.Ordinal);
+        var useVirtualizedRows = UseVirtualizedRows;
+        var virtualizationModeChanged = useVirtualizedRows != _lastUseVirtualizedRows;
         _lastItemsReference = Items;
         _lastItemsCount = Items.Count;
+        _lastUseVirtualizedRows = useVirtualizedRows;
 
         if (itemsChanged)
         {
             _itemsSignature = signature;
             _visibleCount = InitialCount;
             _autoLoadAll = false;
-            _cardRows = UseVirtualizedRows ? CreateCardRows() : [];
+        }
+
+        if (itemsChanged || virtualizationModeChanged)
+        {
+            _cardRows = useVirtualizedRows ? CreateCardRows() : [];
         }
         else
         {
@@ -236,9 +247,10 @@
             RebuildItemCounts();
         }
 
-        if (!UseVirtualizedRows
+        if (!useVirtualizedRows
             && (_partitionVisibleCount != _visibleCount
-                || itemsChanged))
+                || itemsChanged
+                || virtualizationModeChanged))
         {
             RebuildVisiblePartitions();
         }

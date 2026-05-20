@@ -449,6 +449,34 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
+    public void CalendarDay_RendersStaticDensePreviewWhileUpdating()
+    {
+        var items = Enumerable.Range(1, 45)
+            .Select(index => new PremiereItem
+            {
+                CanonicalId = $"tv:{index}",
+                Type = PremiereItemType.SeriesEpisode,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = index,
+                Title = $"Episode {index}",
+                PremiereDate = new DateOnly(2026, 5, 4),
+                TmdbScore = 7
+            })
+            .ToArray();
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, new DateOnly(2026, 5, 4))
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb)
+            .Add(x => x.IsUpdating, true));
+
+        Assert.Empty(component.FindAll("[data-testid='virtualized-day']"));
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Single(component.FindAll("[data-day-load-more]"));
+    }
+
+    [Fact]
     public void CalendarDay_ShowAllLoadsRemainingSmallDayItemsAtOnce()
     {
         var items = Enumerable.Range(1, 12)

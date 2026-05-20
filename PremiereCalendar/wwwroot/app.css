@@ -192,6 +192,7 @@ h1:focus {
 }
 
 .calendar-command-bar {
+    position: relative;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
@@ -3080,6 +3081,17 @@ html[data-theme="dark"] .source-status-item strong.inactive {
         grid-row: auto;
     }
 
+    .calendar-command-bar .query-progress.compact.mobile-quiet {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+
     .calendar-command-actions {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto auto;
@@ -3106,6 +3118,17 @@ html[data-theme="dark"] .source-status-item strong.inactive {
         min-height: 1.48rem;
         padding: 0.1rem 0.38rem;
         font-size: 0.74rem;
+    }
+
+    .calendar-refresh-status {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
     }
 
     .command-week-nav {
@@ -3146,9 +3169,56 @@ html[data-theme="dark"] .source-status-item strong.inactive {
         display: none;
     }
 
+    .calendar-command-bar .command-palette {
+        position: absolute;
+        z-index: 45;
+        top: calc(100% + 0.35rem);
+        right: 0;
+        left: 0;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: stretch;
+        max-height: min(68vh, 28rem);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 0.42rem;
+        box-shadow: 0 16px 36px rgba(23, 33, 43, 0.18);
+    }
+
+    .calendar-command-bar .command-palette-item {
+        width: 100%;
+        min-height: 2.15rem;
+    }
+
+    .calendar-command-bar .command-palette-presets {
+        grid-column: 1 / -1;
+    }
+
     .data-freshness-card {
         gap: 0.25rem;
         padding: 0;
+    }
+
+    .data-freshness-card.passive {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+
+    .data-freshness-card .cache-freshness-pill.complete {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
     }
 
     .cache-freshness-pill,
@@ -3278,6 +3348,7 @@ html[data-theme="dark"] .source-status-item strong.inactive {
         border-right: 0;
         border-left: 0;
         border-radius: 0;
+        padding-top: 0;
         padding-right: 1rem;
         padding-left: 1rem;
         scroll-margin-top: 11rem;
@@ -3296,6 +3367,15 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     .premiere-card {
         grid-template-columns: 76px minmax(0, 1fr);
         width: 100%;
+    }
+
+    .links a,
+    .links span,
+    .arr-add-button {
+        display: inline-flex;
+        align-items: center;
+        min-height: 1.95rem;
+        padding: 0.32rem 0.5rem;
     }
 
     .poster-frame {

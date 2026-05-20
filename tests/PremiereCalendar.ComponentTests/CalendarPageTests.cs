@@ -244,6 +244,40 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_NextThenPreviousWeekRestoresOriginalWeekAndSelectedDay()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-11&day=2026-05-13");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        component.Find("button[title='Next week']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
+            Assert.Equal("2026-05-18", query["week"].ToString());
+            Assert.Equal("2026-05-20", query["day"].ToString());
+            Assert.Equal(new DateOnly(2026, 5, 18), service.Calls.Last().Start);
+            Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260520']").ClassName);
+        });
+
+        component.Find("button[title='Previous week']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
+            Assert.Equal("2026-05-11", query["week"].ToString());
+            Assert.Equal("2026-05-13", query["day"].ToString());
+            Assert.Equal(new DateOnly(2026, 5, 11), service.Calls.Last().Start);
+            Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260513']").ClassName);
+        });
+    }
+
+    [Fact]
     public void CalendarPage_RefreshButtonForcesFreshLoad()
     {
         var service = new FakePremiereService();
@@ -1555,9 +1589,56 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() =>
         {
             var freshness = component.Find("[data-testid='data-freshness-card']");
+            Assert.Contains("passive", freshness.ClassName);
+            Assert.Contains("complete", component.Find(".cache-freshness-pill").ClassName);
             Assert.Contains("Series cache", freshness.TextContent);
             Assert.Contains("10 May", freshness.TextContent);
             Assert.DoesNotContain("Movies cache", freshness.TextContent);
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_HidesCompletedAllCacheFreshnessWhenCollapsedAfterLoad()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        _cacheMaintenance.DefaultMetadata = new CalendarCacheMetadata(
+            DateTimeOffset.Parse("2026-05-10T08:15:00Z"),
+            ItemCount: 12,
+            SchemaVersion: 3,
+            CalendarCacheCompleteness.Complete);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(service.Calls);
+            Assert.Single(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Empty(component.FindAll("[data-testid='data-freshness-card']"));
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_ShowsActionableAllCacheFreshnessWhenCollapsedAfterLoad()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        _cacheMaintenance.DefaultMetadata = new CalendarCacheMetadata(
+            DateTimeOffset.Parse("2026-05-10T08:15:00Z"),
+            ItemCount: 12,
+            SchemaVersion: 3,
+            CalendarCacheCompleteness.Partial);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var freshness = component.Find("[data-testid='data-freshness-card']");
+            Assert.Contains("Series cache", freshness.TextContent);
+            Assert.Contains("Movies cache", freshness.TextContent);
+            Assert.Contains("partial", freshness.TextContent);
         });
     }
 
@@ -1640,6 +1721,35 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_HidesCollapsedSourceProgressDuringVisibleWeekUpdateAfterLoad()
+    {
+        var service = new FakePremiereService
+        {
+            ReportPartialProgress = true,
+            DelayAfterPartialProgress = TimeSpan.FromSeconds(5)
+        };
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(service.Calls);
+            Assert.Single(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Empty(component.FindAll("[data-testid='query-progress']"));
+        }, TimeSpan.FromSeconds(8));
+
+        component.Find("button[title='Update visible week']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.NotEmpty(component.FindAll("[data-testid='refreshing']"));
+            Assert.Single(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Empty(component.FindAll("[data-testid='query-progress']"));
+        });
+    }
+
+    [Fact]
     public void CalendarPage_CommandPaletteExposesSourceDetails()
     {
         var service = new FakePremiereService
@@ -1658,8 +1768,13 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() =>
         {
             var palette = component.Find("[data-testid='command-palette']");
+            Assert.Contains("Update visible week", palette.TextContent);
             Assert.Contains("Refresh sources", palette.TextContent);
             Assert.Contains("Source details", palette.TextContent);
+            Assert.Contains("Filters", palette.TextContent);
+            Assert.Contains("This week", palette.TextContent);
+            Assert.Contains("Settings", palette.TextContent);
+            Assert.Contains("Saved filter presets", palette.TextContent);
         });
     }
 
@@ -1877,6 +1992,37 @@ public sealed class CalendarPageTests : BunitContext
             Assert.DoesNotContain("Updating results", component.Markup);
             Assert.Single(component.FindAll("[data-testid='premiere-card']"));
         }, TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public void CalendarPage_QuietsAllSourceProgressWhenCollapsedAfterLoadBudget()
+    {
+        Services.Configure<CalendarLoadOptions>(options => options.ForegroundLoadBudgetSeconds = 1);
+        var service = new FakePremiereService
+        {
+            ReportPartialProgress = true,
+            DelayAfterPartialProgress = TimeSpan.FromSeconds(5),
+            SuppressFinalProgress = true
+        };
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            var progress = component.Find("[data-testid='query-progress']");
+            Assert.Contains("mobile-quiet", progress.ClassName);
+            Assert.Contains("2 total", progress.TextContent);
+        }, TimeSpan.FromSeconds(3));
+
+        ExpandQueryProgress(component);
+
+        component.WaitForAssertion(() =>
+        {
+            var progress = component.Find("[data-testid='query-progress']");
+            Assert.DoesNotContain("mobile-quiet", progress.ClassName);
+            Assert.Contains("Load budget", progress.TextContent);
+        });
     }
 
     [Fact]

@@ -63,7 +63,8 @@
                      LoadBatchSize="ItemsPerDayBatch"
                      IntegrationSettings="IntegrationSettings"
                      OnAddToArr="OnAddToArr"
-                     IsArrActionBusy="IsArrActionBusy" />
+                     IsArrActionBusy="IsArrActionBusy"
+                     IsUpdating="IsUpdating" />
     </div>
 </div>
 
@@ -97,6 +98,9 @@
 
     [Parameter]
     public bool IsArrActionBusy { get; set; }
+
+    [Parameter]
+    public bool IsUpdating { get; set; }
 
     [Parameter]
     public int InitialItemsPerDay { get; set; } = 10;
