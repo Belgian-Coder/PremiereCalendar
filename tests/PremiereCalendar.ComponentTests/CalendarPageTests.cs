@@ -49,6 +49,20 @@ public sealed class CalendarPageTests : BunitContext
 
     private static void ExpandQueryProgress(IRenderedComponent<PremiereCalendar.Components.Pages.Calendar> component)
     {
+        if (component.FindAll("[data-testid='query-progress-toggle']").Count == 0)
+        {
+            component.Find("button[data-command-palette-toggle]").Click();
+            component.WaitForAssertion(() =>
+            {
+                var palette = component.Find("[data-testid='command-palette']");
+                Assert.Contains("Source details", palette.TextContent);
+            });
+
+            var sourceDetailsButton = component.FindAll(".command-palette-item")
+                .Single(button => button.TextContent.Contains("Source details", StringComparison.Ordinal));
+            sourceDetailsButton.Click();
+        }
+
         component.WaitForAssertion(() =>
             Assert.Single(component.FindAll("[data-testid='query-progress-toggle']")));
 
@@ -1338,6 +1352,22 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_FilterButtonCountIncludesMovieLanguageAndRuntime()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/movies?week=2026-05-11&movieLang=en%2Cnl&movieRuntimeMin=45");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("2", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+        });
+    }
+
+    [Fact]
     public void CalendarPage_FilterButtonCountIgnoresUnsupportedMovieScopeQuery()
     {
         var service = new FakePremiereService();
@@ -1561,7 +1591,9 @@ public sealed class CalendarPageTests : BunitContext
     {
         var service = new FakePremiereService
         {
-            ReportPartialProgress = true
+            ReportPartialProgress = true,
+            DelayAfterPartialProgress = TimeSpan.FromSeconds(5),
+            SuppressFinalProgress = true
         };
         Services.AddSingleton<IPremiereService>(service);
 
@@ -1581,11 +1613,53 @@ public sealed class CalendarPageTests : BunitContext
         var expandedProgress = component.Find("[data-testid='query-progress']");
         Assert.Contains("Fake source one", expandedProgress.TextContent);
         Assert.Contains("Fake source two", expandedProgress.TextContent);
-        Assert.Contains("Complete", expandedProgress.TextContent);
         Assert.Single(component.FindAll("[data-testid='query-progress-details']"));
         Assert.Equal(
             "query-progress-details",
             component.Find("[data-testid='query-progress-toggle']").GetAttribute("aria-controls"));
+    }
+
+    [Fact]
+    public void CalendarPage_HidesCompletedSourceProgressWhenCollapsedAfterLoad()
+    {
+        var service = new FakePremiereService
+        {
+            ReportPartialProgress = true
+        };
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(service.Calls);
+            Assert.Single(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Empty(component.FindAll("[data-testid='query-progress']"));
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_CommandPaletteExposesSourceDetails()
+    {
+        var service = new FakePremiereService
+        {
+            ReportPartialProgress = true,
+            DelayAfterPartialProgress = TimeSpan.FromSeconds(5),
+            SuppressFinalProgress = true
+        };
+        Services.AddSingleton<IPremiereService>(service);
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(component.FindAll("[data-testid='query-progress']")));
+        component.Find("button[data-command-palette-toggle]").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var palette = component.Find("[data-testid='command-palette']");
+            Assert.Contains("Refresh sources", palette.TextContent);
+            Assert.Contains("Source details", palette.TextContent);
+        });
     }
 
     [Fact]

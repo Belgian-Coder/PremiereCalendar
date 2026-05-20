@@ -69,7 +69,7 @@
                 <button class="tool-button compact-command" title="Update visible week" aria-label="Update visible week" @onclick="QuickRefreshAsync" aria-busy="@_isLoading">
                     Update
                 </button>
-                <button class="tool-button primary-action compact-command" title="Refresh sources from providers" aria-label="Refresh sources from providers" @onclick="RefreshAsync" aria-busy="@_isLoading">
+                <button class="tool-button primary-action compact-command full-refresh-command" title="Refresh sources from providers" aria-label="Refresh sources from providers" @onclick="RefreshAsync" aria-busy="@_isLoading">
                     Refresh sources
                 </button>
             </div>
@@ -92,6 +92,10 @@
             <section class="command-palette" id="calendar-command-palette" data-testid="command-palette" data-command-palette-panel aria-label="Actions">
                 <button type="button" class="command-palette-item" @onclick="QuickRefreshFromCommandPaletteAsync">Update visible week</button>
                 <button type="button" class="command-palette-item" @onclick="FullRefreshFromCommandPaletteAsync">Refresh sources</button>
+                @if (HasQueryProgressEntries())
+                {
+                    <button type="button" class="command-palette-item" @onclick="ShowSourceDetailsFromCommandPalette">Source details</button>
+                }
                 <button type="button" class="command-palette-item" @onclick="OpenFilters">Filters</button>
                 <button type="button" class="command-palette-item" @onclick="CurrentWeekFromCommandPaletteAsync">This week</button>
                 <button type="button" class="command-palette-item" @onclick="OpenSettings">Settings</button>
@@ -1464,10 +1468,7 @@
     private bool ShouldShowQueryProgress()
     {
         var entries = GroupedLoadProgressEntries();
-        var hasMeaningfulSourceEntry = entries.Any(entry =>
-            !entry.IsFinal
-            || !string.Equals(entry.SourceName, "Complete", StringComparison.Ordinal));
-        if (!hasMeaningfulSourceEntry)
+        if (!HasQueryProgressEntries(entries))
         {
             return false;
         }
@@ -1477,8 +1478,38 @@
             return true;
         }
 
-        return _items.Count > 0
+        if (_isLoading)
+        {
+            return _items.Count > 0
             || entries.Any(entry => entry.SourceItemCount > 0 || entry.TotalItemCount > 0);
+        }
+
+        return entries.Any(IsAttentionProgressEntry);
+    }
+
+    private bool HasQueryProgressEntries()
+    {
+        return HasQueryProgressEntries(GroupedLoadProgressEntries());
+    }
+
+    private static bool HasQueryProgressEntries(IReadOnlyList<LoadProgressEntry> entries)
+    {
+        return entries.Any(entry =>
+            !entry.IsFinal
+            || !string.Equals(entry.SourceName, "Complete", StringComparison.Ordinal));
+    }
+
+    private static bool IsAttentionProgressEntry(LoadProgressEntry entry)
+    {
+        return string.Equals(entry.SourceName, "Load budget", StringComparison.Ordinal)
+            || !IsCompletedProgressEntry(entry);
+    }
+
+    private static bool IsCompletedProgressEntry(LoadProgressEntry entry)
+    {
+        return entry.IsFinal
+            || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(entry.Phase, "cache", StringComparison.OrdinalIgnoreCase);
     }
 
     private string QueryProgressSummaryText()
@@ -1521,6 +1552,12 @@
     {
         _isCommandPaletteOpen = false;
         await RefreshAsync();
+    }
+
+    private void ShowSourceDetailsFromCommandPalette()
+    {
+        _isCommandPaletteOpen = false;
+        _isQueryProgressExpanded = true;
     }
 
     private async Task CurrentWeekFromCommandPaletteAsync()
