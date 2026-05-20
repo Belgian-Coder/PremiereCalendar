@@ -1,5 +1,5 @@
 using System.Globalization;
-using System.Net.Http.Json;
+using System.IO.Compression;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.RateLimiting;
@@ -700,7 +700,7 @@ public sealed class TmdbClient : ITmdbClient
                 throw new ExternalApiException($"{operation} failed with HTTP {(int)response.StatusCode} {response.ReasonPhrase}.");
             }
 
-            var value = await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
+            var value = await ReadJsonContentAsync<T>(response.Content, cancellationToken);
             if (value is null)
             {
                 throw new ExternalApiException($"{operation} returned an empty response.");
@@ -720,10 +720,40 @@ public sealed class TmdbClient : ITmdbClient
         {
             throw new ExternalApiException($"{operation} returned invalid JSON.", ex);
         }
+        catch (InvalidDataException ex)
+        {
+            throw new ExternalApiException($"{operation} returned invalid compressed JSON.", ex);
+        }
         catch (HttpRequestException ex)
         {
             throw new ExternalApiException($"{operation} could not reach TMDb.", ex);
         }
+    }
+
+    private static async Task<T?> ReadJsonContentAsync<T>(HttpContent content, CancellationToken cancellationToken)
+    {
+        await using var contentStream = await OpenDecodedContentStreamAsync(content, cancellationToken);
+        return await JsonSerializer.DeserializeAsync<T>(contentStream, JsonOptions, cancellationToken);
+    }
+
+    private static async Task<Stream> OpenDecodedContentStreamAsync(
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        Stream stream = await content.ReadAsStreamAsync(cancellationToken);
+        foreach (var encoding in content.Headers.ContentEncoding.Reverse())
+        {
+            stream = encoding.ToLowerInvariant() switch
+            {
+                "gzip" or "x-gzip" => new GZipStream(stream, CompressionMode.Decompress),
+                "deflate" => new DeflateStream(stream, CompressionMode.Decompress),
+                "br" => new BrotliStream(stream, CompressionMode.Decompress),
+                "identity" => stream,
+                _ => stream
+            };
+        }
+
+        return stream;
     }
 
     private async Task<HttpResponseMessage> SendWithRateLimitAndRetryAsync(

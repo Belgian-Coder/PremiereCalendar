@@ -69,6 +69,25 @@ public sealed class TmdbClientIntegrationTests
     }
 
     [Fact]
+    public async Task DiscoverMoviesAsync_ReadsGzipEncodedJsonResponse()
+    {
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.GzipJson(Fixture.Read("tmdb/discover-movie-en.json")));
+        var client = CreateTmdbClient(handler, maxPages: 5);
+
+        var results = await client.DiscoverMoviesAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            new TmdbDiscoverFilters
+            {
+                OriginalLanguage = "en"
+            },
+            CancellationToken.None);
+
+        Assert.NotEmpty(results);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
     public async Task DiscoverMoviesAsync_ForceRefreshBypassesCacheForSameRequest()
     {
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(Fixture.Read("tmdb/discover-movie-en.json")));

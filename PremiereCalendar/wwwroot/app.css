@@ -3014,7 +3014,52 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     html {
         --page-x: 1.25rem;
         --card-grid-gap: 0.9rem;
-        --app-topbar-height: 5.45rem;
+        --app-topbar-height: 4.4rem;
+    }
+
+    .app-topbar {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 0.28rem;
+        padding: 0.38rem 1rem 0.42rem;
+    }
+
+    .navbar-brand {
+        line-height: 1.15;
+    }
+
+    .topbar-actions {
+        width: 100%;
+        flex-wrap: nowrap;
+        justify-content: space-between;
+        gap: 0.28rem;
+    }
+
+    .top-nav {
+        flex-wrap: nowrap;
+        gap: 0.18rem;
+        min-width: 0;
+    }
+
+    .top-nav .nav-link {
+        min-height: 1.75rem;
+        padding: 0.22rem 0.42rem;
+        font-size: 0.82rem;
+        line-height: 1.1;
+        white-space: nowrap;
+    }
+
+    .theme-toggle,
+    .settings-link {
+        width: 1.9rem;
+        height: 1.9rem;
+        min-width: 1.9rem;
+    }
+
+    .theme-toggle svg,
+    .settings-link svg {
+        width: 1rem;
+        height: 1rem;
     }
 
     .calendar-shell {
@@ -3142,6 +3187,10 @@ html[data-theme="dark"] .source-status-item strong.inactive {
 
     .command-palette-label-short {
         display: inline;
+    }
+
+    .filter-footer-summary {
+        display: none;
     }
 
     .calendar-header {

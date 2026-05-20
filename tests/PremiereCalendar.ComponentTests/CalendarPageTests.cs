@@ -1466,6 +1466,7 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Equal("filter-pane-summary", pane.GetAttribute("aria-describedby"));
             Assert.Equal("status", component.Find("#filter-pane-summary").GetAttribute("role"));
             Assert.Equal("polite", component.Find("#filter-pane-summary").GetAttribute("aria-live"));
+            Assert.DoesNotContain("Calendar controls", pane.TextContent);
             Assert.Contains("Selected score", pane.TextContent);
             Assert.Contains("Selected-source votes", pane.TextContent);
             Assert.Contains("Vote count", pane.TextContent);
@@ -1986,7 +1987,7 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
         Assert.Empty(component.FindAll(".preset-command-row"));
-        component.Find("button[title='Open actions (Ctrl+K)']").Click();
+        component.Find("button[title='Open tools and actions (Ctrl+K)']").Click();
         component.Find("input[aria-label='Preset name']").Input("Belgian movies");
         component.Find("button[title='Save current filters as preset']").Click();
 
@@ -2004,7 +2005,12 @@ public sealed class CalendarPageTests : BunitContext
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
-        component.Find("button[title='Open actions (Ctrl+K)']").Click();
+        var toggle = component.Find("button[data-command-palette-toggle]");
+        Assert.Equal("Open tools and actions (Ctrl+K)", toggle.GetAttribute("title"));
+        Assert.Equal("Open tools and actions", toggle.GetAttribute("aria-label"));
+        Assert.Contains("Actions", toggle.TextContent);
+        Assert.Contains("Tools", toggle.TextContent);
+        toggle.Click();
 
         var palette = component.Find("[data-testid='command-palette']");
         Assert.Single(component.FindAll("[data-command-palette-toggle]"));
@@ -2012,6 +2018,8 @@ public sealed class CalendarPageTests : BunitContext
         Assert.Contains("Filters", palette.TextContent);
         Assert.Contains("Settings", palette.TextContent);
         Assert.Contains("Update visible week", palette.TextContent);
+        Assert.Contains("Refresh sources", palette.TextContent);
+        Assert.Contains("This week", palette.TextContent);
         Assert.Contains("Saved filter presets", palette.TextContent);
     }
 
