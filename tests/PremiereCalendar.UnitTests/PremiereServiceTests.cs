@@ -1255,6 +1255,54 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
+    public async Task GetPremieresAsync_HydratesCachedItemsWithCurrentRottenTomatoesScoreBeforeFiltering()
+    {
+        var cachedItem = new PremiereItem
+        {
+            CanonicalId = "movie:67",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 67,
+            ImdbId = "tt0000067",
+            WikidataId = "Q67",
+            Title = "Cached Tomatoes Movie",
+            PremiereDate = new DateOnly(2026, 5, 4),
+            OriginalLanguage = "en",
+            RuntimeMinutes = 90,
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var rottenTomatoes = new FakeRottenTomatoesClient();
+        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Cached Tomatoes Movie", 2026, "Q67")] = 88;
+        var service = CreateService(
+            new FakeTmdbClient(),
+            calendarCache: new FakeCalendarCache { Items = [cachedItem] },
+            rottenTomatoes: rottenTomatoes);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters
+            {
+                ShowSeries = false,
+                ShowMovies = true,
+                ScoreSource = ScoreSource.RottenTomatoes,
+                MinScore = 8,
+                MaxScore = 10,
+                IncludeUnknownScores = false
+            });
+
+        var item = Assert.Single(items);
+        Assert.Equal(88, item.RottenTomatoesScore);
+        var call = Assert.Single(rottenTomatoes.Calls);
+        Assert.Equal(PremiereMediaType.Movie, call.MediaType);
+        Assert.Equal("Cached Tomatoes Movie", call.Title);
+        Assert.Equal(2026, call.Year);
+        Assert.Equal("Q67", call.WikidataId);
+        Assert.False(call.ForceRefresh);
+    }
+
+    [Fact]
     public async Task StreamPremieresAsync_AllViewFetchesOnlyMissingSharedMediaCache()
     {
         var start = new DateOnly(2026, 5, 4);
@@ -2669,6 +2717,110 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
+    public async Task GetPremieresAsync_UsesRottenTomatoesFallbackWhenOmdbHasNoTomatometerScore()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            MovieItems =
+            [
+                new TmdbMovieDiscoverItem
+                {
+                    Id = 68,
+                    Title = "Direct Tomatoes Movie",
+                    ReleaseDate = "2026-05-04",
+                    PrimaryReleaseDate = "2026-05-04",
+                    OriginalLanguage = "en"
+                }
+            ]
+        };
+        tmdb.MovieDetailsById[68] = new TmdbDetailsWithExtras
+        {
+            Id = 68,
+            ExternalIds = new TmdbExternalIds
+            {
+                ImdbId = "tt0000068",
+                WikidataId = "Q680"
+            }
+        };
+        var omdb = new FakeOmdbClient();
+        omdb.ItemsByImdbId["tt0000068"] = new OmdbItem
+        {
+            Response = "True",
+            ImdbRating = "7.1"
+        };
+        var rottenTomatoes = new FakeRottenTomatoesClient();
+        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Direct Tomatoes Movie", 2026, "Q680")] = 87;
+        var service = CreateService(
+            tmdb,
+            omdb: omdb,
+            rottenTomatoes: rottenTomatoes);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(7.1, item.ImdbScore);
+        Assert.Equal(87, item.RottenTomatoesScore);
+        Assert.NotEmpty(rottenTomatoes.Calls);
+        Assert.All(rottenTomatoes.Calls, call =>
+        {
+            Assert.Equal(PremiereMediaType.Movie, call.MediaType);
+            Assert.Equal("Direct Tomatoes Movie", call.Title);
+            Assert.Equal(2026, call.Year);
+            Assert.Equal("Q680", call.WikidataId);
+        });
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_KeepsOmdbTomatometerScoreWhenPresent()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            MovieItems =
+            [
+                new TmdbMovieDiscoverItem
+                {
+                    Id = 69,
+                    Title = "Omdb Tomatoes Movie",
+                    ReleaseDate = "2026-05-04",
+                    PrimaryReleaseDate = "2026-05-04",
+                    OriginalLanguage = "en"
+                }
+            ]
+        };
+        tmdb.MovieDetailsById[69] = new TmdbDetailsWithExtras
+        {
+            Id = 69,
+            ExternalIds = new TmdbExternalIds { ImdbId = "tt0000069" }
+        };
+        var omdb = new FakeOmdbClient();
+        omdb.ItemsByImdbId["tt0000069"] = new OmdbItem
+        {
+            Response = "True",
+            Ratings = [new OmdbRating { Source = "Rotten Tomatoes", Value = "73%" }]
+        };
+        var rottenTomatoes = new FakeRottenTomatoesClient();
+        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Omdb Tomatoes Movie", 2026, null)] = 91;
+        var service = CreateService(
+            tmdb,
+            omdb: omdb,
+            rottenTomatoes: rottenTomatoes);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(73, item.RottenTomatoesScore);
+        Assert.Empty(rottenTomatoes.Calls);
+    }
+
+    [Fact]
     public async Task GetPremieresAsync_UsesExternalCandidateImdbRatingWhenRatingStoresHaveNoScore()
     {
         var tmdb = new FakeTmdbClient();
@@ -2709,6 +2861,224 @@ public sealed class PremiereServiceTests
         Assert.Equal(7.6, item.ImdbScore);
         Assert.Equal(987, item.ImdbVoteCount);
         Assert.DoesNotContain("Simkl", item.SourceNames);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_UsesExternalCandidateImdbIdWhenTmdbExternalIdsAreMissing()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            MovieItems =
+            [
+                new TmdbMovieDiscoverItem
+                {
+                    Id = 67,
+                    Title = "Candidate Identified Movie",
+                    ReleaseDate = "2026-05-04",
+                    PrimaryReleaseDate = "2026-05-04",
+                    OriginalLanguage = "en"
+                }
+            ]
+        };
+        tmdb.MovieDetailsById[67] = new TmdbDetailsWithExtras { Id = 67 };
+        var discovery = new FakeDiscoveryProvider
+        {
+            DisplayName = "Simkl",
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Candidate Identified Movie",
+                    67,
+                    "tt0000067",
+                    null,
+                    "Simkl")
+            ]
+        };
+        var imdbRatings = new FakeImdbRatingsStore();
+        imdbRatings.Items["tt0000067"] = new ImdbRatingRecord(
+            "tt0000067",
+            8.1,
+            4567,
+            DateTimeOffset.Parse("2026-05-09T10:00:00Z"));
+        var service = CreateService(
+            tmdb,
+            discoveryProviders: [discovery],
+            imdbRatingsStore: imdbRatings);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal("tt0000067", item.ImdbId);
+        Assert.Equal("https://www.imdb.com/title/tt0000067/", item.ImdbUrl);
+        Assert.Equal(8.1, item.ImdbScore);
+        Assert.Equal(4567, item.ImdbVoteCount);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_PreservesImdbDataWhenDuplicateCanonicalItemsMerge()
+    {
+        var start = new DateOnly(2026, 5, 4);
+        var richerCachedItem = new PremiereItem
+        {
+            CanonicalId = "movie:71",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 71,
+            Title = "Duplicate Movie",
+            PremiereDate = start,
+            OriginalLanguage = "en",
+            RuntimeMinutes = 101,
+            TrailerUrl = "https://www.youtube.com/watch?v=duplicate",
+            SourceNames = ["TMDb"],
+            Sources = [new PremiereSource { Name = "TMDb", Kind = "metadata" }],
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var identifiedCachedItem = richerCachedItem with
+        {
+            ImdbId = "tt0000071",
+            ImdbUrl = "https://www.imdb.com/title/tt0000071/",
+            ImdbScore = 7.9,
+            ImdbVoteCount = 900,
+            RottenTomatoesScore = 78,
+            MetacriticScore = 66,
+            TrailerUrl = null,
+            RuntimeMinutes = null,
+            SourceNames = ["Simkl"],
+            Sources = [new PremiereSource { Name = "Simkl", Kind = "schedule" }]
+        };
+        var service = CreateService(
+            new FakeTmdbClient(),
+            calendarCache: new FakeCalendarCache { Items = [richerCachedItem, identifiedCachedItem] });
+
+        var items = await service.GetPremieresAsync(
+            start,
+            start.AddDays(6),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal("tt0000071", item.ImdbId);
+        Assert.Equal("https://www.imdb.com/title/tt0000071/", item.ImdbUrl);
+        Assert.Equal(7.9, item.ImdbScore);
+        Assert.Equal(900, item.ImdbVoteCount);
+        Assert.Equal(78, item.RottenTomatoesScore);
+        Assert.Equal(66, item.MetacriticScore);
+        Assert.Contains("TMDb", item.SourceNames);
+        Assert.Contains("Simkl", item.SourceNames);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_PreservesUnverifiedImdbDataWhenMergingIntoVerifiedItem()
+    {
+        var start = new DateOnly(2026, 5, 4);
+        var verifiedItem = new PremiereItem
+        {
+            CanonicalId = "movie:72",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 72,
+            Title = "Provider Matched Movie",
+            PremiereDate = start,
+            OriginalLanguage = "en",
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var unverifiedItem = new PremiereItem
+        {
+            CanonicalId = "unverified:movie:provider-matched-movie",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 0,
+            ImdbId = "tt0000072",
+            ImdbUrl = "https://www.imdb.com/title/tt0000072/",
+            VerificationState = PremiereVerificationState.Unverified,
+            VerificationNote = "Could not match to TMDb yet",
+            Title = "Provider Matched Movie",
+            PremiereDate = start,
+            OriginalLanguage = "en",
+            ImdbScore = 8.2,
+            ImdbVoteCount = 1200,
+            SourceNames = ["Watchmode"],
+            Sources = [new PremiereSource { Name = "Watchmode", Kind = "schedule" }],
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var service = CreateService(
+            new FakeTmdbClient(),
+            calendarCache: new FakeCalendarCache { Items = [verifiedItem, unverifiedItem] });
+
+        var items = await service.GetPremieresAsync(
+            start,
+            start.AddDays(6),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(PremiereVerificationState.Verified, item.VerificationState);
+        Assert.Equal("tt0000072", item.ImdbId);
+        Assert.Equal("https://www.imdb.com/title/tt0000072/", item.ImdbUrl);
+        Assert.Equal(8.2, item.ImdbScore);
+        Assert.Equal(1200, item.ImdbVoteCount);
+        Assert.Contains("Watchmode", item.SourceNames);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_HydratesCandidateImdbIdWhenReusingExpiredCacheEnrichment()
+    {
+        var start = new DateOnly(2026, 5, 4);
+        var cachedItem = new PremiereItem
+        {
+            CanonicalId = "movie:73",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 73,
+            Title = "Reused Cached Movie",
+            PremiereDate = start,
+            OriginalLanguage = "en",
+            RuntimeMinutes = 90,
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var discovery = new FakeDiscoveryProvider
+        {
+            DisplayName = "Simkl",
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    start,
+                    "Reused Cached Movie",
+                    73,
+                    "tt0000073",
+                    null,
+                    "Simkl")
+            ]
+        };
+        var imdbRatings = new FakeImdbRatingsStore();
+        imdbRatings.Items["tt0000073"] = new ImdbRatingRecord(
+            "tt0000073",
+            8.5,
+            2222,
+            DateTimeOffset.Parse("2026-05-09T10:00:00Z"));
+        var service = CreateService(
+            new FakeTmdbClient(),
+            discoveryProviders: [discovery],
+            calendarCache: new FakeCalendarCache { ExpiredItems = [cachedItem] },
+            imdbRatingsStore: imdbRatings);
+
+        var items = await service.GetPremieresAsync(
+            start,
+            start.AddDays(6),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal("tt0000073", item.ImdbId);
+        Assert.Equal(8.5, item.ImdbScore);
+        Assert.Equal(2222, item.ImdbVoteCount);
     }
 
     [Fact]
@@ -3459,6 +3829,7 @@ public sealed class PremiereServiceTests
         IEnumerable<IPremiereDiscoveryProvider>? discoveryProviders = null,
         ICalendarCache? calendarCache = null,
         IImdbRatingsStore? imdbRatingsStore = null,
+        IRottenTomatoesClient? rottenTomatoes = null,
         string[]? sourceRegions = null,
         int sourceTimeoutSeconds = 120,
         int sourceFetchConcurrency = 4,
@@ -3482,7 +3853,9 @@ public sealed class PremiereServiceTests
                 EnrichmentProgressBatchSize = enrichmentProgressBatchSize
             }),
             NullLogger<PremiereService>.Instance,
-            imdbRatingsStore);
+            imdbRatingsStore,
+            providerCacheStateStore: null,
+            rottenTomatoesClient: rottenTomatoes);
     }
 
     private static string CacheKeyForPageMode(CalendarFilters filters, CalendarPageMode pageMode)
@@ -3832,6 +4205,24 @@ public sealed class PremiereServiceTests
         }
     }
 
+    private sealed class FakeRottenTomatoesClient : IRottenTomatoesClient
+    {
+        public Dictionary<(PremiereMediaType MediaType, string Title, int? Year, string? WikidataId), int?> Scores { get; } = [];
+        public ConcurrentBag<RottenTomatoesCall> Calls { get; } = [];
+
+        public Task<int?> GetTomatometerScoreAsync(
+            PremiereMediaType mediaType,
+            string title,
+            int? year,
+            string? wikidataId,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            Calls.Add(new RottenTomatoesCall(mediaType, title, year, wikidataId, forceRefresh));
+            return Task.FromResult(Scores.GetValueOrDefault((mediaType, title, year, wikidataId)));
+        }
+    }
+
     private sealed class FakeTvmazeClient : ITvmazeClient
     {
         public TvmazeShow? TitleSearchResult { get; init; }
@@ -3977,6 +4368,8 @@ public sealed class PremiereServiceTests
     public sealed record FindCall(PremiereMediaType MediaType, string ExternalId, string ExternalSource, bool ForceRefresh);
 
     public sealed record TitleSearchCall(PremiereMediaType MediaType, string Query, int? Year, bool ForceRefresh);
+
+    public sealed record RottenTomatoesCall(PremiereMediaType MediaType, string Title, int? Year, string? WikidataId, bool ForceRefresh);
 
     public sealed record WatchmodeSourceCall(
         PremiereMediaType MediaType,

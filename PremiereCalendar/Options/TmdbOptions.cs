@@ -19,7 +19,7 @@ public sealed class TmdbOptions
     public int EnrichmentProgressBatchSize { get; set; } = 25;
     public int ExternalCandidateBatchSize { get; set; } = 100;
     public int RequestTimeoutSeconds { get; set; } = 20;
-    public int SourceTimeoutSeconds { get; set; } = 30;
+    public int SourceTimeoutSeconds { get; set; } = 45;
     public int MaxRequestsPerSecond { get; set; } = 20;
     public int MaxConcurrentRequests { get; set; } = 4;
 }

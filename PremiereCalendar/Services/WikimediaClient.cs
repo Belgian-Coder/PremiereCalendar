@@ -92,7 +92,66 @@ public sealed class WikimediaClient : IWikimediaClient
         }
     }
 
+    public async Task<string?> GetRottenTomatoesIdAsync(
+        string wikidataId,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        var enabled = _settingsStore is null
+            ? _options.Enabled
+            : (await _settingsStore.GetAsync(cancellationToken)).Sources.Wikimedia.Enabled;
+        if (!enabled || string.IsNullOrWhiteSpace(wikidataId))
+        {
+            return null;
+        }
+
+        var cacheKey = $"wikimedia:rtid:{wikidataId}";
+        if (!forceRefresh && _cache.TryGetValue(cacheKey, out string? cached))
+        {
+            return string.IsNullOrWhiteSpace(cached) ? null : cached;
+        }
+
+        try
+        {
+            var rottenTomatoesId = await GetWikidataStringClaimAsync(wikidataId.Trim(), "P1258", cancellationToken);
+            if (!rottenTomatoesId.IsSuccess)
+            {
+                return null;
+            }
+
+            _cache.Set(
+                cacheKey,
+                string.IsNullOrWhiteSpace(rottenTomatoesId.Value) ? "" : rottenTomatoesId.Value,
+                string.IsNullOrWhiteSpace(rottenTomatoesId.Value) ? TimeSpan.FromDays(7) : TimeSpan.FromDays(30));
+            return rottenTomatoesId.Value;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     private async Task<WikimediaFetchResult<string>> GetP18FileNameAsync(string wikidataId, CancellationToken cancellationToken)
+    {
+        return await GetWikidataStringClaimAsync(wikidataId, "P18", cancellationToken);
+    }
+
+    private async Task<WikimediaFetchResult<string>> GetWikidataStringClaimAsync(
+        string wikidataId,
+        string propertyId,
+        CancellationToken cancellationToken)
     {
         using var response = await GetWithRetryAsync(
             $"wiki/Special:EntityData/{Uri.EscapeDataString(wikidataId)}.json",
@@ -109,13 +168,13 @@ public sealed class WikimediaClient : IWikimediaClient
         if (!document.RootElement.TryGetProperty("entities", out var entities)
             || !entities.TryGetProperty(wikidataId, out var entity)
             || !entity.TryGetProperty("claims", out var claims)
-            || !claims.TryGetProperty("P18", out var imageClaims)
-            || imageClaims.ValueKind != JsonValueKind.Array)
+            || !claims.TryGetProperty(propertyId, out var propertyClaims)
+            || propertyClaims.ValueKind != JsonValueKind.Array)
         {
             return new WikimediaFetchResult<string>(null, IsSuccess: true);
         }
 
-        foreach (var claim in imageClaims.EnumerateArray())
+        foreach (var claim in propertyClaims.EnumerateArray())
         {
             if (claim.TryGetProperty("mainsnak", out var mainSnak)
                 && mainSnak.TryGetProperty("datavalue", out var dataValue)

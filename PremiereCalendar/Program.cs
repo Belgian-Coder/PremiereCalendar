@@ -46,6 +46,7 @@ builder.Services.Configure<FanartOptions>(builder.Configuration.GetSection("Fana
 builder.Services.Configure<TraktOptions>(builder.Configuration.GetSection("Trakt"));
 builder.Services.Configure<TheTvdbOptions>(builder.Configuration.GetSection("TheTvdb"));
 builder.Services.Configure<WikimediaOptions>(builder.Configuration.GetSection("Wikimedia"));
+builder.Services.Configure<RottenTomatoesOptions>(builder.Configuration.GetSection("RottenTomatoes"));
 builder.Services.Configure<WatchmodeOptions>(builder.Configuration.GetSection("Watchmode"));
 builder.Services.Configure<SimklOptions>(builder.Configuration.GetSection("Simkl"));
 builder.Services.Configure<CalendarCacheOptions>(builder.Configuration.GetSection("CalendarCache"));
@@ -141,6 +142,16 @@ builder.Services.AddHttpClient<IWikimediaClient, WikimediaClient>((sp, client) =
 
     client.BaseAddress = new Uri(options.WikidataBaseUrl);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
+});
+
+builder.Services.AddHttpClient<IRottenTomatoesClient, RottenTomatoesClient>((sp, client) =>
+{
+    var options = sp.GetRequiredService<IOptions<RottenTomatoesOptions>>().Value;
+
+    client.BaseAddress = new Uri(options.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
+    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
 });
 
@@ -295,7 +306,13 @@ app.MapGet(
         }
     });
 
-app.Run();
+try
+{
+    app.Run();
+}
+catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested)
+{
+}
 
 static bool RequestHasMatchingEntityTag(HttpContext httpContext, string entityTag)
 {
