@@ -947,7 +947,7 @@ public sealed class PremiereService : IPremiereService
 
         List<PremiereItem>? hydratedItems = null;
         var ratingsByImdbId = new Dictionary<string, ImdbRatingRecord?>(StringComparer.OrdinalIgnoreCase);
-        var rottenTomatoesByItemKey = new Dictionary<string, int?>(StringComparer.Ordinal);
+        var rottenTomatoesByItemKey = new Dictionary<string, RottenTomatoesScores>(StringComparer.Ordinal);
         for (var index = 0; index < items.Count; index++)
         {
             var item = items[index];
@@ -981,26 +981,28 @@ public sealed class PremiereService : IPremiereService
                 }
             }
 
-            if (hydratedItem.RottenTomatoesScore is null && _rottenTomatoesClient is not null)
+            if ((hydratedItem.RottenTomatoesScore is null || hydratedItem.RottenTomatoesAudienceScore is null)
+                && _rottenTomatoesClient is not null)
             {
                 var rottenTomatoesKey = RottenTomatoesHydrationKey(hydratedItem);
-                if (!rottenTomatoesByItemKey.TryGetValue(rottenTomatoesKey, out var rottenTomatoesScore))
+                if (!rottenTomatoesByItemKey.TryGetValue(rottenTomatoesKey, out var rottenTomatoesScores))
                 {
-                    rottenTomatoesScore = await GetRottenTomatoesScoreAsync(
+                    rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
                         hydratedItem.MediaType,
                         hydratedItem.Title,
                         hydratedItem.PremiereDate.Year,
                         hydratedItem.WikidataId,
                         cancellationToken,
                         forceRefresh: false);
-                    rottenTomatoesByItemKey[rottenTomatoesKey] = rottenTomatoesScore;
+                    rottenTomatoesByItemKey[rottenTomatoesKey] = rottenTomatoesScores;
                 }
 
-                if (rottenTomatoesScore is not null)
+                if (rottenTomatoesScores.HasAnyScore)
                 {
                     hydratedItem = hydratedItem with
                     {
-                        RottenTomatoesScore = rottenTomatoesScore
+                        RottenTomatoesScore = hydratedItem.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
+                        RottenTomatoesAudienceScore = hydratedItem.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore
                     };
                 }
             }
@@ -1194,6 +1196,7 @@ public sealed class PremiereService : IPremiereService
             ImdbScore = target.ImdbScore ?? FirstDouble(allItems.Select(item => item.ImdbScore)),
             ImdbVoteCount = target.ImdbVoteCount ?? FirstInt(allItems.Select(item => item.ImdbVoteCount)),
             RottenTomatoesScore = target.RottenTomatoesScore ?? FirstInt(allItems.Select(item => item.RottenTomatoesScore)),
+            RottenTomatoesAudienceScore = target.RottenTomatoesAudienceScore ?? FirstInt(allItems.Select(item => item.RottenTomatoesAudienceScore)),
             MetacriticScore = target.MetacriticScore ?? FirstInt(allItems.Select(item => item.MetacriticScore))
         };
     }
@@ -2521,19 +2524,19 @@ public sealed class PremiereService : IPremiereService
         }
 
         var ratings = await GetExternalRatingsAsync(candidateImdbId, cancellationToken, forceRefresh);
-        var rottenTomatoesScore = ratings.RottenTomatoesScore
-            ?? await GetRottenTomatoesScoreAsync(
-                candidate.MediaType,
-                CoalesceText(candidate.Title, item.Title) ?? item.Title,
-                candidate.ReleaseYear ?? item.PremiereDate.Year,
-                item.WikidataId,
-                cancellationToken,
-                forceRefresh);
+        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+            candidate.MediaType,
+            CoalesceText(candidate.Title, item.Title) ?? item.Title,
+            candidate.ReleaseYear ?? item.PremiereDate.Year,
+            item.WikidataId,
+            cancellationToken,
+            forceRefresh);
         return item with
         {
             ImdbScore = ratings.ImdbScore ?? item.ImdbScore,
             ImdbVoteCount = ratings.ImdbVoteCount ?? item.ImdbVoteCount,
-            RottenTomatoesScore = rottenTomatoesScore ?? item.RottenTomatoesScore,
+            RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore ?? item.RottenTomatoesScore,
+            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore ?? item.RottenTomatoesAudienceScore,
             MetacriticScore = ratings.MetacriticScore ?? item.MetacriticScore,
             Overview = CoalesceText(item.Overview, ratings.Plot),
             PosterUrl = CoalesceText(item.PosterUrl, ratings.PosterUrl)
@@ -3290,14 +3293,13 @@ public sealed class PremiereService : IPremiereService
         await Task.WhenAll(ratingsTask, tvmazeTask);
         var ratings = await ratingsTask;
         var tvmaze = await tvmazeTask;
-        var rottenTomatoesScore = ratings.RottenTomatoesScore
-            ?? await GetRottenTomatoesScoreAsync(
-                PremiereMediaType.Series,
-                item.Name,
-                premiereDate.Year,
-                details?.ExternalIds?.WikidataId,
-                cancellationToken,
-                forceRefresh);
+        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+            PremiereMediaType.Series,
+            item.Name,
+            premiereDate.Year,
+            details?.ExternalIds?.WikidataId,
+            cancellationToken,
+            forceRefresh);
         var bestBackdropPath = CoalesceText(
             item.BackdropPath,
             details?.BackdropPath,
@@ -3372,7 +3374,8 @@ public sealed class PremiereService : IPremiereService
             TmdbVoteCount = item.VoteCount,
             ImdbScore = ratings.ImdbScore,
             ImdbVoteCount = ratings.ImdbVoteCount,
-            RottenTomatoesScore = rottenTomatoesScore,
+            RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
+            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore,
             MetacriticScore = ratings.MetacriticScore,
             NetworkName = tvmaze.NetworkName,
             WebChannelName = tvmaze.WebChannelName,
@@ -3420,14 +3423,13 @@ public sealed class PremiereService : IPremiereService
                 forceRefresh)
             : Task.FromResult(SourceEntries(details, _options.SourceRegions));
         var ratings = await ratingsTask;
-        var rottenTomatoesScore = ratings.RottenTomatoesScore
-            ?? await GetRottenTomatoesScoreAsync(
-                PremiereMediaType.Movie,
-                item.Title,
-                premiereDate.Year,
-                details?.ExternalIds?.WikidataId,
-                cancellationToken,
-                forceRefresh);
+        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+            PremiereMediaType.Movie,
+            item.Title,
+            premiereDate.Year,
+            details?.ExternalIds?.WikidataId,
+            cancellationToken,
+            forceRefresh);
         var bestBackdropPath = CoalesceText(
             item.BackdropPath,
             details?.BackdropPath,
@@ -3484,7 +3486,8 @@ public sealed class PremiereService : IPremiereService
             TmdbVoteCount = item.VoteCount,
             ImdbScore = ratings.ImdbScore,
             ImdbVoteCount = ratings.ImdbVoteCount,
-            RottenTomatoesScore = rottenTomatoesScore,
+            RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
+            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore,
             MetacriticScore = ratings.MetacriticScore
         };
     }
@@ -3544,7 +3547,7 @@ public sealed class PremiereService : IPremiereService
         }
     }
 
-    private async Task<int?> GetRottenTomatoesScoreAsync(
+    private async Task<RottenTomatoesScores> GetRottenTomatoesScoresAsync(
         PremiereMediaType mediaType,
         string? title,
         int? year,
@@ -3554,12 +3557,12 @@ public sealed class PremiereService : IPremiereService
     {
         if (_rottenTomatoesClient is null || string.IsNullOrWhiteSpace(title))
         {
-            return null;
+            return RottenTomatoesScores.Empty;
         }
 
         try
         {
-            return await _rottenTomatoesClient.GetTomatometerScoreAsync(
+            return await _rottenTomatoesClient.GetScoresAsync(
                 mediaType,
                 title,
                 year,
@@ -3570,7 +3573,7 @@ public sealed class PremiereService : IPremiereService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Skipping Rotten Tomatoes enrichment for {MediaType} {Title}.", mediaType, title);
-            return null;
+            return RottenTomatoesScores.Empty;
         }
     }
 

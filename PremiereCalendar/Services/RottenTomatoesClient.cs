@@ -50,7 +50,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
     }
 
-    public async Task<int?> GetTomatometerScoreAsync(
+    public async Task<RottenTomatoesScores> GetScoresAsync(
         PremiereMediaType mediaType,
         string title,
         int? year,
@@ -60,35 +60,35 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
     {
         if (!_options.Enabled || string.IsNullOrWhiteSpace(title))
         {
-            return null;
+            return RottenTomatoesScores.Empty;
         }
 
         var normalizedTitle = NormalizeTitle(title);
         if (string.IsNullOrWhiteSpace(normalizedTitle))
         {
-            return null;
+            return RottenTomatoesScores.Empty;
         }
 
         var cacheKey = $"rt:score:{mediaType}:{normalizedTitle}:{year?.ToString(CultureInfo.InvariantCulture) ?? ""}:{wikidataId?.Trim() ?? ""}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out int cachedScore))
+        if (!forceRefresh && _cache.TryGetValue(cacheKey, out RottenTomatoesScores? cachedScores) && cachedScores is not null)
         {
-            return cachedScore >= 0 ? cachedScore : null;
+            return cachedScores;
         }
 
         return await _singleFlight.RunAsync(
             forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}",
             async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out int flightCachedScore))
+                if (!forceRefresh && _cache.TryGetValue(cacheKey, out RottenTomatoesScores? flightCachedScores) && flightCachedScores is not null)
                 {
-                    return flightCachedScore >= 0 ? flightCachedScore : null;
+                    return flightCachedScores;
                 }
 
                 var hasIdentifierContext = !string.IsNullOrWhiteSpace(wikidataId);
-                var score = await TryGetScoreByWikidataIdAsync(mediaType, wikidataId, token, forceRefresh);
-                if (score is null && ShouldSearchByTitle(mediaType, year, hasIdentifierContext))
+                var scores = await TryGetScoresByWikidataIdAsync(mediaType, wikidataId, token, forceRefresh);
+                if (!scores.HasAnyScore && ShouldSearchByTitle(mediaType, year, hasIdentifierContext))
                 {
-                    score = await SearchAndFetchScoreAsync(
+                    scores = await SearchAndFetchScoresAsync(
                         mediaType,
                         title.Trim(),
                         normalizedTitle,
@@ -97,10 +97,22 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                         token);
                 }
 
-                _cache.Set(cacheKey, score ?? -1, TimeSpan.FromHours(Math.Clamp(_options.CacheHours, 1, 168)));
-                return score;
+                _cache.Set(cacheKey, scores, TimeSpan.FromHours(Math.Clamp(_options.CacheHours, 1, 168)));
+                return scores;
             },
             cancellationToken);
+    }
+
+    public async Task<int?> GetTomatometerScoreAsync(
+        PremiereMediaType mediaType,
+        string title,
+        int? year,
+        string? wikidataId,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        var scores = await GetScoresAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh);
+        return scores.CriticScore;
     }
 
     private static bool ShouldSearchByTitle(PremiereMediaType mediaType, int? year, bool hasIdentifierContext)
@@ -108,7 +120,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         return mediaType == PremiereMediaType.Series || hasIdentifierContext || year.HasValue;
     }
 
-    private async Task<int?> TryGetScoreByWikidataIdAsync(
+    private async Task<RottenTomatoesScores> TryGetScoresByWikidataIdAsync(
         PremiereMediaType mediaType,
         string? wikidataId,
         CancellationToken cancellationToken,
@@ -116,7 +128,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
     {
         if (_wikimediaClient is null || string.IsNullOrWhiteSpace(wikidataId))
         {
-            return null;
+            return RottenTomatoesScores.Empty;
         }
 
         try
@@ -124,19 +136,19 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
             var rottenTomatoesId = await _wikimediaClient.GetRottenTomatoesIdAsync(wikidataId, cancellationToken, forceRefresh);
             if (string.IsNullOrWhiteSpace(rottenTomatoesId) || !IsExpectedMediaPath(mediaType, rottenTomatoesId))
             {
-                return null;
+                return RottenTomatoesScores.Empty;
             }
 
-            return await FetchDirectScoreAsync(rottenTomatoesId, cancellationToken);
+            return await FetchDirectScoresAsync(rottenTomatoesId, fallbackCriticScore: null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Skipping Rotten Tomatoes Wikidata lookup for {WikidataId}.", wikidataId);
-            return null;
+            return RottenTomatoesScores.Empty;
         }
     }
 
-    private async Task<int?> SearchAndFetchScoreAsync(
+    private async Task<RottenTomatoesScores> SearchAndFetchScoresAsync(
         PremiereMediaType mediaType,
         string title,
         string normalizedTitle,
@@ -147,19 +159,18 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         var html = await GetStringAsync($"search?search={Uri.EscapeDataString(title)}", cancellationToken);
         if (string.IsNullOrWhiteSpace(html))
         {
-            return null;
+            return RottenTomatoesScores.Empty;
         }
 
         var match = SelectBestSearchResult(ParseSearchResults(html), mediaType, normalizedTitle, year);
         if (match is null)
         {
-            return null;
+            return RottenTomatoesScores.Empty;
         }
 
-        return match.Score
-            ?? (ShouldFetchDirectSearchMatch(match, year, hasIdentifierContext)
-                ? await FetchDirectScoreAsync(match.Url, cancellationToken)
-                : null);
+        return ShouldFetchDirectSearchMatch(match, year, hasIdentifierContext)
+            ? await FetchDirectScoresAsync(match.Url, match.Score, cancellationToken)
+            : new RottenTomatoesScores(match.Score, AudienceScore: null);
     }
 
     private static bool ShouldFetchDirectSearchMatch(
@@ -167,14 +178,27 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         int? targetYear,
         bool hasIdentifierContext)
     {
-        return hasIdentifierContext
+        return match.Score.HasValue
+            || hasIdentifierContext
             || (targetYear.HasValue && match.Year.HasValue && YearMatches(match.Year, targetYear));
     }
 
-    private async Task<int?> FetchDirectScoreAsync(string urlOrPath, CancellationToken cancellationToken)
+    private async Task<RottenTomatoesScores> FetchDirectScoresAsync(
+        string urlOrPath,
+        int? fallbackCriticScore,
+        CancellationToken cancellationToken)
     {
         var html = await GetStringAsync(urlOrPath, cancellationToken);
-        return string.IsNullOrWhiteSpace(html) ? null : ParseScorecardScore(html);
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return new RottenTomatoesScores(fallbackCriticScore, AudienceScore: null);
+        }
+
+        var scores = ParseScorecardScores(html);
+        return scores with
+        {
+            CriticScore = scores.CriticScore ?? fallbackCriticScore
+        };
     }
 
     private async Task<string?> GetStringAsync(string url, CancellationToken cancellationToken)
@@ -277,38 +301,47 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         return results;
     }
 
-    private static int? ParseScorecardScore(string html)
+    private static RottenTomatoesScores ParseScorecardScores(string html)
     {
         var match = ScorecardJsonRegex.Match(html);
         if (!match.Success)
         {
-            return null;
+            return RottenTomatoesScores.Empty;
         }
 
         var json = WebUtility.HtmlDecode(match.Groups["json"].Value).Trim();
         if (string.IsNullOrWhiteSpace(json))
         {
-            return null;
+            return RottenTomatoesScores.Empty;
         }
 
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
+        int? criticScore = null;
+        int? audienceScore = null;
         if (TryGetProperty(root, "criticsScore", out var criticsScore))
         {
-            var score = ScoreFromJsonObject(criticsScore);
-            if (score is not null)
-            {
-                return score;
-            }
+            criticScore = ScoreFromJsonObject(criticsScore);
+        }
+
+        if (TryGetProperty(root, "audienceScore", out var rootAudienceScore))
+        {
+            audienceScore = ScoreFromJsonObject(rootAudienceScore);
         }
 
         if (TryGetProperty(root, "overlay", out var overlay)
             && TryGetProperty(overlay, "criticsAll", out var criticsAll))
         {
-            return ScoreFromJsonObject(criticsAll);
+            criticScore ??= ScoreFromJsonObject(criticsAll);
         }
 
-        return null;
+        if (overlay.ValueKind == JsonValueKind.Object
+            && TryGetProperty(overlay, "audienceAll", out var audienceAll))
+        {
+            audienceScore ??= ScoreFromJsonObject(audienceAll);
+        }
+
+        return new RottenTomatoesScores(criticScore, audienceScore);
     }
 
     private static int? ScoreFromJsonObject(JsonElement scoreObject)

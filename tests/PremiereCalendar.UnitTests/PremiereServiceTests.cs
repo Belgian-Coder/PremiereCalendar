@@ -1272,7 +1272,7 @@ public sealed class PremiereServiceTests
             LastUpdatedUtc = DateTimeOffset.UtcNow
         };
         var rottenTomatoes = new FakeRottenTomatoesClient();
-        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Cached Tomatoes Movie", 2026, "Q67")] = 88;
+        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Cached Tomatoes Movie", 2026, "Q67")] = new RottenTomatoesScores(88, null);
         var service = CreateService(
             new FakeTmdbClient(),
             calendarCache: new FakeCalendarCache { Items = [cachedItem] },
@@ -1300,6 +1300,44 @@ public sealed class PremiereServiceTests
         Assert.Equal(2026, call.Year);
         Assert.Equal("Q67", call.WikidataId);
         Assert.False(call.ForceRefresh);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_HydratesCachedItemsWithCurrentRottenTomatoesAudienceScore()
+    {
+        var cachedItem = new PremiereItem
+        {
+            CanonicalId = "movie:74",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 74,
+            ImdbId = "tt0000074",
+            WikidataId = "Q74",
+            Title = "Cached Audience Movie",
+            PremiereDate = new DateOnly(2026, 5, 4),
+            OriginalLanguage = "en",
+            RuntimeMinutes = 90,
+            RottenTomatoesScore = 80,
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var rottenTomatoes = new FakeRottenTomatoesClient();
+        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Cached Audience Movie", 2026, "Q74")] = new RottenTomatoesScores(82, 91);
+        var service = CreateService(
+            new FakeTmdbClient(),
+            calendarCache: new FakeCalendarCache { Items = [cachedItem] },
+            rottenTomatoes: rottenTomatoes);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(80, item.RottenTomatoesScore);
+        Assert.Equal(91, item.RottenTomatoesAudienceScore);
+        var call = Assert.Single(rottenTomatoes.Calls);
+        Assert.Equal("Cached Audience Movie", call.Title);
     }
 
     [Fact]
@@ -2749,7 +2787,7 @@ public sealed class PremiereServiceTests
             ImdbRating = "7.1"
         };
         var rottenTomatoes = new FakeRottenTomatoesClient();
-        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Direct Tomatoes Movie", 2026, "Q680")] = 87;
+        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Direct Tomatoes Movie", 2026, "Q680")] = new RottenTomatoesScores(87, null);
         var service = CreateService(
             tmdb,
             omdb: omdb,
@@ -2803,7 +2841,7 @@ public sealed class PremiereServiceTests
             Ratings = [new OmdbRating { Source = "Rotten Tomatoes", Value = "73%" }]
         };
         var rottenTomatoes = new FakeRottenTomatoesClient();
-        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Omdb Tomatoes Movie", 2026, null)] = 91;
+        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Omdb Tomatoes Movie", 2026, null)] = new RottenTomatoesScores(91, 64);
         var service = CreateService(
             tmdb,
             omdb: omdb,
@@ -2817,7 +2855,8 @@ public sealed class PremiereServiceTests
 
         var item = Assert.Single(items);
         Assert.Equal(73, item.RottenTomatoesScore);
-        Assert.Empty(rottenTomatoes.Calls);
+        Assert.Equal(64, item.RottenTomatoesAudienceScore);
+        Assert.NotEmpty(rottenTomatoes.Calls);
     }
 
     [Fact]
@@ -4207,10 +4246,10 @@ public sealed class PremiereServiceTests
 
     private sealed class FakeRottenTomatoesClient : IRottenTomatoesClient
     {
-        public Dictionary<(PremiereMediaType MediaType, string Title, int? Year, string? WikidataId), int?> Scores { get; } = [];
+        public Dictionary<(PremiereMediaType MediaType, string Title, int? Year, string? WikidataId), RottenTomatoesScores> Scores { get; } = [];
         public ConcurrentBag<RottenTomatoesCall> Calls { get; } = [];
 
-        public Task<int?> GetTomatometerScoreAsync(
+        public Task<RottenTomatoesScores> GetScoresAsync(
             PremiereMediaType mediaType,
             string title,
             int? year,
@@ -4219,7 +4258,7 @@ public sealed class PremiereServiceTests
             bool forceRefresh = false)
         {
             Calls.Add(new RottenTomatoesCall(mediaType, title, year, wikidataId, forceRefresh));
-            return Task.FromResult(Scores.GetValueOrDefault((mediaType, title, year, wikidataId)));
+            return Task.FromResult(Scores.GetValueOrDefault((mediaType, title, year, wikidataId)) ?? RottenTomatoesScores.Empty);
         }
     }
 

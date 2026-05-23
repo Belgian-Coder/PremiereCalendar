@@ -11,17 +11,93 @@ namespace PremiereCalendar.IntegrationTests;
 public sealed class RottenTomatoesClientIntegrationTests
 {
     [Fact]
+    public async Task GetScoresAsync_FetchesAudienceScoreWhenSearchRowAlreadyHasTomatometerScore()
+    {
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/search" => Html(
+                    """
+                    <search-page-media-row startyear="2026" tomatometerscore="95">
+                      <a href="https://www.rottentomatoes.com/tv/the_boroughs" data-qa="info-name" slot="title">The Boroughs</a>
+                    </search-page-media-row>
+                    """),
+                "/tv/the_boroughs" => Html(
+                    """
+                    <script id="media-scorecard-json" type="application/json">
+                    {"criticsScore":{"score":"95","scorePercent":"95%"},"audienceScore":{"score":"85","scorePercent":"85%","bandedRatingCount":"50+ Ratings"}}
+                    </script>
+                    """),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            };
+        });
+        var client = CreateClient(handler);
+
+        var scores = await client.GetScoresAsync(
+            PremiereMediaType.Series,
+            "The Boroughs",
+            2026,
+            wikidataId: null,
+            CancellationToken.None);
+
+        Assert.Equal(95, scores.CriticScore);
+        Assert.Equal(85, scores.AudienceScore);
+        Assert.Equal(["/search", "/tv/the_boroughs"], handler.Requests.Select(request => request.Uri.AbsolutePath));
+    }
+
+    [Fact]
+    public async Task GetScoresAsync_FetchesAudienceScoreFromScoredSearchRowWithoutYear()
+    {
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/search" => Html(
+                    """
+                    <search-page-media-row tomatometerscore="100">
+                      <a href="https://www.rottentomatoes.com/tv/kylie" data-qa="info-name" slot="title">Kylie</a>
+                    </search-page-media-row>
+                    """),
+                "/tv/kylie" => Html(
+                    """
+                    <script id="media-scorecard-json" type="application/json">
+                    {"criticsScore":{"score":"100","scorePercent":"100%"},"audienceScore":{"score":"97","scorePercent":"97%","bandedRatingCount":"Fewer than 50 Ratings"}}
+                    </script>
+                    """),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            };
+        });
+        var client = CreateClient(handler);
+
+        var scores = await client.GetScoresAsync(
+            PremiereMediaType.Series,
+            "Kylie",
+            2026,
+            wikidataId: null,
+            CancellationToken.None);
+
+        Assert.Equal(100, scores.CriticScore);
+        Assert.Equal(97, scores.AudienceScore);
+        Assert.Equal(["/search", "/tv/kylie"], handler.Requests.Select(request => request.Uri.AbsolutePath));
+    }
+
+    [Fact]
     public async Task GetTomatometerScoreAsync_UsesExactSearchRowScore()
     {
         var handler = new StubHttpMessageHandler(request =>
         {
-            Assert.Equal("/search", request.RequestUri!.AbsolutePath);
-            return Html(
-                """
-                <search-page-media-row startyear="2026" tomatometerscore="95">
-                  <a href="https://www.rottentomatoes.com/tv/the_boroughs" data-qa="info-name" slot="title">The Boroughs</a>
-                </search-page-media-row>
-                """);
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/search" => Html(
+                    """
+                    <search-page-media-row startyear="2026" tomatometerscore="95">
+                      <a href="https://www.rottentomatoes.com/tv/the_boroughs" data-qa="info-name" slot="title">The Boroughs</a>
+                    </search-page-media-row>
+                    """),
+                "/tv/the_boroughs" => new HttpResponseMessage(HttpStatusCode.NotFound),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            };
         });
         var client = CreateClient(handler);
 
@@ -33,7 +109,7 @@ public sealed class RottenTomatoesClientIntegrationTests
             CancellationToken.None);
 
         Assert.Equal(95, score);
-        Assert.Single(handler.Requests);
+        Assert.Equal(["/search", "/tv/the_boroughs"], handler.Requests.Select(request => request.Uri.AbsolutePath));
     }
 
     [Fact]
@@ -76,13 +152,17 @@ public sealed class RottenTomatoesClientIntegrationTests
     {
         var handler = new StubHttpMessageHandler(request =>
         {
-            Assert.Equal("/search", request.RequestUri!.AbsolutePath);
-            return Html(
-                """
-                <search-page-media-row release-year="2026" tomatometer-score="72">
-                  <a href="https://www.rottentomatoes.com/m/saccharine" data-qa="info-name" slot="title">Saccharine</a>
-                </search-page-media-row>
-                """);
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/search" => Html(
+                    """
+                    <search-page-media-row release-year="2026" tomatometer-score="72">
+                      <a href="https://www.rottentomatoes.com/m/saccharine" data-qa="info-name" slot="title">Saccharine</a>
+                    </search-page-media-row>
+                    """),
+                "/m/saccharine" => new HttpResponseMessage(HttpStatusCode.NotFound),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            };
         });
         var client = CreateClient(handler);
 
@@ -94,7 +174,7 @@ public sealed class RottenTomatoesClientIntegrationTests
             CancellationToken.None);
 
         Assert.Equal(72, score);
-        Assert.Single(handler.Requests);
+        Assert.Equal(["/search", "/m/saccharine"], handler.Requests.Select(request => request.Uri.AbsolutePath));
     }
 
     [Fact]

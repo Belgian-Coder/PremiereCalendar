@@ -90,7 +90,11 @@
         <div class="scores" aria-label="Scores">
             <span class="@ScoreClass(ScoreSource.Tmdb)">TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
             <span class="@ScoreClass(ScoreSource.Imdb)">IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
-            <span class="@ScoreClass(ScoreSource.RottenTomatoes)">RT @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
+            <span class="@ScoreClass(ScoreSource.RottenTomatoes)">RT critics @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
+            @if (Item.RottenTomatoesAudienceScore is not null)
+            {
+                <span title="Rotten Tomatoes audience score">RT audience @FormatRottenTomatoes(Item.RottenTomatoesAudienceScore)</span>
+            }
             <span class="@ScoreClass(ScoreSource.Metacritic)">Meta @FormatMetacritic(Item.MetacriticScore)</span>
         </div>
 
@@ -114,7 +118,11 @@
                 }
                 @if (Item.RottenTomatoesScore is not null)
                 {
-                    <span>RT score</span>
+                    <span>RT critics score</span>
+                }
+                @if (Item.RottenTomatoesAudienceScore is not null)
+                {
+                    <span>RT audience score</span>
                 }
                 @if (Item.MetacriticScore is not null)
                 {
@@ -411,6 +419,7 @@
         Append(builder, Item.ImdbScore);
         Append(builder, Item.ImdbVoteCount);
         Append(builder, Item.RottenTomatoesScore);
+        Append(builder, Item.RottenTomatoesAudienceScore);
         Append(builder, Item.MetacriticScore);
         Append(builder, Item.TvmazeRating);
         Append(builder, Item.TrailerUrl);

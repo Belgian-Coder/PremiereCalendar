@@ -78,6 +78,7 @@ public sealed record PremiereItem
     public double? ImdbScore { get; init; }
     public int? ImdbVoteCount { get; init; }
     public int? RottenTomatoesScore { get; init; }
+    public int? RottenTomatoesAudienceScore { get; init; }
     public int? MetacriticScore { get; init; }
 
     public string? NetworkName { get; init; }
