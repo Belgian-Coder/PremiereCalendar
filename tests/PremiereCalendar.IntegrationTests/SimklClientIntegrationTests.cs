@@ -214,10 +214,84 @@ public sealed class SimklClientIntegrationTests
         Assert.Single(handler.Requests);
     }
 
+    [Fact]
+    public async Task GetCalendarAsync_ReadsPublicCalendarFilesWithRequiredQuery()
+    {
+        var stateStore = new FakeSimklSyncStateStore();
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            Assert.Equal("data.simkl.in", request.RequestUri!.Host);
+            Assert.Equal("test-client-id", QueryString.Parse(request.RequestUri)["client_id"]);
+            Assert.Equal("premiere-calendar", QueryString.Parse(request.RequestUri)["app-name"]);
+            Assert.Equal("1.0", QueryString.Parse(request.RequestUri)["app-version"]);
+
+            return request.RequestUri.AbsolutePath switch
+            {
+                "/calendar/tv.json" => StubHttpMessageHandler.Json(
+                    """
+                    [
+                      {
+                        "title": "Simkl Show",
+                        "date": "2026-05-04T00:00:00-05:00",
+                        "release_date": "2026-05-04",
+                        "url": "https://simkl.com/tv/100/simkl-show",
+                        "ratings": { "imdb": { "rating": 8.1, "votes": 1200 } },
+                        "ids": { "simkl_id": 100, "tmdb": "110", "imdb": "tt0000110", "tvdb": "1110" },
+                        "episode": { "season": 1, "episode": 1, "url": "https://simkl.com/tv/100/simkl-show/season-1/episode-1" }
+                      }
+                    ]
+                    """),
+                "/calendar/movie_release.json" => StubHttpMessageHandler.Json(
+                    """
+                    [
+                      {
+                        "title": "Simkl Movie",
+                        "date": "2026-05-05T00:00:00+00:00",
+                        "release_date": "2026-05-05",
+                        "url": "/movies/200/simkl-movie",
+                        "ratings": { "imdb": { "rating": 7.2, "votes": 340 } },
+                        "ids": { "simkl_id": 200, "tmdb": "220", "imdb": "tt0000220" }
+                      }
+                    ]
+                    """),
+                _ => StubHttpMessageHandler.Json("[]")
+            };
+        });
+        var client = CreateClient(handler, stateStore);
+
+        var items = await client.GetCalendarAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None);
+
+        Assert.Equal(2, items.Count);
+        Assert.Contains(items, item => item.Type == SimklCalendarItemType.Tv && item.Title == "Simkl Show");
+        Assert.Contains(items, item => item.Type == SimklCalendarItemType.MovieRelease && item.Title == "Simkl Movie");
+        Assert.Contains(handler.Requests, request => request.Uri.AbsolutePath == "/calendar/tv.json");
+        Assert.Contains(handler.Requests, request => request.Uri.AbsolutePath == "/calendar/movie_release.json");
+    }
+
+    [Fact]
+    public async Task GetCalendarAsync_SkipsRequestsWhenClientIdIsMissing()
+    {
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("Simkl calendar should not be called without a client ID."));
+        var stateStore = new FakeSimklSyncStateStore();
+        var client = CreateClient(handler, stateStore, clientId: "");
+
+        var items = await client.GetCalendarAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None);
+
+        Assert.Empty(items);
+        Assert.Empty(handler.Requests);
+    }
+
     private static SimklClient CreateClient(
         StubHttpMessageHandler handler,
         ISimklSyncStateStore stateStore,
-        string accessToken = "test-access-token")
+        string accessToken = "test-access-token",
+        string clientId = "test-client-id")
     {
         return new SimklClient(
             new HttpClient(handler) { BaseAddress = new Uri("https://api.simkl.com/") },
@@ -225,7 +299,7 @@ public sealed class SimklClientIntegrationTests
             Microsoft.Extensions.Options.Options.Create(new SimklOptions
             {
                 Enabled = true,
-                ClientId = "test-client-id",
+                ClientId = clientId,
                 ClientSecret = "test-client-secret",
                 AccessToken = accessToken,
                 MinimumActivityCheckMinutes = 0

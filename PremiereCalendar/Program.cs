@@ -222,6 +222,7 @@ builder.Services.AddSingleton<IArtworkProvider, TvmazeArtworkProvider>();
 builder.Services.AddSingleton<IArtworkProvider, TheTvdbArtworkProvider>();
 builder.Services.AddSingleton<IArtworkProvider, WikimediaArtworkProvider>();
 builder.Services.AddSingleton<IPremiereDiscoveryProvider, TraktDiscoveryProvider>();
+builder.Services.AddSingleton<IPremiereDiscoveryProvider, SimklCalendarDiscoveryProvider>();
 builder.Services.AddSingleton<IPremiereDiscoveryProvider, TvmazeScheduleDiscoveryProvider>();
 builder.Services.AddScoped<IPremiereService, PremiereService>();
 

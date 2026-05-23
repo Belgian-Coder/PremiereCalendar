@@ -1156,6 +1156,15 @@ public sealed class SettingsPageTests : BunitContext
                 ? PinStatusResults.Dequeue()
                 : PinStatusResult);
         }
+
+        public Task<IReadOnlyList<SimklCalendarItem>> GetCalendarAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false)
+        {
+            return Task.FromResult<IReadOnlyList<SimklCalendarItem>>([]);
+        }
     }
 
     private sealed class FakeViewSyncService : IViewSyncService

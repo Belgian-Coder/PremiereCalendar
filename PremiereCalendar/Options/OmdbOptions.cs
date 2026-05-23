@@ -6,5 +6,6 @@ public sealed class OmdbOptions
     public string? ApiKey { get; set; }
     public bool Enabled { get; set; }
     public int CacheDays { get; set; } = 90;
+    public int EmptyResponseCacheHours { get; set; } = 6;
     public int RateLimitBackoffHours { get; set; } = 12;
 }

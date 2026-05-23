@@ -11,7 +11,7 @@
 
     <p>Movie and TV metadata are provided by TMDB. Optional IMDb and Rotten Tomatoes rating enrichment is provided through OMDb when configured.</p>
 
-    <p>Optional enrichment can use TVmaze, Fanart.tv, Trakt, TheTVDB, and Wikimedia/Commons. External discovery rows are accepted only after they resolve back to a TMDB movie or TV ID.</p>
+    <p>Optional enrichment can use TVmaze, Fanart.tv, Trakt, SIMKL, TheTVDB, and Wikimedia/Commons. External discovery rows are accepted only after they resolve back to a TMDB movie or TV ID.</p>
 
     <p>Premiere Calendar is designed for local hosting. API keys stay server-side in the local settings database or ASP.NET Core configuration fallback, not in client-side code.</p>
 
@@ -56,6 +56,11 @@
             "Trakt",
             sources.Trakt.Enabled && !string.IsNullOrWhiteSpace(sources.Trakt.ClientId),
             sources.Trakt.Enabled ? "Global movie and new-show calendar candidates." : "Disabled by configuration.");
+
+        yield return new SourceStatus(
+            "SIMKL",
+            sources.Simkl.Enabled && !string.IsNullOrWhiteSpace(sources.Simkl.ClientId),
+            sources.Simkl.Enabled ? "Public calendar candidates and IMDb rating fallback." : "Disabled by configuration.");
 
         yield return new SourceStatus(
             "Fanart.tv",

@@ -144,6 +144,37 @@ public sealed class OmdbClientIntegrationTests
     }
 
     [Fact]
+    public async Task GetByImdbIdAsync_RefreshesStaleEmptyPersistentCacheSoonerThanSuccessfulMetadata()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var store = CreateCacheStore(root);
+            await store.SetAsync(
+                "tt-empty",
+                new PremiereCalendar.Models.OmdbItem
+                {
+                    Response = "False",
+                    Error = "Error getting data."
+                },
+                DateTimeOffset.UtcNow.AddHours(-2),
+                CancellationToken.None);
+            var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(Fixture.Read("omdb/by-imdb-id-success.json")));
+            var client = CreateOmdbClient(handler, enabled: true, cacheStore: store);
+
+            var refreshed = await client.GetByImdbIdAsync("tt-empty", CancellationToken.None);
+
+            Assert.NotNull(refreshed);
+            Assert.Equal("8.2", refreshed.ImdbRating);
+            Assert.Single(handler.Requests);
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    [Fact]
     public async Task GetByImdbIdAsync_SkipsHttpDuringPersistedRateLimitCooldown()
     {
         var root = CreateRoot();
@@ -212,6 +243,7 @@ public sealed class OmdbClientIntegrationTests
                 Enabled = enabled,
                 ApiKey = enabled ? "test-key" : null,
                 CacheDays = 90,
+                EmptyResponseCacheHours = 1,
                 RateLimitBackoffHours = 12
             }),
             cacheStore: cacheStore);

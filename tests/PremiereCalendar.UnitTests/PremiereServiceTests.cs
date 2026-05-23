@@ -2621,6 +2621,49 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
+    public async Task GetPremieresAsync_UsesExternalCandidateImdbRatingWhenRatingStoresHaveNoScore()
+    {
+        var tmdb = new FakeTmdbClient();
+        tmdb.MovieDetailsById[66] = new TmdbDetailsWithExtras
+        {
+            Id = 66,
+            ExternalIds = new TmdbExternalIds { ImdbId = "tt0000066" }
+        };
+        var discovery = new FakeDiscoveryProvider
+        {
+            DisplayName = "Simkl",
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Movie,
+                    new DateOnly(2026, 5, 4),
+                    "Candidate Rated Movie",
+                    66,
+                    "tt0000066",
+                    null,
+                    "Simkl",
+                    ImdbScore: 7.6,
+                    ImdbVoteCount: 987)
+            ]
+        };
+        var service = CreateService(
+            tmdb,
+            discoveryProviders: [discovery],
+            imdbRatingsStore: new FakeImdbRatingsStore());
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        var item = Assert.Single(items);
+        Assert.Equal(7.6, item.ImdbScore);
+        Assert.Equal(987, item.ImdbVoteCount);
+        Assert.DoesNotContain("Simkl", item.SourceNames);
+    }
+
+    [Fact]
     public async Task GetPremieresAsync_SkipsFailedTvmazeEnrichmentWithoutDroppingSeries()
     {
         var tmdb = new FakeTmdbClient

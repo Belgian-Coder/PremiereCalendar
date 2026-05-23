@@ -2125,6 +2125,8 @@ public sealed class PremiereService : IPremiereService
             SeasonNumber = candidate.SeasonNumber,
             EpisodeNumber = candidate.EpisodeNumber,
             EpisodeSource = candidate.Source,
+            ImdbScore = candidate.ImdbScore,
+            ImdbVoteCount = candidate.ImdbVoteCount,
             NetworkName = candidate.MediaType == PremiereMediaType.Series ? candidate.Source : null
         };
     }
@@ -2160,6 +2162,12 @@ public sealed class PremiereService : IPremiereService
         var externalProviderId = candidates
             .Select(candidate => candidate.ExternalProviderId)
             .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
+        var imdbScore = candidates
+            .Select(candidate => candidate.ImdbScore)
+            .FirstOrDefault(score => score is not null);
+        var imdbVoteCount = candidates
+            .Select(candidate => candidate.ImdbVoteCount)
+            .FirstOrDefault(votes => votes is not null);
 
         return selected with
         {
@@ -2169,7 +2177,9 @@ public sealed class PremiereService : IPremiereService
             PosterUrl = posterUrl ?? selected.PosterUrl,
             BackdropUrl = backdropUrl ?? selected.BackdropUrl,
             ExternalUrl = externalUrl ?? selected.ExternalUrl,
-            ExternalProviderId = externalProviderId ?? selected.ExternalProviderId
+            ExternalProviderId = externalProviderId ?? selected.ExternalProviderId,
+            ImdbScore = imdbScore ?? selected.ImdbScore,
+            ImdbVoteCount = imdbVoteCount ?? selected.ImdbVoteCount
         };
     }
 
@@ -2288,6 +2298,8 @@ public sealed class PremiereService : IPremiereService
             SeasonNumber = candidate.SeasonNumber ?? cachedItem.SeasonNumber,
             EpisodeNumber = candidate.EpisodeNumber ?? cachedItem.EpisodeNumber,
             EpisodeSource = CoalesceText(candidate.Source, cachedItem.EpisodeSource),
+            ImdbScore = cachedItem.ImdbScore ?? candidate.ImdbScore,
+            ImdbVoteCount = cachedItem.ImdbVoteCount ?? candidate.ImdbVoteCount,
             SourceNames = sourceNames,
             Sources = SourceEntriesWithCandidate(cachedItem.Sources, candidate),
             NetworkName = CoalesceText(candidate.Source, cachedItem.NetworkName)
@@ -2300,6 +2312,8 @@ public sealed class PremiereService : IPremiereService
     {
         return item with
         {
+            ImdbScore = item.ImdbScore ?? candidate.ImdbScore,
+            ImdbVoteCount = item.ImdbVoteCount ?? candidate.ImdbVoteCount,
             SourceNames = SourceNamesWithCandidate(item.SourceNames, candidate),
             Sources = SourceEntriesWithCandidate(item.Sources, candidate)
         };
@@ -2375,7 +2389,8 @@ public sealed class PremiereService : IPremiereService
 
     private static bool IsDisplayableCandidateSource(string source)
     {
-        return !string.Equals(source, "Trakt", StringComparison.OrdinalIgnoreCase);
+        return !string.Equals(source, "Trakt", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(source, "Simkl", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<int?> ResolveCandidateTmdbIdAsync(

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
@@ -12,6 +13,7 @@ namespace PremiereCalendar.Services;
 public sealed class SimklClient : ISimklClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan CalendarCacheDuration = TimeSpan.FromHours(5);
 
     private readonly HttpClient _httpClient;
     private readonly IMemoryCache _cache;
@@ -198,6 +200,32 @@ public sealed class SimklClient : ISimklClient
         return new SimklSyncResult(SimklSyncStatus.DeltaSyncCompleted, activitiesAllUtc);
     }
 
+    public async Task<IReadOnlyList<SimklCalendarItem>> GetCalendarAsync(
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        var settings = await GetEffectiveSettingsAsync(cancellationToken);
+        if (!IsCalendarConfigured(settings))
+        {
+            return [];
+        }
+
+        var items = new List<SimklCalendarItem>();
+        foreach (var (path, type) in CalendarPaths(start, end))
+        {
+            var fileItems = await GetCalendarFileAsync(path, type, settings, cancellationToken, forceRefresh);
+            items.AddRange(fileItems);
+        }
+
+        return items
+            .Where(item => CalendarItemDate(item) >= start && CalendarItemDate(item) <= end)
+            .GroupBy(CalendarItemKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+    }
+
     private async Task<bool> FetchInitialLibrariesSequentiallyAsync(
         SimklSourceSettings settings,
         CancellationToken cancellationToken)
@@ -212,6 +240,228 @@ public sealed class SimklClient : ISimklClient
         }
 
         return true;
+    }
+
+    private async Task<IReadOnlyList<SimklCalendarItem>> GetCalendarFileAsync(
+        string path,
+        SimklCalendarItemType type,
+        SimklSourceSettings settings,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        var cacheKey = $"simkl:calendar:{path}";
+        if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<SimklCalendarItem>? cached) && cached is not null)
+        {
+            return cached;
+        }
+
+        var uri = BuildCalendarUri(path, settings);
+        var body = await SendPublicTextWithRetryAsync(HttpMethod.Get, uri.ToString(), cancellationToken);
+        if (body is null)
+        {
+            return [];
+        }
+
+        IReadOnlyList<SimklCalendarItem> items;
+        try
+        {
+            var rawItems = JsonSerializer.Deserialize<List<SimklCalendarPayloadItem>>(body, JsonOptions) ?? [];
+            items = rawItems
+                .Select(item => ToCalendarItem(type, item))
+                .Where(item => item is not null)
+                .Select(item => item!)
+                .ToArray();
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+
+        _cache.Set(cacheKey, items, CalendarCacheDuration);
+        return items;
+    }
+
+    private IEnumerable<(string Path, SimklCalendarItemType Type)> CalendarPaths(DateOnly start, DateOnly end)
+    {
+        yield return ("calendar/tv.json", SimklCalendarItemType.Tv);
+        yield return ("calendar/movie_release.json", SimklCalendarItemType.MovieRelease);
+
+        var todayUtc = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (start >= todayUtc.AddDays(-1) && end <= todayUtc.AddDays(33))
+        {
+            yield break;
+        }
+
+        var cursor = new DateOnly(start.Year, start.Month, 1);
+        var lastMonth = new DateOnly(end.Year, end.Month, 1);
+        while (cursor <= lastMonth)
+        {
+            yield return ($"calendar/{cursor.Year.ToString(CultureInfo.InvariantCulture)}/{cursor.Month.ToString(CultureInfo.InvariantCulture)}/tv.json", SimklCalendarItemType.Tv);
+            yield return ($"calendar/{cursor.Year.ToString(CultureInfo.InvariantCulture)}/{cursor.Month.ToString(CultureInfo.InvariantCulture)}/movie_release.json", SimklCalendarItemType.MovieRelease);
+            cursor = cursor.AddMonths(1);
+        }
+    }
+
+    private Uri BuildCalendarUri(string path, SimklSourceSettings settings)
+    {
+        var baseUrl = string.IsNullOrWhiteSpace(_options.CalendarBaseUrl)
+            ? "https://data.simkl.in/"
+            : _options.CalendarBaseUrl.Trim();
+        if (!baseUrl.EndsWith("/", StringComparison.Ordinal))
+        {
+            baseUrl += "/";
+        }
+
+        var uri = new Uri(new Uri(baseUrl), path);
+        var query = string.Join(
+            "&",
+            $"client_id={Uri.EscapeDataString(settings.ClientId.Trim())}",
+            $"app-name={Uri.EscapeDataString(AppParameter(_options.AppName, "premiere-calendar"))}",
+            $"app-version={Uri.EscapeDataString(AppParameter(_options.AppVersion, "1.0"))}");
+        return new Uri($"{uri}?{query}");
+    }
+
+    private static SimklCalendarItem? ToCalendarItem(SimklCalendarItemType type, SimklCalendarPayloadItem item)
+    {
+        if (!TryParseCalendarDate(item.Date, item.ReleaseDate, out var date))
+        {
+            return null;
+        }
+
+        return new SimklCalendarItem(
+            type,
+            item.Title,
+            date,
+            TryParseDateOnly(item.ReleaseDate),
+            NormalizeSimklUrl(item.Url),
+            new SimklCalendarIds(
+                JsonElementToInt(item.Ids?.SimklId),
+                JsonElementToString(item.Ids?.Tmdb),
+                JsonElementToString(item.Ids?.Imdb),
+                JsonElementToString(item.Ids?.Tvdb)),
+            new SimklCalendarRatings(ToRating(item.Ratings?.Imdb)),
+            item.Episode is null
+                ? null
+                : new SimklCalendarEpisode(
+                    JsonElementToInt(item.Episode.Season),
+                    JsonElementToInt(item.Episode.Episode),
+                    NormalizeSimklUrl(item.Episode.Url)));
+    }
+
+    private static SimklRating? ToRating(SimklPayloadRating? rating)
+    {
+        if (rating is null)
+        {
+            return null;
+        }
+
+        var value = JsonElementToDouble(rating.Rating);
+        var votes = JsonElementToInt(rating.Votes);
+        return value is null && votes is null ? null : new SimklRating(value, votes);
+    }
+
+    private static bool TryParseCalendarDate(string? value, string? fallbackDate, out DateTimeOffset date)
+    {
+        if (!string.IsNullOrWhiteSpace(value)
+            && DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out date))
+        {
+            return true;
+        }
+
+        var releaseDate = TryParseDateOnly(fallbackDate);
+        if (releaseDate is { } parsed)
+        {
+            date = new DateTimeOffset(parsed.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            return true;
+        }
+
+        date = default;
+        return false;
+    }
+
+    private static DateOnly? TryParseDateOnly(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+            && DateOnly.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
+                ? date
+                : null;
+    }
+
+    private static DateOnly CalendarItemDate(SimklCalendarItem item)
+    {
+        return DateOnly.FromDateTime(item.Date.DateTime);
+    }
+
+    private static string CalendarItemKey(SimklCalendarItem item)
+    {
+        var date = CalendarItemDate(item);
+        return $"{item.Type}:{date:yyyyMMdd}:{item.Ids.SimklId}:{item.Ids.Tmdb}:{item.Ids.Imdb}:{item.Episode?.Season}:{item.Episode?.Episode}:{item.Title}";
+    }
+
+    private static string? NormalizeSimklUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var trimmed = value.Trim();
+        if (Uri.TryCreate(trimmed, UriKind.Absolute, out var absolute)
+            && (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps))
+        {
+            return absolute.ToString();
+        }
+
+        return trimmed.StartsWith("/", StringComparison.Ordinal)
+            ? $"https://simkl.com{trimmed}"
+            : null;
+    }
+
+    private static string AppParameter(string? value, string fallback)
+    {
+        return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+    }
+
+    private static string? JsonElementToString(JsonElement? element)
+    {
+        if (element is null || element.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return element.Value.ValueKind == JsonValueKind.String
+            ? element.Value.GetString()
+            : element.Value.GetRawText();
+    }
+
+    private static int? JsonElementToInt(JsonElement? element)
+    {
+        if (element is null || element.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return element.Value.ValueKind switch
+        {
+            JsonValueKind.Number when element.Value.TryGetInt32(out var value) => value,
+            JsonValueKind.String when int.TryParse(element.Value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) => value,
+            _ => null
+        };
+    }
+
+    private static double? JsonElementToDouble(JsonElement? element)
+    {
+        if (element is null || element.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return element.Value.ValueKind switch
+        {
+            JsonValueKind.Number when element.Value.TryGetDouble(out var value) => value,
+            JsonValueKind.String when double.TryParse(element.Value.GetString(), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var value) => value,
+            _ => null
+        };
     }
 
     private async Task<string?> SendPublicTextWithRetryAsync(
@@ -352,6 +602,11 @@ public sealed class SimklClient : ISimklClient
             && !string.IsNullOrWhiteSpace(settings.AccessToken);
     }
 
+    private static bool IsCalendarConfigured(SimklSourceSettings settings)
+    {
+        return settings.Enabled && !string.IsNullOrWhiteSpace(settings.ClientId);
+    }
+
     private static string? ExtractActivitiesAllUtc(string json)
     {
         try
@@ -383,5 +638,47 @@ public sealed class SimklClient : ISimklClient
         }
 
         return null;
+    }
+
+    private sealed record SimklCalendarPayloadItem
+    {
+        public string? Title { get; init; }
+        public string? Date { get; init; }
+
+        [JsonPropertyName("release_date")]
+        public string? ReleaseDate { get; init; }
+
+        public string? Url { get; init; }
+        public SimklPayloadIds? Ids { get; init; }
+        public SimklPayloadRatings? Ratings { get; init; }
+        public SimklPayloadEpisode? Episode { get; init; }
+    }
+
+    private sealed record SimklPayloadIds
+    {
+        [JsonPropertyName("simkl_id")]
+        public JsonElement? SimklId { get; init; }
+
+        public JsonElement? Tmdb { get; init; }
+        public JsonElement? Imdb { get; init; }
+        public JsonElement? Tvdb { get; init; }
+    }
+
+    private sealed record SimklPayloadRatings
+    {
+        public SimklPayloadRating? Imdb { get; init; }
+    }
+
+    private sealed record SimklPayloadRating
+    {
+        public JsonElement? Rating { get; init; }
+        public JsonElement? Votes { get; init; }
+    }
+
+    private sealed record SimklPayloadEpisode
+    {
+        public JsonElement? Season { get; init; }
+        public JsonElement? Episode { get; init; }
+        public string? Url { get; init; }
     }
 }
