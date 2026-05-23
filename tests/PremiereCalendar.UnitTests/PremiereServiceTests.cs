@@ -1207,6 +1207,54 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
+    public async Task GetPremieresAsync_HydratesCachedItemsWithCurrentImdbDatasetBeforeFiltering()
+    {
+        var cachedItem = new PremiereItem
+        {
+            CanonicalId = "movie:66",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 66,
+            ImdbId = "tt0000066",
+            Title = "Cached Rated Movie",
+            PremiereDate = new DateOnly(2026, 5, 4),
+            OriginalLanguage = "en",
+            RuntimeMinutes = 90,
+            ImdbScore = 4.1,
+            ImdbVoteCount = 12,
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var imdbRatings = new FakeImdbRatingsStore();
+        imdbRatings.Items["tt0000066"] = new ImdbRatingRecord(
+            "tt0000066",
+            8.3,
+            12345,
+            new DateTimeOffset(2026, 5, 23, 19, 12, 0, TimeSpan.Zero));
+        var service = CreateService(
+            new FakeTmdbClient(),
+            calendarCache: new FakeCalendarCache { Items = [cachedItem] },
+            imdbRatingsStore: imdbRatings);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters
+            {
+                ShowSeries = false,
+                ShowMovies = true,
+                ScoreSource = ScoreSource.Imdb,
+                MinScore = 8,
+                MaxScore = 10,
+                IncludeUnknownScores = false
+            });
+
+        var item = Assert.Single(items);
+        Assert.Equal(8.3, item.ImdbScore);
+        Assert.Equal(12345, item.ImdbVoteCount);
+    }
+
+    [Fact]
     public async Task StreamPremieresAsync_AllViewFetchesOnlyMissingSharedMediaCache()
     {
         var start = new DateOnly(2026, 5, 4);

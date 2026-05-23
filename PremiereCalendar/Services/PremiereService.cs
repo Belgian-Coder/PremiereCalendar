@@ -109,14 +109,20 @@ public sealed class PremiereService : IPremiereService
                     cancellationToken);
                 if (sharedCacheSnapshot.HasSeries && sharedCacheSnapshot.HasMovies)
                 {
-                    var cachedItems = ApplyRequestedFilters(MergePremiereItems(sharedCacheSnapshot.Items), filters);
+                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
+                        MergePremiereItems(sharedCacheSnapshot.Items),
+                        cancellationToken);
+                    var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
                     yield break;
                 }
 
                 if (sharedCacheSnapshot.HasAny)
                 {
-                    seededItems = ApplyRequestedFilters(MergePremiereItems(sharedCacheSnapshot.Items), filters);
+                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
+                        MergePremiereItems(sharedCacheSnapshot.Items),
+                        cancellationToken);
+                    seededItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", seededItems, seededItems, fromCache: true);
                     fetchCriteria = criteria with
                     {
@@ -139,7 +145,10 @@ public sealed class PremiereService : IPremiereService
                 var cached = await _calendarCache.GetWeekAsync(start, end, cacheKey, cancellationToken);
                 if (cached is not null)
                 {
-                    var cachedItems = ApplyRequestedFilters(MergePremiereItems(cached), filters);
+                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
+                        MergePremiereItems(cached),
+                        cancellationToken);
+                    var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
                     yield break;
                 }
@@ -289,7 +298,10 @@ public sealed class PremiereService : IPremiereService
             return null;
         }
 
-        var mergedItems = ApplyRequestedFilters(MergePremiereItems(cachedItems), filters);
+        var hydratedItems = await HydrateCachedImdbRatingsAsync(
+            MergePremiereItems(cachedItems),
+            cancellationToken);
+        var mergedItems = ApplyRequestedFilters(hydratedItems, filters);
         return CreateProgress(
             allowExpired ? "Expired week cache" : "Week cache",
             mergedItems,
@@ -464,7 +476,10 @@ public sealed class PremiereService : IPremiereService
             return null;
         }
 
-        var cachedItems = ApplyRequestedFilters(MergePremiereItems(cached), filters);
+        var hydratedItems = await HydrateCachedImdbRatingsAsync(
+            MergePremiereItems(cached),
+            cancellationToken);
+        var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
         _logger.LogWarning(
             refreshError,
             "Using cached premiere calendar results for {StartDate} through {EndDate} after source refresh failed.",
@@ -916,6 +931,74 @@ public sealed class PremiereService : IPremiereService
         CalendarFilters? filters)
     {
         return filters is null ? items : PremiereFilter.Apply(items, filters);
+    }
+
+    private async Task<IReadOnlyList<PremiereItem>> HydrateCachedImdbRatingsAsync(
+        IReadOnlyList<PremiereItem> items,
+        CancellationToken cancellationToken)
+    {
+        if (_imdbRatingsStore is null || items.Count == 0)
+        {
+            return items;
+        }
+
+        List<PremiereItem>? hydratedItems = null;
+        var ratingsByImdbId = new Dictionary<string, ImdbRatingRecord?>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < items.Count; index++)
+        {
+            var item = items[index];
+            var hydratedItem = item;
+            if (HasCachedImdbId(item))
+            {
+                var imdbId = item.ImdbId!.Trim();
+                if (!ratingsByImdbId.TryGetValue(imdbId, out var rating))
+                {
+                    try
+                    {
+                        rating = await _imdbRatingsStore.GetByImdbIdAsync(imdbId, cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Skipping cached IMDb dataset rating lookup for IMDb ID {ImdbId}.", imdbId);
+                        rating = null;
+                    }
+
+                    ratingsByImdbId[imdbId] = rating;
+                }
+
+                if (rating is not null
+                    && (item.ImdbScore != rating.AverageRating || item.ImdbVoteCount != rating.VoteCount))
+                {
+                    hydratedItem = item with
+                    {
+                        ImdbScore = rating.AverageRating,
+                        ImdbVoteCount = rating.VoteCount
+                    };
+                }
+            }
+
+            if (hydratedItems is not null)
+            {
+                hydratedItems.Add(hydratedItem);
+            }
+            else if (!ReferenceEquals(hydratedItem, item))
+            {
+                hydratedItems = new List<PremiereItem>(items.Count);
+                for (var existingIndex = 0; existingIndex < index; existingIndex++)
+                {
+                    hydratedItems.Add(items[existingIndex]);
+                }
+
+                hydratedItems.Add(hydratedItem);
+            }
+        }
+
+        return hydratedItems ?? items;
+    }
+
+    private static bool HasCachedImdbId(PremiereItem item)
+    {
+        return !string.IsNullOrWhiteSpace(item.ImdbId);
     }
 
     private static List<PremiereItem> MergePremiereItems(IEnumerable<PremiereItem> items)
