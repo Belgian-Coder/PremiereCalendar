@@ -94,6 +94,11 @@ public static class TmdbQueryBuilder
         });
     }
 
+    public static string BuildTvSeasonDetailsPath(int id, int seasonNumber)
+    {
+        return BuildPath($"tv/{id}/season/{seasonNumber}", new Dictionary<string, string?>());
+    }
+
     public static string BuildMovieDetailsPath(int id)
     {
         return BuildPath($"movie/{id}", new Dictionary<string, string?>

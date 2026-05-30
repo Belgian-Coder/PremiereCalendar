@@ -158,6 +158,31 @@ public sealed class TmdbClient : ITmdbClient
             forceRefresh);
     }
 
+    public Task<TmdbSeasonDetails?> GetTvSeasonDetailsAsync(
+        int id,
+        int seasonNumber,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        EnsureConfigured();
+
+        if (id <= 0 || seasonNumber <= 0)
+        {
+            return Task.FromResult<TmdbSeasonDetails?>(null);
+        }
+
+        return GetOrCreateAsync(
+            $"tmdb:tv-season-details:{id}:{seasonNumber}",
+            TimeSpan.FromHours(12),
+            token => SendJsonAsync<TmdbSeasonDetails>(
+                TmdbQueryBuilder.BuildTvSeasonDetailsPath(id, seasonNumber),
+                "TMDb TV season details",
+                token,
+                notFoundReturnsNull: true),
+            cancellationToken,
+            forceRefresh);
+    }
+
     public Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false)
     {
         EnsureConfigured();

@@ -1710,7 +1710,13 @@ public sealed class PremiereService : IPremiereService
 
         return await MapWithLimitedConcurrencyAsync(
             rawItems,
-            (item, token) => MapSeriesAsync(item, token, forceRefresh),
+            (item, token) => MapSeriesAsync(
+                item,
+                token,
+                forceRefresh,
+                requestedStart: start,
+                requestedEnd: end,
+                canonicalizeSeriesPremiereDate: true),
             cancellationToken);
     }
 
@@ -1734,19 +1740,25 @@ public sealed class PremiereService : IPremiereService
                 forceRefresh)
             .WithCancellation(cancellationToken))
         {
-            var metadataItems = rawBatch.Results
-                .Select(item => MapSeriesMetadata(item))
-                .Where(item => item is not null)
-                .Select(item => item!)
-                .ToArray();
-            if (metadataItems.Length > 0)
+            var metadataItems = await MapWithLimitedConcurrencyAsync(
+                rawBatch.Results,
+                (item, token) => MapSeriesPremiereMetadataAsync(item, token, forceRefresh, start, end),
+                cancellationToken);
+            if (metadataItems.Count > 0)
             {
                 yield return WithTmdbMetadataProgress(new PremiereItemBatch(metadataItems), rawBatch, completedRawItems);
             }
 
             await foreach (var mappedBatch in MapInProgressBatchesAsync(
                     rawBatch.Results,
-                    (item, token) => MapSeriesAsync(item, token, forceRefresh, cachedEnrichment: cachedEnrichment),
+                    (item, token) => MapSeriesAsync(
+                        item,
+                        token,
+                        forceRefresh,
+                        cachedEnrichment: cachedEnrichment,
+                        requestedStart: start,
+                        requestedEnd: end,
+                        canonicalizeSeriesPremiereDate: true),
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
@@ -3206,6 +3218,23 @@ public sealed class PremiereService : IPremiereService
         };
     }
 
+    private async Task<PremiereItem?> MapSeriesPremiereMetadataAsync(
+        TmdbTvDiscoverItem item,
+        CancellationToken cancellationToken,
+        bool forceRefresh,
+        DateOnly requestedStart,
+        DateOnly requestedEnd)
+    {
+        var premiereDate = await GetSeasonOneEpisodeOneDateAsync(item.Id, cancellationToken, forceRefresh);
+        if (premiereDate is { } canonicalDate
+            && (canonicalDate < requestedStart || canonicalDate > requestedEnd))
+        {
+            return null;
+        }
+
+        return MapSeriesMetadata(item, premiereDateOverride: premiereDate);
+    }
+
     private PremiereItem? MapMovieMetadata(TmdbMovieDiscoverItem item)
     {
         if (item.Id <= 0
@@ -3250,7 +3279,10 @@ public sealed class PremiereService : IPremiereService
         int? seasonNumber = null,
         int? episodeNumber = null,
         string? episodeSource = null,
-        bool allowWatchmodeAvailabilityFallback = true)
+        bool allowWatchmodeAvailabilityFallback = true,
+        DateOnly? requestedStart = null,
+        DateOnly? requestedEnd = null,
+        bool canonicalizeSeriesPremiereDate = false)
     {
         var itemType = itemTypeOverride ?? PremiereItemType.SeriesPremiere;
         if (item.Id <= 0
@@ -3269,9 +3301,28 @@ public sealed class PremiereService : IPremiereService
             return null;
         }
 
+        if (canonicalizeSeriesPremiereDate)
+        {
+            var canonicalDate = await GetSeasonOneEpisodeOneDateAsync(item.Id, cancellationToken, forceRefresh);
+            if (canonicalDate is { } seasonOneEpisodeOneDate)
+            {
+                premiereDate = seasonOneEpisodeOneDate;
+            }
+
+            if (requestedStart is { } start && premiereDate < start)
+            {
+                return null;
+            }
+
+            if (requestedEnd is { } end && premiereDate > end)
+            {
+                return null;
+            }
+        }
+
         var discoveredItem = MapSeriesMetadata(
             item,
-            premiereDateOverride,
+            premiereDate,
             itemType,
             episodeTitle,
             seasonNumber,
@@ -3510,6 +3561,42 @@ public sealed class PremiereService : IPremiereService
         catch (ExternalApiException ex)
         {
             _logger.LogWarning(ex, "Skipping TMDb detail enrichment for {MediaType} {TmdbId}.", mediaType, tmdbId);
+            return null;
+        }
+    }
+
+    private async Task<DateOnly?> GetSeasonOneEpisodeOneDateAsync(
+        int tmdbId,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        var season = await TryGetSeasonDetailsAsync(
+            () => _tmdbClient.GetTvSeasonDetailsAsync(tmdbId, 1, cancellationToken, forceRefresh),
+            tmdbId,
+            cancellationToken);
+        var episode = season?.Episodes.FirstOrDefault(episode =>
+            episode.SeasonNumber == 1 && episode.EpisodeNumber == 1);
+
+        return TryParseTmdbDate(episode?.AirDate, out var airDate) ? airDate : null;
+    }
+
+    private async Task<TmdbSeasonDetails?> TryGetSeasonDetailsAsync(
+        Func<Task<TmdbSeasonDetails?>> getDetails,
+        int tmdbId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await getDetails();
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Skipping TMDb season detail enrichment for series {TmdbId} after a request timeout.", tmdbId);
+            return null;
+        }
+        catch (ExternalApiException ex)
+        {
+            _logger.LogWarning(ex, "Skipping TMDb season detail enrichment for series {TmdbId}.", tmdbId);
             return null;
         }
     }

@@ -192,6 +192,27 @@ public sealed record TmdbDetailsWithExtras
     public string? TvType { get; init; }
 }
 
+public sealed record TmdbSeasonDetails
+{
+    [JsonPropertyName("episodes")]
+    public List<TmdbEpisodeDetails> Episodes { get; init; } = [];
+}
+
+public sealed record TmdbEpisodeDetails
+{
+    [JsonPropertyName("season_number")]
+    public int SeasonNumber { get; init; }
+
+    [JsonPropertyName("episode_number")]
+    public int EpisodeNumber { get; init; }
+
+    [JsonPropertyName("air_date")]
+    public string? AirDate { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+}
+
 public sealed record TmdbNetwork
 {
     [JsonPropertyName("id")]
