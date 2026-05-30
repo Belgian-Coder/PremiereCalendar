@@ -1988,7 +1988,9 @@ public sealed class PremiereService : IPremiereService
                 token,
                 forceRefresh,
                 criteria,
-                new Dictionary<string, PremiereItem>(StringComparer.Ordinal)),
+                new Dictionary<string, PremiereItem>(StringComparer.Ordinal),
+                start,
+                end),
             cancellationToken);
     }
 
@@ -2040,6 +2042,8 @@ public sealed class PremiereService : IPremiereService
                     forceRefresh,
                     criteria,
                     cachedEnrichment,
+                    start,
+                    end,
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
@@ -2057,6 +2061,8 @@ public sealed class PremiereService : IPremiereService
                     forceRefresh,
                     criteria,
                     cachedEnrichment,
+                    start,
+                    end,
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
@@ -2120,11 +2126,20 @@ public sealed class PremiereService : IPremiereService
         bool forceRefresh,
         PremiereDiscoveryCriteria criteria,
         IReadOnlyDictionary<string, PremiereItem> cachedEnrichment,
+        DateOnly requestStart,
+        DateOnly requestEnd,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         await foreach (var mappedBatch in MapInProgressBatchesAsync(
                 candidates,
-                (candidate, token) => MapExternalCandidateAsync(candidate, token, forceRefresh, criteria, cachedEnrichment),
+                (candidate, token) => MapExternalCandidateAsync(
+                    candidate,
+                    token,
+                    forceRefresh,
+                    criteria,
+                    cachedEnrichment,
+                    requestStart,
+                    requestEnd),
                 cancellationToken)
             .WithCancellation(cancellationToken))
         {
@@ -2177,8 +2192,23 @@ public sealed class PremiereService : IPremiereService
         CancellationToken cancellationToken,
         bool forceRefresh,
         PremiereDiscoveryCriteria criteria,
-        IReadOnlyDictionary<string, PremiereItem> cachedEnrichment)
+        IReadOnlyDictionary<string, PremiereItem> cachedEnrichment,
+        DateOnly requestStart,
+        DateOnly requestEnd)
     {
+        var canonicalCandidate = await CanonicalizeExternalSeriesPremiereCandidateAsync(
+            candidate,
+            criteria,
+            requestStart,
+            requestEnd,
+            cancellationToken,
+            forceRefresh);
+        if (canonicalCandidate is null)
+        {
+            return null;
+        }
+
+        candidate = canonicalCandidate;
         if (TryReuseCachedExternalCandidate(cachedEnrichment, candidate, criteria, out var cachedCandidateItem))
         {
             return await HydrateExternalCandidateRatingsAsync(cachedCandidateItem, candidate, cancellationToken, forceRefresh);
@@ -2263,6 +2293,39 @@ public sealed class PremiereService : IPremiereService
 
         var mergedItem = MergeExternalCandidateSource(mappedItem, candidate);
         return await HydrateExternalCandidateRatingsAsync(mergedItem, candidate, cancellationToken, forceRefresh);
+    }
+
+    private async Task<ExternalPremiereCandidate?> CanonicalizeExternalSeriesPremiereCandidateAsync(
+        ExternalPremiereCandidate candidate,
+        PremiereDiscoveryCriteria criteria,
+        DateOnly requestStart,
+        DateOnly requestEnd,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        if (candidate.MediaType != PremiereMediaType.Series
+            || criteria.Series.SeriesDateMode != SeriesDateMode.NewSeriesOnly
+            || candidate.TmdbId is not > 0)
+        {
+            return candidate;
+        }
+
+        var canonicalDate = await GetSeasonOneEpisodeOneDateAsync(candidate.TmdbId.Value, cancellationToken, forceRefresh);
+        if (canonicalDate is null)
+        {
+            return candidate;
+        }
+
+        if (canonicalDate < requestStart || canonicalDate > requestEnd)
+        {
+            return null;
+        }
+
+        return candidate with
+        {
+            PremiereDate = canonicalDate.Value,
+            SeriesPremiereDate = canonicalDate.Value
+        };
     }
 
     private static PremiereItem? CreateUnverifiedPremiereItem(

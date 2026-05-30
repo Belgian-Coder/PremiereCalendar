@@ -1074,6 +1074,71 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
+    public async Task GetPremieresAsync_NewSeriesOnlyUsesSeasonOneEpisodeOneDateForExternalTmdbCandidate()
+    {
+        var discovery = new FakeDiscoveryProvider
+        {
+            DisplayName = "Simkl",
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Series,
+                    new DateOnly(2026, 5, 29),
+                    "External Shifted Premiere",
+                    603,
+                    "tt0000603",
+                    null,
+                    "Simkl")
+            ]
+        };
+        var tmdb = new FakeTmdbClient();
+        tmdb.SeasonOneEpisodeOneDatesById[603] = new DateOnly(2026, 5, 28);
+        var service = CreateService(tmdb, discoveryProviders: [discovery]);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 25),
+            new DateOnly(2026, 5, 31),
+            CancellationToken.None,
+            filters: NewSeriesOnlyFilters());
+
+        var item = Assert.Single(items);
+        Assert.Equal("External Shifted Premiere", item.Title);
+        Assert.Equal(new DateOnly(2026, 5, 28), item.PremiereDate);
+        Assert.Equal(PremiereItemType.SeriesPremiere, item.Type);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_NewSeriesOnlyExcludesExternalTmdbCandidateWhenSeasonOneEpisodeOneFallsOutsideRequestedWindow()
+    {
+        var discovery = new FakeDiscoveryProvider
+        {
+            DisplayName = "Simkl",
+            Candidates =
+            [
+                new ExternalPremiereCandidate(
+                    PremiereMediaType.Series,
+                    new DateOnly(2026, 5, 31),
+                    "External Boundary Premiere",
+                    604,
+                    "tt0000604",
+                    null,
+                    "Simkl")
+            ]
+        };
+        var tmdb = new FakeTmdbClient();
+        tmdb.SeasonOneEpisodeOneDatesById[604] = new DateOnly(2026, 6, 1);
+        var service = CreateService(tmdb, discoveryProviders: [discovery]);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 25),
+            new DateOnly(2026, 5, 31),
+            CancellationToken.None,
+            filters: NewSeriesOnlyFilters());
+
+        Assert.Empty(items);
+    }
+
+    [Fact]
     public async Task GetPremieresAsync_NewSeriesOnlyAcceptsExternalSeasonOneEpisodeOneAsPremiere()
     {
         var discovery = new FakeDiscoveryProvider
