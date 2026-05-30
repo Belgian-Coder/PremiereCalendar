@@ -209,6 +209,8 @@ That makes it reachable from other LAN devices when Windows Firewall allows inbo
 
 Use the root `Install-PremiereCalendar.ps1` wrapper for source-tree app updates. It publishes the self-contained build, copies it to the configured install directory while preserving runtime data, and installs or updates the automatic Windows Service. The wrapper restarts itself elevated when service installation needs administrator rights. `Run-PremiereCalendar.ps1` is the foreground build-and-run helper for local development and does not install a service.
 
+Settings can also start a guarded source update through `GitHub source update`. That path launches `deploy/Update-And-Install-PremiereCalendar.ps1` in the configured source checkout, fetches the configured remote branch, refuses dirty or non-fast-forward repositories, runs `git pull --ff-only`, and then calls the same install wrapper. The request returns before the service restart, so the app can briefly become unavailable while the installer replaces binaries.
+
 The health endpoint is:
 
 ```text
@@ -226,6 +228,7 @@ GET /health
 - `PremiereCalendar/Services/CalendarPresetService.cs` - route-scoped saved filter presets that preserve the current week when applied.
 - `PremiereCalendar/Services/CalendarVisitChangeService.cs` - subtle per-week change summaries comparing the current visible IDs to the last visit.
 - `PremiereCalendar/Services/ReleaseUpdateService.cs` - on-demand GitHub latest-release check used by Settings.
+- `PremiereCalendar/Services/ApplicationUpdateService.cs` - guarded Settings-triggered GitHub source update launcher.
 - `PremiereCalendar/Services/SettingsBackupService.cs` - JSON export/import for integration settings and local app state.
 - `PremiereCalendar/Components/Shared/MediaFilterPanel.razor` - TMDb-style per-media filter groups for series and movies.
 - `PremiereCalendar/Components/Shared/CalendarWeek.razor` - sticky day selector and one mounted selected-day section.

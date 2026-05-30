@@ -80,6 +80,25 @@ The Settings page can export and import a JSON backup of integration settings an
 
 The same SQLite file also stores IMDb ratings, OMDb response cache, and provider-sync markers such as TMDb/TVmaze change checks.
 
+## Application Updates
+
+Settings includes a guarded `GitHub source update` action for source-tree installs. It uses the non-secret `ApplicationUpdate` infrastructure settings from `appsettings.json`, not the SQLite settings database:
+
+```json
+"ApplicationUpdate": {
+  "Enabled": true,
+  "RepositoryPath": "D:\\Projects\\PremiereCalendar",
+  "Remote": "origin",
+  "Branch": "feature/view-sync",
+  "InstallScriptPath": "Install-PremiereCalendar.ps1",
+  "UpdateScriptPath": "deploy/Update-And-Install-PremiereCalendar.ps1",
+  "LogDirectory": "App_Data/logs/application-updates",
+  "PowerShellPath": "powershell.exe"
+}
+```
+
+The updater starts a detached PowerShell process, fetches the configured remote branch, refuses dirty working trees, refuses non-fast-forward branch divergence, runs `git pull --ff-only`, then calls the existing install wrapper with `-NoElevate`. It does not run `git reset`, does not accept arbitrary shell commands from the UI, and writes attempt logs under `ApplicationUpdate:LogDirectory`.
+
 ## Sonarr And Radarr
 
 The app can add series to Sonarr and movies to Radarr from each calendar card. Configure both from the Settings page opened through the cog icon in the top bar.

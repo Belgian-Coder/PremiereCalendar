@@ -11,6 +11,7 @@
 @inject BackgroundJobTimelineService BackgroundJobTimeline
 @inject ReleaseUpdateService ReleaseUpdateService
 @inject SettingsBackupService SettingsBackupService
+@inject IApplicationUpdateService ApplicationUpdateService
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
 @inject Microsoft.Extensions.Logging.ILogger<PremiereCalendar.Components.Pages.Settings> Logger
@@ -111,7 +112,7 @@
                             }
                         </section>
 
-                        <section class="status-mini-panel" aria-label="Release updates">
+                        <section class="status-mini-panel update-panel" aria-label="Release updates">
                             <div class="status-mini-heading">
                                 <strong>Release/update checker</strong>
                                 <button class="tool-button settings-secondary"
@@ -143,6 +144,32 @@
                                     }
                                 </p>
                             }
+                            <div class="application-update-block">
+                                <div class="status-mini-heading compact">
+                                    <strong>GitHub source update</strong>
+                                    <button class="tool-button settings-secondary"
+                                            type="button"
+                                            title="Update application from GitHub source"
+                                            aria-label="Update application from GitHub source"
+                                            @onclick="StartApplicationUpdateAsync"
+                                            disabled="@(_isStartingApplicationUpdate || _applicationUpdateStatus?.IsConfigured != true)">
+                                        @(_isStartingApplicationUpdate ? "Starting..." : "Update")
+                                    </button>
+                                </div>
+                                <p class="settings-help" data-testid="application-update-status">
+                                    @ApplicationUpdateStatusText()
+                                </p>
+                                @if (_applicationUpdateResult is not null)
+                                {
+                                    <p class="@ApplicationUpdateResultClass" data-testid="application-update-result">
+                                        @_applicationUpdateResult.Message
+                                        @if (!string.IsNullOrWhiteSpace(_applicationUpdateResult.LogPath))
+                                        {
+                                            <span> Log: @Path.GetFileName(_applicationUpdateResult.LogPath)</span>
+                                        }
+                                    </p>
+                                }
+                            </div>
                         </section>
 
                         <section class="status-mini-panel backup-panel" aria-label="Backup and restore settings">
@@ -827,6 +854,9 @@
     private IReadOnlyList<BackgroundJobEvent> _jobEvents = [];
     private ReleaseUpdateResult? _releaseResult;
     private bool _isCheckingRelease;
+    private ApplicationUpdateStatus? _applicationUpdateStatus;
+    private ApplicationUpdateStartResult? _applicationUpdateResult;
+    private bool _isStartingApplicationUpdate;
     private string _backupJson = "";
     private bool _includeBackupSecrets;
 
@@ -1066,6 +1096,7 @@
         {
             _cacheSummary = CacheInspector.GetSummary();
             _jobEvents = await BackgroundJobTimeline.GetRecentAsync(_disposeCancellation.Token);
+            _applicationUpdateStatus = ApplicationUpdateService.GetStatus();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1093,6 +1124,36 @@
         finally
         {
             _isCheckingRelease = false;
+        }
+    }
+
+    private async Task StartApplicationUpdateAsync()
+    {
+        _isStartingApplicationUpdate = true;
+        try
+        {
+            _applicationUpdateResult = await ApplicationUpdateService.StartUpdateAsync(_disposeCancellation.Token);
+            _applicationUpdateStatus = ApplicationUpdateService.GetStatus();
+            if (_applicationUpdateResult.Started)
+            {
+                ShowToast(
+                    ToastKind.Info,
+                    "Application update started",
+                    "GitHub update and local install were started. The app may restart shortly.");
+            }
+            else
+            {
+                ShowToast(ToastKind.Error, "Application update not started", _applicationUpdateResult.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            _applicationUpdateResult = new ApplicationUpdateStartResult(false, ex.Message, null);
+            ShowToast(ToastKind.Error, "Application update failed", ex.Message);
+        }
+        finally
+        {
+            _isStartingApplicationUpdate = false;
         }
     }
 
@@ -1141,6 +1202,26 @@
             BackgroundJobStatus.Skipped => "job-status skipped",
             _ => "job-status started"
         };
+    }
+
+    private string ApplicationUpdateResultClass => _applicationUpdateResult?.Started == true
+        ? "settings-help update-result started"
+        : "settings-help update-result failed";
+
+    private string ApplicationUpdateStatusText()
+    {
+        if (_applicationUpdateStatus is null)
+        {
+            return "Update status is not loaded yet.";
+        }
+
+        var prefix = _applicationUpdateStatus.IsConfigured
+            ? "Ready"
+            : "Not ready";
+        var logText = string.IsNullOrWhiteSpace(_applicationUpdateStatus.LatestLogPath)
+            ? ""
+            : $" Latest log: {Path.GetFileName(_applicationUpdateStatus.LatestLogPath)}.";
+        return $"{prefix}: {_applicationUpdateStatus.Remote}/{_applicationUpdateStatus.Branch} at {_applicationUpdateStatus.RepositoryPath}. {_applicationUpdateStatus.Message}{logText}";
     }
 
     private IEnumerable<BackgroundJobEvent> VisibleJobEvents()

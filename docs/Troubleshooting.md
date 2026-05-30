@@ -47,6 +47,8 @@ Arrow keys are ignored while you type in an input field.
 | Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key; free OMDb keys can hit daily limits |
 | Posters are missing | Check artwork provider settings, then click Refresh sources |
 | Settings do not match `appsettings.json` | The Settings page wins; change values in the app |
+| GitHub source update is disabled | Check `ApplicationUpdate:RepositoryPath`, `Remote`, `Branch`, and the update log in Settings > Local status |
+| GitHub source update refuses to run | Commit or stash local repository changes, or resolve branch divergence so the configured branch can fast-forward |
 | Sonarr add fails | The series needs a TVDB ID and valid Sonarr settings |
 | Radarr add fails | Check Radarr URL, API key, root folder, and quality profile |
 

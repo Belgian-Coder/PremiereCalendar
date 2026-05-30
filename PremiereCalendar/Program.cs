@@ -57,6 +57,7 @@ builder.Services.Configure<CalendarLoadOptions>(builder.Configuration.GetSection
 builder.Services.Configure<CacheMaintenanceOptions>(builder.Configuration.GetSection("CacheMaintenance"));
 builder.Services.Configure<ImdbDatasetOptions>(builder.Configuration.GetSection("ImdbDataset"));
 builder.Services.Configure<ProviderDeltaSyncOptions>(builder.Configuration.GetSection("ProviderDeltaSync"));
+builder.Services.Configure<ApplicationUpdateOptions>(builder.Configuration.GetSection("ApplicationUpdate"));
 
 builder.Services.AddMemoryCache();
 builder.Services.AddResponseCompression(options =>
@@ -206,6 +207,8 @@ builder.Services.AddSingleton<BackgroundJobTimelineService>();
 builder.Services.AddSingleton<CalendarPresetService>();
 builder.Services.AddSingleton<CalendarVisitChangeService>();
 builder.Services.AddSingleton<SettingsBackupService>();
+builder.Services.AddSingleton<IApplicationUpdateProcessStarter, DefaultApplicationUpdateProcessStarter>();
+builder.Services.AddSingleton<IApplicationUpdateService, ApplicationUpdateService>();
 builder.Services.AddSingleton<ICalendarFilterUsageStore, SqliteCalendarFilterUsageStore>();
 builder.Services.AddSingleton<ISimklSyncStateStore, SqliteSimklSyncStateStore>();
 builder.Services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();

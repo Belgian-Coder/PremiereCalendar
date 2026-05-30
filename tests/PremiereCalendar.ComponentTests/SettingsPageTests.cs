@@ -14,6 +14,7 @@ namespace PremiereCalendar.ComponentTests;
 public sealed class SettingsPageTests : BunitContext
 {
     private readonly FakeViewSyncService _viewSyncService = new();
+    private readonly FakeApplicationUpdateService _applicationUpdateService = new();
     private readonly InMemoryAppStateStore _appStateStore = new();
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-settings-tests-{Guid.NewGuid():N}");
 
@@ -24,6 +25,7 @@ public sealed class SettingsPageTests : BunitContext
         JSInterop.Setup<string>("premiereViewSync.getOrCreateDeviceId").SetResult("device-a");
         Services.AddLogging();
         Services.AddSingleton<IViewSyncService>(_viewSyncService);
+        Services.AddSingleton<IApplicationUpdateService>(_applicationUpdateService);
         Services.AddSingleton<IAppStateStore>(_appStateStore);
         Services.AddSingleton(TimeProvider.System);
         Services.AddSingleton(sp => new CacheInspectorService(
@@ -185,12 +187,35 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Contains("Local status", status.TextContent);
             Assert.Contains("Calendar cache", status.TextContent);
             Assert.Contains("Backup", status.TextContent);
+            Assert.Contains("GitHub source update", status.TextContent);
         });
 
         component.Find("button[title='Check for application updates']").Click();
 
         component.WaitForAssertion(() =>
             Assert.Contains("1.2.0", component.Find("[data-testid='release-update-result']").TextContent));
+    }
+
+    [Fact]
+    public void SettingsPage_StartsConfiguredApplicationUpdateFromGitHub()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("button[title='Update application from GitHub source']");
+        component.Find("button[title='Update application from GitHub source']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(1, _applicationUpdateService.StartCount);
+            var result = component.Find("[data-testid='application-update-result']");
+            Assert.Contains("Update started", result.TextContent);
+            Assert.Contains("feature/view-sync", result.TextContent);
+        });
     }
 
     [Fact]
@@ -1265,6 +1290,35 @@ public sealed class SettingsPageTests : BunitContext
                 || string.Equals(Overview.GroupState?.RouteKey, routeKey, StringComparison.OrdinalIgnoreCase)
                     ? Overview.GroupState
                     : null);
+        }
+    }
+
+    private sealed class FakeApplicationUpdateService : IApplicationUpdateService
+    {
+        public int StartCount { get; private set; }
+        public ApplicationUpdateStatus Status { get; set; } = new(
+            IsEnabled: true,
+            IsConfigured: true,
+            RepositoryPath: "D:\\Projects\\PremiereCalendar",
+            Remote: "origin",
+            Branch: "feature/view-sync",
+            LatestLogPath: null,
+            Message: "Ready to update from GitHub.");
+
+        public ApplicationUpdateStartResult Result { get; set; } = new(
+            Started: true,
+            Message: "Update started from origin/feature/view-sync. The app may restart while the installer runs.",
+            LogPath: "D:\\Apps\\PremiereCalendar\\App_Data\\logs\\application-updates\\application-update.log");
+
+        public ApplicationUpdateStatus GetStatus()
+        {
+            return Status;
+        }
+
+        public Task<ApplicationUpdateStartResult> StartUpdateAsync(CancellationToken cancellationToken)
+        {
+            StartCount++;
+            return Task.FromResult(Result);
         }
     }
 

@@ -83,6 +83,22 @@ public sealed class InstallerScriptTests
     }
 
     [Fact]
+    public void SourceUpdateScriptOnlyFastForwardsCleanRepositoriesBeforeInstalling()
+    {
+        var script = ReadRepoFile("deploy/Update-And-Install-PremiereCalendar.ps1");
+
+        Assert.Contains("safe.directory=$resolvedRepositoryPath", script, StringComparison.Ordinal);
+        Assert.Contains("status --porcelain=v1", script, StringComparison.Ordinal);
+        Assert.Contains("Repository has local changes", script, StringComparison.Ordinal);
+        Assert.Contains("fetch $Remote $Branch", script, StringComparison.Ordinal);
+        Assert.Contains("merge-base --is-ancestor HEAD $remoteRef", script, StringComparison.Ordinal);
+        Assert.Contains("pull --ff-only $Remote $Branch", script, StringComparison.Ordinal);
+        Assert.Contains("Install-PremiereCalendar.ps1", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("reset --hard", script, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("checkout --", script, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void BuildReleasePackagePublishesRequestedVersionMetadata()
     {
         var script = ReadRepoFile("deploy/Build-ReleasePackage.ps1");
