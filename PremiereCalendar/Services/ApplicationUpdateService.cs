@@ -148,7 +148,7 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
             Enabled = options.Enabled,
             RepositoryPath = options.RepositoryPath.Trim(),
             Remote = string.IsNullOrWhiteSpace(options.Remote) ? "origin" : options.Remote.Trim(),
-            Branch = string.IsNullOrWhiteSpace(options.Branch) ? "feature/view-sync" : options.Branch.Trim(),
+            Branch = string.IsNullOrWhiteSpace(options.Branch) ? "main" : options.Branch.Trim(),
             InstallScriptPath = string.IsNullOrWhiteSpace(options.InstallScriptPath)
                 ? "Install-PremiereCalendar.ps1"
                 : options.InstallScriptPath.Trim(),

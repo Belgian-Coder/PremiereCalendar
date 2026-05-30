@@ -8,7 +8,7 @@ public sealed class ApplicationUpdateOptions
 
     public string Remote { get; set; } = "origin";
 
-    public string Branch { get; set; } = "feature/view-sync";
+    public string Branch { get; set; } = "main";
 
     public string InstallScriptPath { get; set; } = "Install-PremiereCalendar.ps1";
 

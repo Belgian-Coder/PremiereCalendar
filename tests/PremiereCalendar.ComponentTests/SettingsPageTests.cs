@@ -214,7 +214,7 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Equal(1, _applicationUpdateService.StartCount);
             var result = component.Find("[data-testid='application-update-result']");
             Assert.Contains("Update started", result.TextContent);
-            Assert.Contains("feature/view-sync", result.TextContent);
+            Assert.Contains("main", result.TextContent);
         });
     }
 
@@ -1301,13 +1301,13 @@ public sealed class SettingsPageTests : BunitContext
             IsConfigured: true,
             RepositoryPath: "D:\\Projects\\PremiereCalendar",
             Remote: "origin",
-            Branch: "feature/view-sync",
+            Branch: "main",
             LatestLogPath: null,
             Message: "Ready to update from GitHub.");
 
         public ApplicationUpdateStartResult Result { get; set; } = new(
             Started: true,
-            Message: "Update started from origin/feature/view-sync. The app may restart while the installer runs.",
+            Message: "Update started from origin/main. The app may restart while the installer runs.",
             LogPath: "D:\\Apps\\PremiereCalendar\\App_Data\\logs\\application-updates\\application-update.log");
 
         public ApplicationUpdateStatus GetStatus()

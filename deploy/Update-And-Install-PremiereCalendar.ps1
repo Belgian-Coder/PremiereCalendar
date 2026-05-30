@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory)][string]$RepositoryPath,
     [string]$Remote = 'origin',
-    [string]$Branch = 'feature/view-sync',
+    [string]$Branch = 'main',
     [string]$InstallScriptPath = 'Install-PremiereCalendar.ps1',
     [string]$LogPath = ''
 )

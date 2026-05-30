@@ -89,7 +89,7 @@ Settings includes a guarded `GitHub source update` action for source-tree instal
   "Enabled": true,
   "RepositoryPath": "D:\\Projects\\PremiereCalendar",
   "Remote": "origin",
-  "Branch": "feature/view-sync",
+  "Branch": "main",
   "InstallScriptPath": "Install-PremiereCalendar.ps1",
   "UpdateScriptPath": "deploy/Update-And-Install-PremiereCalendar.ps1",
   "LogDirectory": "App_Data/logs/application-updates",

@@ -87,6 +87,7 @@ public sealed class InstallerScriptTests
     {
         var script = ReadRepoFile("deploy/Update-And-Install-PremiereCalendar.ps1");
 
+        Assert.Contains("[string]$Branch = 'main'", script, StringComparison.Ordinal);
         Assert.Contains("safe.directory=$resolvedRepositoryPath", script, StringComparison.Ordinal);
         Assert.Contains("status --porcelain=v1", script, StringComparison.Ordinal);
         Assert.Contains("Repository has local changes", script, StringComparison.Ordinal);

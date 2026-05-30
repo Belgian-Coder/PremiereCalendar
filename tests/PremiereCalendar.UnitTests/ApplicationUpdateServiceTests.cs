@@ -44,7 +44,7 @@ public sealed class ApplicationUpdateServiceTests : IDisposable
             {
                 RepositoryPath = repo,
                 Remote = "origin",
-                Branch = "feature/view-sync",
+                Branch = "main",
                 InstallScriptPath = "Install-PremiereCalendar.ps1",
                 UpdateScriptPath = "deploy/Update-And-Install-PremiereCalendar.ps1",
                 LogDirectory = "App_Data/logs/application-updates"
@@ -58,11 +58,34 @@ public sealed class ApplicationUpdateServiceTests : IDisposable
         var request = Assert.IsType<ApplicationUpdateProcessStartRequest>(starter.Request);
         Assert.Equal(repo, request.RepositoryPath);
         Assert.Equal("origin", request.Remote);
-        Assert.Equal("feature/view-sync", request.Branch);
+        Assert.Equal("main", request.Branch);
         Assert.Equal(Path.Combine(repo, "Install-PremiereCalendar.ps1"), request.InstallScriptPath);
         Assert.Equal(Path.Combine(repo, "deploy", "Update-And-Install-PremiereCalendar.ps1"), request.UpdateScriptPath);
         Assert.StartsWith(Path.Combine(_root, "App_Data", "logs", "application-updates"), request.LogPath, StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith(".log", request.LogPath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task StartUpdateAsync_DefaultsToMainWhenBranchIsOmitted()
+    {
+        var repo = CreateRepositoryWithUpdateScripts();
+        var starter = new CapturingApplicationUpdateProcessStarter();
+        var service = CreateService(
+            new ApplicationUpdateOptions
+            {
+                RepositoryPath = repo,
+                Remote = "origin",
+                InstallScriptPath = "Install-PremiereCalendar.ps1",
+                UpdateScriptPath = "deploy/Update-And-Install-PremiereCalendar.ps1",
+                LogDirectory = "App_Data/logs/application-updates"
+            },
+            starter);
+
+        var result = await service.StartUpdateAsync(CancellationToken.None);
+
+        Assert.True(result.Started);
+        var request = Assert.IsType<ApplicationUpdateProcessStartRequest>(starter.Request);
+        Assert.Equal("main", request.Branch);
     }
 
     [Fact]
@@ -82,7 +105,7 @@ public sealed class ApplicationUpdateServiceTests : IDisposable
             {
                 RepositoryPath = repo,
                 Remote = "origin",
-                Branch = "feature/view-sync",
+                Branch = "main",
                 LogDirectory = "App_Data/logs/application-updates"
             },
             new CapturingApplicationUpdateProcessStarter());
@@ -92,7 +115,7 @@ public sealed class ApplicationUpdateServiceTests : IDisposable
         Assert.True(status.IsConfigured);
         Assert.Equal(repo, status.RepositoryPath);
         Assert.Equal("origin", status.Remote);
-        Assert.Equal("feature/view-sync", status.Branch);
+        Assert.Equal("main", status.Branch);
         Assert.Equal(newLog, status.LatestLogPath);
     }
 
