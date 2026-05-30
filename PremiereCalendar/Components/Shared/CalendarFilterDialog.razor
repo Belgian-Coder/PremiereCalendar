@@ -1,16 +1,26 @@
+@using System.Globalization
+
+@{
+    var draftSummary = DraftSummaryText();
+}
+
 <div class="filter-overlay" data-testid="filter-overlay" @onclick="CloseAsync">
     <section class="filter-pane"
              role="dialog"
              aria-modal="true"
              aria-labelledby="filter-pane-title"
+             aria-describedby="filter-pane-summary"
              tabindex="-1"
              data-testid="filter-pane"
              data-filter-pane
              @onclick:stopPropagation="true">
         <header class="filter-pane-header">
             <div>
-                <p class="eyebrow">Calendar controls</p>
                 <h2 id="filter-pane-title">Filters</h2>
+                <small id="filter-pane-summary"
+                       class="filter-pane-summary"
+                       role="status"
+                       aria-live="polite">@draftSummary</small>
             </div>
             <button class="tool-button"
                     type="button"
@@ -27,17 +37,17 @@
                 <h3>Sort</h3>
                 <label>
                     Sort results by
-                    <select @bind="_draftFilters.SortMode" @bind:after="NotifyDraftChanged">
+                    <select aria-label="Sort results by" @bind="_draftFilters.SortMode" @bind:after="NotifyDraftChanged">
                         <option value="@PremiereSortMode.PremiereDate">Premiere date</option>
                         <option value="@PremiereSortMode.Title">Title</option>
-                        <option value="@PremiereSortMode.Score">TMDb user score</option>
-                        <option value="@PremiereSortMode.VoteCount">Minimum user votes</option>
+                        <option value="@PremiereSortMode.Score">Selected score</option>
+                        <option value="@PremiereSortMode.VoteCount">Vote count</option>
                     </select>
                 </label>
 
                 <label>
                     Direction
-                    <select @bind="_draftFilters.SortDirection" @bind:after="NotifyDraftChanged">
+                    <select aria-label="Sort direction" @bind="_draftFilters.SortDirection" @bind:after="NotifyDraftChanged">
                         <option value="@SortDirection.Ascending">Ascending</option>
                         <option value="@SortDirection.Descending">Descending</option>
                     </select>
@@ -98,7 +108,7 @@
             <div class="filter-section">
                 <h3>Minimum user votes</h3>
                 <label>
-                    TMDb votes
+                    Selected-source votes
                     <input type="number"
                            min="0"
                            max="5000"
@@ -110,6 +120,7 @@
         </div>
 
         <footer class="filter-pane-footer">
+            <span class="filter-footer-summary" aria-hidden="true">@draftSummary</span>
             <button class="tool-button"
                     type="button"
                     title="Clear current page filters"
@@ -150,22 +161,37 @@
 
     private CalendarFilters _draftFilters = new();
     private string _lastInitialSignature = "";
+    private string _savedFilterSignature = "";
+    private string _draftFilterSignature = "";
+    private CalendarFilters _normalizedDraftFilters = new();
+    private bool _draftSignatureDirty = true;
+    private IReadOnlyList<PremiereItem>? _cachedMatchItems;
+    private string _cachedMatchSignature = "";
+    private int _cachedMatchItemsCount = -1;
+    private int _cachedMatchCount;
 
     protected override void OnParametersSet()
     {
-        var signature = $"{PageMode}|{Filters.WeekStart:yyyyMMdd}|{PremiereDiscoveryCriteria.FromFilters(Filters).CacheKey()}";
+        var savedFilterSignature = FilterSignature(Filters);
+        var signature = $"{PageMode}|{Filters.WeekStart:yyyyMMdd}|{savedFilterSignature}";
         if (string.Equals(signature, _lastInitialSignature, StringComparison.Ordinal))
         {
             return;
         }
 
         _lastInitialSignature = signature;
+        _savedFilterSignature = savedFilterSignature;
         _draftFilters = CalendarFilterState.Clone(Filters);
         CalendarFilterState.ApplyPageMode(_draftFilters, PageMode);
+        _normalizedDraftFilters = CalendarFilterState.Clone(_draftFilters);
+        CalendarFilterState.Normalize(_normalizedDraftFilters);
+        _draftFilterSignature = _savedFilterSignature;
+        _draftSignatureDirty = false;
     }
 
     private Task NotifyDraftChanged()
     {
+        _draftSignatureDirty = true;
         StateHasChanged();
         return Task.CompletedTask;
     }
@@ -221,5 +247,65 @@
         }
 
         return filters.ShowMovies ? "Movies" : "None";
+    }
+
+    private string DraftSummaryText()
+    {
+        var draftSignature = DraftFilterSignature();
+        var matchText = Items.Count == 0
+            ? "No loaded cards to estimate"
+            : $"{DraftMatchCount(draftSignature).ToString("N0", CultureInfo.InvariantCulture)} of {Items.Count.ToString("N0", CultureInfo.InvariantCulture)} loaded cards match";
+        return HasDraftChanges(draftSignature) ? $"{matchText} - unsaved changes" : $"{matchText} - no unsaved changes";
+    }
+
+    private int DraftMatchCount(string draftSignature)
+    {
+        if (ReferenceEquals(Items, _cachedMatchItems)
+            && Items.Count == _cachedMatchItemsCount
+            && string.Equals(draftSignature, _cachedMatchSignature, StringComparison.Ordinal))
+        {
+            return _cachedMatchCount;
+        }
+
+        _cachedMatchItems = Items;
+        _cachedMatchItemsCount = Items.Count;
+        _cachedMatchSignature = draftSignature;
+        _cachedMatchCount = PremiereFilter.CountMatches(Items, _normalizedDraftFilters);
+        return _cachedMatchCount;
+    }
+
+    private bool HasDraftChanges(string draftSignature)
+    {
+        return !string.Equals(draftSignature, _savedFilterSignature, StringComparison.Ordinal);
+    }
+
+    private string DraftFilterSignature()
+    {
+        if (!_draftSignatureDirty)
+        {
+            return _draftFilterSignature;
+        }
+
+        _normalizedDraftFilters = CalendarFilterState.Clone(_draftFilters);
+        CalendarFilterState.ApplyPageMode(_normalizedDraftFilters, PageMode);
+        CalendarFilterState.Normalize(_normalizedDraftFilters);
+        _draftFilterSignature = NormalizedFilterSignature(_normalizedDraftFilters);
+        _draftSignatureDirty = false;
+        return _draftFilterSignature;
+    }
+
+    private string FilterSignature(CalendarFilters filters)
+    {
+        var clone = CalendarFilterState.Clone(filters);
+        CalendarFilterState.ApplyPageMode(clone, PageMode);
+        CalendarFilterState.Normalize(clone);
+        return NormalizedFilterSignature(clone);
+    }
+
+    private static string NormalizedFilterSignature(CalendarFilters filters)
+    {
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{filters.ShowSeries}|{filters.ShowMovies}|{filters.SortMode}|{filters.SortDirection}|{PremiereDiscoveryCriteria.FromFilters(filters).CacheKey()}");
     }
 }

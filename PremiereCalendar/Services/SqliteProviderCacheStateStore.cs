@@ -118,6 +118,57 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         }
     }
 
+    public async Task SaveManyAsync(IEnumerable<ProviderCacheState> states, CancellationToken cancellationToken)
+    {
+        var validStates = states
+            .Where(state => !string.IsNullOrWhiteSpace(state.Provider) && !string.IsNullOrWhiteSpace(state.Key))
+            .ToArray();
+        if (validStates.Length == 0)
+        {
+            return;
+        }
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureInitializedAsync(cancellationToken);
+            await using var connection = CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = UpsertCommandText;
+            var providerParameter = command.Parameters.Add("$provider", SqliteType.Text);
+            var scopeParameter = command.Parameters.Add("$scope", SqliteType.Text);
+            var cacheKeyParameter = command.Parameters.Add("$cacheKey", SqliteType.Text);
+            var lastCheckedUtcParameter = command.Parameters.Add("$lastCheckedUtc", SqliteType.Text);
+            var lastChangedUtcParameter = command.Parameters.Add("$lastChangedUtc", SqliteType.Text);
+            var watermarkParameter = command.Parameters.Add("$watermark", SqliteType.Text);
+            var itemCountParameter = command.Parameters.Add("$itemCount", SqliteType.Integer);
+            var metadataJsonParameter = command.Parameters.Add("$metadataJson", SqliteType.Text);
+
+            foreach (var state in validStates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                providerParameter.Value = Normalize(state.Provider);
+                scopeParameter.Value = state.Scope.ToString();
+                cacheKeyParameter.Value = state.Key;
+                lastCheckedUtcParameter.Value = state.LastCheckedUtc.ToString("O", CultureInfo.InvariantCulture);
+                lastChangedUtcParameter.Value = state.LastChangedUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "";
+                watermarkParameter.Value = state.Watermark ?? "";
+                itemCountParameter.Value = state.ItemCount is { } count ? count : DBNull.Value;
+                metadataJsonParameter.Value = state.MetadataJson ?? "";
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     private async Task EnsureInitializedAsync(CancellationToken cancellationToken)
     {
         if (_initialized)
@@ -152,6 +203,35 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
 
         _initialized = true;
     }
+
+    private const string UpsertCommandText = """
+        INSERT INTO ProviderCacheState (
+            Provider,
+            Scope,
+            CacheKey,
+            LastCheckedUtc,
+            LastChangedUtc,
+            Watermark,
+            ItemCount,
+            MetadataJson
+        )
+        VALUES (
+            $provider,
+            $scope,
+            $cacheKey,
+            $lastCheckedUtc,
+            $lastChangedUtc,
+            $watermark,
+            $itemCount,
+            $metadataJson
+        )
+        ON CONFLICT(Provider, Scope, CacheKey) DO UPDATE SET
+            LastCheckedUtc = excluded.LastCheckedUtc,
+            LastChangedUtc = excluded.LastChangedUtc,
+            Watermark = excluded.Watermark,
+            ItemCount = excluded.ItemCount,
+            MetadataJson = excluded.MetadataJson
+        """;
 
     private SqliteConnection CreateConnection()
     {

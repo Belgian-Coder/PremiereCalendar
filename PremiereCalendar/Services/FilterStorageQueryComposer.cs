@@ -10,7 +10,9 @@ public static class FilterStorageQueryComposer
     {
         foreach (var (key, value) in ToDictionary(query))
         {
-            if (IsNavigationOnlyKey(key) || IsDefaultFilterValue(key, value))
+            if (IsNavigationOnlyKey(key)
+                || IsUnsupportedMediaSpecificKey(key)
+                || IsDefaultFilterValue(key, value))
             {
                 continue;
             }
@@ -28,6 +30,7 @@ public static class FilterStorageQueryComposer
     {
         var parameters = ToDictionary(savedQuery);
         parameters.Remove("week");
+        parameters.Remove("day");
 
         var currentParameters = ToDictionary(currentQuery);
         if (currentParameters.TryGetValue("week", out var week)
@@ -36,6 +39,13 @@ public static class FilterStorageQueryComposer
             parameters["week"] = week;
         }
 
+        if (currentParameters.TryGetValue("day", out var day)
+            && !string.IsNullOrWhiteSpace(day))
+        {
+            parameters["day"] = day;
+        }
+
+        RemoveUnsupportedMediaSpecificKeys(parameters);
         return ToQueryString(parameters);
     }
 
@@ -53,6 +63,7 @@ public static class FilterStorageQueryComposer
         OverlayMediaParameters(parameters, "series", seriesQuery);
         OverlayMediaParameters(parameters, "movie", movieQuery);
 
+        RemoveUnsupportedMediaSpecificKeys(parameters);
         return ToQueryString(parameters);
     }
 
@@ -77,7 +88,7 @@ public static class FilterStorageQueryComposer
         }
 
         foreach (var (key, value) in ToDictionary(sourceQuery)
-            .Where(pair => IsMediaSpecificKey(pair.Key, prefix)))
+            .Where(pair => IsMediaSpecificKey(pair.Key, prefix) && !IsUnsupportedMediaSpecificKey(pair.Key)))
         {
             parameters[key] = value;
         }
@@ -92,7 +103,26 @@ public static class FilterStorageQueryComposer
 
     private static bool IsNavigationOnlyKey(string key)
     {
-        return key.Equals("week", StringComparison.OrdinalIgnoreCase);
+        return key.Equals("week", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("day", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUnsupportedMediaSpecificKey(string key)
+    {
+        return key.Equals("movieScope", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("seriesReleaseTypes", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("seriesCertifications", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("seriesCertificationCountry", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("movieStatuses", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("movieTypes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void RemoveUnsupportedMediaSpecificKeys(IDictionary<string, string?> parameters)
+    {
+        foreach (var key in parameters.Keys.Where(IsUnsupportedMediaSpecificKey).ToArray())
+        {
+            parameters.Remove(key);
+        }
     }
 
     private static bool IsDefaultFilterValue(string key, string? value)
@@ -177,11 +207,31 @@ public static class FilterStorageQueryComposer
         }
 
         var trimmed = query.Trim().TrimStart('?');
-        return QueryHelpers.ParseQuery($"?{trimmed}")
-            .ToDictionary(
-                pair => pair.Key,
-                pair => (string?)pair.Value.ToString(),
-                QueryKeyComparer);
+        var parameters = new Dictionary<string, string?>(QueryKeyComparer);
+        foreach (var pair in QueryHelpers.ParseQuery($"?{trimmed}"))
+        {
+            parameters[pair.Key] = LastNonBlankOrLast(pair.Value);
+        }
+
+        return parameters;
+    }
+
+    private static string? LastNonBlankOrLast(IReadOnlyList<string?> values)
+    {
+        if (values.Count == 0)
+        {
+            return null;
+        }
+
+        for (var index = values.Count - 1; index >= 0; index--)
+        {
+            if (!string.IsNullOrWhiteSpace(values[index]))
+            {
+                return values[index];
+            }
+        }
+
+        return values[values.Count - 1];
     }
 
     private static string ToQueryString(IDictionary<string, string?> parameters)

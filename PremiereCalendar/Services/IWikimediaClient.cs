@@ -6,4 +6,9 @@ public interface IWikimediaClient
         string wikidataId,
         CancellationToken cancellationToken,
         bool forceRefresh = false);
+
+    Task<string?> GetRottenTomatoesIdAsync(
+        string wikidataId,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false);
 }

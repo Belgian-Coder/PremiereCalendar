@@ -43,38 +43,32 @@ public sealed class ImdbDatasetImporter : IImdbDatasetImporter
             await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var gzip = new GZipStream(responseStream, CompressionMode.Decompress);
             using var reader = new StreamReader(gzip);
-            var count = 0;
+            var records = new List<ImdbRatingRecord>();
+            var isHeader = true;
 
-            IEnumerable<ImdbRatingRecord> ReadRecords()
+            while (await reader.ReadLineAsync(cancellationToken) is { } line)
             {
-                string? line;
-                var isHeader = true;
-                while ((line = reader.ReadLine()) is not null)
+                if (isHeader)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (isHeader)
-                    {
-                        isHeader = false;
-                        continue;
-                    }
-
-                    var parts = line.Split('\t');
-                    if (parts.Length < 3
-                        || string.IsNullOrWhiteSpace(parts[0])
-                        || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var averageRating)
-                        || !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var voteCount))
-                    {
-                        continue;
-                    }
-
-                    count++;
-                    yield return new ImdbRatingRecord(parts[0].Trim(), averageRating, voteCount, importedAtUtc);
+                    isHeader = false;
+                    continue;
                 }
+
+                var parts = line.Split('\t');
+                if (parts.Length < 3
+                    || string.IsNullOrWhiteSpace(parts[0])
+                    || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var averageRating)
+                    || !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var voteCount))
+                {
+                    continue;
+                }
+
+                records.Add(new ImdbRatingRecord(parts[0].Trim(), averageRating, voteCount, importedAtUtc));
             }
 
-            await _ratingsStore.ReplaceAllAsync(ReadRecords(), importedAtUtc, cancellationToken);
-            _logger.LogInformation("Imported {Count} IMDb title ratings.", count);
-            return count;
+            await _ratingsStore.ReplaceAllAsync(records, importedAtUtc, cancellationToken);
+            _logger.LogInformation("Imported {Count} IMDb title ratings.", records.Count);
+            return records.Count;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -17,6 +17,7 @@ public sealed class TraktClientIntegrationTests
         {
             Assert.Contains("test-client-id", request.Headers.GetValues("trakt-api-key"));
             Assert.Contains("2", request.Headers.GetValues("trakt-api-version"));
+            Assert.Contains(request.Headers.UserAgent, value => value.Product?.Name == "PremiereCalendar");
 
             return request.RequestUri!.AbsolutePath.Contains("/movies/", StringComparison.Ordinal)
                 ? StubHttpMessageHandler.Json(

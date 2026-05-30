@@ -15,38 +15,75 @@ TMDb is required for live data. Everything else is optional.
 
 | Dark mode | Light mode |
 | --- | --- |
-| ![Series calendar in dark mode](docs/images/readme/series-dark.png) | ![Series calendar in light mode](docs/images/readme/series-light.png) |
+| ![New-series calendar in dark mode](docs/images/readme/series-dark.png) | ![New-series calendar in light mode](docs/images/readme/series-light.png) |
 
 | Movies | Filters |
 | --- | --- |
-| ![Movie calendar in dark mode](docs/images/readme/movies-dark.png) | ![Filter drawer in dark mode](docs/images/readme/filters-dark.png) |
+| ![Movie calendar in dark mode](docs/images/readme/movies-dark.png) | ![Filter pane in dark mode](docs/images/readme/filters-dark.png) |
 
-## First Setup
+| Local status |
+| --- |
+| ![Settings local status center](docs/images/readme/settings-local-status-light.png) |
 
-1. Start the app.
-2. Open `http://localhost:5298`.
-3. Click the cog icon.
-4. Paste your TMDb API read access token.
-5. Click Save.
-6. Go back to All, Series, or Movies.
+## Install On Windows
 
-No TMDb token means the app cannot load real calendar data.
+For a normal Windows install, use the release zip.
 
-## Run It
+1. Download the `PremiereCalendar-...-win-x64.zip` release.
+2. Right-click the zip and choose Extract All.
+3. Open the extracted folder.
+4. Double-click `Install-PremiereCalendar.cmd`.
+5. Click Yes when Windows asks for administrator permission.
+6. Open `http://localhost:5298`.
+7. Add the TMDb token in Settings when the app redirects you there.
 
-For a quick local run:
+The app starts automatically after the computer reboots.
+
+If TMDb settings are missing, the calendar automatically opens Settings and shows a setup notice until the required token is saved.
+
+## TMDb Token
+
+TMDb is required. Without it, the app opens but cannot load real calendar data.
+
+1. Create or sign in to a TMDb account.
+2. Open your TMDb account API settings.
+3. Copy the API Read Access Token, not the short API key.
+4. Paste it in the app Settings page and click Save.
+
+## Check It Worked
+
+| Check | Good result |
+| --- | --- |
+| Installer window | Ends with a success message |
+| App page | `http://localhost:5298` opens |
+| Health page | `http://localhost:5298/health` says Healthy |
+| Calendar | All, Series, or Movies loads cards after the TMDb token is saved |
+
+## Open From Another Computer
+
+1. Leave the computer running Premiere Calendar turned on.
+2. Find that computer's local network IP address.
+3. On another computer, open `http://IP-ADDRESS:5298`.
+
+For a friendly LAN name, add a DNS record on your router or local DNS server that points to the host computer's LAN IP, then open `http://NAME:5298`.
+
+If it does not open, check that both computers are on the same network and that Windows allowed the Premiere Calendar firewall prompt.
+
+Premiere Calendar has no built-in user login. Keep the service on a trusted LAN or VPN, and avoid exposing it directly to the public internet.
+
+## Run From Source
+
+Use this only when you cloned the repository instead of downloading a release zip.
 
 ```powershell
-.\Run-PremiereCalendar.ps1
+.\Run-PremiereCalendar.cmd
 ```
 
-To install or update the Windows service:
+To build and install the service from the source tree:
 
 ```powershell
-.\Install-PremiereCalendar.ps1
+.\Install-PremiereCalendar.cmd
 ```
-
-The service starts automatically after a reboot.
 
 ## Navigation And Shortcuts
 
@@ -58,12 +95,33 @@ The service starts automatically after a reboot.
 | Go to another week | Use Previous, This week, or Next |
 | Move from the top of a day to yesterday | Keep scrolling upward until the message appears |
 | Move from the bottom of a day to tomorrow | Keep scrolling downward until the message appears |
-| See which sources loaded | Click Show sources in Loaded-source filters |
-| Hide source details again | Click Hide sources |
-| Change filters | Click the filter button |
+| See which sources loaded | Open Source details when source diagnostics are shown |
+| See cache age | Check the data freshness pill above the day strip |
+| Save filter combinations | Open Actions, enter a preset name, and click Save preset |
+| Apply a saved filter preset | Open Actions, choose a preset, and click Apply preset |
+| Open Actions | Press Ctrl+K, or Cmd+K on macOS |
+| Close Actions | Press Escape |
+| Change filters | Click the filter button; a small badge shows how many filters are active |
 | Change settings | Click the cog icon |
 
 The arrow keys do not take over while you are typing in a text box.
+
+## Sync Viewing Between Devices
+
+View sync is optional. It lets two or more browsers follow the same calendar URL.
+
+1. Open Settings.
+2. Find View sync.
+3. Give this browser a name, such as `Office PC`.
+4. Create or select a group.
+5. Turn on Sync this browser.
+6. Save view sync.
+
+Do the same on another computer and choose the same group. When one grouped browser changes day, week, route, or filters, the other grouped browsers follow the latest view. Use Ungroup this device to stop syncing that browser.
+
+Settings shows one block per sync group. Each block lists the attached browsers and the latest saved URLs for All, Series, and Movies. The current browser is marked `me`, and the active group is highlighted.
+
+All, Series, and Movies keep separate synced views. A browser on Series follows only the latest Series URL, not Movies or All. Opening All, Series, or Movies without filters first uses that group's saved URL for the same route. Local saved filters are only the fallback when the browser is not in a group or that group has no saved URL for the route. Settings, About, external links, credentials, and host names are not synced.
 
 ## What The Cards Mean
 
@@ -88,21 +146,23 @@ The arrow keys do not take over while you are typing in a text box.
 
 ## Cache
 
-The app keeps calendar data, images, IMDb scores, OMDb responses, and small provider sync markers on disk. This means cached data survives restarts, crashes, and updates.
+The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync groups, and small provider sync markers on disk. This means cached data survives restarts, crashes, and updates.
 
-Click Refresh when you want the current week checked again. Refresh keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
+Use Update when you want to reuse fresh local cache where possible. Use Refresh sources when you want the visible week checked against providers again. Refresh sources keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
+
+Settings includes a Local status center with a cache inspector, background job timeline, release/update checker, and settings backup/restore box. The release checker only reports available GitHub releases; it never installs updates silently.
 
 ## Common Problems
 
 | Problem | Try this |
 | --- | --- |
-| No cards load | Add a TMDb token in Settings, then click Refresh |
-| IMDb scores are missing | Wait for the IMDb dataset import to finish, then Refresh |
+| No cards load | Add a TMDb token in Settings, then click Refresh sources |
+| IMDb scores are missing | Wait for the IMDb dataset import to finish, then click Refresh sources |
 | Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key; OMDb free keys can hit daily limits |
-| A source looks slow | Click Show sources to see which provider is still loading |
+| A source looks slow | Open Settings and check the Local status background job timeline |
 | TVmaze is slow | Use narrower filters or disable TVmaze schedule discovery in Settings |
 | Settings look wrong | Change them in the app Settings page, not in `appsettings.json` |
-| Posters are missing | Check optional artwork providers, then Refresh |
+| Posters are missing | Check optional artwork providers, then click Refresh sources |
 
 More help: [Troubleshooting](docs/Troubleshooting.md).
 

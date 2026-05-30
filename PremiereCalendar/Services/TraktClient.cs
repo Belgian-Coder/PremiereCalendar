@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
@@ -10,6 +11,7 @@ namespace PremiereCalendar.Services;
 public sealed class TraktClient : ITraktClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly ProductInfoHeaderValue UserAgent = new("PremiereCalendar", "1.0");
 
     private readonly HttpClient _httpClient;
     private readonly IMemoryCache _cache;
@@ -116,6 +118,7 @@ public sealed class TraktClient : ITraktClient
             using var request = new HttpRequestMessage(HttpMethod.Get, path);
             request.Headers.Add("trakt-api-key", settings.ClientId.Trim());
             request.Headers.Add("trakt-api-version", string.IsNullOrWhiteSpace(_options.ApiVersion) ? "2" : _options.ApiVersion.Trim());
+            request.Headers.UserAgent.Add(UserAgent);
 
             var response = await _httpClient.SendAsync(request, cancellationToken);
             if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt == maxAttempts)

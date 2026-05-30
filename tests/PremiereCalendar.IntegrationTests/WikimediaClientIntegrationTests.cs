@@ -92,6 +92,42 @@ public sealed class WikimediaClientIntegrationTests
     }
 
     [Fact]
+    public async Task GetRottenTomatoesIdAsync_ReadsP1258Identifier()
+    {
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(
+            """
+            {
+              "entities": {
+                "Q123": {
+                  "claims": {
+                    "P1258": [
+                      {
+                        "mainsnak": {
+                          "datavalue": { "value": "m/corporate_retreat" }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """));
+        var client = new WikimediaClient(
+            new HttpClient(handler) { BaseAddress = new Uri("https://www.wikidata.org/") },
+            new MemoryCache(new MemoryCacheOptions()),
+            Microsoft.Extensions.Options.Options.Create(new WikimediaOptions
+            {
+                Enabled = true,
+                CommonsApiUrl = "https://commons.wikimedia.org/w/api.php"
+            }));
+
+        var rottenTomatoesId = await client.GetRottenTomatoesIdAsync("Q123", CancellationToken.None);
+
+        Assert.Equal("m/corporate_retreat", rottenTomatoesId);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
     public async Task GetReusableImageUrlAsync_DoesNotCacheTransientWikidataFailureAsMissingImage()
     {
         var wikidataAttempts = 0;

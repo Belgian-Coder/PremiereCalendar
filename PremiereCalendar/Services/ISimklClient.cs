@@ -7,6 +7,12 @@ public interface ISimklClient
     Task<SimklPinCodeResult> RequestPinCodeAsync(CancellationToken cancellationToken);
 
     Task<SimklPinStatusResult> CheckPinCodeAsync(string userCode, CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<SimklCalendarItem>> GetCalendarAsync(
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false);
 }
 
 public enum SimklSyncStatus
@@ -45,3 +51,31 @@ public sealed record SimklPinStatusResult(
     SimklPinStatus Status,
     string? AccessToken = null,
     string? Message = null);
+
+public enum SimklCalendarItemType
+{
+    Tv,
+    MovieRelease
+}
+
+public sealed record SimklCalendarItem(
+    SimklCalendarItemType Type,
+    string? Title,
+    DateTimeOffset Date,
+    DateOnly? ReleaseDate,
+    string? Url,
+    SimklCalendarIds Ids,
+    SimklCalendarRatings? Ratings,
+    SimklCalendarEpisode? Episode);
+
+public sealed record SimklCalendarIds(
+    int? SimklId,
+    string? Tmdb,
+    string? Imdb,
+    string? Tvdb);
+
+public sealed record SimklCalendarRatings(SimklRating? Imdb);
+
+public sealed record SimklRating(double? Rating, int? Votes);
+
+public sealed record SimklCalendarEpisode(int? Season, int? Episode, string? Url);

@@ -28,6 +28,15 @@ function Remove-PremiereCalendarStartupEntries {
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
+function Remove-PremiereCalendarFirewallRules {
+    param([Parameter(Mandatory)][string]$DisplayName)
+
+    $displayNamePattern = '^' + [regex]::Escape($DisplayName) + ' \d+$'
+    Get-NetFirewallRule -DisplayName "$DisplayName *" -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match $displayNamePattern } |
+        Remove-NetFirewallRule
+}
+
 $exePath = Join-Path $PublishDirectory 'PremiereCalendar.exe'
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Published app executable not found: $exePath"
@@ -52,32 +61,19 @@ else {
 
 $environment = New-Object System.Collections.Generic.List[string]
 $environment.Add("ASPNETCORE_URLS=http://0.0.0.0:$Port")
+$environment.Add("Urls=http://0.0.0.0:$Port")
 $environment.Add('ASPNETCORE_ENVIRONMENT=Production')
 $environment.Add('DOTNET_ENVIRONMENT=Production')
 $environment.Add("AppDatabase__Path=$(Join-Path $PublishDirectory 'App_Data\data\premiere-calendar.db')")
 $environment.Add("CalendarCache__Directory=$(Join-Path $PublishDirectory 'App_Data\cache\calendar')")
 $environment.Add("ImageCache__Directory=$(Join-Path $PublishDirectory 'App_Data\cache\images')")
-
-$secretsPath = Join-Path $env:APPDATA 'Microsoft\UserSecrets\e9fb65ab-fad7-4bf7-9c12-b076a6fc56a5\secrets.json'
-if (Test-Path -LiteralPath $secretsPath) {
-    $secrets = Get-Content -LiteralPath $secretsPath -Raw | ConvertFrom-Json -AsHashtable
-    foreach ($key in $secrets.Keys) {
-        $value = [string]$secrets[$key]
-        if (-not [string]::IsNullOrWhiteSpace($value)) {
-            $environmentName = $key.Replace(':', '__')
-            $environment.Add("$environmentName=$value")
-        }
-    }
-}
-else {
-    Write-Warning "User-secrets file was not found at $secretsPath. Configure TMDb__BearerToken for the service before starting it."
-}
+Write-Host 'API credentials are configured in the app Settings page, not copied from user-secrets into the service environment.'
 
 $serviceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 New-ItemProperty -Path $serviceRegistryPath -Name Environment -PropertyType MultiString -Value $environment.ToArray() -Force | Out-Null
 
-$firewallRuleName = 'Premiere Calendar 5298'
-Get-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+$firewallRuleName = "$DisplayName $Port"
+Remove-PremiereCalendarFirewallRules -DisplayName $DisplayName
 New-NetFirewallRule `
     -DisplayName $firewallRuleName `
     -Direction Inbound `

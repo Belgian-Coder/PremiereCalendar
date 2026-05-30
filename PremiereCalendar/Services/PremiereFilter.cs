@@ -7,20 +7,14 @@ public static class PremiereFilter
     public static IReadOnlyList<PremiereItem> Apply(IEnumerable<PremiereItem> items, CalendarFilters filters)
     {
         return items
-            .Where(item => PassesMediaTypeFilter(item, filters))
-            .Where(item => PassesLanguageFilter(item, filters.Language))
-            .Where(item => PassesOriginGroupFilter(item, filters.OriginGroup))
-            .Where(item => PassesGenreFilter(item, filters.GenreIds))
-            .Where(item => PassesSourceSelectionFilter(item, filters.SelectedSources))
-            .Where(item => PassesNetworkFilter(item, filters.NetworkText))
-            .Where(item => PassesSearchFilter(item, filters.SearchText))
-            .Where(item => PassesKeywordFilter(item, filters.KeywordText))
-            .Where(item => PassesMediaFilterSet(item, EffectiveMediaFilterSet(item, filters)))
-            .Where(item => PassesScoreFilter(item, filters))
-            .Where(item => PassesVoteCountFilter(item, filters.MinVoteCount, filters.ScoreSource))
-            .Where(item => PassesRuntimeFilter(item, filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes))
+            .Where(item => Matches(item, filters))
             .ApplySort(filters.SortMode, filters.SortDirection, filters.ScoreSource)
             .ToList();
+    }
+
+    public static int CountMatches(IEnumerable<PremiereItem> items, CalendarFilters filters)
+    {
+        return items.Count(item => Matches(item, filters));
     }
 
     public static IOrderedEnumerable<PremiereItem> SortItems(
@@ -30,6 +24,22 @@ public static class PremiereFilter
         ScoreSource scoreSource)
     {
         return items.ApplySort(sortMode, sortDirection, scoreSource);
+    }
+
+    private static bool Matches(PremiereItem item, CalendarFilters filters)
+    {
+        return PassesMediaTypeFilter(item, filters)
+            && PassesLanguageFilter(item, filters.Language)
+            && PassesOriginGroupFilter(item, filters.OriginGroup)
+            && PassesGenreFilter(item, filters.GenreIds)
+            && PassesSourceSelectionFilter(item, filters.SelectedSources)
+            && PassesNetworkFilter(item, filters.NetworkText)
+            && PassesSearchFilter(item, filters.SearchText)
+            && PassesKeywordFilter(item, filters.KeywordText)
+            && PassesMediaFilterSet(item, EffectiveMediaFilterSet(item, filters))
+            && PassesScoreFilter(item, filters)
+            && PassesVoteCountFilter(item, filters.MinVoteCount, filters.ScoreSource)
+            && PassesRuntimeFilter(item, filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes);
     }
 
     public static bool PassesScoreFilter(PremiereItem item, CalendarFilters filters)
@@ -148,6 +158,11 @@ public static class PremiereFilter
 
     private static bool PassesMediaFilterSet(PremiereItem item, MediaFilterSet filters)
     {
+        if (!filters.HasCriteria)
+        {
+            return true;
+        }
+
         return PassesOriginalLanguageFilter(item, filters.OriginalLanguages)
             && PassesSeriesDateModeFilter(item, filters.SeriesDateMode)
             && PassesOriginCountryFilter(item, filters.OriginCountries)
@@ -173,11 +188,9 @@ public static class PremiereFilter
 
     private static MediaFilterSet EffectiveMediaFilterSet(PremiereItem item, CalendarFilters filters)
     {
-        var mediaFilters = item.MediaType == PremiereMediaType.Series
+        return item.MediaType == PremiereMediaType.Series
             ? filters.SeriesFilters
             : filters.MovieFilters;
-
-        return mediaFilters.HasCriteria ? mediaFilters : new MediaFilterSet();
     }
 
     private static bool PassesOriginalLanguageFilter(PremiereItem item, IReadOnlyCollection<string> originalLanguages)

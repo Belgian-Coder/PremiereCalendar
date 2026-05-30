@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Net;
 using System.Text;
 
@@ -40,6 +41,25 @@ internal sealed class StubHttpMessageHandler : HttpMessageHandler
         return new HttpResponseMessage(statusCode)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+    }
+
+    public static HttpResponseMessage GzipJson(string json, HttpStatusCode statusCode = HttpStatusCode.OK)
+    {
+        using var compressed = new MemoryStream();
+        using (var gzip = new GZipStream(compressed, CompressionLevel.Fastest, leaveOpen: true))
+        using (var writer = new StreamWriter(gzip, Encoding.UTF8))
+        {
+            writer.Write(json);
+        }
+
+        var content = new ByteArrayContent(compressed.ToArray());
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+        content.Headers.ContentEncoding.Add("gzip");
+
+        return new HttpResponseMessage(statusCode)
+        {
+            Content = content
         };
     }
 }

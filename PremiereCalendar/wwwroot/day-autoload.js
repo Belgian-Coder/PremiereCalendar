@@ -1,5 +1,6 @@
 const dayAutoloadSelector = "[data-day-autoload-sentinel]";
 const dayLoadAllSelector = "[data-day-load-all]";
+const observedDayAutoloadSentinels = new Set();
 
 function findDayAutoloadSentinels(roots) {
   const sentinels = [];
@@ -50,6 +51,7 @@ function initializeDayAutoload(roots = [document]) {
 
     sentinel.dataset.autoloadObserved = "true";
     window.premiereCalendarDayAutoloadObserver.observe(sentinel);
+    observedDayAutoloadSentinels.add(sentinel);
   }
 }
 
@@ -62,6 +64,8 @@ function loadMoreUntilComplete(sentinel) {
 
   const pump = () => {
     if (!document.documentElement.contains(sentinel)) {
+      window.premiereCalendarDayAutoloadObserver?.unobserve(sentinel);
+      observedDayAutoloadSentinels.delete(sentinel);
       return;
     }
 
@@ -78,8 +82,50 @@ function loadMoreUntilComplete(sentinel) {
   pump();
 }
 
+function cleanupObservedDayAutoloadSentinel(sentinel) {
+  if (!observedDayAutoloadSentinels.has(sentinel)) {
+    return;
+  }
+
+  window.premiereCalendarDayAutoloadObserver.unobserve(sentinel);
+  observedDayAutoloadSentinels.delete(sentinel);
+}
+
+function cleanupDetachedDayAutoloadSentinels(roots = []) {
+  if (!window.premiereCalendarDayAutoloadObserver) {
+    return;
+  }
+
+  if (roots.length > 0) {
+    for (const root of roots) {
+      if (!(root instanceof Element)) {
+        continue;
+      }
+
+      if (root.matches(dayAutoloadSelector)) {
+        cleanupObservedDayAutoloadSentinel(root);
+      }
+
+      for (const sentinel of root.querySelectorAll(dayAutoloadSelector)) {
+        cleanupObservedDayAutoloadSentinel(sentinel);
+      }
+    }
+
+    return;
+  }
+
+  for (const sentinel of Array.from(observedDayAutoloadSentinels)) {
+    if (document.documentElement.contains(sentinel)) {
+      continue;
+    }
+
+    cleanupObservedDayAutoloadSentinel(sentinel);
+  }
+}
+
 if (window.premiereCalendarDomObserver) {
   window.premiereCalendarDomObserver.register(initializeDayAutoload);
+  window.premiereCalendarDomObserver.registerCleanup(cleanupDetachedDayAutoloadSentinels);
 } else {
   initializeDayAutoload([document]);
   document.addEventListener("DOMContentLoaded", () => initializeDayAutoload([document]));

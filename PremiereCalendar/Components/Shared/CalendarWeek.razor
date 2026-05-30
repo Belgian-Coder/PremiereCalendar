@@ -8,32 +8,41 @@
             <button class="filter-open-button"
                     type="button"
                     title="Open filters"
-                    aria-label="Open filters"
+                    aria-label="@FilterButtonAriaLabel()"
                     @onclick="OnOpenFilters">
                 <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
                     <path d="M4 5h16l-6.2 7.1v5.1l-3.6 1.8v-6.9L4 5Z" />
                 </svg>
+                @if (ActiveFilterCount > 0)
+                {
+                    <span class="filter-count-badge" data-testid="active-filter-count" aria-hidden="true">
+                        @ActiveFilterCount.ToString(CultureInfo.InvariantCulture)
+                    </span>
+                }
                 <span class="visually-hidden">Filters</span>
             </button>
 
-            <nav class="day-jump-nav" aria-label="Week days" role="tablist">
+            <nav class="day-jump-nav mobile-day-jump-strip" aria-label="Week days" role="tablist">
                 @for (var index = 0; index < 7; index++)
                 {
                     var day = WeekStart.AddDays(index);
                     <button class="@DayButtonClass(day)"
+                            id="@DayButtonId(day)"
                             type="button"
                             role="tab"
                             data-day-button
                             data-day-target="@DayElementId(day)"
+                            aria-label="@DayButtonAriaLabel(day)"
                             aria-selected="@AriaSelected(day)"
                             tabindex="@DayTabIndex(day)"
-                            aria-controls="@DayElementId(day)"
+                            aria-controls="@ControlledPanelId(day)"
                             @onkeydown="args => OnDayKeyDown(args, day)"
                             @onclick="() => SelectDay(day)">
                         <span class="day-jump-main">
                             <span>@day.ToString("ddd", CultureInfo.CurrentCulture)</span>
                             <span>@day.ToString("dd MMM", CultureInfo.CurrentCulture)</span>
                         </span>
+                        <span class="day-jump-compact-date" aria-hidden="true">@day.ToString("dd", CultureInfo.CurrentCulture)</span>
                         <small class="day-jump-count">@DayCountLabel(day)</small>
                     </button>
                 }
@@ -45,6 +54,7 @@
         <CalendarDay @key="_selectedDay"
                      Day="_selectedDay"
                      DayId="@DayElementId(_selectedDay)"
+                     LabelledById="@DayButtonId(_selectedDay)"
                      Items="SelectedDayItems"
                      ScoreSource="ScoreSource"
                      ImageCacheVersion="@ImageCacheVersion"
@@ -53,7 +63,8 @@
                      LoadBatchSize="ItemsPerDayBatch"
                      IntegrationSettings="IntegrationSettings"
                      OnAddToArr="OnAddToArr"
-                     IsArrActionBusy="IsArrActionBusy" />
+                     IsArrActionBusy="IsArrActionBusy"
+                     IsUpdating="IsUpdating" />
     </div>
 </div>
 
@@ -89,6 +100,9 @@
     public bool IsArrActionBusy { get; set; }
 
     [Parameter]
+    public bool IsUpdating { get; set; }
+
+    [Parameter]
     public int InitialItemsPerDay { get; set; } = 10;
 
     [Parameter]
@@ -96,6 +110,9 @@
 
     [Parameter]
     public EventCallback OnOpenFilters { get; set; }
+
+    [Parameter]
+    public int ActiveFilterCount { get; set; }
 
     [Parameter]
     public DateOnly? SelectedDay { get; set; }
@@ -106,11 +123,12 @@
     [Parameter]
     public EventCallback<DateOnly> OnAdjacentCalendarDayRequested { get; set; }
 
-    private Dictionary<DateOnly, List<PremiereItem>> _dayGroups = [];
+    private Dictionary<DateOnly, DayGroup> _dayGroups = [];
     private IReadOnlyList<PremiereItem>? _lastGroupedItems;
     private string _lastGroupKey = "";
     private DateOnly _selectedDay;
     private DateOnly _lastWeekStart;
+    private DateOnly? _lastExternalSelectedDay;
     private ElementReference _selectedDayContainer;
     private DotNetObjectReference<CalendarWeek>? _objectReference;
     private bool _autoDayNavigationRegistered;
@@ -118,38 +136,54 @@
     private bool _scrollSelectedDayIntoView;
     private bool _focusSelectedDayButton;
 
-    private IReadOnlyList<PremiereItem> SelectedDayItems => _dayGroups.GetValueOrDefault(_selectedDay) ?? [];
+    private IReadOnlyList<PremiereItem> SelectedDayItems => _dayGroups.TryGetValue(_selectedDay, out var group) ? group.Items : [];
+
+    private string FilterButtonAriaLabel()
+    {
+        if (ActiveFilterCount <= 0)
+        {
+            return "Open filters";
+        }
+
+        var noun = ActiveFilterCount == 1 ? "active filter" : "active filters";
+        return $"Open filters, {ActiveFilterCount.ToString(CultureInfo.InvariantCulture)} {noun}";
+    }
 
     protected override void OnParametersSet()
     {
         var weekChanged = _lastWeekStart != WeekStart;
+        var externallySelectedDay = NormalizeSelectedDay(SelectedDay);
+        var externalSelectionCleared = _lastExternalSelectedDay.HasValue && !externallySelectedDay.HasValue;
         if (weekChanged)
         {
             _lastWeekStart = WeekStart;
-            var externallySelectedDay = NormalizeSelectedDay(SelectedDay);
             _selectedDay = externallySelectedDay ?? WeekStart;
             _hasUserSelectedDay = externallySelectedDay.HasValue;
         }
-        else if (NormalizeSelectedDay(SelectedDay) is { } externallySelectedDay
-            && externallySelectedDay != _selectedDay)
+        else if (externallySelectedDay is { } selectedDay)
         {
-            _selectedDay = externallySelectedDay;
+            _selectedDay = selectedDay;
             _hasUserSelectedDay = true;
         }
+        else if (externalSelectionCleared)
+        {
+            _selectedDay = WeekStart;
+            _hasUserSelectedDay = false;
+        }
+
+        _lastExternalSelectedDay = externallySelectedDay;
 
         var groupKey = string.Create(
             CultureInfo.InvariantCulture,
             $"{WeekStart:yyyyMMdd}|{Items.Count}|{SortMode}|{SortDirection}|{ScoreSource}");
 
-        if (ReferenceEquals(Items, _lastGroupedItems)
-            && string.Equals(groupKey, _lastGroupKey, StringComparison.Ordinal))
+        if (!ReferenceEquals(Items, _lastGroupedItems)
+            || !string.Equals(groupKey, _lastGroupKey, StringComparison.Ordinal))
         {
-            return;
+            _lastGroupedItems = Items;
+            _lastGroupKey = groupKey;
+            _dayGroups = CreateDayGroups();
         }
-
-        _lastGroupedItems = Items;
-        _lastGroupKey = groupKey;
-        _dayGroups = CreateDayGroups();
 
         if (_selectedDay == default
             || _selectedDay < WeekStart
@@ -226,26 +260,44 @@
         }
     }
 
-    private Dictionary<DateOnly, List<PremiereItem>> CreateDayGroups()
+    private Dictionary<DateOnly, DayGroup> CreateDayGroups()
     {
         var start = WeekStart;
         var end = start.AddDays(6);
+        var groups = new Dictionary<DateOnly, DayGroupBuilder>();
 
-        return PremiereFilter
-            .SortItems(
-                Items.Where(item => item.PremiereDate >= start && item.PremiereDate <= end),
-                SortMode,
-                SortDirection,
-                ScoreSource)
-            .GroupBy(item => item.PremiereDate)
-            .ToDictionary(group => group.Key, group => group
-                .OrderBy(VerificationSortRank)
-                .ToList());
+        foreach (var item in PremiereFilter.SortItems(Items, SortMode, SortDirection, ScoreSource))
+        {
+            if (item.PremiereDate < start || item.PremiereDate > end)
+            {
+                continue;
+            }
+
+            if (!groups.TryGetValue(item.PremiereDate, out var builder))
+            {
+                builder = new DayGroupBuilder();
+                groups[item.PremiereDate] = builder;
+            }
+
+            builder.Add(item);
+        }
+
+        return groups.ToDictionary(entry => entry.Key, entry => entry.Value.ToDayGroup());
     }
 
     private static string DayElementId(DateOnly day)
     {
         return $"premiere-day-{day.ToString("yyyyMMdd", CultureInfo.InvariantCulture)}";
+    }
+
+    private static string DayButtonId(DateOnly day)
+    {
+        return $"premiere-day-tab-{day.ToString("yyyyMMdd", CultureInfo.InvariantCulture)}";
+    }
+
+    private string? ControlledPanelId(DateOnly day)
+    {
+        return day == _selectedDay ? DayElementId(day) : null;
     }
 
     private string DayButtonClass(DateOnly day)
@@ -265,30 +317,43 @@
 
     private string DayCountLabel(DateOnly day)
     {
-        if (!_dayGroups.TryGetValue(day, out var items) || items.Count == 0)
+        if (!_dayGroups.TryGetValue(day, out var group) || group.Items.Count == 0)
         {
             return "Empty";
         }
 
-        var movieCount = items.Count(item => item.MediaType == PremiereMediaType.Movie);
-        var seriesCount = items.Count - movieCount;
-
-        return movieCount switch
+        return group.MovieCount switch
         {
-            > 0 when seriesCount > 0 => $"{movieCount} movie{Plural(movieCount)} / {seriesCount} series",
-            > 0 => $"{movieCount} movie{Plural(movieCount)}",
-            _ => $"{seriesCount} series"
+            > 0 when group.SeriesCount > 0 => $"M {group.MovieCount.ToString(CultureInfo.InvariantCulture)} / S {group.SeriesCount.ToString(CultureInfo.InvariantCulture)}",
+            > 0 => $"{group.MovieCount.ToString(CultureInfo.InvariantCulture)} movie{Plural(group.MovieCount)}",
+            _ => $"{group.SeriesCount.ToString(CultureInfo.InvariantCulture)} series"
         };
+    }
+
+    private string DayButtonAriaLabel(DateOnly day)
+    {
+        if (!_dayGroups.TryGetValue(day, out var group) || group.Items.Count == 0)
+        {
+            return $"{day.ToString("dddd, dd MMMM yyyy", CultureInfo.CurrentCulture)}, no premieres";
+        }
+
+        var countText = new List<string>();
+        if (group.MovieCount > 0)
+        {
+            countText.Add($"{group.MovieCount.ToString(CultureInfo.InvariantCulture)} movie{Plural(group.MovieCount)}");
+        }
+
+        if (group.SeriesCount > 0)
+        {
+            countText.Add($"{group.SeriesCount.ToString(CultureInfo.InvariantCulture)} series");
+        }
+
+        return $"{day.ToString("dddd, dd MMMM yyyy", CultureInfo.CurrentCulture)}, {string.Join(" and ", countText)}";
     }
 
     private static string Plural(int count)
     {
         return count == 1 ? "" : "s";
-    }
-
-    private static int VerificationSortRank(PremiereItem item)
-    {
-        return item.VerificationState == PremiereVerificationState.Unverified ? 1 : 0;
     }
 
     private async Task SelectDay(DateOnly day, bool focusSelectedDayButton = false)
@@ -350,7 +415,7 @@
         for (var index = 0; index < 7; index++)
         {
             var day = WeekStart.AddDays(index);
-            if (_dayGroups.TryGetValue(day, out var items) && items.Count > 0)
+            if (_dayGroups.TryGetValue(day, out var group) && group.Items.Count > 0)
             {
                 return day;
             }
@@ -364,6 +429,43 @@
         return day is { } value && value >= WeekStart && value <= WeekStart.AddDays(6)
             ? value
             : null;
+    }
+
+    private sealed record DayGroup(
+        IReadOnlyList<PremiereItem> Items,
+        int MovieCount,
+        int SeriesCount);
+
+    private sealed class DayGroupBuilder
+    {
+        private readonly List<PremiereItem> _verifiedItems = [];
+        private readonly List<PremiereItem> _unverifiedItems = [];
+        private int _movieCount;
+
+        public void Add(PremiereItem item)
+        {
+            if (item.MediaType == PremiereMediaType.Movie)
+            {
+                _movieCount++;
+            }
+
+            if (item.VerificationState == PremiereVerificationState.Unverified)
+            {
+                _unverifiedItems.Add(item);
+            }
+            else
+            {
+                _verifiedItems.Add(item);
+            }
+        }
+
+        public DayGroup ToDayGroup()
+        {
+            var items = new List<PremiereItem>(_verifiedItems.Count + _unverifiedItems.Count);
+            items.AddRange(_verifiedItems);
+            items.AddRange(_unverifiedItems);
+            return new DayGroup(items, _movieCount, items.Count - _movieCount);
+        }
     }
 
     public async ValueTask DisposeAsync()

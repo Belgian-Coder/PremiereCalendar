@@ -32,6 +32,7 @@ public sealed class PremiereCardTests : BunitContext
             ImdbScore = 7.4,
             ImdbVoteCount = 1234,
             RottenTomatoesScore = 83,
+            RottenTomatoesAudienceScore = 91,
             MetacriticScore = 72
         };
 
@@ -53,7 +54,8 @@ public sealed class PremiereCardTests : BunitContext
         Assert.Contains("IMDb 7.4 / 10", component.Markup);
         Assert.Contains("1", component.Markup);
         Assert.Contains("234", component.Markup);
-        Assert.Contains("RT 83%", component.Markup);
+        Assert.Contains("RT critics 83%", component.Markup);
+        Assert.Contains("RT audience 91%", component.Markup);
         Assert.Contains("Meta 72/100", component.Markup);
         Assert.Contains("Trailer via TMDb Videos", component.Markup);
         Assert.Contains("TMDb poster", component.Markup);

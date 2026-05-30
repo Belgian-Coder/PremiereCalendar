@@ -12,6 +12,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
     private readonly IOptionsMonitor<ProviderDeltaSyncOptions> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ProviderDeltaSyncService> _logger;
+    private readonly BackgroundJobTimelineService? _timeline;
 
     public ProviderDeltaSyncService(
         ITmdbClient tmdbClient,
@@ -19,7 +20,8 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         IProviderCacheStateStore stateStore,
         IOptionsMonitor<ProviderDeltaSyncOptions> options,
         TimeProvider timeProvider,
-        ILogger<ProviderDeltaSyncService> logger)
+        ILogger<ProviderDeltaSyncService> logger,
+        BackgroundJobTimelineService? timeline = null)
     {
         _tmdbClient = tmdbClient;
         _tvmazeClient = tvmazeClient;
@@ -27,6 +29,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         _options = options;
         _timeProvider = timeProvider;
         _logger = logger;
+        _timeline = timeline;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -46,13 +49,13 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                     await Task.Delay(delay, stoppingToken);
                 }
 
-                await RunOnceAsync(stoppingToken);
+                await RunOnceSafelyAsync(stoppingToken);
             }
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 await Task.Delay(TimeSpan.FromMinutes(Math.Max(15, _options.CurrentValue.WakeIntervalMinutes)), stoppingToken);
-                await RunOnceAsync(stoppingToken);
+                await RunOnceSafelyAsync(stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -62,31 +65,121 @@ public sealed class ProviderDeltaSyncService : BackgroundService
 
     internal async Task RunOnceAsync(CancellationToken cancellationToken)
     {
+        await RunOnceCoreAsync(cancellationToken);
+    }
+
+    private async Task<ProviderDeltaSyncResult> RunOnceCoreAsync(CancellationToken cancellationToken)
+    {
         var nowUtc = _timeProvider.GetUtcNow();
+        var failures = new List<ProviderDeltaFailure>();
         if (_options.CurrentValue.UseTmdbChanges)
         {
-            await SyncTmdbChangesAsync(nowUtc, cancellationToken);
+            if (await SyncTmdbChangesAsync(nowUtc, cancellationToken) is { } failure)
+            {
+                failures.Add(failure);
+            }
         }
 
         if (_options.CurrentValue.UseTvmazeUpdates)
         {
-            await SyncTvmazeUpdatesAsync(nowUtc, cancellationToken);
+            if (await SyncTvmazeUpdatesAsync(nowUtc, cancellationToken) is { } failure)
+            {
+                failures.Add(failure);
+            }
+        }
+
+        return new ProviderDeltaSyncResult(failures);
+    }
+
+    internal async Task RunOnceSafelyAsync(CancellationToken cancellationToken)
+    {
+        var startedUtc = _timeProvider.GetUtcNow();
+        var startedTimestamp = _timeProvider.GetTimestamp();
+        try
+        {
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Started,
+                "Started provider delta sync.",
+                startedUtc,
+                null,
+                cancellationToken);
+            var result = await RunOnceCoreAsync(cancellationToken);
+            if (result.Failures.Count > 0)
+            {
+                await RecordTimelineAsync(
+                    BackgroundJobStatus.Failed,
+                    $"Provider delta sync failed: {string.Join("; ", result.Failures.Select(failure => failure.Reason))}",
+                    _timeProvider.GetUtcNow(),
+                    _timeProvider.GetElapsedTime(startedTimestamp),
+                    cancellationToken);
+                return;
+            }
+
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Succeeded,
+                "Finished provider delta sync.",
+                _timeProvider.GetUtcNow(),
+                _timeProvider.GetElapsedTime(startedTimestamp),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Provider delta sync cycle failed.");
+            await RecordTimelineAsync(
+                BackgroundJobStatus.Failed,
+                ex.Message,
+                _timeProvider.GetUtcNow(),
+                _timeProvider.GetElapsedTime(startedTimestamp),
+                CancellationToken.None);
         }
     }
 
-    private async Task SyncTmdbChangesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
+    private async Task RecordTimelineAsync(
+        BackgroundJobStatus status,
+        string message,
+        DateTimeOffset occurredUtc,
+        TimeSpan? duration,
+        CancellationToken cancellationToken)
+    {
+        if (_timeline is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _timeline.RecordAsync("Provider delta sync", status, message, occurredUtc, duration, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not record provider delta sync timeline event.");
+        }
+    }
+
+    private async Task<ProviderDeltaFailure?> SyncTmdbChangesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
         try
         {
             var end = DateOnly.FromDateTime(nowUtc.UtcDateTime);
             var lookbackDays = Math.Clamp(_options.CurrentValue.TmdbLookbackDays, 1, 14);
-            var start = end.AddDays(-lookbackDays);
+            var start = end.AddDays(-(lookbackDays - 1));
             await SyncTmdbMediaChangesAsync(PremiereMediaType.Movie, start, end, nowUtc, cancellationToken);
             await SyncTmdbMediaChangesAsync(PremiereMediaType.Series, start, end, nowUtc, cancellationToken);
+            return null;
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "TMDb change tracking sync timed out or was canceled by an external dependency.");
+            return new ProviderDeltaFailure("TMDb", "TMDb change tracking timed out or was canceled by an external dependency.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "TMDb change tracking sync failed.");
+            return new ProviderDeltaFailure("TMDb", $"TMDb change tracking failed: {SafeFailureMessage(ex)}");
         }
     }
 
@@ -104,8 +197,9 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         var watermark = end.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
         var globalKey = $"{keyPrefix}-changes";
 
-        await _stateStore.SaveAsync(
-            new ProviderCacheState(
+        var states = new List<ProviderCacheState>
+        {
+            new(
                 "tmdb",
                 ProviderCacheScope.Global,
                 globalKey,
@@ -113,8 +207,8 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                 nowUtc,
                 watermark,
                 changes.Count,
-                null),
-            cancellationToken);
+                null)
+        };
 
         foreach (var change in changes)
         {
@@ -123,8 +217,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                 continue;
             }
 
-            await _stateStore.SaveAsync(
-                new ProviderCacheState(
+            states.Add(new ProviderCacheState(
                     "tmdb",
                     ProviderCacheScope.Item,
                     $"{keyPrefix}:{change.Id}",
@@ -132,18 +225,20 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                     nowUtc,
                     watermark,
                     null,
-                    null),
-                cancellationToken);
+                    null));
         }
+
+        await _stateStore.SaveManyAsync(states, cancellationToken);
     }
 
-    private async Task SyncTvmazeUpdatesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
+    private async Task<ProviderDeltaFailure?> SyncTvmazeUpdatesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
         try
         {
             var updates = await _tvmazeClient.GetShowUpdatesAsync(TvmazeUpdateWindow.Day, cancellationToken);
-            await _stateStore.SaveAsync(
-                new ProviderCacheState(
+            var states = new List<ProviderCacheState>
+            {
+                new(
                     "tvmaze",
                     ProviderCacheScope.Global,
                     "show-updates",
@@ -151,13 +246,12 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                     updates.Count > 0 ? updates.Max(update => update.UpdatedAtUtc) : null,
                     "day",
                     updates.Count,
-                    null),
-                cancellationToken);
+                    null)
+            };
 
             foreach (var update in updates)
             {
-                await _stateStore.SaveAsync(
-                    new ProviderCacheState(
+                states.Add(new ProviderCacheState(
                         "tvmaze",
                         ProviderCacheScope.Item,
                         $"show:{update.ShowId}",
@@ -165,13 +259,32 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                         update.UpdatedAtUtc,
                         "day",
                         null,
-                        null),
-                    cancellationToken);
+                        null));
             }
+
+            await _stateStore.SaveManyAsync(states, cancellationToken);
+            return null;
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "TVmaze update tracking sync timed out or was canceled by an external dependency.");
+            return new ProviderDeltaFailure("TVmaze", "TVmaze update tracking timed out or was canceled by an external dependency.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "TVmaze update tracking sync failed.");
+            return new ProviderDeltaFailure("TVmaze", $"TVmaze update tracking failed: {SafeFailureMessage(ex)}");
         }
     }
+
+    private static string SafeFailureMessage(Exception exception)
+    {
+        return string.IsNullOrWhiteSpace(exception.Message)
+            ? exception.GetType().Name
+            : exception.Message;
+    }
+
+    private sealed record ProviderDeltaSyncResult(IReadOnlyList<ProviderDeltaFailure> Failures);
+
+    private sealed record ProviderDeltaFailure(string Provider, string Reason);
 }

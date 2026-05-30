@@ -29,7 +29,7 @@ builder.Services.AddRazorComponents()
         options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
         options.HandshakeTimeout = TimeSpan.FromSeconds(30);
         options.KeepAliveInterval = TimeSpan.FromSeconds(15);
-        options.MaximumReceiveMessageSize = 256 * 1024;
+        options.MaximumReceiveMessageSize = 1024 * 1024;
     });
 builder.Services.Configure<CircuitOptions>(options =>
 {
@@ -46,6 +46,7 @@ builder.Services.Configure<FanartOptions>(builder.Configuration.GetSection("Fana
 builder.Services.Configure<TraktOptions>(builder.Configuration.GetSection("Trakt"));
 builder.Services.Configure<TheTvdbOptions>(builder.Configuration.GetSection("TheTvdb"));
 builder.Services.Configure<WikimediaOptions>(builder.Configuration.GetSection("Wikimedia"));
+builder.Services.Configure<RottenTomatoesOptions>(builder.Configuration.GetSection("RottenTomatoes"));
 builder.Services.Configure<WatchmodeOptions>(builder.Configuration.GetSection("Watchmode"));
 builder.Services.Configure<SimklOptions>(builder.Configuration.GetSection("Simkl"));
 builder.Services.Configure<CalendarCacheOptions>(builder.Configuration.GetSection("CalendarCache"));
@@ -56,6 +57,7 @@ builder.Services.Configure<CalendarLoadOptions>(builder.Configuration.GetSection
 builder.Services.Configure<CacheMaintenanceOptions>(builder.Configuration.GetSection("CacheMaintenance"));
 builder.Services.Configure<ImdbDatasetOptions>(builder.Configuration.GetSection("ImdbDataset"));
 builder.Services.Configure<ProviderDeltaSyncOptions>(builder.Configuration.GetSection("ProviderDeltaSync"));
+builder.Services.Configure<ApplicationUpdateOptions>(builder.Configuration.GetSection("ApplicationUpdate"));
 
 builder.Services.AddMemoryCache();
 builder.Services.AddResponseCompression(options =>
@@ -144,6 +146,16 @@ builder.Services.AddHttpClient<IWikimediaClient, WikimediaClient>((sp, client) =
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
 });
 
+builder.Services.AddHttpClient<IRottenTomatoesClient, RottenTomatoesClient>((sp, client) =>
+{
+    var options = sp.GetRequiredService<IOptions<RottenTomatoesOptions>>().Value;
+
+    client.BaseAddress = new Uri(options.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
+    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
+});
+
 builder.Services.AddHttpClient<IWatchmodeClient, WatchmodeClient>((sp, client) =>
 {
     var options = sp.GetRequiredService<IOptions<WatchmodeOptions>>().Value;
@@ -175,6 +187,12 @@ builder.Services.AddHttpClient<IArrIntegrationService, ArrIntegrationService>(cl
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.Timeout = TimeSpan.FromSeconds(20);
 });
+builder.Services.AddHttpClient<ReleaseUpdateService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.github.com/");
+    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<FileCalendarCache>();
@@ -183,11 +201,21 @@ builder.Services.AddSingleton<ICalendarCacheMaintenance>(sp => sp.GetRequiredSer
 builder.Services.AddTransient<IImageCache>(sp => sp.GetRequiredService<FileImageCache>());
 builder.Services.AddTransient<IImageCacheMaintenance>(sp => sp.GetRequiredService<FileImageCache>());
 builder.Services.AddSingleton<IIntegrationSettingsStore, SqliteIntegrationSettingsStore>();
+builder.Services.AddSingleton<IAppStateStore, SqliteAppStateStore>();
+builder.Services.AddSingleton<CacheInspectorService>();
+builder.Services.AddSingleton<BackgroundJobTimelineService>();
+builder.Services.AddSingleton<CalendarPresetService>();
+builder.Services.AddSingleton<CalendarVisitChangeService>();
+builder.Services.AddSingleton<SettingsBackupService>();
+builder.Services.AddSingleton<IApplicationUpdateProcessStarter, DefaultApplicationUpdateProcessStarter>();
+builder.Services.AddSingleton<IApplicationUpdateService, ApplicationUpdateService>();
 builder.Services.AddSingleton<ICalendarFilterUsageStore, SqliteCalendarFilterUsageStore>();
 builder.Services.AddSingleton<ISimklSyncStateStore, SqliteSimklSyncStateStore>();
 builder.Services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();
 builder.Services.AddSingleton<IOmdbCacheStore, SqliteOmdbCacheStore>();
 builder.Services.AddSingleton<IProviderCacheStateStore, SqliteProviderCacheStateStore>();
+builder.Services.AddSingleton<IViewSyncStore, SqliteViewSyncStore>();
+builder.Services.AddSingleton<IViewSyncService, ViewSyncService>();
 builder.Services.AddSingleton<ISingleFlightCoordinator, SingleFlightCoordinator>();
 builder.Services.AddSingleton<ProviderRequestThrottler>();
 builder.Services.AddSingleton<CalendarLoadCoordinator>();
@@ -208,6 +236,7 @@ builder.Services.AddSingleton<IArtworkProvider, TvmazeArtworkProvider>();
 builder.Services.AddSingleton<IArtworkProvider, TheTvdbArtworkProvider>();
 builder.Services.AddSingleton<IArtworkProvider, WikimediaArtworkProvider>();
 builder.Services.AddSingleton<IPremiereDiscoveryProvider, TraktDiscoveryProvider>();
+builder.Services.AddSingleton<IPremiereDiscoveryProvider, SimklCalendarDiscoveryProvider>();
 builder.Services.AddSingleton<IPremiereDiscoveryProvider, TvmazeScheduleDiscoveryProvider>();
 builder.Services.AddScoped<IPremiereService, PremiereService>();
 
@@ -280,7 +309,13 @@ app.MapGet(
         }
     });
 
-app.Run();
+try
+{
+    app.Run();
+}
+catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested)
+{
+}
 
 static bool RequestHasMatchingEntityTag(HttpContext httpContext, string entityTag)
 {

@@ -49,4 +49,6 @@ public sealed record ExternalPremiereCandidate(
     string? ExternalUrl = null,
     string? PosterUrl = null,
     string? BackdropUrl = null,
-    int? ReleaseYear = null);
+    int? ReleaseYear = null,
+    double? ImdbScore = null,
+    int? ImdbVoteCount = null);

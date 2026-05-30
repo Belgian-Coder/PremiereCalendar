@@ -25,7 +25,7 @@ flowchart LR
     Cards --> ImageCache["/cached-image"]
 ```
 
-TMDb is the canonical identity source. TMDb Discover creates the primary verified rows. Trakt and optional TVmaze schedules can add candidates; mapped candidates become verified cards, while unmapped candidates are retained as unverified external cards below the verified results. In the new-series view, TVmaze later episodes are filtered out before TMDb mapping; `S01E01` candidates can still support a series-premiere card. Watchmode is streaming availability fallback only. SIMKL is account/library sync state, not calendar discovery. Draft filter changes never call external APIs; saved filters do. Runtime API and integration settings are read from the local SQLite settings database first, with ASP.NET Core configuration used only as a fallback.
+TMDb is the canonical identity source. TMDb Discover creates the primary verified rows. Trakt and optional TVmaze schedules can add candidates; mapped candidates become verified cards, while unmapped candidates are retained as unverified external cards below the verified results. In the new-series view, TVmaze later episodes are filtered out before TMDb mapping; `S01E01` candidates can still support a series-premiere card. Watchmode is streaming availability fallback only. SIMKL is account/library sync state, not calendar discovery. Draft filter changes never call external APIs; saved filters do. Runtime API and integration credentials are read from the local SQLite settings database.
 
 ## Request Flow
 
@@ -37,7 +37,7 @@ TMDb is the canonical identity source. TMDb Discover creates the primary verifie
 6. Optional discovery providers fetch Trakt calendars and TVmaze schedules. External candidates without TMDb IDs are resolved through TMDb external-ID lookup and strict title/year fallback. Candidates that still cannot map are kept as unverified external cards instead of being thrown away. External candidates are batched before mapping so TVmaze schedule rows can use the same bounded TMDb resolution/enrichment concurrency as larger TMDb result sets. When TVmaze supplies a known show language and the saved original-language filter does not include it, the candidate is skipped before TMDb resolution.
 7. Each accepted item is normalized into a `PremiereItem` with a stable canonical ID: `tv:{tmdbId}` for series premieres, `tv:{tmdbId}:air:{yyyyMMdd}` or `tv:{tmdbId}:s{season}e{episode}` for series episodes, and `movie:{tmdbId}` for movies.
 8. Detail enrichment runs with bounded concurrency so a busy week does not create unbounded external calls.
-9. Each source batch is yielded from `IPremiereService.StreamPremieresAsync` as soon as partial data is ready. The page updates cards while later pages, days, and providers are still running. The Loaded-source filters panel is collapsed by default and shows only the total card count; Show sources expands provider chips with counts, progress, and diagnostics. The chips can be clicked to show only one loaded source without making another API request. If the foreground load budget expires, the page stops waiting and renders the best available partial or cached result.
+9. Each source batch is yielded from `IPremiereService.StreamPremieresAsync` as soon as partial data is ready. The page updates cards while later pages, days, and providers are still running. Source diagnostics stay compact by default and show only meaningful totals; Source details expands provider chips with counts, progress, and diagnostics. The chips can be clicked to show only one loaded source without making another API request. If the foreground load budget expires, the page stops waiting and renders the best available partial or cached result.
 10. The filtered normalized result set for that week and criteria hash is written to `App_Data/cache/calendar`. Week cache writes are atomic: the app writes a temporary file first and replaces the final cache file only after serialization succeeds.
 11. The UI still applies `PremiereFilter` in memory for local-only filters and final consistency, then renders one selected day. Left Arrow and Right Arrow move between days. Overscrolling at the top moves to yesterday; overscrolling at the bottom moves to tomorrow. Moderate days render 10 cards at a time and auto-load more while browsing. Days over 40 items switch to .NET 11 Blazor `Virtualize`.
 12. Poster/backdrop URLs are routed through `/cached-image`, which stores image bytes locally under `App_Data/cache/images`. Poster cards include `w=185`, so the cache stores a displayed-size variant for the card. TMDb poster URLs that already use the requested card width are stored directly; larger variants and non-TMDb posters are resized to a JPEG variant. Cards place the real image URL in `data-lazy-src`, so the browser does not request offscreen images until they are near the viewport.
@@ -45,7 +45,7 @@ TMDb is the canonical identity source. TMDb Discover creates the primary verifie
 
 ## External Sources
 
-TMDb is required. It provides discovery, core metadata, TMDb scores, posters/backdrops, videos, genres, keywords, external IDs, TV networks, and watch providers. The TMDb API read access token is stored from the Settings page in the local database, or read from configuration fallback when the database value is empty.
+TMDb is required. It provides discovery, core metadata, TMDb scores, posters/backdrops, videos, genres, keywords, external IDs, TV networks, and watch providers. The TMDb API read access token is stored from the Settings page in the local database.
 
 IMDb datasets are included. The app imports IMDb's non-commercial ratings dataset into SQLite and uses it for IMDb scores and vote counts when a card has an IMDb ID.
 
@@ -128,7 +128,7 @@ When external schedules provide exact season and episode numbers for a show/day,
 
 ## Filtering
 
-Filters are draft UI state until Save is clicked. Closing or canceling the pane discards draft changes. Save updates the URL, reloads the visible week with TMDb-supported filters in the request, and then applies any remaining local filters in memory. The pane has a page-level `Clear filters` action, and each series/movie filter section has its own `Clear` action for resetting just that media group.
+Filters are draft UI state until Save is clicked. Closing or canceling the pane discards draft changes. Save updates the URL and applies the saved filter state. Source-affecting filters reload the visible week with TMDb-supported filters in the request, then apply any remaining local filters in memory. View-only changes such as sort mode or URL canonicalization are applied locally and do not start a new source load. The calendar header shows only a filter-count badge instead of spelling out every active criterion. The pane has a page-level `Clear filters` action, and each series/movie filter section has its own `Clear` action for resetting just that media group.
 
 The combined calendar at `/` supports:
 
@@ -151,7 +151,7 @@ Saved filters sent to TMDb Discover include media type, series row scope (`air_d
 
 Filters kept local after loading include free-text TV network/provider matching and any legacy query parameters that no longer appear in the visible TMDb-style filter pane.
 
-Saved filters are written to query parameters, but generated URLs omit default values. A copied URL restores the same week and filter state, including selected provider/channel sources and comma-separated language selections such as `seriesLang=en,nl`; defaults such as `sort=date`, `dir=asc`, `lang=both`, `origin=all`, score `0-10`, minimum votes `0`, and runtime `0-360` are not written. The browser also stores the last saved non-default filter query in `localStorage` separately for `/`, `/series`, and `/movies`, without the week; opening one of those routes without meaningful query filters restores that route's last saved filters without pinning an old week. Week-only URLs and older default-only URLs such as `?week=2026-05-04&sort=date&min=0` do not block restoration. The combined `/` route also composes its restored query from the separately saved series and movie filter groups, so filters saved on `/series` and `/movies` are reused by the All view.
+Saved filters are written to query parameters, but generated URLs omit default values. A copied URL restores the same week and filter state, including selected provider/channel sources and comma-separated language selections such as `seriesLang=en,nl`; defaults such as `sort=date`, `dir=asc`, `lang=both`, `origin=all`, score `0-10`, minimum votes `0`, and runtime `0-360` are not written. The browser also stores the last saved non-default filter query in `localStorage` separately for `/`, `/series`, and `/movies`, without the week; opening one of those routes without meaningful query filters restores only that route's saved filters without pinning an old week. Week-only URLs and older default-only URLs such as `?week=2026-05-04&sort=date&min=0` do not block restoration.
 
 The `/series` route locks the media request to series and shows only TV-oriented controls. The `/movies` route locks the media request to movies and shows only movie-oriented controls. This mirrors TMDb's split between TV network filtering and movie-specific release/provider filters without duplicating the data pipeline.
 
@@ -209,6 +209,8 @@ That makes it reachable from other LAN devices when Windows Firewall allows inbo
 
 Use the root `Install-PremiereCalendar.ps1` wrapper for source-tree app updates. It publishes the self-contained build, copies it to the configured install directory while preserving runtime data, and installs or updates the automatic Windows Service. The wrapper restarts itself elevated when service installation needs administrator rights. `Run-PremiereCalendar.ps1` is the foreground build-and-run helper for local development and does not install a service.
 
+Settings can also start a guarded source update through `GitHub source update`. That path launches `deploy/Update-And-Install-PremiereCalendar.ps1` in the configured source checkout, fetches the configured remote branch, refuses dirty or non-fast-forward repositories, runs `git pull --ff-only`, and then calls the same install wrapper. The request returns before the service restart, so the app can briefly become unavailable while the installer replaces binaries.
+
 The health endpoint is:
 
 ```text
@@ -221,11 +223,19 @@ GET /health
 - `PremiereCalendar/Components/Shared/CalendarFilterDialog.razor` - filter pane with local draft state, Save/Cancel behavior, and page-mode-aware clearing.
 - `PremiereCalendar/Services/CalendarFilterState.cs` - filter clone, normalize, and route-mode locking helpers.
 - `PremiereCalendar/Services/AdjacentWeekPrefetcher.cs` - background warming for nearby full-week caches around the visible week.
+- `PremiereCalendar/Services/BackgroundJobTimelineService.cs` - bounded local history for warmup, prefetch, IMDb import, provider sync, and cache-maintenance work.
+- `PremiereCalendar/Services/CacheInspectorService.cs` - file counts, sizes, and newest-write timestamps for calendar and image caches.
+- `PremiereCalendar/Services/CalendarPresetService.cs` - route-scoped saved filter presets that preserve the current week when applied.
+- `PremiereCalendar/Services/CalendarVisitChangeService.cs` - subtle per-week change summaries comparing the current visible IDs to the last visit.
+- `PremiereCalendar/Services/ReleaseUpdateService.cs` - on-demand GitHub latest-release check used by Settings.
+- `PremiereCalendar/Services/ApplicationUpdateService.cs` - guarded Settings-triggered GitHub source update launcher.
+- `PremiereCalendar/Services/SettingsBackupService.cs` - JSON export/import for integration settings and local app state.
 - `PremiereCalendar/Components/Shared/MediaFilterPanel.razor` - TMDb-style per-media filter groups for series and movies.
 - `PremiereCalendar/Components/Shared/CalendarWeek.razor` - sticky day selector and one mounted selected-day section.
 - `PremiereCalendar/Components/Shared/CalendarDay.razor` - per-day grouping, render fingerprinting, 10-card batching, scroll auto-load sentinels, and .NET 11 Blazor `Virtualize` for dense days.
 - `PremiereCalendar/Components/Shared/PremiereCard.razor` - poster, metadata, source chips, scores, links, description, and card-level render fingerprinting.
 - `PremiereCalendar/wwwroot/dom-observer.js` - shared batched DOM initializer for lazy images, filter-pane swipe setup, and day auto-loading.
+- `PremiereCalendar/wwwroot/command-palette.js` - global Ctrl+K/Cmd+K and Escape handling for the calendar Actions palette.
 - `PremiereCalendar/Services/PremiereService.cs` - orchestration, normalization, enrichment, de-duplication, and week cache writes.
 - `PremiereCalendar/Services/PremiereDiscoveryCriteria.cs` - converts saved UI filters to TMDb-supported request filters and cache keys.
 - `PremiereCalendar/Services/PremiereLoadProgress.cs` - source-batch progress messages used by the page during fresh loads.

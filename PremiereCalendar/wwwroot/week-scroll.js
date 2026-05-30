@@ -7,11 +7,18 @@ const autoDayNavigationActivationDelta = 760;
 const autoDayNavigationMinimumPromptMs = 800;
 const autoDayNavigationEdgeTolerance = 4;
 const autoDayNavigation = new WeakMap();
+const focusRestoreSelector = "[data-focus-restore='calendar-heading']";
+const focusRestoreStorageKey = "premiereCalendar:restoreFocus";
+const dayTabNavigationKeys = new Set(["ArrowLeft", "ArrowRight", "Home", "End"]);
+let focusRestoreReady = false;
+let topbarOffsetReady = false;
+let topbarOffsetHeight = 0;
 const focusableSelector = [
     "a[href]",
     "button:not([disabled])",
     "input:not([disabled])",
     "select:not([disabled])",
+    "summary",
     "textarea:not([disabled])",
     "[tabindex]:not([tabindex='-1'])"
 ].join(",");
@@ -62,6 +69,49 @@ function focusDayButton(dayElementId) {
 
     if (button instanceof HTMLElement) {
         button.focus({ preventScroll: true });
+        button.scrollIntoView({
+            block: "nearest",
+            inline: "nearest",
+            behavior: "smooth"
+        });
+    }
+}
+
+function focusSelector(selector) {
+    const targetSelector = String(selector ?? "");
+    const focus = () => {
+        const element = document.querySelector(targetSelector);
+        if (element instanceof HTMLElement) {
+            element.focus({ preventScroll: true });
+        }
+    };
+
+    requestAnimationFrame(() => requestAnimationFrame(focus));
+    window.setTimeout(focus, 50);
+    window.setTimeout(focus, 250);
+    window.setTimeout(focus, 750);
+    window.setTimeout(focus, 1500);
+    window.setTimeout(focus, 2500);
+}
+
+function rememberCalendarHeadingFocus() {
+    try {
+        window.sessionStorage?.setItem(focusRestoreStorageKey, "calendar-heading");
+    } catch {
+    }
+}
+
+function restoreRememberedFocus() {
+    let target = null;
+    try {
+        target = window.sessionStorage?.getItem(focusRestoreStorageKey);
+        window.sessionStorage?.removeItem(focusRestoreStorageKey);
+    } catch {
+        target = null;
+    }
+
+    if (target === "calendar-heading") {
+        focusSelector("[data-testid='calendar-focus-target']");
     }
 }
 
@@ -244,8 +294,70 @@ function disposeAutoDayNavigation(element) {
 }
 
 function initializeWeekControls(roots = [document]) {
+    initializeTopbarOffset();
+    initializeFocusRestore();
     findElements(roots, dayButtonSelector).forEach(initializeDayButton);
     findElements(roots, filterPaneSelector).forEach(initializeFilterPane);
+}
+
+function initializeTopbarOffset() {
+    if (topbarOffsetReady) {
+        return;
+    }
+
+    const topbar = document.querySelector(".app-topbar");
+    if (!(topbar instanceof HTMLElement)) {
+        return;
+    }
+
+    topbarOffsetReady = true;
+    const update = () => {
+        const nextHeight = topbar.offsetHeight;
+        if (nextHeight === topbarOffsetHeight) {
+            return;
+        }
+
+        topbarOffsetHeight = nextHeight;
+        document.documentElement.style.setProperty("--app-topbar-current-height", `${nextHeight}px`);
+    };
+
+    update();
+    window.addEventListener("resize", update, { passive: true });
+    if ("ResizeObserver" in window) {
+        new ResizeObserver(update).observe(topbar);
+    }
+}
+
+function initializeFocusRestore() {
+    if (focusRestoreReady) {
+        return;
+    }
+
+    focusRestoreReady = true;
+    document.addEventListener("click", (event) => {
+        if (!(event.target instanceof Element)) {
+            return;
+        }
+
+        if (event.target.closest(focusRestoreSelector)) {
+            rememberCalendarHeadingFocus();
+            focusSelector("[data-testid='calendar-focus-target']");
+        }
+    }, true);
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+            return;
+        }
+
+        if (!(event.target instanceof Element)) {
+            return;
+        }
+
+        if (event.target.closest(focusRestoreSelector)) {
+            rememberCalendarHeadingFocus();
+            focusSelector("[data-testid='calendar-focus-target']");
+        }
+    }, true);
 }
 
 function initializeDayButton(button) {
@@ -254,6 +366,11 @@ function initializeDayButton(button) {
     }
 
     button.dataset.dayButtonReady = "true";
+    button.addEventListener("keydown", (event) => {
+        if (dayTabNavigationKeys.has(event.key)) {
+            event.preventDefault();
+        }
+    });
     button.addEventListener("click", () => {
         const board = document.querySelector("[data-testid='calendar-week']");
         if (board instanceof HTMLElement) {
@@ -344,10 +461,13 @@ function initializeFilterPane(pane) {
 window.premiereCalendarWeek = {
     scrollSelectedDayIntoView,
     focusDayButton,
+    focusSelector,
     registerAutoDayNavigation,
     disposeAutoDayNavigation
 };
 
+initializeFocusRestore();
+restoreRememberedFocus();
 if (window.premiereCalendarDomObserver) {
     window.premiereCalendarDomObserver.register(initializeWeekControls);
 } else {

@@ -1,10 +1,32 @@
 # Release Installer
 
-Premiere Calendar ships as a self-contained Windows x64 release zip. The target machine does not need a separate .NET runtime because the release package includes the runtime files produced by `dotnet publish --self-contained true`.
+Premiere Calendar ships as a self-contained Windows x64 release zip. The target machine does not need a separate .NET runtime.
 
-The installer is designed for a Windows machine that hosts the app as a Windows Service.
+The installer sets up a Windows Service, so the app starts again after reboot.
 
-## Build A Release Package
+## Simple Install
+
+Use these steps on the computer that should host Premiere Calendar.
+
+1. Copy the release zip to the computer.
+2. Right-click the zip and choose Extract All.
+3. Open the extracted folder.
+4. Double-click `Install-PremiereCalendar.cmd`.
+5. Click Yes when Windows asks for administrator permission.
+6. Open `http://localhost:5298`.
+7. Add the TMDb API Read Access Token in Settings when the app redirects you there.
+
+To use the app from another computer on the same network, open `http://HOST-IP:5298`. For a friendly LAN name, add a DNS record on your router or local DNS server that points to the host computer's LAN IP, then open `http://NAME:5298`.
+
+Premiere Calendar does not include user authentication. The default firewall rule is scoped to the local subnet; keep the app behind a trusted LAN or VPN and do not expose the port directly to the public internet.
+
+Good signs after install:
+
+- `http://localhost:5298` opens.
+- `http://localhost:5298/health` says Healthy.
+- Cards load after the TMDb token is saved.
+
+## For Maintainers: Build A Release Package
 
 From the repository root:
 
@@ -32,18 +54,15 @@ Use `-Version 1.2.3` to pin a release version:
 
 Use `-SkipTests` only when tests have already been run for the exact commit/package being released.
 
-## Install On A Target Machine
+## Advanced Install Command
 
-1. Copy the release zip to the target machine.
-2. Extract it.
-3. Open PowerShell as Administrator in the extracted folder.
-4. Run:
+The double-click installer is the recommended path. Use PowerShell only when you need a custom port, install folder, data folder, firewall scope, or service name.
 
 ```powershell
-.\Install-PremiereCalendar.ps1 -TmdbBearerToken 'YOUR_TMDB_V4_READ_ACCESS_TOKEN'
+.\Install-PremiereCalendar.ps1 -Port 8080 -InstallDirectory 'D:\Apps\PremiereCalendar' -DataDirectory 'D:\Data\PremiereCalendar'
 ```
 
-For a guided install, double-click `Install-PremiereCalendar.cmd`. It opens an elevated PowerShell window and prompts for the TMDb token. You can also install without source keys and enter them later on the app's Settings page; installer-provided keys are first-run fallback values and the database-backed Settings page takes precedence after a value is saved there.
+API credentials are not installer parameters. Add TMDb and optional source keys in the app Settings page so they are stored in the SQLite settings database and preserved across app updates.
 
 By default this installs:
 
@@ -54,42 +73,25 @@ By default this installs:
 - URL: `http://0.0.0.0:5298`
 - firewall: inbound TCP `5298` from `LocalSubnet`
 
-The installer verifies `http://localhost:5298/health` before it finishes.
+The installer verifies `http://localhost:5298/health` before it finishes. The health endpoint only proves the service is responding; the calendar still needs the TMDb token saved in Settings before cards can load.
 
 The installer also removes old user Startup-folder shortcuts for Premiere Calendar. The Windows Service is the only supported automatic-start mechanism, because it starts after reboot even before the user logs in and it has restart-on-failure recovery.
 
-## Optional Source Keys
-
-Optional free-source keys can be passed during install:
-
-```powershell
-.\Install-PremiereCalendar.ps1 `
-  -TmdbBearerToken 'YOUR_TMDB_V4_READ_ACCESS_TOKEN' `
-  -TraktClientId 'YOUR_TRAKT_CLIENT_ID' `
-  -FanartApiKey 'YOUR_FANART_TV_KEY' `
-  -OmdbApiKey 'YOUR_OMDB_KEY' `
-  -TheTvdbApiKey 'YOUR_THETVDB_KEY'
-```
-
-These values are stored in the Windows Service `Environment` registry value as ASP.NET Core environment variables. They are not written into packaged `appsettings.json`. After installation, the Settings page can edit the same source API values into the SQLite settings database, which overrides the service-environment fallback.
-
 ## Update
 
-Run the new package's installer again from an elevated PowerShell session:
+Extract the new zip and double-click `Install-PremiereCalendar.cmd` again.
+
+PowerShell alternative:
 
 ```powershell
 .\Install-PremiereCalendar.ps1
 ```
 
-The installer stops the service, replaces the installed binaries, preserves the existing service secrets when matching parameters are omitted, preserves `C:\ProgramData\PremiereCalendar`, restarts the service, and health-checks the app.
+The installer stops the service, replaces the installed binaries, preserves `C:\ProgramData\PremiereCalendar`, restarts the service, and health-checks the app.
 
 If an older install has an in-place `App_Data` folder under the binary directory, the installer excludes that folder from the mirror copy so upgrades do not delete it.
 
-Pass a secret parameter again when you want to rotate it:
-
-```powershell
-.\Install-PremiereCalendar.ps1 -TmdbBearerToken 'NEW_TMDB_TOKEN'
-```
+Rotate source API tokens in the app Settings page, then click Save.
 
 ## Custom Port Or Paths
 

@@ -4,6 +4,8 @@ namespace PremiereCalendar.Services;
 
 public static class CalendarFilterState
 {
+    private static readonly int[] ValidMovieReleaseTypes = [1, 2, 3, 4, 5, 6];
+
     public static CalendarFilters Clone(CalendarFilters source)
     {
         return new CalendarFilters
@@ -74,18 +76,29 @@ public static class CalendarFilterState
     public static void Normalize(CalendarFilters filters)
     {
         NormalizeVisibleFilterState(filters);
+        if (!filters.ShowSeries && !filters.ShowMovies)
+        {
+            filters.ShowSeries = true;
+            filters.ShowMovies = true;
+        }
+
         filters.MinVoteCount = Math.Max(0, filters.MinVoteCount);
-        filters.RuntimeMinMinutes = Math.Clamp(filters.RuntimeMinMinutes, 0, 360);
-        filters.RuntimeMaxMinutes = Math.Clamp(filters.RuntimeMaxMinutes, 0, 360);
-        filters.MinScore = Math.Clamp(filters.MinScore, 0, 10);
-        filters.MaxScore = Math.Clamp(filters.MaxScore, 0, 10);
+        (filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes) = NormalizeRange(
+            filters.RuntimeMinMinutes,
+            filters.RuntimeMaxMinutes,
+            0,
+            360);
+        (filters.MinScore, filters.MaxScore) = NormalizeRange(
+            filters.MinScore,
+            filters.MaxScore,
+            0,
+            10);
         Normalize(filters.SeriesFilters);
         Normalize(filters.MovieFilters);
     }
 
     public static void NormalizeVisibleFilterState(CalendarFilters filters)
     {
-        filters.ScoreSource = ScoreSource.Tmdb;
         filters.IncludeUnknownScores = true;
 
         if (filters.SortMode == PremiereSortMode.Runtime)
@@ -102,8 +115,34 @@ public static class CalendarFilterState
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(language => language, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        filters.RuntimeMinMinutes = Math.Clamp(filters.RuntimeMinMinutes, 0, 360);
-        filters.RuntimeMaxMinutes = Math.Clamp(filters.RuntimeMaxMinutes, 0, 360);
+        (filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes) = NormalizeRange(
+            filters.RuntimeMinMinutes,
+            filters.RuntimeMaxMinutes,
+            0,
+            360);
+        filters.MovieReleaseTypes = filters.MovieReleaseTypes
+            .Where(ValidMovieReleaseTypes.Contains)
+            .Distinct()
+            .Order()
+            .ToList();
         filters.WatchRegion = filters.WatchRegion.Trim().ToUpperInvariant();
+    }
+
+    private static (int Min, int Max) NormalizeRange(int min, int max, int floor, int ceiling)
+    {
+        var normalizedMin = Math.Clamp(min, floor, ceiling);
+        var normalizedMax = Math.Clamp(max, floor, ceiling);
+        return normalizedMin <= normalizedMax
+            ? (normalizedMin, normalizedMax)
+            : (normalizedMax, normalizedMin);
+    }
+
+    private static (double Min, double Max) NormalizeRange(double min, double max, double floor, double ceiling)
+    {
+        var normalizedMin = Math.Clamp(min, floor, ceiling);
+        var normalizedMax = Math.Clamp(max, floor, ceiling);
+        return normalizedMin <= normalizedMax
+            ? (normalizedMin, normalizedMax)
+            : (normalizedMax, normalizedMin);
     }
 }

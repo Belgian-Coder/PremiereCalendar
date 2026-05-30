@@ -3,19 +3,15 @@
 Configuration is handled with two layers:
 
 - Runtime app settings edited on the Settings page are stored in the local SQLite parameter database.
-- Infrastructure and first-run fallback values still use standard ASP.NET Core providers. Non-secret defaults live in `PremiereCalendar/appsettings.json`; API credentials must not be committed.
+- Infrastructure values still use standard ASP.NET Core providers. Non-secret defaults live in `PremiereCalendar/appsettings.json`; API credentials must not be committed.
 
-For source-tree development, `dotnet user-secrets` can seed first-run fallback values. For release installs, `Install-PremiereCalendar.ps1` can write fallback values to the Windows Service `Environment` registry value as ASP.NET Core environment variables such as `Tmdb__BearerToken`, `Trakt__ClientId`, `CalendarCache__Directory`, and `ImageCache__Directory`. The release package builder clears API credentials from packaged `appsettings.json`.
+Release installs write infrastructure values such as `AppDatabase__Path`, `CalendarCache__Directory`, and `ImageCache__Directory` to the Windows Service `Environment` registry value. Source API credentials are configured only in the app Settings page and are stored in the SQLite settings database. The release package builder clears API credentials from packaged `appsettings.json`.
 
-Local application settings edited through the Settings page override those fallback values and are stored in a SQLite parameter database. The default path is `App_Data/data/premiere-calendar.db`; release installs set `AppDatabase__Path` to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db`.
+Local application settings edited through the Settings page are stored in a SQLite parameter database. The default path is `App_Data/data/premiere-calendar.db`; release installs set `AppDatabase__Path` to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db`.
 
 ## TMDb
 
-Required for live data. Enter the TMDb API read access token on the Settings page. User-secrets are still supported as first-run fallback:
-
-```powershell
-dotnet user-secrets set "Tmdb:BearerToken" "YOUR_TMDB_V4_READ_ACCESS_TOKEN" --project .\PremiereCalendar\PremiereCalendar.csproj
-```
+Required for live data. Enter the TMDb API read access token on the Settings page. If the token is missing, the calendar redirects to Settings with a setup notice.
 
 Default non-secret settings:
 
@@ -40,12 +36,7 @@ The same TMDb token is also used by `TmdbFilterCatalogService` to load official 
 
 ## OMDb
 
-OMDb is disabled by default. Enable it from the Settings page only when an API key is configured. User-secrets are still supported as first-run fallback:
-
-```powershell
-dotnet user-secrets set "Omdb:Enabled" "true" --project .\PremiereCalendar\PremiereCalendar.csproj
-dotnet user-secrets set "Omdb:ApiKey" "YOUR_OMDB_API_KEY" --project .\PremiereCalendar\PremiereCalendar.csproj
-```
+OMDb is disabled by default. Enable it from the Settings page only when an API key is configured.
 
 When disabled, Rotten Tomatoes and Metacritic show as `n/a`, OMDb plot/poster fallback is skipped, and the app still uses TMDb and local IMDb dataset scores normally.
 
@@ -83,9 +74,30 @@ The Settings page persists local app parameters in a SQLite database:
 }
 ```
 
-Stored parameters currently include Sonarr and Radarr enable flags, URLs, API keys, root folder paths, quality profile IDs, tag-on-add values, add behavior, and source API settings for TMDb, TVmaze, Trakt, Watchmode, SIMKL, OMDb, Fanart.tv, TheTVDB, and Wikimedia. In release installs this path is overridden to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db` so updates can replace binaries without touching local settings.
+Stored parameters currently include Sonarr and Radarr enable flags, URLs, API keys, root folder paths, quality profile IDs, tag-on-add values, add behavior, and source API settings for TMDb, TVmaze, Trakt, Watchmode, SIMKL, OMDb, Fanart.tv, TheTVDB, and Wikimedia. The same parameter table stores local app state such as saved filter presets, visit-change snapshots, and the background job timeline. In release installs this path is overridden to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db` so updates can replace binaries without touching local settings.
+
+The Settings page can export and import a JSON backup of integration settings and local calendar state. Export includes saved presets and visit state. API secrets are redacted by default; enable `Include API secrets` only for a private backup you intend to restore as-is. Import replaces the saved settings and matching local calendar-state keys from the provided JSON without overwriting volatile diagnostics such as the background job timeline.
 
 The same SQLite file also stores IMDb ratings, OMDb response cache, and provider-sync markers such as TMDb/TVmaze change checks.
+
+## Application Updates
+
+Settings includes a guarded `GitHub source update` action for source-tree installs. It uses the non-secret `ApplicationUpdate` infrastructure settings from `appsettings.json`, not the SQLite settings database:
+
+```json
+"ApplicationUpdate": {
+  "Enabled": true,
+  "RepositoryPath": "D:\\Projects\\PremiereCalendar",
+  "Remote": "origin",
+  "Branch": "main",
+  "InstallScriptPath": "Install-PremiereCalendar.ps1",
+  "UpdateScriptPath": "deploy/Update-And-Install-PremiereCalendar.ps1",
+  "LogDirectory": "App_Data/logs/application-updates",
+  "PowerShellPath": "powershell.exe"
+}
+```
+
+The updater starts a detached PowerShell process, fetches the configured remote branch, refuses dirty working trees, refuses non-fast-forward branch divergence, runs `git pull --ff-only`, then calls the existing install wrapper with `-NoElevate`. It does not run `git reset`, does not accept arbitrary shell commands from the UI, and writes attempt logs under `ApplicationUpdate:LogDirectory`.
 
 ## Sonarr And Radarr
 
@@ -150,30 +162,17 @@ TVmaze schedule entries can add exact episode rows in the app's every-episode mo
 
 `Tvmaze:ScheduleFetchConcurrency` controls how many schedule endpoints are queried at once when schedule discovery is enabled. The default is 4, below TVmaze's documented minimum allowance of 20 calls per 10 seconds. Schedule requests retry `429` responses with `Retry-After` or a short fallback delay.
 
-Disable it from the Settings page if you want TMDb-only plus optional OMDb. Configuration fallback remains available:
-
-```powershell
-dotnet user-secrets set "Tvmaze:Enabled" "false" --project .\PremiereCalendar\PremiereCalendar.csproj
-```
+Disable it from the Settings page if you want TMDb-only plus optional OMDb.
 
 ## Fanart.tv
 
-Fanart.tv artwork is disabled until a free API key is configured on the Settings page. Configuration fallback remains available:
-
-```powershell
-dotnet user-secrets set "Fanart:Enabled" "true" --project .\PremiereCalendar\PremiereCalendar.csproj
-dotnet user-secrets set "Fanart:ApiKey" "YOUR_FANART_TV_API_KEY" --project .\PremiereCalendar\PremiereCalendar.csproj
-```
+Fanart.tv artwork is disabled until a free API key is configured on the Settings page.
 
 Fanart.tv is used only as artwork fallback when TMDb has no poster. The app prefers poster-like assets, English artwork, Dutch artwork, neutral-language artwork, and then higher-like counts.
 
 ## Trakt
 
-Trakt discovery is active by default once a free Trakt app client ID is configured on the Settings page. Configuration fallback remains available:
-
-```powershell
-dotnet user-secrets set "Trakt:ClientId" "YOUR_TRAKT_CLIENT_ID" --project .\PremiereCalendar\PremiereCalendar.csproj
-```
+Trakt discovery is active by default once a free Trakt app client ID is configured on the Settings page.
 
 Trakt calendar rows are candidate rows only. The app accepts them only when a TMDb movie/TV ID is already present or can be resolved through TMDb external-ID lookup. Set `Trakt:Enabled` to `false` to keep Trakt disabled even when a client ID is present.
 
@@ -190,12 +189,7 @@ Useful non-secret defaults:
 
 ## TheTVDB
 
-TheTVDB artwork is disabled until an API key is configured on the Settings page. Configuration fallback remains available:
-
-```powershell
-dotnet user-secrets set "TheTvdb:Enabled" "true" --project .\PremiereCalendar\PremiereCalendar.csproj
-dotnet user-secrets set "TheTvdb:ApiKey" "YOUR_THETVDB_API_KEY" --project .\PremiereCalendar\PremiereCalendar.csproj
-```
+TheTVDB artwork is disabled until an API key is configured on the Settings page.
 
 TheTVDB is used only as an optional series artwork fallback. Check TheTVDB API terms for any required attribution when enabling it.
 
@@ -293,7 +287,7 @@ Poster and backdrop image bytes are cached through a local endpoint by default:
   "Directory": "App_Data/cache/images",
   "CacheDays": 30,
   "MaxBytes": 5242880,
-    "AllowedHosts": [ "image.tmdb.org", ".media-amazon.com", "static.tvmaze.com", "assets.fanart.tv", "webservice.fanart.tv", "artworks.thetvdb.com", "upload.wikimedia.org", "commons.wikimedia.org" ]
+    "AllowedHosts": [ "image.tmdb.org", ".media-amazon.com", "static.tvmaze.com", "assets.fanart.tv", "webservice.fanart.tv", "artworks.thetvdb.com", "upload.wikimedia.org", "commons.wikimedia.org", "cdn.watchmode.com" ]
 }
 ```
 

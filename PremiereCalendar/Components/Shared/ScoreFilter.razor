@@ -1,5 +1,15 @@
 <div class="score-filter" data-testid="score-filter">
     <label>
+        Source
+        <select @bind="Filters.ScoreSource" @bind:after="NotifyChanged">
+            <option value="@ScoreSource.Tmdb">TMDb</option>
+            <option value="@ScoreSource.Imdb">IMDb</option>
+            <option value="@ScoreSource.RottenTomatoes">Rotten Tomatoes</option>
+            <option value="@ScoreSource.Metacritic">Metacritic</option>
+        </select>
+    </label>
+
+    <label>
         Minimum
         <input type="number"
                min="0"

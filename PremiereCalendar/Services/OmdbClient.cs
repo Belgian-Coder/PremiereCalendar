@@ -54,7 +54,7 @@ public sealed class OmdbClient : IOmdbClient
         var persisted = await GetPersistedAsync(imdbId, cancellationToken);
         if (!forceRefresh && IsFresh(persisted))
         {
-            _cache.Set(cacheKey, persisted!.Item, CacheDuration());
+            _cache.Set(cacheKey, persisted!.Item, CacheDuration(persisted.Item));
             return persisted.Item;
         }
 
@@ -79,7 +79,7 @@ public sealed class OmdbClient : IOmdbClient
                 var flightPersisted = persisted ?? await GetPersistedAsync(imdbId, token);
                 if (!forceRefresh && IsFresh(flightPersisted))
                 {
-                    _cache.Set(cacheKey, flightPersisted!.Item, CacheDuration());
+                    _cache.Set(cacheKey, flightPersisted!.Item, CacheDuration(flightPersisted.Item));
                     return flightPersisted.Item;
                 }
 
@@ -115,7 +115,7 @@ public sealed class OmdbClient : IOmdbClient
                             throw new ExternalApiException($"OMDb lookup for {imdbId} failed: {item.Error}");
                         }
 
-                        _cache.Set(cacheKey, item, CacheDuration());
+                        _cache.Set(cacheKey, item, CacheDuration(item));
                         if (_cacheStore is not null)
                         {
                             await _cacheStore.SetAsync(imdbId, item, _timeProvider.GetUtcNow(), token);
@@ -166,12 +166,40 @@ public sealed class OmdbClient : IOmdbClient
     private bool IsFresh(OmdbCacheEntry? entry)
     {
         return entry is not null
-            && _timeProvider.GetUtcNow() - entry.CachedAtUtc < CacheDuration();
+            && _timeProvider.GetUtcNow() - entry.CachedAtUtc < CacheDuration(entry.Item);
     }
 
     private TimeSpan CacheDuration()
     {
         return TimeSpan.FromDays(Math.Max(1, _options.CacheDays));
+    }
+
+    private TimeSpan CacheDuration(OmdbItem item)
+    {
+        return HasUsefulPayload(item)
+            ? CacheDuration()
+            : TimeSpan.FromHours(Math.Max(1, _options.EmptyResponseCacheHours));
+    }
+
+    private static bool HasUsefulPayload(OmdbItem item)
+    {
+        if (string.Equals(item.Response, "False", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return HasUsefulValue(item.ImdbRating)
+            || HasUsefulValue(item.ImdbVotes)
+            || HasUsefulValue(item.Metascore)
+            || HasUsefulValue(item.Plot)
+            || HasUsefulValue(item.Poster)
+            || item.Ratings.Any(rating => HasUsefulValue(rating.Value));
+    }
+
+    private static bool HasUsefulValue(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+            && !string.Equals(value, "N/A", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task RecordFailureAsync(HttpResponseMessage response, string error, CancellationToken cancellationToken)

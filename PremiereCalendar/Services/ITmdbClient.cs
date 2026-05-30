@@ -41,6 +41,15 @@ public interface ITmdbClient
 
     Task<TmdbDetailsWithExtras?> GetTvDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false);
 
+    Task<TmdbSeasonDetails?> GetTvSeasonDetailsAsync(
+        int id,
+        int seasonNumber,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        return Task.FromResult<TmdbSeasonDetails?>(null);
+    }
+
     Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false);
 
     Task<int?> FindTmdbIdByExternalIdAsync(

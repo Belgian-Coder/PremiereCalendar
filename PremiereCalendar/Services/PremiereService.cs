@@ -28,6 +28,7 @@ public sealed class PremiereService : IPremiereService
     private readonly ILogger<PremiereService> _logger;
     private readonly IImdbRatingsStore? _imdbRatingsStore;
     private readonly IProviderCacheStateStore? _providerCacheStateStore;
+    private readonly IRottenTomatoesClient? _rottenTomatoesClient;
 
     public PremiereService(
         ITmdbClient tmdbClient,
@@ -42,7 +43,8 @@ public sealed class PremiereService : IPremiereService
         IOptions<TmdbOptions> options,
         ILogger<PremiereService> logger,
         IImdbRatingsStore? imdbRatingsStore = null,
-        IProviderCacheStateStore? providerCacheStateStore = null)
+        IProviderCacheStateStore? providerCacheStateStore = null,
+        IRottenTomatoesClient? rottenTomatoesClient = null)
     {
         _tmdbClient = tmdbClient;
         _omdbClient = omdbClient;
@@ -57,6 +59,7 @@ public sealed class PremiereService : IPremiereService
         _logger = logger;
         _imdbRatingsStore = imdbRatingsStore;
         _providerCacheStateStore = providerCacheStateStore;
+        _rottenTomatoesClient = rottenTomatoesClient;
     }
 
     public async Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
@@ -109,14 +112,20 @@ public sealed class PremiereService : IPremiereService
                     cancellationToken);
                 if (sharedCacheSnapshot.HasSeries && sharedCacheSnapshot.HasMovies)
                 {
-                    var cachedItems = ApplyRequestedFilters(MergePremiereItems(sharedCacheSnapshot.Items), filters);
+                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
+                        MergePremiereItems(sharedCacheSnapshot.Items),
+                        cancellationToken);
+                    var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
                     yield break;
                 }
 
                 if (sharedCacheSnapshot.HasAny)
                 {
-                    seededItems = ApplyRequestedFilters(MergePremiereItems(sharedCacheSnapshot.Items), filters);
+                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
+                        MergePremiereItems(sharedCacheSnapshot.Items),
+                        cancellationToken);
+                    seededItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", seededItems, seededItems, fromCache: true);
                     fetchCriteria = criteria with
                     {
@@ -139,7 +148,10 @@ public sealed class PremiereService : IPremiereService
                 var cached = await _calendarCache.GetWeekAsync(start, end, cacheKey, cancellationToken);
                 if (cached is not null)
                 {
-                    var cachedItems = ApplyRequestedFilters(MergePremiereItems(cached), filters);
+                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
+                        MergePremiereItems(cached),
+                        cancellationToken);
+                    var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
                     yield break;
                 }
@@ -289,7 +301,10 @@ public sealed class PremiereService : IPremiereService
             return null;
         }
 
-        var mergedItems = ApplyRequestedFilters(MergePremiereItems(cachedItems), filters);
+        var hydratedItems = await HydrateCachedImdbRatingsAsync(
+            MergePremiereItems(cachedItems),
+            cancellationToken);
+        var mergedItems = ApplyRequestedFilters(hydratedItems, filters);
         return CreateProgress(
             allowExpired ? "Expired week cache" : "Week cache",
             mergedItems,
@@ -464,7 +479,10 @@ public sealed class PremiereService : IPremiereService
             return null;
         }
 
-        var cachedItems = ApplyRequestedFilters(MergePremiereItems(cached), filters);
+        var hydratedItems = await HydrateCachedImdbRatingsAsync(
+            MergePremiereItems(cached),
+            cancellationToken);
+        var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
         _logger.LogWarning(
             refreshError,
             "Using cached premiere calendar results for {StartDate} through {EndDate} after source refresh failed.",
@@ -918,6 +936,108 @@ public sealed class PremiereService : IPremiereService
         return filters is null ? items : PremiereFilter.Apply(items, filters);
     }
 
+    private async Task<IReadOnlyList<PremiereItem>> HydrateCachedImdbRatingsAsync(
+        IReadOnlyList<PremiereItem> items,
+        CancellationToken cancellationToken)
+    {
+        if (items.Count == 0 || (_imdbRatingsStore is null && _rottenTomatoesClient is null))
+        {
+            return items;
+        }
+
+        List<PremiereItem>? hydratedItems = null;
+        var ratingsByImdbId = new Dictionary<string, ImdbRatingRecord?>(StringComparer.OrdinalIgnoreCase);
+        var rottenTomatoesByItemKey = new Dictionary<string, RottenTomatoesScores>(StringComparer.Ordinal);
+        for (var index = 0; index < items.Count; index++)
+        {
+            var item = items[index];
+            var hydratedItem = item;
+            if (_imdbRatingsStore is not null && HasCachedImdbId(item))
+            {
+                var imdbId = item.ImdbId!.Trim();
+                if (!ratingsByImdbId.TryGetValue(imdbId, out var rating))
+                {
+                    try
+                    {
+                        rating = await _imdbRatingsStore.GetByImdbIdAsync(imdbId, cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Skipping cached IMDb dataset rating lookup for IMDb ID {ImdbId}.", imdbId);
+                        rating = null;
+                    }
+
+                    ratingsByImdbId[imdbId] = rating;
+                }
+
+                if (rating is not null
+                    && (item.ImdbScore != rating.AverageRating || item.ImdbVoteCount != rating.VoteCount))
+                {
+                    hydratedItem = item with
+                    {
+                        ImdbScore = rating.AverageRating,
+                        ImdbVoteCount = rating.VoteCount
+                    };
+                }
+            }
+
+            if ((hydratedItem.RottenTomatoesScore is null || hydratedItem.RottenTomatoesAudienceScore is null)
+                && _rottenTomatoesClient is not null)
+            {
+                var rottenTomatoesKey = RottenTomatoesHydrationKey(hydratedItem);
+                if (!rottenTomatoesByItemKey.TryGetValue(rottenTomatoesKey, out var rottenTomatoesScores))
+                {
+                    rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+                        hydratedItem.MediaType,
+                        hydratedItem.Title,
+                        hydratedItem.PremiereDate.Year,
+                        hydratedItem.WikidataId,
+                        cancellationToken,
+                        forceRefresh: false);
+                    rottenTomatoesByItemKey[rottenTomatoesKey] = rottenTomatoesScores;
+                }
+
+                if (rottenTomatoesScores.HasAnyScore)
+                {
+                    hydratedItem = hydratedItem with
+                    {
+                        RottenTomatoesScore = hydratedItem.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
+                        RottenTomatoesAudienceScore = hydratedItem.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore
+                    };
+                }
+            }
+
+            if (hydratedItems is not null)
+            {
+                hydratedItems.Add(hydratedItem);
+            }
+            else if (!ReferenceEquals(hydratedItem, item))
+            {
+                hydratedItems = new List<PremiereItem>(items.Count);
+                for (var existingIndex = 0; existingIndex < index; existingIndex++)
+                {
+                    hydratedItems.Add(items[existingIndex]);
+                }
+
+                hydratedItems.Add(hydratedItem);
+            }
+        }
+
+        return hydratedItems ?? items;
+    }
+
+    private static string RottenTomatoesHydrationKey(PremiereItem item)
+    {
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{item.MediaType}:{item.Title}:{item.PremiereDate.Year}:{item.WikidataId}");
+    }
+
+    private static bool HasCachedImdbId(PremiereItem item)
+    {
+        return !string.IsNullOrWhiteSpace(item.ImdbId);
+    }
+
     private static List<PremiereItem> MergePremiereItems(IEnumerable<PremiereItem> items)
     {
         var mergedByCanonicalId = items
@@ -970,7 +1090,8 @@ public sealed class PremiereService : IPremiereService
             .DistinctBy(source => $"{source.Kind}:{source.Id}:{source.Name}", StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        return selected with
+        var merged = MergeSupplementalIdentityAndScores(selected, items);
+        return merged with
         {
             SourceNames = sourceNames.Length > 0 ? sourceNames : selected.SourceNames,
             Sources = sources.Length > 0 ? sources : selected.Sources
@@ -1047,11 +1168,57 @@ public sealed class PremiereService : IPremiereService
             .DistinctBy(source => $"{source.Kind}:{source.Id}:{source.Name}", StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        return target with
+        var merged = MergeSupplementalIdentityAndScores(target, [sourceItem]);
+        return merged with
         {
             SourceNames = sourceNames,
             Sources = sources
         };
+    }
+
+    private static PremiereItem MergeSupplementalIdentityAndScores(
+        PremiereItem target,
+        IReadOnlyList<PremiereItem> candidates)
+    {
+        var allItems = candidates.Prepend(target).ToArray();
+        var imdbId = FirstText(allItems.Select(item => item.ImdbId));
+        return target with
+        {
+            ImdbId = imdbId,
+            ImdbUrl = CoalesceText(
+                target.ImdbUrl,
+                FirstText(allItems.Select(item => item.ImdbUrl)),
+                BuildImdbUrl(imdbId)),
+            TvdbId = target.TvdbId ?? FirstPositiveInt(allItems.Select(item => item.TvdbId)),
+            WikidataId = CoalesceText(target.WikidataId, FirstText(allItems.Select(item => item.WikidataId))),
+            ExternalProviderId = CoalesceText(target.ExternalProviderId, FirstText(allItems.Select(item => item.ExternalProviderId))),
+            ExternalUrl = CoalesceText(target.ExternalUrl, FirstText(allItems.Select(item => item.ExternalUrl))),
+            ImdbScore = target.ImdbScore ?? FirstDouble(allItems.Select(item => item.ImdbScore)),
+            ImdbVoteCount = target.ImdbVoteCount ?? FirstInt(allItems.Select(item => item.ImdbVoteCount)),
+            RottenTomatoesScore = target.RottenTomatoesScore ?? FirstInt(allItems.Select(item => item.RottenTomatoesScore)),
+            RottenTomatoesAudienceScore = target.RottenTomatoesAudienceScore ?? FirstInt(allItems.Select(item => item.RottenTomatoesAudienceScore)),
+            MetacriticScore = target.MetacriticScore ?? FirstInt(allItems.Select(item => item.MetacriticScore))
+        };
+    }
+
+    private static string? FirstText(IEnumerable<string?> values)
+    {
+        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+    }
+
+    private static int? FirstPositiveInt(IEnumerable<int?> values)
+    {
+        return values.FirstOrDefault(value => value is > 0);
+    }
+
+    private static int? FirstInt(IEnumerable<int?> values)
+    {
+        return values.FirstOrDefault(value => value is not null);
+    }
+
+    private static double? FirstDouble(IEnumerable<double?> values)
+    {
+        return values.FirstOrDefault(value => value is not null);
     }
 
     private static bool UnverifiedMatchesVerified(PremiereItem unverified, PremiereItem verified)
@@ -1543,7 +1710,13 @@ public sealed class PremiereService : IPremiereService
 
         return await MapWithLimitedConcurrencyAsync(
             rawItems,
-            (item, token) => MapSeriesAsync(item, token, forceRefresh),
+            (item, token) => MapSeriesAsync(
+                item,
+                token,
+                forceRefresh,
+                requestedStart: start,
+                requestedEnd: end,
+                canonicalizeSeriesPremiereDate: true),
             cancellationToken);
     }
 
@@ -1567,19 +1740,25 @@ public sealed class PremiereService : IPremiereService
                 forceRefresh)
             .WithCancellation(cancellationToken))
         {
-            var metadataItems = rawBatch.Results
-                .Select(item => MapSeriesMetadata(item))
-                .Where(item => item is not null)
-                .Select(item => item!)
-                .ToArray();
-            if (metadataItems.Length > 0)
+            var metadataItems = await MapWithLimitedConcurrencyAsync(
+                rawBatch.Results,
+                (item, token) => MapSeriesPremiereMetadataAsync(item, token, forceRefresh, start, end),
+                cancellationToken);
+            if (metadataItems.Count > 0)
             {
                 yield return WithTmdbMetadataProgress(new PremiereItemBatch(metadataItems), rawBatch, completedRawItems);
             }
 
             await foreach (var mappedBatch in MapInProgressBatchesAsync(
                     rawBatch.Results,
-                    (item, token) => MapSeriesAsync(item, token, forceRefresh, cachedEnrichment: cachedEnrichment),
+                    (item, token) => MapSeriesAsync(
+                        item,
+                        token,
+                        forceRefresh,
+                        cachedEnrichment: cachedEnrichment,
+                        requestedStart: start,
+                        requestedEnd: end,
+                        canonicalizeSeriesPremiereDate: true),
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
@@ -1809,7 +1988,9 @@ public sealed class PremiereService : IPremiereService
                 token,
                 forceRefresh,
                 criteria,
-                new Dictionary<string, PremiereItem>(StringComparer.Ordinal)),
+                new Dictionary<string, PremiereItem>(StringComparer.Ordinal),
+                start,
+                end),
             cancellationToken);
     }
 
@@ -1861,6 +2042,8 @@ public sealed class PremiereService : IPremiereService
                     forceRefresh,
                     criteria,
                     cachedEnrichment,
+                    start,
+                    end,
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
@@ -1878,6 +2061,8 @@ public sealed class PremiereService : IPremiereService
                     forceRefresh,
                     criteria,
                     cachedEnrichment,
+                    start,
+                    end,
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
@@ -1941,11 +2126,20 @@ public sealed class PremiereService : IPremiereService
         bool forceRefresh,
         PremiereDiscoveryCriteria criteria,
         IReadOnlyDictionary<string, PremiereItem> cachedEnrichment,
+        DateOnly requestStart,
+        DateOnly requestEnd,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         await foreach (var mappedBatch in MapInProgressBatchesAsync(
                 candidates,
-                (candidate, token) => MapExternalCandidateAsync(candidate, token, forceRefresh, criteria, cachedEnrichment),
+                (candidate, token) => MapExternalCandidateAsync(
+                    candidate,
+                    token,
+                    forceRefresh,
+                    criteria,
+                    cachedEnrichment,
+                    requestStart,
+                    requestEnd),
                 cancellationToken)
             .WithCancellation(cancellationToken))
         {
@@ -1998,11 +2192,26 @@ public sealed class PremiereService : IPremiereService
         CancellationToken cancellationToken,
         bool forceRefresh,
         PremiereDiscoveryCriteria criteria,
-        IReadOnlyDictionary<string, PremiereItem> cachedEnrichment)
+        IReadOnlyDictionary<string, PremiereItem> cachedEnrichment,
+        DateOnly requestStart,
+        DateOnly requestEnd)
     {
+        var canonicalCandidate = await CanonicalizeExternalSeriesPremiereCandidateAsync(
+            candidate,
+            criteria,
+            requestStart,
+            requestEnd,
+            cancellationToken,
+            forceRefresh);
+        if (canonicalCandidate is null)
+        {
+            return null;
+        }
+
+        candidate = canonicalCandidate;
         if (TryReuseCachedExternalCandidate(cachedEnrichment, candidate, criteria, out var cachedCandidateItem))
         {
-            return cachedCandidateItem;
+            return await HydrateExternalCandidateRatingsAsync(cachedCandidateItem, candidate, cancellationToken, forceRefresh);
         }
 
         var tmdbId = await ResolveCandidateTmdbIdAsync(candidate, cancellationToken, forceRefresh);
@@ -2077,7 +2286,46 @@ public sealed class PremiereService : IPremiereService
                 episodeSource: candidate.Source,
                 allowWatchmodeAvailabilityFallback: false);
 
-        return mappedItem is null ? null : MergeExternalCandidateSource(mappedItem, candidate);
+        if (mappedItem is null)
+        {
+            return null;
+        }
+
+        var mergedItem = MergeExternalCandidateSource(mappedItem, candidate);
+        return await HydrateExternalCandidateRatingsAsync(mergedItem, candidate, cancellationToken, forceRefresh);
+    }
+
+    private async Task<ExternalPremiereCandidate?> CanonicalizeExternalSeriesPremiereCandidateAsync(
+        ExternalPremiereCandidate candidate,
+        PremiereDiscoveryCriteria criteria,
+        DateOnly requestStart,
+        DateOnly requestEnd,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        if (candidate.MediaType != PremiereMediaType.Series
+            || criteria.Series.SeriesDateMode != SeriesDateMode.NewSeriesOnly
+            || candidate.TmdbId is not > 0)
+        {
+            return candidate;
+        }
+
+        var canonicalDate = await GetSeasonOneEpisodeOneDateAsync(candidate.TmdbId.Value, cancellationToken, forceRefresh);
+        if (canonicalDate is null)
+        {
+            return candidate;
+        }
+
+        if (canonicalDate < requestStart || canonicalDate > requestEnd)
+        {
+            return null;
+        }
+
+        return candidate with
+        {
+            PremiereDate = canonicalDate.Value,
+            SeriesPremiereDate = canonicalDate.Value
+        };
     }
 
     private static PremiereItem? CreateUnverifiedPremiereItem(
@@ -2125,6 +2373,8 @@ public sealed class PremiereService : IPremiereService
             SeasonNumber = candidate.SeasonNumber,
             EpisodeNumber = candidate.EpisodeNumber,
             EpisodeSource = candidate.Source,
+            ImdbScore = candidate.ImdbScore,
+            ImdbVoteCount = candidate.ImdbVoteCount,
             NetworkName = candidate.MediaType == PremiereMediaType.Series ? candidate.Source : null
         };
     }
@@ -2160,6 +2410,18 @@ public sealed class PremiereService : IPremiereService
         var externalProviderId = candidates
             .Select(candidate => candidate.ExternalProviderId)
             .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
+        var imdbId = candidates
+            .Select(candidate => NormalizeExternalId(candidate.ImdbId))
+            .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
+        var tvdbId = candidates
+            .Select(candidate => candidate.TvdbId)
+            .FirstOrDefault(id => id is > 0);
+        var imdbScore = candidates
+            .Select(candidate => candidate.ImdbScore)
+            .FirstOrDefault(score => score is not null);
+        var imdbVoteCount = candidates
+            .Select(candidate => candidate.ImdbVoteCount)
+            .FirstOrDefault(votes => votes is not null);
 
         return selected with
         {
@@ -2169,7 +2431,11 @@ public sealed class PremiereService : IPremiereService
             PosterUrl = posterUrl ?? selected.PosterUrl,
             BackdropUrl = backdropUrl ?? selected.BackdropUrl,
             ExternalUrl = externalUrl ?? selected.ExternalUrl,
-            ExternalProviderId = externalProviderId ?? selected.ExternalProviderId
+            ExternalProviderId = externalProviderId ?? selected.ExternalProviderId,
+            ImdbId = imdbId ?? selected.ImdbId,
+            TvdbId = tvdbId ?? selected.TvdbId,
+            ImdbScore = imdbScore ?? selected.ImdbScore,
+            ImdbVoteCount = imdbVoteCount ?? selected.ImdbVoteCount
         };
     }
 
@@ -2280,14 +2546,21 @@ public sealed class PremiereService : IPremiereService
         ExternalPremiereCandidate candidate)
     {
         var sourceNames = SourceNamesWithCandidate(cachedItem.SourceNames, candidate);
+        var candidateImdbId = NormalizeExternalId(candidate.ImdbId);
+        var imdbId = CoalesceText(cachedItem.ImdbId, candidateImdbId);
         return cachedItem with
         {
+            ImdbId = imdbId,
+            ImdbUrl = CoalesceText(cachedItem.ImdbUrl, BuildImdbUrl(imdbId)),
+            TvdbId = cachedItem.TvdbId ?? candidate.TvdbId,
             Title = CoalesceText(candidate.Title, cachedItem.Title) ?? cachedItem.Title,
             PremiereDate = candidate.PremiereDate,
             EpisodeTitle = CoalesceText(candidate.EpisodeTitle, cachedItem.EpisodeTitle),
             SeasonNumber = candidate.SeasonNumber ?? cachedItem.SeasonNumber,
             EpisodeNumber = candidate.EpisodeNumber ?? cachedItem.EpisodeNumber,
             EpisodeSource = CoalesceText(candidate.Source, cachedItem.EpisodeSource),
+            ImdbScore = cachedItem.ImdbScore ?? candidate.ImdbScore,
+            ImdbVoteCount = cachedItem.ImdbVoteCount ?? candidate.ImdbVoteCount,
             SourceNames = sourceNames,
             Sources = SourceEntriesWithCandidate(cachedItem.Sources, candidate),
             NetworkName = CoalesceText(candidate.Source, cachedItem.NetworkName)
@@ -2298,10 +2571,50 @@ public sealed class PremiereService : IPremiereService
         PremiereItem item,
         ExternalPremiereCandidate candidate)
     {
+        var candidateImdbId = NormalizeExternalId(candidate.ImdbId);
+        var imdbId = CoalesceText(item.ImdbId, candidateImdbId);
         return item with
         {
+            ImdbId = imdbId,
+            ImdbUrl = CoalesceText(item.ImdbUrl, BuildImdbUrl(imdbId)),
+            TvdbId = item.TvdbId ?? candidate.TvdbId,
+            ImdbScore = item.ImdbScore ?? candidate.ImdbScore,
+            ImdbVoteCount = item.ImdbVoteCount ?? candidate.ImdbVoteCount,
             SourceNames = SourceNamesWithCandidate(item.SourceNames, candidate),
             Sources = SourceEntriesWithCandidate(item.Sources, candidate)
+        };
+    }
+
+    private async Task<PremiereItem> HydrateExternalCandidateRatingsAsync(
+        PremiereItem item,
+        ExternalPremiereCandidate candidate,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        var candidateImdbId = NormalizeExternalId(candidate.ImdbId);
+        if (string.IsNullOrWhiteSpace(candidateImdbId)
+            || !string.Equals(candidateImdbId, item.ImdbId, StringComparison.OrdinalIgnoreCase))
+        {
+            return item;
+        }
+
+        var ratings = await GetExternalRatingsAsync(candidateImdbId, cancellationToken, forceRefresh);
+        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+            candidate.MediaType,
+            CoalesceText(candidate.Title, item.Title) ?? item.Title,
+            candidate.ReleaseYear ?? item.PremiereDate.Year,
+            item.WikidataId,
+            cancellationToken,
+            forceRefresh);
+        return item with
+        {
+            ImdbScore = ratings.ImdbScore ?? item.ImdbScore,
+            ImdbVoteCount = ratings.ImdbVoteCount ?? item.ImdbVoteCount,
+            RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore ?? item.RottenTomatoesScore,
+            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore ?? item.RottenTomatoesAudienceScore,
+            MetacriticScore = ratings.MetacriticScore ?? item.MetacriticScore,
+            Overview = CoalesceText(item.Overview, ratings.Plot),
+            PosterUrl = CoalesceText(item.PosterUrl, ratings.PosterUrl)
         };
     }
 
@@ -2375,7 +2688,8 @@ public sealed class PremiereService : IPremiereService
 
     private static bool IsDisplayableCandidateSource(string source)
     {
-        return !string.Equals(source, "Trakt", StringComparison.OrdinalIgnoreCase);
+        return !string.Equals(source, "Trakt", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(source, "Simkl", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<int?> ResolveCandidateTmdbIdAsync(
@@ -2967,6 +3281,23 @@ public sealed class PremiereService : IPremiereService
         };
     }
 
+    private async Task<PremiereItem?> MapSeriesPremiereMetadataAsync(
+        TmdbTvDiscoverItem item,
+        CancellationToken cancellationToken,
+        bool forceRefresh,
+        DateOnly requestedStart,
+        DateOnly requestedEnd)
+    {
+        var premiereDate = await GetSeasonOneEpisodeOneDateAsync(item.Id, cancellationToken, forceRefresh);
+        if (premiereDate is { } canonicalDate
+            && (canonicalDate < requestedStart || canonicalDate > requestedEnd))
+        {
+            return null;
+        }
+
+        return MapSeriesMetadata(item, premiereDateOverride: premiereDate);
+    }
+
     private PremiereItem? MapMovieMetadata(TmdbMovieDiscoverItem item)
     {
         if (item.Id <= 0
@@ -3011,7 +3342,10 @@ public sealed class PremiereService : IPremiereService
         int? seasonNumber = null,
         int? episodeNumber = null,
         string? episodeSource = null,
-        bool allowWatchmodeAvailabilityFallback = true)
+        bool allowWatchmodeAvailabilityFallback = true,
+        DateOnly? requestedStart = null,
+        DateOnly? requestedEnd = null,
+        bool canonicalizeSeriesPremiereDate = false)
     {
         var itemType = itemTypeOverride ?? PremiereItemType.SeriesPremiere;
         if (item.Id <= 0
@@ -3030,9 +3364,28 @@ public sealed class PremiereService : IPremiereService
             return null;
         }
 
+        if (canonicalizeSeriesPremiereDate)
+        {
+            var canonicalDate = await GetSeasonOneEpisodeOneDateAsync(item.Id, cancellationToken, forceRefresh);
+            if (canonicalDate is { } seasonOneEpisodeOneDate)
+            {
+                premiereDate = seasonOneEpisodeOneDate;
+            }
+
+            if (requestedStart is { } start && premiereDate < start)
+            {
+                return null;
+            }
+
+            if (requestedEnd is { } end && premiereDate > end)
+            {
+                return null;
+            }
+        }
+
         var discoveredItem = MapSeriesMetadata(
             item,
-            premiereDateOverride,
+            premiereDate,
             itemType,
             episodeTitle,
             seasonNumber,
@@ -3054,6 +3407,13 @@ public sealed class PremiereService : IPremiereService
         await Task.WhenAll(ratingsTask, tvmazeTask);
         var ratings = await ratingsTask;
         var tvmaze = await tvmazeTask;
+        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+            PremiereMediaType.Series,
+            item.Name,
+            premiereDate.Year,
+            details?.ExternalIds?.WikidataId,
+            cancellationToken,
+            forceRefresh);
         var bestBackdropPath = CoalesceText(
             item.BackdropPath,
             details?.BackdropPath,
@@ -3128,7 +3488,8 @@ public sealed class PremiereService : IPremiereService
             TmdbVoteCount = item.VoteCount,
             ImdbScore = ratings.ImdbScore,
             ImdbVoteCount = ratings.ImdbVoteCount,
-            RottenTomatoesScore = ratings.RottenTomatoesScore,
+            RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
+            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore,
             MetacriticScore = ratings.MetacriticScore,
             NetworkName = tvmaze.NetworkName,
             WebChannelName = tvmaze.WebChannelName,
@@ -3176,6 +3537,13 @@ public sealed class PremiereService : IPremiereService
                 forceRefresh)
             : Task.FromResult(SourceEntries(details, _options.SourceRegions));
         var ratings = await ratingsTask;
+        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+            PremiereMediaType.Movie,
+            item.Title,
+            premiereDate.Year,
+            details?.ExternalIds?.WikidataId,
+            cancellationToken,
+            forceRefresh);
         var bestBackdropPath = CoalesceText(
             item.BackdropPath,
             details?.BackdropPath,
@@ -3232,7 +3600,8 @@ public sealed class PremiereService : IPremiereService
             TmdbVoteCount = item.VoteCount,
             ImdbScore = ratings.ImdbScore,
             ImdbVoteCount = ratings.ImdbVoteCount,
-            RottenTomatoesScore = ratings.RottenTomatoesScore,
+            RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
+            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore,
             MetacriticScore = ratings.MetacriticScore
         };
     }
@@ -3255,6 +3624,42 @@ public sealed class PremiereService : IPremiereService
         catch (ExternalApiException ex)
         {
             _logger.LogWarning(ex, "Skipping TMDb detail enrichment for {MediaType} {TmdbId}.", mediaType, tmdbId);
+            return null;
+        }
+    }
+
+    private async Task<DateOnly?> GetSeasonOneEpisodeOneDateAsync(
+        int tmdbId,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        var season = await TryGetSeasonDetailsAsync(
+            () => _tmdbClient.GetTvSeasonDetailsAsync(tmdbId, 1, cancellationToken, forceRefresh),
+            tmdbId,
+            cancellationToken);
+        var episode = season?.Episodes.FirstOrDefault(episode =>
+            episode.SeasonNumber == 1 && episode.EpisodeNumber == 1);
+
+        return TryParseTmdbDate(episode?.AirDate, out var airDate) ? airDate : null;
+    }
+
+    private async Task<TmdbSeasonDetails?> TryGetSeasonDetailsAsync(
+        Func<Task<TmdbSeasonDetails?>> getDetails,
+        int tmdbId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await getDetails();
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Skipping TMDb season detail enrichment for series {TmdbId} after a request timeout.", tmdbId);
+            return null;
+        }
+        catch (ExternalApiException ex)
+        {
+            _logger.LogWarning(ex, "Skipping TMDb season detail enrichment for series {TmdbId}.", tmdbId);
             return null;
         }
     }
@@ -3289,6 +3694,36 @@ public sealed class PremiereService : IPremiereService
         {
             _logger.LogWarning(ex, "Skipping OMDb ratings enrichment for IMDb ID {ImdbId}.", imdbId);
             return MergeExternalRatings(imdbRating, new ExternalRatings(null, null));
+        }
+    }
+
+    private async Task<RottenTomatoesScores> GetRottenTomatoesScoresAsync(
+        PremiereMediaType mediaType,
+        string? title,
+        int? year,
+        string? wikidataId,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        if (_rottenTomatoesClient is null || string.IsNullOrWhiteSpace(title))
+        {
+            return RottenTomatoesScores.Empty;
+        }
+
+        try
+        {
+            return await _rottenTomatoesClient.GetScoresAsync(
+                mediaType,
+                title,
+                year,
+                wikidataId,
+                cancellationToken,
+                forceRefresh);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Skipping Rotten Tomatoes enrichment for {MediaType} {Title}.", mediaType, title);
+            return RottenTomatoesScores.Empty;
         }
     }
 

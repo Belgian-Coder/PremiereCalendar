@@ -44,4 +44,5 @@ public sealed record ExternalRatings(
     string? PosterUrl = null,
     int? ImdbVoteCount = null,
     int? MetacriticScore = null,
-    string? Plot = null);
+    string? Plot = null,
+    int? RottenTomatoesAudienceScore = null);

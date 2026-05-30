@@ -1,9 +1,20 @@
 @page "/settings"
 @rendermode InteractiveServer
 @implements IDisposable
+@using System.Globalization
+@using Microsoft.AspNetCore.WebUtilities
 @inject IIntegrationSettingsStore SettingsStore
 @inject IArrIntegrationService ArrService
 @inject ISimklClient SimklClient
+@inject IViewSyncService ViewSyncService
+@inject CacheInspectorService CacheInspector
+@inject BackgroundJobTimelineService BackgroundJobTimeline
+@inject ReleaseUpdateService ReleaseUpdateService
+@inject SettingsBackupService SettingsBackupService
+@inject IApplicationUpdateService ApplicationUpdateService
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+@inject Microsoft.Extensions.Logging.ILogger<PremiereCalendar.Components.Pages.Settings> Logger
 
 <PageTitle>Settings</PageTitle>
 
@@ -17,14 +28,328 @@
         </div>
     </header>
 
+    @if (_showTmdbRequiredNotice)
+    {
+        <section class="status-panel setup-required" role="alert" data-testid="tmdb-required-notice">
+            <strong>TMDb token required.</strong>
+            Add a TMDb API read access token under <a href="#tmdb-token">Source APIs</a>, then Save settings before using the calendar.
+        </section>
+    }
+
     @if (_isLoading)
     {
         <div class="status-panel">Loading settings...</div>
     }
+    else if (!string.IsNullOrWhiteSpace(_loadError))
+    {
+        <section class="status-panel error" role="alert" data-testid="settings-load-error">
+            <strong>Settings could not be loaded.</strong>
+            Check local database access, then reopen Settings.
+        </section>
+    }
     else
     {
         <EditForm EditContext="_editContext">
+            <div class="settings-actions sticky" aria-live="polite">
+                <span class="@SettingsDirtyClass">@SettingsDirtyText</span>
+                <button class="tool-button primary-action" type="button" title="Save integration settings" @onclick="SaveAsync" disabled="@_isSaving">
+                    @(_isSaving ? "Saving..." : "Save settings")
+                </button>
+            </div>
+
             <section class="settings-grid">
+                <article class="settings-panel local-status-center" data-testid="local-status-center" aria-label="Local status center">
+                    <div class="settings-panel-header">
+                        <div>
+                            <p class="eyebrow">Diagnostics</p>
+                            <h2>Local status</h2>
+                            <div class="settings-status-row compact">
+                                @StatusBadge("Cache", _cacheSummary is null ? ProviderAvailability.NeedsSetup : ProviderAvailability.Available)
+                                @StatusBadge("Jobs", _jobEvents.Count == 0 ? new ProviderAvailability("No history", "configured") : ProviderAvailability.Available)
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="local-status-grid">
+                        <section class="status-mini-panel" aria-label="Cache inspector">
+                            <div class="status-mini-heading">
+                                <strong>Cache inspector</strong>
+                                <button class="tool-button settings-secondary" type="button" @onclick="RefreshLocalStatusAsync">Refresh</button>
+                            </div>
+                            @if (_cacheSummary is null)
+                            {
+                                <p class="settings-help">Cache status is not loaded yet.</p>
+                            }
+                            else
+                            {
+                                <div class="cache-inspector-list">
+                                    @CacheSummaryRow("Calendar cache", _cacheSummary.Calendar)
+                                    @CacheSummaryRow("Image cache", _cacheSummary.Image)
+                                </div>
+                            }
+                        </section>
+
+                        <section class="status-mini-panel" aria-label="Background job timeline">
+                            <div class="status-mini-heading">
+                                <strong>Background job timeline</strong>
+                            </div>
+                            @if (_jobEvents.Count == 0)
+                            {
+                                <p class="settings-help">No background jobs have reported yet.</p>
+                            }
+                            else
+                            {
+                                <ol class="job-timeline">
+                                    @foreach (var job in VisibleJobEvents())
+                                    {
+                                        <li>
+                                            <span class="@JobStatusClass(job.Status)">@job.Status</span>
+                                            <strong>@job.JobName</strong>
+                                            <small>@FormatLocalTimestamp(job.OccurredUtc) · @job.Message</small>
+                                        </li>
+                                    }
+                                </ol>
+                            }
+                        </section>
+
+                        <section class="status-mini-panel update-panel" aria-label="Release updates">
+                            <div class="status-mini-heading">
+                                <strong>Release/update checker</strong>
+                                <button class="tool-button settings-secondary"
+                                        type="button"
+                                        title="Check for application updates"
+                                        @onclick="CheckForUpdatesAsync"
+                                        disabled="@_isCheckingRelease">
+                                    @(_isCheckingRelease ? "Checking..." : "Check")
+                                </button>
+                            </div>
+                            @if (_releaseResult is null)
+                            {
+                                <p class="settings-help">Checks GitHub releases on demand. Updates are never installed silently.</p>
+                            }
+                            else
+                            {
+                                <p class="settings-help" data-testid="release-update-result">
+                                    @if (!_releaseResult.HasPublishedRelease)
+                                    {
+                                        <span>@_releaseResult.ReleaseName Current @_releaseResult.CurrentVersion.</span>
+                                    }
+                                    else
+                                    {
+                                        <span>Current @_releaseResult.CurrentVersion · latest @_releaseResult.LatestVersion.</span>
+                                        @if (_releaseResult.IsUpdateAvailable && !string.IsNullOrWhiteSpace(_releaseResult.ReleaseUrl))
+                                        {
+                                            <a href="@_releaseResult.ReleaseUrl" target="_blank" rel="noopener">Open release</a>
+                                        }
+                                    }
+                                </p>
+                            }
+                            <div class="application-update-block">
+                                <div class="status-mini-heading compact">
+                                    <strong>GitHub source update</strong>
+                                    <button class="tool-button settings-secondary"
+                                            type="button"
+                                            title="Update application from GitHub source"
+                                            aria-label="Update application from GitHub source"
+                                            @onclick="StartApplicationUpdateAsync"
+                                            disabled="@(_isStartingApplicationUpdate || _applicationUpdateStatus?.IsConfigured != true)">
+                                        @(_isStartingApplicationUpdate ? "Starting..." : "Update")
+                                    </button>
+                                </div>
+                                <p class="settings-help" data-testid="application-update-status">
+                                    @ApplicationUpdateStatusText()
+                                </p>
+                                @if (_applicationUpdateResult is not null)
+                                {
+                                    <p class="@ApplicationUpdateResultClass" data-testid="application-update-result">
+                                        @_applicationUpdateResult.Message
+                                        @if (!string.IsNullOrWhiteSpace(_applicationUpdateResult.LogPath))
+                                        {
+                                            <span> Log: @Path.GetFileName(_applicationUpdateResult.LogPath)</span>
+                                        }
+                                    </p>
+                                }
+                            </div>
+                        </section>
+
+                        <section class="status-mini-panel backup-panel" aria-label="Backup and restore settings">
+                            <div class="status-mini-heading">
+                                <strong>Backup</strong>
+                                <div class="settings-action-row compact">
+                                    <button class="tool-button settings-secondary" type="button" @onclick="ExportBackupAsync">Export</button>
+                                    <button class="tool-button settings-secondary" type="button" @onclick="ImportBackupAsync" disabled="@string.IsNullOrWhiteSpace(_backupJson)">Import</button>
+                                </div>
+                            </div>
+                            <label class="switch-row compact">
+                                <input type="checkbox" @bind="_includeBackupSecrets" />
+                                <span>Include API secrets</span>
+                            </label>
+                            <textarea class="settings-input backup-json"
+                                      aria-label="Settings backup JSON"
+                                      @bind="_backupJson"
+                                      @bind:event="onchange"></textarea>
+                            <small class="settings-help">Export includes local settings, saved presets, and visit state. API secrets are redacted unless explicitly included.</small>
+                        </section>
+                    </div>
+                </article>
+
+                <article class="settings-panel" aria-label="View sync settings">
+                    <div class="settings-panel-header">
+                        <div>
+                            <p class="eyebrow">Experience</p>
+                            <h2>View sync</h2>
+                            <div class="settings-status-row compact" aria-label="View sync status">
+                                @StatusBadge("View sync", ViewSyncProviderStatus())
+                            </div>
+                        </div>
+                        <label class="switch-row">
+                            <input type="checkbox"
+                                   aria-label="Sync viewing on this browser"
+                                   @bind="_viewSyncEnabled"
+                                   disabled="@(!_viewSyncLoaded)" />
+                            <span>Sync this browser</span>
+                        </label>
+                    </div>
+
+                    @if (!_viewSyncLoaded)
+                    {
+                        <div class="status-panel">Loading view sync...</div>
+                    }
+                    else
+                    {
+                        <div class="settings-fields">
+                            <label>
+                                <span>This device name</span>
+                                <input class="settings-input"
+                                       aria-label="This device name"
+                                       @bind="_viewSyncDeviceName" />
+                                <small class="settings-help">Use a friendly name like Office PC or Living room tablet.</small>
+                            </label>
+
+                            <label>
+                                <span>View sync group</span>
+                                <select class="settings-input"
+                                        aria-label="View sync group"
+                                        @bind="_selectedViewSyncGroupId">
+                                    <option value="">No group</option>
+                                    @foreach (var group in _viewSyncGroups)
+                                    {
+                                        <option value="@group.GroupId">@group.Name</option>
+                                    }
+                                </select>
+                                <small class="settings-help">Devices in the same group follow the latest calendar URL.</small>
+                            </label>
+
+                            <div class="settings-inline-fields">
+                                <label>
+                                    <span>New group</span>
+                                    <input class="settings-input"
+                                           aria-label="New view sync group name"
+                                           @bind="_newViewSyncGroupName" />
+                                </label>
+                                <button class="tool-button settings-secondary"
+                                        type="button"
+                                        aria-label="Create view sync group"
+                                        @onclick="CreateViewSyncGroupAsync"
+                                        disabled="@_isCreatingViewSyncGroup">
+                                    @(_isCreatingViewSyncGroup ? "Creating..." : "Create group")
+                                </button>
+                            </div>
+
+                            @if (_viewSyncGroupOverviews.Count > 0)
+                            {
+                                <section class="view-sync-groups" aria-label="View sync groups">
+                                    <div class="view-sync-groups-heading">
+                                        <strong>Groups and synced URLs</strong>
+                                        <small>Devices in the same group follow that group's latest calendar URLs.</small>
+                                    </div>
+                                    @foreach (var groupOverview in _viewSyncGroupOverviews)
+                                    {
+                                        var isSelectedGroup = IsSelectedViewSyncGroup(groupOverview.Group);
+                                        <article class="@ViewSyncGroupBlockClass(groupOverview.Group)" aria-label="@($"View sync group {groupOverview.Group.Name}")">
+                                            <div class="view-sync-group-header">
+                                                <div>
+                                                    <h3>@groupOverview.Group.Name</h3>
+                                                    <small>@(groupOverview.Devices.Count == 1 ? "1 device" : $"{groupOverview.Devices.Count.ToString("N0", CultureInfo.InvariantCulture)} devices")</small>
+                                                </div>
+                                                @if (isSelectedGroup)
+                                                {
+                                                    <span class="integration-status online">Current group</span>
+                                                }
+                                                else
+                                                {
+                                                    <button type="button"
+                                                            class="tool-button settings-secondary"
+                                                            aria-label="@($"Select view sync group {groupOverview.Group.Name}")"
+                                                            @onclick="() => SelectViewSyncGroup(groupOverview.Group.GroupId)">
+                                                        Select group
+                                                    </button>
+                                                }
+                                            </div>
+
+                                            @if (groupOverview.Devices.Count > 0)
+                                            {
+                                                <div class="view-sync-device-list" aria-label="@($"Devices in {groupOverview.Group.Name}")">
+                                                    @foreach (var device in groupOverview.Devices)
+                                                    {
+                                                        <span>
+                                                            <strong>@device.DisplayName</strong>
+                                                            @if (IsCurrentViewSyncDevice(device))
+                                                            {
+                                                                <em class="view-sync-me-badge" data-testid="view-sync-me-badge">me</em>
+                                                            }
+                                                            <small>@FormatViewSyncLastSeen(device.LastSeenUtc)</small>
+                                                        </span>
+                                                    }
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <p class="settings-help">No devices are attached to this group yet.</p>
+                                            }
+
+                                            <div class="view-sync-routes" aria-label="@(isSelectedGroup ? "Latest synced calendar routes" : $"Latest synced calendar routes for {groupOverview.Group.Name}")">
+                                                @foreach (var route in ViewSyncRouteSummaries(groupOverview.States))
+                                                {
+                                                    <div class="view-sync-route-row">
+                                                        <strong>@route.Label</strong>
+                                                        @if (route.State is { } state)
+                                                        {
+                                                            <span>@state.RelativeUrl</span>
+                                                            <small>By @state.UpdatedByDeviceName · @FormatViewSyncLastSeen(state.UpdatedUtc)</small>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="muted">Not synced yet</span>
+                                                        }
+                                                    </div>
+                                                }
+                                            </div>
+                                        </article>
+                                    }
+                                </section>
+                            }
+                        </div>
+
+                        <div class="settings-action-row">
+                            <button class="tool-button primary-action"
+                                    type="button"
+                                    aria-label="Save view sync settings"
+                                    @onclick="SaveViewSyncSettingsAsync"
+                                    disabled="@_isSavingViewSync">
+                                @ViewSyncSaveButtonText
+                            </button>
+                            <button class="tool-button settings-secondary"
+                                    type="button"
+                                    aria-label="Ungroup this device"
+                                    @onclick="UngroupViewSyncDeviceAsync"
+                                    disabled="@(_isUngroupingViewSync || string.IsNullOrWhiteSpace(_viewSyncOverview?.Device.GroupId))">
+                                @(_isUngroupingViewSync ? "Ungrouping..." : "Ungroup this device")
+                            </button>
+                        </div>
+                    }
+                </article>
+
                 <article class="settings-panel">
                     <div class="settings-panel-header">
                         <div>
@@ -279,7 +604,7 @@
 
                             <label>
                                 <span>TMDb API read access token</span>
-                                <InputText type="password" class="settings-input" aria-label="TMDb API read access token" @bind-Value="_settings.Sources.Tmdb.BearerToken" />
+                                <InputText id="tmdb-token" type="password" class="settings-input" aria-label="TMDb API read access token" @bind-Value="_settings.Sources.Tmdb.BearerToken" />
                                 <small class="settings-help">Required for live calendar data.</small>
                             </label>
 
@@ -378,7 +703,10 @@
                                         <span class="simkl-connect-title">SIMKL account</span>
                                         <small class="settings-help">@SimklConnectionSummary</small>
                                     </div>
-                                    <span class="simkl-status @SimklStatusClass">@SimklStatusText</span>
+                                    <span class="simkl-status @SimklStatusClass"
+                                          role="status"
+                                          aria-live="polite"
+                                          data-testid="simkl-auth-status">@SimklStatusText</span>
                                 </div>
 
                                 <button class="tool-button primary-action settings-secondary" type="button" aria-label="Connect SIMKL" @onclick="ConnectSimklAsync" disabled="@_isRequestingSimklPin">
@@ -387,13 +715,18 @@
 
                                 @if (_simklPinCode is { Success: true } simklPinCode)
                                 {
-                                    <div class="simkl-pin-panel" aria-label="SIMKL authorization code">
-                                        <div class="simkl-pin-row">
+                                    <div class="simkl-pin-panel"
+                                         aria-label="SIMKL authorization code"
+                                         data-testid="simkl-pin-panel">
+                                        <div class="simkl-pin-row"
+                                             role="status"
+                                             aria-live="polite"
+                                             data-testid="simkl-pin-status">
                                             <span class="simkl-pin-label">Code</span>
                                             <strong class="simkl-pin-code">@simklPinCode.UserCode</strong>
-                                            <a class="tool-button settings-secondary simkl-pin-link" href="@simklPinCode.VerificationUrl" target="_blank" rel="noopener">Open SIMKL authorization page</a>
                                         </div>
                                         <small class="settings-help">After you approve the app on SIMKL, this page will save the token automatically. Use the button below if it has not updated yet.</small>
+                                        <a class="tool-button settings-secondary simkl-pin-link" href="@simklPinCode.VerificationUrl" target="_blank" rel="noopener">Open SIMKL authorization page</a>
                                         <button class="tool-button settings-secondary" type="button" aria-label="Save SIMKL token after authorization" @onclick="SaveSimklTokenAfterAuthorizationAsync" disabled="@_isCheckingSimklPin">
                                             @(_isCheckingSimklPin ? "Checking SIMKL..." : "I authorized SIMKL - save token")
                                         </button>
@@ -477,13 +810,6 @@
                     </div>
                 </article>
             </section>
-
-            <div class="settings-actions sticky" aria-live="polite">
-                <span class="@SettingsDirtyClass">@SettingsDirtyText</span>
-                <button class="tool-button primary-action" type="button" title="Save integration settings" @onclick="SaveAsync" disabled="@_isSaving">
-                    @(_isSaving ? "Saving..." : "Save settings")
-                </button>
-            </div>
         </EditForm>
     }
 </div>
@@ -503,10 +829,36 @@
     private bool _isCheckingSimklPin;
     private SimklPinCodeResult? _simklPinCode;
     private string? _simklAuthorizationStatus;
+    private string? _loadError;
+    private string? _tmdbReturnUrl;
     private CancellationTokenSource? _simklPinPollingCancellation;
     private readonly CancellationTokenSource _disposeCancellation = new();
     private EditContext? _editContext;
     private bool _isDirty;
+    private bool _viewSyncLoaded;
+    private bool _viewSyncEnabled;
+    private bool _isSavingViewSync;
+    private bool _isCreatingViewSyncGroup;
+    private bool _isUngroupingViewSync;
+    private bool _showTmdbRequiredNotice;
+    private string _viewSyncDeviceId = "";
+    private string _viewSyncDeviceName = "This browser";
+    private string? _selectedViewSyncGroupId;
+    private string _newViewSyncGroupName = "";
+    private ViewSyncOverview? _viewSyncOverview;
+    private IReadOnlyList<ViewSyncGroup> _viewSyncGroups = [];
+    private IReadOnlyList<ViewSyncDevice> _viewSyncGroupDevices = [];
+    private IReadOnlyList<ViewSyncGroupState> _viewSyncGroupStates = [];
+    private IReadOnlyList<ViewSyncGroupOverview> _viewSyncGroupOverviews = [];
+    private CacheInspectorSummary? _cacheSummary;
+    private IReadOnlyList<BackgroundJobEvent> _jobEvents = [];
+    private ReleaseUpdateResult? _releaseResult;
+    private bool _isCheckingRelease;
+    private ApplicationUpdateStatus? _applicationUpdateStatus;
+    private ApplicationUpdateStartResult? _applicationUpdateResult;
+    private bool _isStartingApplicationUpdate;
+    private string _backupJson = "";
+    private bool _includeBackupSecrets;
 
     private bool HasSimklAccessToken => !string.IsNullOrWhiteSpace(_settings.Sources.Simkl.AccessToken);
 
@@ -515,6 +867,21 @@
     private string SettingsDirtyText => _isDirty ? "Unsaved changes" : "All changes saved";
 
     private string SettingsDirtyClass => _isDirty ? "settings-dirty dirty" : "settings-dirty clean";
+
+    private string ViewSyncSaveButtonText
+    {
+        get
+        {
+            if (_isSavingViewSync)
+            {
+                return "Saving...";
+            }
+
+            return !_viewSyncEnabled && !string.IsNullOrWhiteSpace(_selectedViewSyncGroupId)
+                ? "Add this browser"
+                : "Save view sync";
+        }
+    }
 
     private string SimklConnectionSummary
     {
@@ -540,6 +907,11 @@
                 return _simklAuthorizationStatus ?? "Waiting for authorization";
             }
 
+            if (!string.IsNullOrWhiteSpace(_simklAuthorizationStatus))
+            {
+                return _simklAuthorizationStatus;
+            }
+
             return HasSimklAccessToken ? "Connected" : "Not connected";
         }
     }
@@ -553,6 +925,11 @@
                 return "pending";
             }
 
+            if (!string.IsNullOrWhiteSpace(_simklAuthorizationStatus))
+            {
+                return "idle";
+            }
+
             return HasSimklAccessToken ? "connected" : "idle";
         }
     }
@@ -564,6 +941,23 @@
         builder.AddContent(2, $"{name}: {status.Text}");
         builder.CloseElement();
     };
+
+    private ProviderAvailability ViewSyncProviderStatus()
+    {
+        if (!_viewSyncLoaded)
+        {
+            return new ProviderAvailability("Checking", "configured");
+        }
+
+        if (!_viewSyncEnabled)
+        {
+            return ProviderAvailability.Disabled;
+        }
+
+        return string.IsNullOrWhiteSpace(_selectedViewSyncGroupId)
+            ? ProviderAvailability.NeedsSetup
+            : ProviderAvailability.Online;
+    }
 
     private ProviderAvailability SonarrProviderStatus()
     {
@@ -676,31 +1070,472 @@
         return options.RootFolders.Count > 0 || options.QualityProfiles.Count > 0;
     }
 
+    private RenderFragment CacheSummaryRow(string label, CacheBucketSummary summary) => builder =>
+    {
+        builder.OpenElement(0, "div");
+        builder.AddAttribute(1, "class", "cache-inspector-row");
+        builder.OpenElement(2, "strong");
+        builder.AddContent(3, label);
+        builder.CloseElement();
+        builder.OpenElement(4, "span");
+        builder.AddContent(5, summary.Exists
+            ? $"{summary.FileCount.ToString("N0", CultureInfo.InvariantCulture)} files · {FormatBytes(summary.TotalBytes)}"
+            : "folder missing");
+        builder.CloseElement();
+        builder.OpenElement(6, "small");
+        builder.AddContent(7, summary.LastWriteUtc is { } lastWrite
+            ? $"Updated {FormatLocalTimestamp(lastWrite)}"
+            : summary.Directory);
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private async Task RefreshLocalStatusAsync()
+    {
+        try
+        {
+            _cacheSummary = CacheInspector.GetSummary();
+            _jobEvents = await BackgroundJobTimeline.GetRecentAsync(_disposeCancellation.Token);
+            _applicationUpdateStatus = ApplicationUpdateService.GetStatus();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowToast(ToastKind.Error, "Status failed", ex.Message);
+        }
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        _isCheckingRelease = true;
+        try
+        {
+            _releaseResult = await ReleaseUpdateService.CheckLatestAsync(_disposeCancellation.Token);
+            var message = !_releaseResult.HasPublishedRelease
+                ? "No published GitHub releases were found."
+                : _releaseResult.IsUpdateAvailable
+                ? $"Version {_releaseResult.LatestVersion} is available."
+                : "This install is up to date.";
+            ShowToast(ToastKind.Info, "Update check complete", message);
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "Update check failed", ex.Message);
+        }
+        finally
+        {
+            _isCheckingRelease = false;
+        }
+    }
+
+    private async Task StartApplicationUpdateAsync()
+    {
+        _isStartingApplicationUpdate = true;
+        try
+        {
+            _applicationUpdateResult = await ApplicationUpdateService.StartUpdateAsync(_disposeCancellation.Token);
+            _applicationUpdateStatus = ApplicationUpdateService.GetStatus();
+            if (_applicationUpdateResult.Started)
+            {
+                ShowToast(
+                    ToastKind.Info,
+                    "Application update started",
+                    "GitHub update and local install were started. The app may restart shortly.");
+            }
+            else
+            {
+                ShowToast(ToastKind.Error, "Application update not started", _applicationUpdateResult.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            _applicationUpdateResult = new ApplicationUpdateStartResult(false, ex.Message, null);
+            ShowToast(ToastKind.Error, "Application update failed", ex.Message);
+        }
+        finally
+        {
+            _isStartingApplicationUpdate = false;
+        }
+    }
+
+    private async Task ExportBackupAsync()
+    {
+        try
+        {
+            _backupJson = await SettingsBackupService.ExportAsync(_includeBackupSecrets, _disposeCancellation.Token);
+            var message = _includeBackupSecrets
+                ? "Settings backup JSON is ready with API secrets included."
+                : "Settings backup JSON is ready with API secrets redacted.";
+            ShowToast(ToastKind.Success, "Backup exported", message);
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "Backup failed", ex.Message);
+        }
+    }
+
+    private async Task ImportBackupAsync()
+    {
+        try
+        {
+            await SettingsBackupService.ImportAsync(_backupJson, _disposeCancellation.Token);
+            _settings = await SettingsStore.GetAsync(_disposeCancellation.Token);
+            HydrateDerivedSettingsFields();
+            NormalizeSettings();
+            HydrateDerivedSettingsFields();
+            CreateEditContext();
+            _isDirty = false;
+            await RefreshLocalStatusAsync();
+            ShowToast(ToastKind.Success, "Backup imported", "Settings were restored from the backup JSON.");
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "Import failed", ex.Message);
+        }
+    }
+
+    private static string JobStatusClass(BackgroundJobStatus status)
+    {
+        return status switch
+        {
+            BackgroundJobStatus.Succeeded => "job-status succeeded",
+            BackgroundJobStatus.Failed => "job-status failed",
+            BackgroundJobStatus.Skipped => "job-status skipped",
+            _ => "job-status started"
+        };
+    }
+
+    private string ApplicationUpdateResultClass => _applicationUpdateResult?.Started == true
+        ? "settings-help update-result started"
+        : "settings-help update-result failed";
+
+    private string ApplicationUpdateStatusText()
+    {
+        if (_applicationUpdateStatus is null)
+        {
+            return "Update status is not loaded yet.";
+        }
+
+        var prefix = _applicationUpdateStatus.IsConfigured
+            ? "Ready"
+            : "Not ready";
+        var logText = string.IsNullOrWhiteSpace(_applicationUpdateStatus.LatestLogPath)
+            ? ""
+            : $" Latest log: {Path.GetFileName(_applicationUpdateStatus.LatestLogPath)}.";
+        return $"{prefix}: {_applicationUpdateStatus.Remote}/{_applicationUpdateStatus.Branch} at {_applicationUpdateStatus.RepositoryPath}. {_applicationUpdateStatus.Message}{logText}";
+    }
+
+    private IEnumerable<BackgroundJobEvent> VisibleJobEvents()
+    {
+        return _jobEvents
+            .OrderBy(entry => entry.Status == BackgroundJobStatus.Failed ? 0 : 1)
+            .ThenByDescending(entry => entry.OccurredUtc)
+            .ThenBy(entry => entry.JobName, StringComparer.Ordinal)
+            .Take(6);
+    }
+
+    private static string FormatLocalTimestamp(DateTimeOffset value)
+    {
+        return value.ToLocalTime().ToString("dd MMM HH:mm", CultureInfo.CurrentCulture);
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB"];
+        var value = (double)Math.Max(0, bytes);
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+
+        return unit == 0
+            ? $"{value.ToString("0", CultureInfo.InvariantCulture)} {units[unit]}"
+            : $"{value.ToString("0.0", CultureInfo.InvariantCulture)} {units[unit]}";
+    }
+
     protected override async Task OnInitializedAsync()
     {
-        _settings = await SettingsStore.GetAsync();
-        CreateEditContext();
-        EnsureSimklActivityCheckInterval();
-        _tvmazeScheduleCountries = string.Join(", ", _settings.Sources.Tvmaze.ScheduleCountries);
-        _watchmodeRegions = string.Join(", ", _settings.Sources.Watchmode.Regions);
-
-        var optionLoadTasks = new List<Task>();
-        if (CanLoadSonarrOptions())
+        var showTmdbRequiredNotice = HasTmdbRequiredReason();
+        _tmdbReturnUrl = showTmdbRequiredNotice ? TmdbReturnUrl() : null;
+        try
         {
-            optionLoadTasks.Add(LoadSonarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+            _settings = await SettingsStore.GetAsync();
+            _showTmdbRequiredNotice = showTmdbRequiredNotice && HasMissingTmdbToken();
+            CreateEditContext();
+            EnsureSimklActivityCheckInterval();
+            HydrateDerivedSettingsFields();
+
+            var optionLoadTasks = new List<Task>();
+            if (CanLoadSonarrOptions())
+            {
+                optionLoadTasks.Add(LoadSonarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+            }
+
+            if (CanLoadRadarrOptions())
+            {
+                optionLoadTasks.Add(LoadRadarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+            }
+
+            if (optionLoadTasks.Count > 0)
+            {
+                await Task.WhenAll(optionLoadTasks);
+            }
+
+            await RefreshLocalStatusAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _loadError = "Settings could not be loaded.";
+            _showTmdbRequiredNotice = false;
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private bool HasMissingTmdbToken()
+    {
+        return string.IsNullOrWhiteSpace(_settings.Sources.Tmdb.BearerToken);
+    }
+
+    private bool HasTmdbRequiredReason()
+    {
+        try
+        {
+            var query = QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(Navigation.Uri).Query);
+            return query.TryGetValue("reason", out var reason)
+                && string.Equals(reason.ToString(), "tmdb", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private string? TmdbReturnUrl()
+    {
+        try
+        {
+            var query = QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(Navigation.Uri).Query);
+            if (!query.TryGetValue("returnUrl", out var returnUrl))
+            {
+                return null;
+            }
+
+            var value = returnUrl.ToString();
+            return LocalReturnUrl.IsSafe(value) ? value : null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
         }
 
-        if (CanLoadRadarrOptions())
+        await LoadViewSyncOverviewAsync();
+    }
+
+    private async Task LoadViewSyncOverviewAsync()
+    {
+        try
         {
-            optionLoadTasks.Add(LoadRadarrOptionsCoreAsync(showToast: false, timeout: TimeSpan.FromSeconds(3)));
+            _viewSyncDeviceId = await JS.InvokeAsync<string?>("premiereViewSync.getOrCreateDeviceId")
+                ?? Guid.NewGuid().ToString("N");
+            _viewSyncOverview = await ViewSyncService.GetOverviewAsync(_viewSyncDeviceId, _disposeCancellation.Token);
+            ApplyViewSyncOverview(_viewSyncOverview);
+            _viewSyncLoaded = true;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JSException or JSDisconnectedException)
+        {
+            _viewSyncLoaded = true;
+            _viewSyncEnabled = false;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "View sync overview load failed.");
+            _viewSyncLoaded = true;
+            _viewSyncEnabled = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ApplyViewSyncOverview(ViewSyncOverview overview)
+    {
+        _viewSyncOverview = overview;
+        _viewSyncDeviceName = overview.Device.DisplayName;
+        _viewSyncEnabled = overview.Device.SyncEnabled;
+        _selectedViewSyncGroupId = overview.Device.GroupId;
+        _viewSyncGroups = overview.Groups;
+        _viewSyncGroupDevices = overview.GroupDevices;
+        _viewSyncGroupStates = overview.GroupStates is { Count: > 0 }
+            ? overview.GroupStates
+            : overview.GroupState is null
+                ? []
+                : [overview.GroupState];
+        _viewSyncGroupOverviews = overview.GroupOverviews is { Count: > 0 }
+            ? overview.GroupOverviews
+            : BuildFallbackViewSyncGroupOverviews(overview);
+    }
+
+    private IReadOnlyList<ViewSyncGroupOverview> BuildFallbackViewSyncGroupOverviews(ViewSyncOverview overview)
+    {
+        if (overview.Groups.Count == 0)
+        {
+            return [];
         }
 
-        if (optionLoadTasks.Count > 0)
+        return overview.Groups
+            .Select(group => new ViewSyncGroupOverview(
+                group,
+                IsSelectedViewSyncGroup(group) ? _viewSyncGroupDevices : [],
+                IsSelectedViewSyncGroup(group) ? _viewSyncGroupStates : []))
+            .ToArray();
+    }
+
+    private IEnumerable<ViewSyncRouteSummary> ViewSyncRouteSummaries(IReadOnlyList<ViewSyncGroupState> states)
+    {
+        yield return ViewSyncRouteSummaryFor("All", "all", states);
+        yield return ViewSyncRouteSummaryFor("Movies", "movies", states);
+        yield return ViewSyncRouteSummaryFor("Series", "series", states);
+    }
+
+    private ViewSyncRouteSummary ViewSyncRouteSummaryFor(
+        string label,
+        string routeKey,
+        IReadOnlyList<ViewSyncGroupState> states)
+    {
+        return new ViewSyncRouteSummary(
+            label,
+            states.FirstOrDefault(state =>
+                string.Equals(state.RouteKey, routeKey, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private sealed record ViewSyncRouteSummary(string Label, ViewSyncGroupState? State);
+
+    private bool IsCurrentViewSyncDevice(ViewSyncDevice device)
+    {
+        return string.Equals(device.DeviceId, _viewSyncDeviceId, StringComparison.Ordinal);
+    }
+
+    private bool IsSelectedViewSyncGroup(ViewSyncGroup group)
+    {
+        return string.Equals(group.GroupId, _selectedViewSyncGroupId, StringComparison.Ordinal);
+    }
+
+    private string ViewSyncGroupBlockClass(ViewSyncGroup group)
+    {
+        return IsSelectedViewSyncGroup(group)
+            ? "view-sync-group-block selected"
+            : "view-sync-group-block";
+    }
+
+    private void SelectViewSyncGroup(string groupId)
+    {
+        _selectedViewSyncGroupId = groupId;
+        _viewSyncEnabled = true;
+    }
+
+    private async Task SaveViewSyncSettingsAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_viewSyncDeviceId))
         {
-            await Task.WhenAll(optionLoadTasks);
+            return;
         }
 
-        _isLoading = false;
+        _isSavingViewSync = true;
+        try
+        {
+            var overview = await ViewSyncService.SaveDeviceAsync(
+                _viewSyncDeviceId,
+                _viewSyncDeviceName,
+                _viewSyncEnabled || !string.IsNullOrWhiteSpace(_selectedViewSyncGroupId),
+                _selectedViewSyncGroupId,
+                _disposeCancellation.Token);
+            ApplyViewSyncOverview(overview);
+            ShowToast(ToastKind.Success, "View sync saved", "This browser's sync settings were saved.");
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "View sync failed", ex.Message);
+        }
+        finally
+        {
+            _isSavingViewSync = false;
+        }
+    }
+
+    private async Task CreateViewSyncGroupAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_viewSyncDeviceId))
+        {
+            return;
+        }
+
+        _isCreatingViewSyncGroup = true;
+        try
+        {
+            var group = await ViewSyncService.CreateGroupAsync(_newViewSyncGroupName, _disposeCancellation.Token);
+            _selectedViewSyncGroupId = group.GroupId;
+            _newViewSyncGroupName = "";
+            var overview = await ViewSyncService.SaveDeviceAsync(
+                _viewSyncDeviceId,
+                _viewSyncDeviceName,
+                syncEnabled: true,
+                _selectedViewSyncGroupId,
+                _disposeCancellation.Token);
+            ApplyViewSyncOverview(overview);
+            ShowToast(ToastKind.Success, "View sync group created", $"Created {group.Name}.");
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "View sync failed", ex.Message);
+        }
+        finally
+        {
+            _isCreatingViewSyncGroup = false;
+        }
+    }
+
+    private async Task UngroupViewSyncDeviceAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_viewSyncDeviceId))
+        {
+            return;
+        }
+
+        _isUngroupingViewSync = true;
+        try
+        {
+            var overview = await ViewSyncService.UngroupDeviceAsync(_viewSyncDeviceId, _disposeCancellation.Token);
+            ApplyViewSyncOverview(overview);
+            ShowToast(ToastKind.Success, "View sync disabled", "This browser was removed from its sync group.");
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "View sync failed", ex.Message);
+        }
+        finally
+        {
+            _isUngroupingViewSync = false;
+        }
+    }
+
+    private static string FormatViewSyncLastSeen(DateTimeOffset value)
+    {
+        return value.ToLocalTime().ToString("dd MMM HH:mm", CultureInfo.CurrentCulture);
     }
 
     private async Task ConnectSimklAsync()
@@ -790,10 +1625,22 @@
                     return;
                 }
 
-                var completed = await CheckSimklAuthorizationCoreAsync(userCode, showToast: false, cancellationToken);
-                if (completed)
+                try
                 {
-                    return;
+                    var completed = await CheckSimklAuthorizationCoreAsync(userCode, showToast: false, cancellationToken);
+                    if (completed)
+                    {
+                        return;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _simklAuthorizationStatus = $"Waiting for authorization. Last check failed: {ex.Message}";
+                    await InvokeAsync(StateHasChanged);
                 }
             }
 
@@ -847,13 +1694,15 @@
                 return false;
             default:
                 _simklAuthorizationStatus = result.Message ?? "Authorization failed";
+                _simklPinCode = null;
+                StopSimklAuthorizationPolling();
                 if (showToast)
                 {
                     ShowToast(ToastKind.Error, "SIMKL authorization failed", result.Message ?? "SIMKL did not authorize this PIN.");
                 }
 
                 await InvokeAsync(StateHasChanged);
-                return false;
+                return true;
         }
     }
 
@@ -878,7 +1727,16 @@
             NormalizeSettings();
             await SettingsStore.SaveAsync(_settings);
             _isDirty = false;
+            if (!HasMissingTmdbToken())
+            {
+                _showTmdbRequiredNotice = false;
+            }
+
             ShowToast(ToastKind.Success, "Settings saved", "Integration and source API parameters were saved to the local database.");
+            if (!HasMissingTmdbToken() && !string.IsNullOrWhiteSpace(_tmdbReturnUrl))
+            {
+                Navigation.NavigateTo(_tmdbReturnUrl, replace: true);
+            }
         }
         catch (Exception ex)
         {
@@ -999,6 +1857,12 @@
         _settings.Sources.Omdb.ApiKey = _settings.Sources.Omdb.ApiKey.Trim();
         _settings.Sources.Fanart.ApiKey = _settings.Sources.Fanart.ApiKey.Trim();
         _settings.Sources.TheTvdb.ApiKey = _settings.Sources.TheTvdb.ApiKey.Trim();
+    }
+
+    private void HydrateDerivedSettingsFields()
+    {
+        _tvmazeScheduleCountries = string.Join(", ", _settings.Sources.Tvmaze.ScheduleCountries);
+        _watchmodeRegions = string.Join(", ", _settings.Sources.Watchmode.Regions);
     }
 
     private void EnsureSimklActivityCheckInterval()

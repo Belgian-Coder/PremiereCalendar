@@ -1,8 +1,9 @@
 @using System.Globalization
-@using System.Text
 
 <section class="calendar-day"
          id="@DayId"
+         role="tabpanel"
+         aria-labelledby="@LabelledById"
          data-testid="calendar-day"
          data-day-animation-key="@Day.ToString("yyyyMMdd", CultureInfo.InvariantCulture)">
     <div class="day-scroll-prompt day-scroll-prompt-top" data-day-scroll-prompt="previous" aria-hidden="true">
@@ -33,7 +34,7 @@
         @if (UseVirtualizedRows)
         {
             <div class="day-virtualized-list" data-testid="virtualized-day">
-                <div class="day-load-controls" aria-label="@($"Virtualized items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
+                <div class="day-load-controls visually-hidden" aria-label="@($"Virtualized items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
                     <span class="day-visible-count">Showing all @Items.Count with virtual scrolling</span>
                 </div>
 
@@ -138,6 +139,9 @@
     public string DayId { get; set; } = "";
 
     [Parameter]
+    public string LabelledById { get; set; } = "";
+
+    [Parameter]
     public IReadOnlyList<PremiereItem> Items { get; set; } = [];
 
     [Parameter]
@@ -159,6 +163,9 @@
     public bool IsArrActionBusy { get; set; }
 
     [Parameter]
+    public bool IsUpdating { get; set; }
+
+    [Parameter]
     public int InitialVisibleCount { get; set; } = 10;
 
     [Parameter]
@@ -166,18 +173,27 @@
 
     private int _visibleCount;
     private string _itemsSignature = "";
+    private IReadOnlyList<PremiereItem>? _lastItemsReference;
+    private int _lastItemsCount = -1;
+    private int _partitionVisibleCount = -1;
     private bool _autoLoadAll;
     private List<CardRow> _cardRows = [];
     private string _lastRenderFingerprint = "";
+    private bool _lastUseVirtualizedRows;
     private bool _shouldRender = true;
+    private IReadOnlyList<PremiereItem> _visibleItems = [];
+    private IReadOnlyList<PremiereItem> _visibleVerifiedItems = [];
+    private IReadOnlyList<PremiereItem> _visibleUnverifiedItems = [];
+    private int _movieCount;
+    private int _seriesCount;
 
     private const int VirtualizeThreshold = 40;
     private const int VirtualizedOverscanRows = 4;
     private const float VirtualizedRowItemSize = 520;
 
-    private int MovieCount => Items.Count(item => item.MediaType == PremiereMediaType.Movie);
+    private int MovieCount => _movieCount;
 
-    private int SeriesCount => Items.Count(item => item.MediaType == PremiereMediaType.Series);
+    private int SeriesCount => _seriesCount;
 
     private int HiddenItemCount => Math.Max(0, Items.Count - _visibleCount);
 
@@ -185,28 +201,37 @@
 
     private int NextBatchCount => Math.Min(Math.Max(1, LoadBatchSize), HiddenItemCount);
 
-    private IEnumerable<PremiereItem> VisibleItems => Items.Take(_visibleCount);
+    private IReadOnlyList<PremiereItem> VisibleItems => _visibleItems;
 
-    private IReadOnlyList<PremiereItem> VisibleVerifiedItems => VisibleItems
-        .Where(item => item.VerificationState == PremiereVerificationState.Verified)
-        .ToArray();
+    private IReadOnlyList<PremiereItem> VisibleVerifiedItems => _visibleVerifiedItems;
 
-    private IReadOnlyList<PremiereItem> VisibleUnverifiedItems => VisibleItems
-        .Where(item => item.VerificationState == PremiereVerificationState.Unverified)
-        .ToArray();
+    private IReadOnlyList<PremiereItem> VisibleUnverifiedItems => _visibleUnverifiedItems;
 
-    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold;
+    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold && !IsUpdating;
 
     protected override void OnParametersSet()
     {
-        var signature = BuildItemsSignature();
+        var canReuseItemsSignature = ReferenceEquals(Items, _lastItemsReference)
+            && Items.Count == _lastItemsCount
+            && !string.IsNullOrEmpty(_itemsSignature);
+        var signature = canReuseItemsSignature ? _itemsSignature : BuildItemsSignature();
+        var itemsChanged = !string.Equals(signature, _itemsSignature, StringComparison.Ordinal);
+        var useVirtualizedRows = UseVirtualizedRows;
+        var virtualizationModeChanged = useVirtualizedRows != _lastUseVirtualizedRows;
+        _lastItemsReference = Items;
+        _lastItemsCount = Items.Count;
+        _lastUseVirtualizedRows = useVirtualizedRows;
 
-        if (!string.Equals(signature, _itemsSignature, StringComparison.Ordinal))
+        if (itemsChanged)
         {
             _itemsSignature = signature;
             _visibleCount = InitialCount;
             _autoLoadAll = false;
-            _cardRows = CreateCardRows();
+        }
+
+        if (itemsChanged || virtualizationModeChanged)
+        {
+            _cardRows = useVirtualizedRows ? CreateCardRows() : [];
         }
         else
         {
@@ -215,6 +240,19 @@
             {
                 _autoLoadAll = false;
             }
+        }
+
+        if (itemsChanged)
+        {
+            RebuildItemCounts();
+        }
+
+        if (!useVirtualizedRows
+            && (_partitionVisibleCount != _visibleCount
+                || itemsChanged
+                || virtualizationModeChanged))
+        {
+            RebuildVisiblePartitions();
         }
 
         var renderFingerprint = BuildRenderFingerprint();
@@ -230,6 +268,7 @@
     private void ShowMore()
     {
         _visibleCount = Math.Min(Items.Count, _visibleCount + Math.Max(1, LoadBatchSize));
+        RebuildVisiblePartitions();
         _shouldRender = true;
     }
 
@@ -237,15 +276,58 @@
     {
         _visibleCount = Items.Count;
         _autoLoadAll = false;
+        RebuildVisiblePartitions();
         _shouldRender = true;
     }
 
     private List<CardRow> CreateCardRows()
     {
-        return Items
-            .Chunk(2)
-            .Select((items, index) => new CardRow(index, items))
-            .ToList();
+        var rows = new List<CardRow>((Items.Count + 1) / 2);
+        for (var index = 0; index < Items.Count; index += 2)
+        {
+            var rowItems = new List<PremiereItem>(2)
+            {
+                Items[index]
+            };
+            if (index + 1 < Items.Count)
+            {
+                rowItems.Add(Items[index + 1]);
+            }
+
+            rows.Add(new CardRow(rows.Count, rowItems));
+        }
+
+        return rows;
+    }
+
+    private void RebuildItemCounts()
+    {
+        _movieCount = 0;
+        _seriesCount = 0;
+        foreach (var item in Items)
+        {
+            if (item.MediaType == PremiereMediaType.Movie)
+            {
+                _movieCount++;
+            }
+            else if (item.MediaType == PremiereMediaType.Series)
+            {
+                _seriesCount++;
+            }
+        }
+    }
+
+    private void RebuildVisiblePartitions()
+    {
+        var visibleItems = Items.Take(_visibleCount).ToArray();
+        _visibleItems = visibleItems;
+        _visibleVerifiedItems = visibleItems
+            .Where(item => item.VerificationState == PremiereVerificationState.Verified)
+            .ToArray();
+        _visibleUnverifiedItems = visibleItems
+            .Where(item => item.VerificationState == PremiereVerificationState.Unverified)
+            .ToArray();
+        _partitionVisibleCount = _visibleCount;
     }
 
     private static string FormatCount(int count, string noun)
@@ -267,18 +349,63 @@
 
     private string BuildItemsSignature()
     {
-        var builder = new StringBuilder();
-        builder.Append(Day.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
-        builder.Append('|');
-        builder.Append(Items.Count);
+        var hash = new HashCode();
+        hash.Add(Day);
+        hash.Add(Items.Count);
 
         foreach (var item in Items)
         {
-            builder.Append('|');
-            builder.Append(item.CanonicalId);
+            AppendItemSignature(ref hash, item);
         }
 
-        return builder.ToString();
+        return hash.ToHashCode().ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static void AppendItemSignature(ref HashCode hash, PremiereItem item)
+    {
+        hash.Add(item.CanonicalId);
+        hash.Add(item.Type);
+        hash.Add(item.MediaType);
+        hash.Add(item.TmdbId);
+        hash.Add(item.VerificationState);
+        hash.Add(item.VerificationNote);
+        hash.Add(item.ExternalUrl);
+        hash.Add(item.Title);
+        hash.Add(item.PremiereDate);
+        hash.Add(item.SeasonNumber);
+        hash.Add(item.EpisodeNumber);
+        hash.Add(item.EpisodeTitle);
+        hash.Add(item.PosterUrl);
+        hash.Add(item.ImageSource);
+        hash.Add(item.Overview);
+        hash.Add(item.OriginalLanguage);
+        hash.Add(item.RuntimeMinutes);
+        hash.Add(item.TmdbScore);
+        hash.Add(item.TmdbVoteCount);
+        hash.Add(item.ImdbScore);
+        hash.Add(item.ImdbVoteCount);
+        hash.Add(item.RottenTomatoesScore);
+        hash.Add(item.RottenTomatoesAudienceScore);
+        hash.Add(item.MetacriticScore);
+        hash.Add(item.TvmazeRating);
+        hash.Add(item.TrailerUrl);
+        hash.Add(item.TmdbUrl);
+        hash.Add(item.ImdbUrl);
+        hash.Add(item.TvmazeUrl);
+        hash.Add(item.OfficialSiteUrl);
+        hash.Add(item.EpisodeSource);
+        hash.Add(item.LastUpdatedUtc);
+        AddValues(ref hash, item.OriginCountries);
+        AddValues(ref hash, item.SourceNames);
+        AddValues(ref hash, item.Genres);
+    }
+
+    private static void AddValues(ref HashCode hash, IEnumerable<string> values)
+    {
+        foreach (var value in values)
+        {
+            hash.Add(value, StringComparer.Ordinal);
+        }
     }
 
     private sealed record CardRow(int Index, IReadOnlyList<PremiereItem> Items);
