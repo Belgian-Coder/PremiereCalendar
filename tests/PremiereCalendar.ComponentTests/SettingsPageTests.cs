@@ -33,6 +33,18 @@ public sealed class SettingsPageTests : BunitContext
             Microsoft.Extensions.Options.Options.Create(new ImageCacheOptions { Directory = "cache/images" }),
             new FakeWebHostEnvironment(_root)));
         Services.AddSingleton<BackgroundJobTimelineService>();
+        Services.AddSingleton<IProviderCacheStateStore, FakeProviderCacheStateStore>();
+        Services.AddSingleton<IOmdbCacheStore, FakeOmdbCacheStore>();
+        Services.AddSingleton<IImdbRatingsStore, FakeImdbRatingsStore>();
+        Services.AddSingleton<IOmdbClient, FakeOmdbClient>();
+        Services.AddSingleton<IRottenTomatoesClient, FakeRottenTomatoesClient>();
+        Services.AddSingleton<ITmdbClient, FakeTmdbClient>();
+        Services.AddSingleton<RatingMapper>();
+        Services.AddSingleton<ScoreBackfillService>();
+        Services.AddSingleton<MissingExternalIdRepairService>();
+        Services.AddSingleton<ICalendarCache, FakeCalendarCache>();
+        Services.AddSingleton<SourceHealthService>();
+        Services.AddSingleton<CalendarDataMaintenanceService>();
         Services.AddSingleton<SettingsBackupService>();
         Services.AddSingleton(new ReleaseUpdateService(
             new HttpClient(new StaticHttpMessageHandler(
@@ -186,6 +198,9 @@ public sealed class SettingsPageTests : BunitContext
             var status = component.Find("[data-testid='local-status-center']");
             Assert.Contains("Local status", status.TextContent);
             Assert.Contains("Calendar cache", status.TextContent);
+            Assert.Contains("Source health", status.TextContent);
+            Assert.Contains("Backfill scores", status.TextContent);
+            Assert.Contains("Repair IDs", status.TextContent);
             Assert.Contains("Backup", status.TextContent);
             Assert.Contains("GitHub source update", status.TextContent);
         });
@@ -1303,6 +1318,12 @@ public sealed class SettingsPageTests : BunitContext
             Remote: "origin",
             Branch: "main",
             LatestLogPath: null,
+            CurrentCommit: "abc123",
+            RemoteCommit: "def456",
+            IsRepositoryDirty: false,
+            LatestLogTail: null,
+            LastResult: null,
+            LastBackupPath: null,
             Message: "Ready to update from GitHub.");
 
         public ApplicationUpdateStartResult Result { get; set; } = new(
@@ -1351,6 +1372,175 @@ public sealed class SettingsPageTests : BunitContext
                 .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
             return Task.FromResult(values);
         }
+    }
+
+    private sealed class FakeProviderCacheStateStore : IProviderCacheStateStore
+    {
+        public List<ProviderCacheState> States { get; } =
+        [
+            new ProviderCacheState(
+                "calendar",
+                ProviderCacheScope.Week,
+                "20260525:default",
+                DateTimeOffset.Parse("2026-05-31T10:00:00Z"),
+                null,
+                null,
+                2,
+                null)
+        ];
+
+        public Task<ProviderCacheState?> GetAsync(string provider, ProviderCacheScope scope, string key, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(States.LastOrDefault(state =>
+                string.Equals(state.Provider, provider, StringComparison.OrdinalIgnoreCase)
+                && state.Scope == scope
+                && string.Equals(state.Key, key, StringComparison.Ordinal)));
+        }
+
+        public Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken)
+        {
+            States.Add(state);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<ProviderCacheState>> GetRecentAsync(int take, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<ProviderCacheState>>(States.Take(take).ToArray());
+        }
+
+        public Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(string provider, int take, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<ProviderCacheState>>(
+                States
+                    .Where(state => string.Equals(state.Provider, provider, StringComparison.OrdinalIgnoreCase))
+                    .Take(take)
+                    .ToArray());
+        }
+    }
+
+    private sealed class FakeOmdbCacheStore : IOmdbCacheStore
+    {
+        public Task<OmdbCacheEntry?> GetAsync(string imdbId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<OmdbCacheEntry?>(null);
+        }
+
+        public Task SetAsync(string imdbId, OmdbItem item, DateTimeOffset cachedAtUtc, CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task<OmdbProviderCacheState> GetProviderStateAsync(CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new OmdbProviderCacheState(null, null, null));
+        }
+
+        public Task MarkRateLimitedAsync(DateTimeOffset untilUtc, string error, CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task MarkFailureAsync(string error, CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeImdbRatingsStore : IImdbRatingsStore
+    {
+        public Task<ImdbRatingRecord?> GetByImdbIdAsync(string imdbId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<ImdbRatingRecord?>(null);
+        }
+
+        public Task ReplaceAllAsync(IEnumerable<ImdbRatingRecord> ratings, DateTimeOffset importedAtUtc, CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task<ImdbDatasetState> GetStateAsync(CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new ImdbDatasetState(null, 0, null));
+        }
+
+        public Task SaveStateAsync(ImdbDatasetState state, CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeOmdbClient : IOmdbClient
+    {
+        public Task<OmdbItem?> GetByImdbIdAsync(string imdbId, CancellationToken cancellationToken, bool forceRefresh = false)
+        {
+            return Task.FromResult<OmdbItem?>(null);
+        }
+    }
+
+    private sealed class FakeRottenTomatoesClient : IRottenTomatoesClient
+    {
+        public Task<RottenTomatoesScores> GetScoresAsync(PremiereMediaType mediaType, string title, int? year, string? wikidataId, CancellationToken cancellationToken, bool forceRefresh = false)
+        {
+            return Task.FromResult(RottenTomatoesScores.Empty);
+        }
+    }
+
+    private sealed class FakeCalendarCache : ICalendarCache
+    {
+        private IReadOnlyList<PremiereItem> _items =
+        [
+            new PremiereItem
+            {
+                CanonicalId = "movie:1",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                Title = "Cached Movie",
+                PremiereDate = new DateOnly(2026, 5, 25)
+            }
+        ];
+
+        public Task<IReadOnlyList<PremiereItem>?> GetWeekAsync(DateOnly start, DateOnly end, string cacheKey, CancellationToken cancellationToken, bool allowExpired = false)
+        {
+            return Task.FromResult<IReadOnlyList<PremiereItem>?>(_items);
+        }
+
+        public Task SetWeekAsync(DateOnly start, DateOnly end, string cacheKey, IReadOnlyList<PremiereItem> items, CancellationToken cancellationToken)
+        {
+            _items = items;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeTmdbClient : ITmdbClient
+    {
+        public Task<IReadOnlyList<TmdbTvDiscoverItem>> DiscoverTvAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbTvDiscoverItem>>([]);
+        public async IAsyncEnumerable<TmdbDiscoverBatch<TmdbTvDiscoverItem>> StreamDiscoverTvAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken, bool forceRefresh = false)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public Task<IReadOnlyList<TmdbTvDiscoverItem>> DiscoverTvByNetworksAsync(DateOnly start, DateOnly end, IReadOnlyList<int> networkIds, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbTvDiscoverItem>>([]);
+        public Task<IReadOnlyList<TmdbMovieDiscoverItem>> DiscoverMoviesAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbMovieDiscoverItem>>([]);
+        public async IAsyncEnumerable<TmdbDiscoverBatch<TmdbMovieDiscoverItem>> StreamDiscoverMoviesAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken, bool forceRefresh = false)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public Task<TmdbDetailsWithExtras?> GetTvDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<TmdbDetailsWithExtras?>(null);
+        public Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<TmdbDetailsWithExtras?>(null);
+        public Task<int?> FindTmdbIdByExternalIdAsync(PremiereMediaType mediaType, string externalId, string externalSource, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<int?>(null);
+        public Task<IReadOnlyList<TmdbTitleSearchResult>> SearchTitlesAsync(PremiereMediaType mediaType, string query, int? year, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbTitleSearchResult>>([]);
+        public Task<IReadOnlyList<TmdbGenre>> GetGenresAsync(PremiereMediaType mediaType, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbGenre>>([]);
+        public Task<IReadOnlyList<TmdbConfigurationLanguage>> GetLanguagesAsync(CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbConfigurationLanguage>>([]);
+        public Task<IReadOnlyList<TmdbConfigurationCountry>> GetCountriesAsync(CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbConfigurationCountry>>([]);
+        public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(PremiereMediaType mediaType, string region, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbWatchProvider>>([]);
+        public Task<TmdbCertificationResponse?> GetCertificationsAsync(PremiereMediaType mediaType, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<TmdbCertificationResponse?>(null);
+        public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbKeyword>>([]);
+        public Task<IReadOnlyList<TmdbChangedItem>> GetChangedMovieIdsAsync(DateOnly start, DateOnly end, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
+        public Task<IReadOnlyList<TmdbChangedItem>> GetChangedTvIdsAsync(DateOnly start, DateOnly end, CancellationToken cancellationToken, bool forceRefresh = false) => Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
     }
 
     private sealed class FakeWebHostEnvironment : IWebHostEnvironment

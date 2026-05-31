@@ -8,7 +8,7 @@ namespace PremiereCalendar.Services;
 
 public sealed class FileCalendarCache : ICalendarCache, ICalendarCacheMaintenance
 {
-    private const int CurrentSchemaVersion = 7;
+    private const int CurrentSchemaVersion = 8;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {

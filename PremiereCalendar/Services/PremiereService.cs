@@ -29,6 +29,9 @@ public sealed class PremiereService : IPremiereService
     private readonly IImdbRatingsStore? _imdbRatingsStore;
     private readonly IProviderCacheStateStore? _providerCacheStateStore;
     private readonly IRottenTomatoesClient? _rottenTomatoesClient;
+    private readonly WeekDiagnosticsService? _weekDiagnosticsService;
+    private readonly ScoreBackfillService? _scoreBackfillService;
+    private readonly MissingExternalIdRepairService? _missingExternalIdRepairService;
 
     public PremiereService(
         ITmdbClient tmdbClient,
@@ -44,7 +47,10 @@ public sealed class PremiereService : IPremiereService
         ILogger<PremiereService> logger,
         IImdbRatingsStore? imdbRatingsStore = null,
         IProviderCacheStateStore? providerCacheStateStore = null,
-        IRottenTomatoesClient? rottenTomatoesClient = null)
+        IRottenTomatoesClient? rottenTomatoesClient = null,
+        WeekDiagnosticsService? weekDiagnosticsService = null,
+        ScoreBackfillService? scoreBackfillService = null,
+        MissingExternalIdRepairService? missingExternalIdRepairService = null)
     {
         _tmdbClient = tmdbClient;
         _omdbClient = omdbClient;
@@ -60,6 +66,9 @@ public sealed class PremiereService : IPremiereService
         _imdbRatingsStore = imdbRatingsStore;
         _providerCacheStateStore = providerCacheStateStore;
         _rottenTomatoesClient = rottenTomatoesClient;
+        _weekDiagnosticsService = weekDiagnosticsService;
+        _scoreBackfillService = scoreBackfillService;
+        _missingExternalIdRepairService = missingExternalIdRepairService;
     }
 
     public async Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
@@ -182,6 +191,7 @@ public sealed class PremiereService : IPremiereService
 
         IReadOnlyList<PremiereItem> finalItems = [];
         PremiereLoadProgress? finalUpdate = null;
+        var progressHistory = new List<PremiereLoadProgress>();
         Exception? refreshError = null;
 
         await using (var enumerator = FetchFreshPremiereUpdatesAsync(start, end, forceRefresh, fetchCriteria, filters, cachedEnrichment, cancellationToken)
@@ -210,6 +220,7 @@ public sealed class PremiereService : IPremiereService
                     update = MergeProgressWithSeed(update, seededItems);
                 }
 
+                progressHistory.Add(update);
                 if (update.IsFinal)
                 {
                     finalItems = update.Items;
@@ -249,6 +260,22 @@ public sealed class PremiereService : IPremiereService
             ExceptionDispatchInfo.Capture(refreshError).Throw();
         }
 
+        if (finalUpdate is not null && forceRefresh && !finalUpdate.HasSourceErrors)
+        {
+            finalItems = await RepairAndBackfillAsync(finalItems, cancellationToken, forceRefresh);
+            finalUpdate = finalUpdate with
+            {
+                Items = finalItems,
+                TotalItemCount = finalItems.Count,
+                SourceItems = finalItems
+            };
+        }
+
+        if (finalUpdate is not null)
+        {
+            await RecordWeekDiagnosticsAsync(start, end, cacheKey, finalItems, progressHistory, cancellationToken);
+        }
+
         if (finalUpdate is not null && !finalUpdate.HasSourceErrors)
         {
             try
@@ -279,6 +306,54 @@ public sealed class PremiereService : IPremiereService
         if (finalUpdate is not null)
         {
             yield return finalUpdate;
+        }
+    }
+
+    private async Task<IReadOnlyList<PremiereItem>> RepairAndBackfillAsync(
+        IReadOnlyList<PremiereItem> items,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        var repairedItems = items;
+        if (_missingExternalIdRepairService is not null)
+        {
+            repairedItems = (await _missingExternalIdRepairService.RepairItemsAsync(
+                repairedItems,
+                cancellationToken,
+                forceRefresh)).Items;
+        }
+
+        if (_scoreBackfillService is not null)
+        {
+            repairedItems = (await _scoreBackfillService.BackfillItemsAsync(
+                repairedItems,
+                cancellationToken,
+                forceRefresh)).Items;
+        }
+
+        return repairedItems;
+    }
+
+    private async Task RecordWeekDiagnosticsAsync(
+        DateOnly start,
+        DateOnly end,
+        string cacheKey,
+        IReadOnlyList<PremiereItem> finalItems,
+        IReadOnlyList<PremiereLoadProgress> progressHistory,
+        CancellationToken cancellationToken)
+    {
+        if (_weekDiagnosticsService is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _weekDiagnosticsService.RecordAsync(start, end, cacheKey, finalItems, progressHistory, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not record week diagnostics for {StartDate} through {EndDate}.", start, end);
         }
     }
 
@@ -1089,12 +1164,18 @@ public sealed class PremiereService : IPremiereService
             .Where(source => !string.IsNullOrWhiteSpace(source.Name))
             .DistinctBy(source => $"{source.Kind}:{source.Id}:{source.Name}", StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        var contributions = items
+            .SelectMany(item => item.MergeContributions)
+            .Concat(selected.MergeContributions)
+            .DistinctBy(MergeContributionKey, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         var merged = MergeSupplementalIdentityAndScores(selected, items);
         return merged with
         {
             SourceNames = sourceNames.Length > 0 ? sourceNames : selected.SourceNames,
-            Sources = sources.Length > 0 ? sources : selected.Sources
+            Sources = sources.Length > 0 ? sources : selected.Sources,
+            MergeContributions = contributions.Length > 0 ? contributions : selected.MergeContributions
         };
     }
 
@@ -1167,13 +1248,23 @@ public sealed class PremiereService : IPremiereService
             .Where(source => !string.IsNullOrWhiteSpace(source.Name))
             .DistinctBy(source => $"{source.Kind}:{source.Id}:{source.Name}", StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        var contributions = target.MergeContributions
+            .Concat(sourceItem.MergeContributions)
+            .DistinctBy(MergeContributionKey, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         var merged = MergeSupplementalIdentityAndScores(target, [sourceItem]);
         return merged with
         {
             SourceNames = sourceNames,
-            Sources = sources
+            Sources = sources,
+            MergeContributions = contributions
         };
+    }
+
+    private static string MergeContributionKey(PremiereMergeContribution contribution)
+    {
+        return $"{contribution.Source}:{contribution.Status}:{contribution.MatchMethod}:{contribution.TmdbId}:{contribution.ImdbId}:{contribution.TvdbId}:{contribution.CandidateDate}:{contribution.ExternalProviderId}";
     }
 
     private static PremiereItem MergeSupplementalIdentityAndScores(
@@ -1463,11 +1554,17 @@ public sealed class PremiereService : IPremiereService
         int? unmappedCount = null,
         int? filteredCount = null)
     {
+        var diagnosticSourceItems = sourceItems
+            .Select(EnsureDiagnostics)
+            .ToArray();
+        var diagnosticAllItems = allItems
+            .Select(EnsureDiagnostics)
+            .ToArray();
         return new PremiereLoadProgress(
             sourceName,
-            sourceItems.Count,
-            allItems.Count,
-            allItems,
+            diagnosticSourceItems.Length,
+            diagnosticAllItems.Length,
+            diagnosticAllItems,
             isFinal,
             fromCache,
             completedWork,
@@ -1477,12 +1574,83 @@ public sealed class PremiereService : IPremiereService
         {
             ProviderKey = ProviderKeyForSource(sourceName),
             Phase = isFinal || isSourceComplete ? "complete" : fromCache ? "cache" : "loading",
-            SourceItems = sourceItems,
+            SourceItems = diagnosticSourceItems,
             HasSourceErrors = hasSourceErrors,
             FailedSourceNames = failedSourceNames ?? [],
-            UnmappedCount = unmappedCount ?? CountUnverified(sourceItems),
+            UnmappedCount = unmappedCount ?? CountUnverified(diagnosticSourceItems),
             FilteredCount = filteredCount
         };
+    }
+
+    private static PremiereItem EnsureDiagnostics(PremiereItem item)
+    {
+        var dateSemantics = item.DateSemantics ?? InferDateSemantics(item);
+        var contributions = item.MergeContributions.Length > 0
+            ? item.MergeContributions
+            : item.TmdbId > 0
+                ? [PremiereDiagnosticsFactory.TmdbContribution(item.MediaType, item.TmdbId)]
+                :
+                [
+                    new PremiereMergeContribution
+                    {
+                        Source = CoalesceText(item.ExternalProviderId, item.ExternalUrl, "External source") ?? "External source",
+                        Status = "unverified",
+                        MatchMethod = "External candidate",
+                        Reason = item.VerificationNote ?? "Could not map this candidate to TMDb.",
+                        ImdbId = item.ImdbId,
+                        TvdbId = item.TvdbId,
+                        CandidateDate = item.PremiereDate,
+                        ExternalProviderId = item.ExternalProviderId
+                    }
+                ];
+
+        return PremiereDiagnosticsFactory.ApplyMissingDataIssues(item with
+        {
+            DateSemantics = dateSemantics,
+            MergeContributions = contributions
+        });
+    }
+
+    private static PremiereDateSemantics InferDateSemantics(PremiereItem item)
+    {
+        if (item.VerificationState == PremiereVerificationState.Unverified)
+        {
+            return new PremiereDateSemantics(
+                item.PremiereDate,
+                PremiereDateSourceKind.ExternalProviderDate,
+                PremiereDataConfidence.Low,
+                "Unverified external provider date.");
+        }
+
+        if (item.Type == PremiereItemType.SeriesEpisode)
+        {
+            return new PremiereDateSemantics(
+                item.PremiereDate,
+                string.IsNullOrWhiteSpace(item.EpisodeSource)
+                    ? PremiereDateSourceKind.TmdbEpisodeAirDate
+                    : PremiereDateSourceKind.ExternalProviderDate,
+                string.IsNullOrWhiteSpace(item.EpisodeSource)
+                    ? PremiereDataConfidence.Medium
+                    : PremiereDataConfidence.High,
+                string.IsNullOrWhiteSpace(item.EpisodeSource)
+                    ? "TMDb episode air-date discovery."
+                    : $"Episode date from {item.EpisodeSource}.");
+        }
+
+        if (item.Type == PremiereItemType.SeriesPremiere)
+        {
+            return new PremiereDateSemantics(
+                item.PremiereDate,
+                PremiereDateSourceKind.TmdbFirstAirDate,
+                PremiereDataConfidence.Medium,
+                "TMDb first air date.");
+        }
+
+        return new PremiereDateSemantics(
+            item.PremiereDate,
+            PremiereDateSourceKind.TmdbMovieReleaseDate,
+            PremiereDataConfidence.Medium,
+            "TMDb movie release date.");
     }
 
     private static int CountUnverified(IEnumerable<PremiereItem> items)
@@ -2375,6 +2543,18 @@ public sealed class PremiereService : IPremiereService
             EpisodeSource = candidate.Source,
             ImdbScore = candidate.ImdbScore,
             ImdbVoteCount = candidate.ImdbVoteCount,
+            DateSemantics = new PremiereDateSemantics(
+                candidate.PremiereDate,
+                PremiereDateSourceKind.ExternalProviderDate,
+                PremiereDataConfidence.Low,
+                $"Unverified date from {candidate.Source}."),
+            MergeContributions =
+            [
+                PremiereDiagnosticsFactory.ExternalContribution(
+                    candidate,
+                    "Unmapped external candidate",
+                    "Could not resolve this external candidate to a TMDb ID.")
+            ],
             NetworkName = candidate.MediaType == PremiereMediaType.Series ? candidate.Source : null
         };
     }
@@ -2563,6 +2743,13 @@ public sealed class PremiereService : IPremiereService
             ImdbVoteCount = cachedItem.ImdbVoteCount ?? candidate.ImdbVoteCount,
             SourceNames = sourceNames,
             Sources = SourceEntriesWithCandidate(cachedItem.Sources, candidate),
+            MergeContributions = cachedItem.MergeContributions
+                .Append(PremiereDiagnosticsFactory.ExternalContribution(
+                    candidate,
+                    ExternalCandidateMatchMethod(candidate),
+                    "Reused cached TMDb-backed enrichment for this external candidate."))
+                .DistinctBy(MergeContributionKey, StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
             NetworkName = CoalesceText(candidate.Source, cachedItem.NetworkName)
         };
     }
@@ -2581,8 +2768,47 @@ public sealed class PremiereService : IPremiereService
             ImdbScore = item.ImdbScore ?? candidate.ImdbScore,
             ImdbVoteCount = item.ImdbVoteCount ?? candidate.ImdbVoteCount,
             SourceNames = SourceNamesWithCandidate(item.SourceNames, candidate),
-            Sources = SourceEntriesWithCandidate(item.Sources, candidate)
+            Sources = SourceEntriesWithCandidate(item.Sources, candidate),
+            DateSemantics = item.DateSemantics?.SourceKind == PremiereDateSourceKind.TmdbSeasonOneEpisodeOne
+                ? item.DateSemantics
+                : new PremiereDateSemantics(
+                    item.PremiereDate,
+                    PremiereDateSourceKind.ExternalProviderDate,
+                    PremiereDataConfidence.High,
+                    $"Date accepted from {candidate.Source} and mapped back to TMDb."),
+            MergeContributions = item.MergeContributions
+                .Append(PremiereDiagnosticsFactory.ExternalContribution(
+                    candidate,
+                    ExternalCandidateMatchMethod(candidate),
+                    "Merged external candidate into the TMDb-backed row."))
+                .DistinctBy(MergeContributionKey, StringComparer.OrdinalIgnoreCase)
+                .ToArray()
         };
+    }
+
+    private static string ExternalCandidateMatchMethod(ExternalPremiereCandidate candidate)
+    {
+        if (candidate.TmdbId is > 0)
+        {
+            return "TMDb ID";
+        }
+
+        if (!string.IsNullOrWhiteSpace(candidate.ImdbId))
+        {
+            return "IMDb ID";
+        }
+
+        if (candidate.TvdbId is > 0)
+        {
+            return "TVDB ID";
+        }
+
+        if (!string.IsNullOrWhiteSpace(candidate.ExternalProviderId))
+        {
+            return "Provider ID";
+        }
+
+        return "Title/date";
     }
 
     private async Task<PremiereItem> HydrateExternalCandidateRatingsAsync(
@@ -3253,6 +3479,29 @@ public sealed class PremiereService : IPremiereService
 
         var posterUrl = BuildImageUrl(_options.PosterSize, item.PosterPath);
         var backdropUrl = BuildImageUrl(_options.BackdropSize, item.BackdropPath);
+        var dateSemantics = itemType == PremiereItemType.SeriesEpisode
+            ? new PremiereDateSemantics(
+                premiereDate,
+                string.IsNullOrWhiteSpace(episodeSource)
+                    ? PremiereDateSourceKind.TmdbEpisodeAirDate
+                    : PremiereDateSourceKind.ExternalProviderDate,
+                string.IsNullOrWhiteSpace(episodeSource)
+                    ? PremiereDataConfidence.Medium
+                    : PremiereDataConfidence.High,
+                string.IsNullOrWhiteSpace(episodeSource)
+                    ? "TMDb episode air-date discovery."
+                    : $"Episode date from {episodeSource}.")
+            : new PremiereDateSemantics(
+                premiereDate,
+                premiereDateOverride is not null
+                    ? PremiereDateSourceKind.TmdbSeasonOneEpisodeOne
+                    : PremiereDateSourceKind.TmdbFirstAirDate,
+                premiereDateOverride is not null
+                    ? PremiereDataConfidence.High
+                    : PremiereDataConfidence.Medium,
+                premiereDateOverride is not null
+                    ? "Season 1 episode 1 air date from TMDb."
+                    : "TMDb first air date.");
         return new PremiereItem
         {
             CanonicalId = itemType == PremiereItemType.SeriesEpisode
@@ -3277,7 +3526,9 @@ public sealed class PremiereService : IPremiereService
             EpisodeNumber = episodeNumber,
             EpisodeSource = episodeSource,
             TmdbScore = item.VoteAverage,
-            TmdbVoteCount = item.VoteCount
+            TmdbVoteCount = item.VoteCount,
+            DateSemantics = dateSemantics,
+            MergeContributions = [PremiereDiagnosticsFactory.TmdbContribution(PremiereMediaType.Series, item.Id)]
         };
     }
 
@@ -3300,15 +3551,17 @@ public sealed class PremiereService : IPremiereService
 
     private PremiereItem? MapMovieMetadata(TmdbMovieDiscoverItem item)
     {
+        var releaseDateValue = CoalesceText(item.ReleaseDate, item.PrimaryReleaseDate);
         if (item.Id <= 0
             || string.IsNullOrWhiteSpace(item.Title)
-            || !TryParseTmdbDate(CoalesceText(item.ReleaseDate, item.PrimaryReleaseDate), out var premiereDate))
+            || !TryParseTmdbDate(releaseDateValue, out var premiereDate))
         {
             return null;
         }
 
         var posterUrl = BuildImageUrl(_options.PosterSize, item.PosterPath);
         var backdropUrl = BuildImageUrl(_options.BackdropSize, item.BackdropPath);
+        var usedReleaseDate = !string.IsNullOrWhiteSpace(item.ReleaseDate);
         return new PremiereItem
         {
             CanonicalId = PremiereIdentity.CanonicalId(PremiereMediaType.Movie, item.Id),
@@ -3327,7 +3580,13 @@ public sealed class PremiereService : IPremiereService
             OriginCountries = item.OriginCountry,
             GenreIds = item.GenreIds,
             TmdbScore = item.VoteAverage,
-            TmdbVoteCount = item.VoteCount
+            TmdbVoteCount = item.VoteCount,
+            DateSemantics = new PremiereDateSemantics(
+                premiereDate,
+                usedReleaseDate ? PremiereDateSourceKind.TmdbMovieReleaseDate : PremiereDateSourceKind.TmdbMoviePrimaryReleaseDate,
+                PremiereDataConfidence.Medium,
+                usedReleaseDate ? "TMDb movie release date." : "TMDb primary release date."),
+            MergeContributions = [PremiereDiagnosticsFactory.TmdbContribution(PremiereMediaType.Movie, item.Id)]
         };
     }
 
@@ -3447,6 +3706,12 @@ public sealed class PremiereService : IPremiereService
                 forceRefresh)
             : baseSources;
         var tmdbRuntime = details?.EpisodeRunTime.FirstOrDefault(runtime => runtime > 0);
+        var dateSemantics = BuildSeriesDateSemantics(
+            itemType,
+            premiereDate,
+            premiereDateOverride,
+            canonicalizeSeriesPremiereDate,
+            episodeSource);
 
         return new PremiereItem
         {
@@ -3491,6 +3756,8 @@ public sealed class PremiereService : IPremiereService
             RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
             RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore,
             MetacriticScore = ratings.MetacriticScore,
+            DateSemantics = dateSemantics,
+            MergeContributions = [PremiereDiagnosticsFactory.TmdbContribution(PremiereMediaType.Series, item.Id)],
             NetworkName = tvmaze.NetworkName,
             WebChannelName = tvmaze.WebChannelName,
             TvmazeAverageRuntimeMinutes = tvmaze.AverageRuntimeMinutes,
@@ -3507,9 +3774,10 @@ public sealed class PremiereService : IPremiereService
         IReadOnlyDictionary<string, PremiereItem>? cachedEnrichment = null,
         bool allowWatchmodeAvailabilityFallback = true)
     {
+        var releaseDateValue = CoalesceText(item.ReleaseDate, item.PrimaryReleaseDate);
         if (item.Id <= 0
             || string.IsNullOrWhiteSpace(item.Title)
-            || !TryParseTmdbDate(CoalesceText(item.ReleaseDate, item.PrimaryReleaseDate), out var premiereDate))
+            || !TryParseTmdbDate(releaseDateValue, out var premiereDate))
         {
             return null;
         }
@@ -3567,6 +3835,7 @@ public sealed class PremiereService : IPremiereService
             cancellationToken,
             forceRefresh);
         var sources = await sourcesTask;
+        var usedReleaseDate = !string.IsNullOrWhiteSpace(item.ReleaseDate);
 
         return new PremiereItem
         {
@@ -3602,8 +3871,52 @@ public sealed class PremiereService : IPremiereService
             ImdbVoteCount = ratings.ImdbVoteCount,
             RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
             RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore,
-            MetacriticScore = ratings.MetacriticScore
+            MetacriticScore = ratings.MetacriticScore,
+            DateSemantics = new PremiereDateSemantics(
+                premiereDate,
+                usedReleaseDate ? PremiereDateSourceKind.TmdbMovieReleaseDate : PremiereDateSourceKind.TmdbMoviePrimaryReleaseDate,
+                PremiereDataConfidence.Medium,
+                usedReleaseDate ? "TMDb movie release date." : "TMDb primary release date."),
+            MergeContributions = [PremiereDiagnosticsFactory.TmdbContribution(PremiereMediaType.Movie, item.Id)]
         };
+    }
+
+    private static PremiereDateSemantics BuildSeriesDateSemantics(
+        PremiereItemType itemType,
+        DateOnly premiereDate,
+        DateOnly? premiereDateOverride,
+        bool canonicalizedSeasonOneEpisodeOne,
+        string? episodeSource)
+    {
+        if (itemType == PremiereItemType.SeriesEpisode)
+        {
+            return new PremiereDateSemantics(
+                premiereDate,
+                string.IsNullOrWhiteSpace(episodeSource)
+                    ? PremiereDateSourceKind.TmdbEpisodeAirDate
+                    : PremiereDateSourceKind.ExternalProviderDate,
+                string.IsNullOrWhiteSpace(episodeSource)
+                    ? PremiereDataConfidence.Medium
+                    : PremiereDataConfidence.High,
+                string.IsNullOrWhiteSpace(episodeSource)
+                    ? "TMDb episode air-date discovery."
+                    : $"Episode date from {episodeSource}.");
+        }
+
+        if (canonicalizedSeasonOneEpisodeOne || premiereDateOverride is not null)
+        {
+            return new PremiereDateSemantics(
+                premiereDate,
+                PremiereDateSourceKind.TmdbSeasonOneEpisodeOne,
+                PremiereDataConfidence.High,
+                "Season 1 episode 1 air date from TMDb.");
+        }
+
+        return new PremiereDateSemantics(
+            premiereDate,
+            PremiereDateSourceKind.TmdbFirstAirDate,
+            PremiereDataConfidence.Medium,
+            "TMDb first air date.");
     }
 
     private async Task<TmdbDetailsWithExtras?> TryGetDetailsAsync(

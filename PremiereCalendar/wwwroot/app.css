@@ -875,6 +875,27 @@ h1:focus {
     background: var(--surface);
 }
 
+.mobile-filter-review {
+    display: none;
+    gap: 0.25rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-strong);
+}
+
+.mobile-filter-review strong {
+    color: var(--ink);
+    font-size: 0.86rem;
+}
+
+.mobile-filter-review span,
+.mobile-filter-review small {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
 .filter-pane-footer {
     border-top: 1px solid var(--line);
 }
@@ -2017,6 +2038,68 @@ h1:focus {
     font-weight: 800;
 }
 
+.provenance-section {
+    display: grid;
+    gap: 0.35rem;
+    margin-top: 0.55rem;
+    padding: 0.55rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-strong);
+}
+
+.provenance-section h4 {
+    margin: 0;
+    color: var(--ink);
+    font-size: 0.78rem;
+    font-weight: 850;
+}
+
+.provenance-section p {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.5rem;
+    align-items: baseline;
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+}
+
+.merge-contribution-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+}
+
+.merge-contribution-list span {
+    display: inline-flex;
+    gap: 0.28rem;
+    align-items: center;
+    padding: 0.22rem 0.42rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 0.74rem;
+    font-weight: 800;
+}
+
+.merge-contribution-list em {
+    color: var(--muted);
+    font-style: normal;
+    font-weight: 700;
+}
+
+.missing-data-list {
+    display: grid;
+    gap: 0.25rem;
+    margin: 0;
+    padding-left: 1rem;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.35;
+}
+
 .source-tags span {
     background: var(--amber-soft);
     color: #8a5620;
@@ -2383,6 +2466,22 @@ html[data-theme="dark"] .links span {
     align-items: flex-start;
 }
 
+.source-health-panel .status-mini-heading {
+    align-items: stretch;
+    flex-direction: column;
+}
+
+.source-health-panel .settings-action-row.compact {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    width: 100%;
+}
+
+.source-health-panel .settings-action-row.compact .tool-button {
+    justify-content: center;
+}
+
 .application-update-block {
     display: grid;
     gap: 0.45rem;
@@ -2398,29 +2497,65 @@ html[data-theme="dark"] .links span {
     color: #a33a3a;
 }
 
+.update-evidence {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+}
+
+.update-evidence span {
+    padding: 0.18rem 0.38rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 800;
+}
+
+.update-log-tail pre {
+    max-height: 11rem;
+    overflow: auto;
+    margin: 0.35rem 0 0;
+    padding: 0.5rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 0.72rem;
+    white-space: pre-wrap;
+}
+
 .cache-inspector-list,
-.cache-inspector-row {
+.cache-inspector-row,
+.source-health-list,
+.source-health-row {
     display: grid;
     gap: 0.35rem;
 }
 
-.cache-inspector-row {
+.cache-inspector-row,
+.source-health-row {
     padding-bottom: 0.45rem;
     border-bottom: 1px solid var(--line);
 }
 
-.cache-inspector-row:last-child {
+.cache-inspector-row:last-child,
+.source-health-row:last-child {
     padding-bottom: 0;
     border-bottom: 0;
 }
 
-.cache-inspector-row strong {
+.cache-inspector-row strong,
+.source-health-row strong {
     color: var(--ink);
     font-size: 0.84rem;
 }
 
 .cache-inspector-row span,
 .cache-inspector-row small,
+.source-health-row span,
+.source-health-row small,
 .job-timeline small {
     color: var(--muted);
     font-size: 0.76rem;
@@ -3031,6 +3166,10 @@ html[data-theme="dark"] .source-status-item strong.inactive {
 }
 
 @media (max-width: 700px) {
+    .mobile-filter-review {
+        display: grid;
+    }
+
     html {
         --page-x: 1.25rem;
         --card-grid-gap: 0.9rem;
@@ -3447,8 +3586,10 @@ html[data-theme="dark"] .source-status-item strong.inactive {
     }
 
     .settings-actions.sticky {
-        top: 6rem;
+        position: static;
+        top: auto;
         width: 100%;
+        margin: 0 0 0.75rem;
         justify-content: space-between;
     }
 

@@ -1013,10 +1013,14 @@ public sealed class PremiereServiceTests
         Assert.Equal("tv:601", show.CanonicalId);
         Assert.Equal("tt0000601", show.ImdbId);
         Assert.Equal(9601, show.TvdbId);
+        Assert.Contains(show.MergeContributions, contribution => contribution.Source == "TMDb");
+        Assert.Contains(show.MergeContributions, contribution => contribution.Source == "Trakt" && contribution.MatchMethod == "TMDb ID");
 
         var movie = Assert.Single(items, item => item.MediaType == PremiereMediaType.Movie);
         Assert.Equal("movie:701", movie.CanonicalId);
         Assert.Equal("tt0000701", movie.ImdbId);
+        Assert.Contains(movie.MergeContributions, contribution => contribution.Source == "TMDb");
+        Assert.Contains(movie.MergeContributions, contribution => contribution.Source == "Trakt" && contribution.MatchMethod == "TMDb ID");
     }
 
     [Fact]
@@ -1105,6 +1109,11 @@ public sealed class PremiereServiceTests
         Assert.Equal("External Shifted Premiere", item.Title);
         Assert.Equal(new DateOnly(2026, 5, 28), item.PremiereDate);
         Assert.Equal(PremiereItemType.SeriesPremiere, item.Type);
+        Assert.NotNull(item.DateSemantics);
+        Assert.Equal(PremiereDateSourceKind.TmdbSeasonOneEpisodeOne, item.DateSemantics.SourceKind);
+        Assert.Equal(PremiereDataConfidence.High, item.DateSemantics.Confidence);
+        Assert.Contains("Season 1 episode 1", item.DateSemantics.Reason);
+        Assert.Contains(item.MergeContributions, contribution => contribution.Source == "Simkl");
     }
 
     [Fact]

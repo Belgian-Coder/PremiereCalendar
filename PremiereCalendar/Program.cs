@@ -204,6 +204,9 @@ builder.Services.AddSingleton<IIntegrationSettingsStore, SqliteIntegrationSettin
 builder.Services.AddSingleton<IAppStateStore, SqliteAppStateStore>();
 builder.Services.AddSingleton<CacheInspectorService>();
 builder.Services.AddSingleton<BackgroundJobTimelineService>();
+builder.Services.AddSingleton<IWeekDiagnosticsStore, AppStateWeekDiagnosticsStore>();
+builder.Services.AddSingleton<WeekDiagnosticsService>();
+builder.Services.AddSingleton<SourceHealthService>();
 builder.Services.AddSingleton<CalendarPresetService>();
 builder.Services.AddSingleton<CalendarVisitChangeService>();
 builder.Services.AddSingleton<SettingsBackupService>();
@@ -231,6 +234,9 @@ builder.Services.AddSingleton<IFilterCatalogService, TmdbFilterCatalogService>()
 builder.Services.AddSingleton<TmdbRequestLimiter>();
 builder.Services.AddSingleton<TrailerSelector>();
 builder.Services.AddSingleton<RatingMapper>();
+builder.Services.AddSingleton<ScoreBackfillService>();
+builder.Services.AddSingleton<MissingExternalIdRepairService>();
+builder.Services.AddSingleton<CalendarDataMaintenanceService>();
 builder.Services.AddSingleton<IArtworkProvider, FanartArtworkProvider>();
 builder.Services.AddSingleton<IArtworkProvider, TvmazeArtworkProvider>();
 builder.Services.AddSingleton<IArtworkProvider, TheTvdbArtworkProvider>();

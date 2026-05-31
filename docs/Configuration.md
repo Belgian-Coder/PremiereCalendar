@@ -92,12 +92,16 @@ Settings includes a guarded `GitHub source update` action for source-tree instal
   "Branch": "main",
   "InstallScriptPath": "Install-PremiereCalendar.ps1",
   "UpdateScriptPath": "deploy/Update-And-Install-PremiereCalendar.ps1",
+  "TargetDirectory": "D:\\Apps\\PremiereCalendar",
+  "BackupDirectory": "D:\\Apps\\PremiereCalendar\\App_Data\\backups\\application-updates",
+  "HealthUrl": "http://localhost:5298/health",
+  "RollbackOnFailure": true,
   "LogDirectory": "App_Data/logs/application-updates",
   "PowerShellPath": "powershell.exe"
 }
 ```
 
-The updater starts a detached PowerShell process, fetches the configured remote branch, refuses dirty working trees, refuses non-fast-forward branch divergence, runs `git pull --ff-only`, then calls the existing install wrapper with `-NoElevate`. It does not run `git reset`, does not accept arbitrary shell commands from the UI, and writes attempt logs under `ApplicationUpdate:LogDirectory`.
+The updater starts a detached PowerShell process, fetches the configured remote branch, refuses dirty working trees, refuses non-fast-forward branch divergence, creates a pre-update snapshot of installed `App_Data`, runs `git pull --ff-only`, then calls the existing install wrapper with `-NoElevate`. It does not accept arbitrary shell commands from the UI and writes attempt logs under `ApplicationUpdate:LogDirectory`. Rollback can run `git reset --hard <previousHead>` only after the script has already proved the repository was clean before starting; it then restores the `App_Data` snapshot, reinstalls, and health-checks the previous version.
 
 ## Sonarr And Radarr
 

@@ -118,6 +118,64 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         }
     }
 
+    public async Task<IReadOnlyList<ProviderCacheState>> GetRecentAsync(int take, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureInitializedAsync(cancellationToken);
+            await using var connection = CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark, ItemCount, MetadataJson
+                FROM ProviderCacheState
+                ORDER BY LastCheckedUtc DESC
+                LIMIT $take
+                """;
+            command.Parameters.AddWithValue("$take", Math.Clamp(take, 1, 500));
+            return await ReadStatesAsync(command, cancellationToken);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(
+        string provider,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(provider))
+        {
+            return [];
+        }
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureInitializedAsync(cancellationToken);
+            await using var connection = CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark, ItemCount, MetadataJson
+                FROM ProviderCacheState
+                WHERE Provider = $provider
+                ORDER BY LastCheckedUtc DESC
+                LIMIT $take
+                """;
+            command.Parameters.AddWithValue("$provider", Normalize(provider));
+            command.Parameters.AddWithValue("$take", Math.Clamp(take, 1, 500));
+            return await ReadStatesAsync(command, cancellationToken);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task SaveManyAsync(IEnumerable<ProviderCacheState> states, CancellationToken cancellationToken)
     {
         var validStates = states
@@ -267,6 +325,20 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             EmptyToNull(reader.GetString(5)),
             reader.IsDBNull(6) ? null : reader.GetInt32(6),
             EmptyToNull(reader.GetString(7)));
+    }
+
+    private static async Task<IReadOnlyList<ProviderCacheState>> ReadStatesAsync(
+        SqliteCommand command,
+        CancellationToken cancellationToken)
+    {
+        var states = new List<ProviderCacheState>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            states.Add(ReadState(reader));
+        }
+
+        return states;
     }
 
     private static DateTimeOffset? ParseDate(string value)

@@ -33,6 +33,15 @@
         </header>
 
         <div class="filter-pane-body">
+            <section class="mobile-filter-review" data-testid="mobile-filter-review" aria-label="Active filter review">
+                <strong>Active filters</strong>
+                <span>@MobileFilterCountText()</span>
+                @if (MobileFilterSummary().Length > 0)
+                {
+                    <small>@string.Join(" · ", MobileFilterSummary())</small>
+                }
+            </section>
+
             <div class="filter-section">
                 <h3>Sort</h3>
                 <label>
@@ -247,6 +256,57 @@
         }
 
         return filters.ShowMovies ? "Movies" : "None";
+    }
+
+    private string MobileFilterCountText()
+    {
+        var count = MobileFilterSummary().Length;
+        return count == 1 ? "1 filter" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} filters";
+    }
+
+    private string[] MobileFilterSummary()
+    {
+        var summary = new List<string>();
+        if (PageMode == CalendarPageMode.All && (!_draftFilters.ShowSeries || !_draftFilters.ShowMovies))
+        {
+            summary.Add(MediaSummary(_draftFilters));
+        }
+
+        if (PageMode is CalendarPageMode.All or CalendarPageMode.Series
+            && _draftFilters.SeriesFilters.SeriesDateMode == SeriesDateMode.NewSeriesOnly)
+        {
+            summary.Add("New only");
+        }
+
+        if (PageMode is CalendarPageMode.All or CalendarPageMode.Series
+            && _draftFilters.SeriesFilters.OriginalLanguages.Count > 0)
+        {
+            summary.Add(string.Join(", ", _draftFilters.SeriesFilters.OriginalLanguages.Select(static language => language.Trim().ToUpperInvariant())));
+        }
+
+        if (PageMode is CalendarPageMode.All or CalendarPageMode.Movies
+            && _draftFilters.MovieFilters.OriginalLanguages.Count > 0)
+        {
+            summary.Add(string.Join(", ", _draftFilters.MovieFilters.OriginalLanguages.Select(static language => language.Trim().ToUpperInvariant())));
+        }
+
+        if (PageMode is CalendarPageMode.All or CalendarPageMode.Movies
+            && _draftFilters.MovieFilters.RuntimeMinMinutes > 0)
+        {
+            summary.Add($"Runtime >= {_draftFilters.MovieFilters.RuntimeMinMinutes.ToString("N0", CultureInfo.InvariantCulture)} min");
+        }
+
+        if (_draftFilters.MinScore > 0 || _draftFilters.MaxScore < 10)
+        {
+            summary.Add("Score range");
+        }
+
+        if (_draftFilters.MinVoteCount > 0)
+        {
+            summary.Add("Minimum votes");
+        }
+
+        return summary.ToArray();
     }
 
     private string DraftSummaryText()

@@ -22,6 +22,7 @@ Unit tests cover pure behavior:
 - Belgium-origin language-free discovery, Belgian TV network discovery, and optional source-region ordering.
 - French-language and Belgium-origin local filtering.
 - View-sync URL validation, device grouping, latest URL persistence, and duplicate publish suppression.
+- Item diagnostics for date semantics, merge contributions, missing-data reasons, source anomalies, score backfill, missing-ID repair, source health, and update evidence.
 
 Integration tests cover service and HTTP behavior with fake handlers:
 
@@ -43,6 +44,7 @@ Integration tests cover service and HTTP behavior with fake handlers:
 - TVmaze global web-schedule discovery behavior.
 - Fanart.tv movie and TV artwork parsing.
 - Trakt movie and new-show calendar parsing.
+- Trakt, TVmaze, and SIMKL merge candidates mapping to existing and new TMDb items without losing source attribution.
 - Trakt no-client-ID skip behavior.
 - Watchmode availability fallback parsing.
 - SIMKL OAuth PIN exchange and sync-state behavior without live polling.
@@ -59,6 +61,7 @@ Component tests cover Blazor rendering:
 
 - Seven day buttons, one mounted selected day, empty-day states, selected-day switching, dense-day `Virtualize` rendering, and the 10-card incremental path for smaller days.
 - Premiere card metadata, provider/channel source chips, data provenance tags, scores, and trailer link behavior.
+- Premiere card provenance details, including date confidence, merge inspector, and missing-data reasons.
 - Premiere card render fingerprinting for unchanged inputs and score/image state changes.
 - Calendar day render fingerprinting for unchanged day inputs and score/image state changes.
 - Separate YouTube trailer search links on every card.
@@ -70,6 +73,8 @@ Component tests cover Blazor rendering:
 - Adjacent-week prefetch trigger after visible week load.
 - Incremental loaded-source display while source batches report progress.
 - View sync Settings controls, explicit URL publishing, route-specific plain URL takeover, and same-route live-follow navigation.
+- Settings source health, score backfill, missing-ID repair, update evidence, and rollback configuration rendering.
+- Mobile filter drawer review text without reintroducing noisy header filter chips.
 
 ## Run
 
@@ -98,6 +103,10 @@ After configuring real secrets, run the app and verify:
 - OMDb scores appear only when enabled and available.
 - Provider/channel source chips appear when TMDb or TVmaze returns source data.
 - Missing scores display as `n/a`, never as zero.
+- Card provenance explains the date source and missing score or ID reasons.
+- Settings source health lists provider cache state, OMDb state, IMDb state, and recent background jobs.
+- Settings backfill and repair actions complete without changing unrelated weeks.
+- GitHub source update evidence shows current/remote commits, dirty state, latest log tail, and the latest backup path.
 
 ## Browser Performance Checks
 
@@ -132,3 +141,10 @@ Additional deployed Playwright validation on 2026-05-19 after filter URL and vie
 - Mobile `390x844` `/series?week=2026-05-11&day=2026-05-17&seriesScope=new&seriesLang=en,nl` rendered badge `2`, no horizontal overflow, and no console errors.
 - Post-deploy health check returned `200 Healthy`; the Windows Service was `Running` with `Automatic` start type.
 - Regression tests now cover view-sync overview failures so optional sync storage issues do not break Calendar or Settings rendering.
+
+Current automated validation on 2026-05-31 after data-trust diagnostics:
+
+- `dotnet test PremiereCalendar.slnx --no-restore` passed 518 tests.
+- New tests cover date semantics, source merge attribution, anomaly detection, score backfill, missing external-ID repair, source health, update evidence, rollback script behavior, provenance rendering, Settings diagnostics, and mobile filter review.
+- Deployed Playwright validation covered desktop `1440x1000` All, Series, Movies, card provenance, Settings diagnostics, command palette, and filter drawer, plus iPhone `390x844` Series, Movies, card provenance, Settings diagnostics, source health, and filter drawer.
+- Browser validation reported no console warnings or errors, no horizontal overflow, no visible command clipping, filter panes within the viewport, and two-column desktop card grids.

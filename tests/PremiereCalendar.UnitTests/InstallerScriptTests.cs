@@ -95,7 +95,10 @@ public sealed class InstallerScriptTests
         Assert.Contains("merge-base --is-ancestor HEAD $remoteRef", script, StringComparison.Ordinal);
         Assert.Contains("pull --ff-only $Remote $Branch", script, StringComparison.Ordinal);
         Assert.Contains("Install-PremiereCalendar.ps1", script, StringComparison.Ordinal);
-        Assert.DoesNotContain("reset --hard", script, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Backup snapshot:", script, StringComparison.Ordinal);
+        Assert.Contains("Test-ApplicationHealth -Uri $HealthUrl", script, StringComparison.Ordinal);
+        Assert.Contains("reset --hard $previousHead", script, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Rollback completed to $previousHead", script, StringComparison.Ordinal);
         Assert.DoesNotContain("checkout --", script, StringComparison.OrdinalIgnoreCase);
     }
 

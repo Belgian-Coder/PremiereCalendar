@@ -17,4 +17,12 @@ public sealed class ApplicationUpdateOptions
     public string LogDirectory { get; set; } = "App_Data/logs/application-updates";
 
     public string PowerShellPath { get; set; } = "powershell.exe";
+
+    public string TargetDirectory { get; set; } = "D:\\Apps\\PremiereCalendar";
+
+    public string BackupDirectory { get; set; } = "D:\\Apps\\PremiereCalendar\\App_Data\\backups\\application-updates";
+
+    public string HealthUrl { get; set; } = "http://localhost:5298/health";
+
+    public bool RollbackOnFailure { get; set; } = true;
 }

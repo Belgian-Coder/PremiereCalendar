@@ -107,6 +107,50 @@
 
         <details class="source-details">
             <summary>Provenance</summary>
+            @if (Item.DateSemantics is not null)
+            {
+                <section class="provenance-section" aria-label="Data confidence">
+                    <h4>Data confidence</h4>
+                    <p>
+                        <strong>@FormatDateSource(Item.DateSemantics.SourceKind)</strong>
+                        <span>@FormatConfidence(Item.DateSemantics.Confidence)</span>
+                        <small>@Item.DateSemantics.Reason</small>
+                    </p>
+                </section>
+            }
+
+            @if (Item.MergeContributions.Length > 0)
+            {
+                <section class="provenance-section" aria-label="Merge inspector">
+                    <h4>Merge inspector</h4>
+                    <div class="merge-contribution-list">
+                        @foreach (var contribution in Item.MergeContributions)
+                        {
+                            <span title="@MergeContributionTitle(contribution)">
+                                <strong>@contribution.Source</strong>
+                                @if (!string.IsNullOrWhiteSpace(contribution.MatchMethod))
+                                {
+                                    <em>@contribution.MatchMethod</em>
+                                }
+                            </span>
+                        }
+                    </div>
+                </section>
+            }
+
+            @if (Item.MissingDataIssues.Length > 0)
+            {
+                <section class="provenance-section" aria-label="Missing data">
+                    <h4>Missing data</h4>
+                    <ul class="missing-data-list">
+                        @foreach (var issue in Item.MissingDataIssues.Take(6))
+                        {
+                            <li>@issue.Message</li>
+                        }
+                    </ul>
+                </section>
+            }
+
             <div class="source-tags" aria-label="Sources">
                 @if (!IsUnverified)
                 {
@@ -362,6 +406,47 @@
         return runtimeMinutes is > 0 ? $"{runtimeMinutes} min" : "runtime n/a";
     }
 
+    private static string FormatDateSource(PremiereDateSourceKind sourceKind)
+    {
+        return sourceKind switch
+        {
+            PremiereDateSourceKind.TmdbSeasonOneEpisodeOne => "Season 1 episode 1",
+            PremiereDateSourceKind.TmdbEpisodeAirDate => "Episode air date",
+            PremiereDateSourceKind.TmdbFirstAirDate => "TMDb first air date",
+            PremiereDateSourceKind.TmdbMovieReleaseDate => "TMDb release date",
+            PremiereDateSourceKind.TmdbMoviePrimaryReleaseDate => "TMDb primary release date",
+            PremiereDateSourceKind.ExternalProviderDate => "External provider date",
+            PremiereDateSourceKind.Cache => "Cached date",
+            _ => "Unknown date source"
+        };
+    }
+
+    private static string FormatConfidence(PremiereDataConfidence confidence)
+    {
+        return confidence switch
+        {
+            PremiereDataConfidence.High => "high confidence",
+            PremiereDataConfidence.Medium => "medium confidence",
+            _ => "low confidence"
+        };
+    }
+
+    private static string MergeContributionTitle(PremiereMergeContribution contribution)
+    {
+        var ids = new[]
+            {
+                contribution.TmdbId is > 0 ? $"TMDb {contribution.TmdbId}" : null,
+                !string.IsNullOrWhiteSpace(contribution.ImdbId) ? $"IMDb {contribution.ImdbId}" : null,
+                contribution.TvdbId is > 0 ? $"TVDB {contribution.TvdbId}" : null,
+                !string.IsNullOrWhiteSpace(contribution.ExternalProviderId) ? $"Provider {contribution.ExternalProviderId}" : null
+            }
+            .Where(value => !string.IsNullOrWhiteSpace(value));
+        var idText = string.Join(", ", ids);
+        return string.IsNullOrWhiteSpace(idText)
+            ? contribution.Reason
+            : $"{contribution.Reason} ({idText})";
+    }
+
     private static string Initials(string title)
     {
         var letters = title
@@ -431,6 +516,11 @@
         Append(builder, Item.OriginCountries);
         Append(builder, Item.SourceNames);
         Append(builder, Item.Genres);
+        Append(builder, Item.DateSemantics?.SourceKind);
+        Append(builder, Item.DateSemantics?.Confidence);
+        Append(builder, Item.DateSemantics?.Reason);
+        Append(builder, Item.MergeContributions.Select(MergeContributionTitle));
+        Append(builder, Item.MissingDataIssues.Select(issue => issue.Message));
         return builder.ToString();
     }
 

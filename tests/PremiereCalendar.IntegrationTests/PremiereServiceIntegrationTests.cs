@@ -44,6 +44,8 @@ public sealed class PremiereServiceIntegrationTests
         Assert.Equal("HBO", series.NetworkName);
         Assert.Contains("HBO", series.SourceNames);
         Assert.Contains("VTM GO", series.SourceNames);
+        Assert.Equal(PremiereDateSourceKind.TmdbSeasonOneEpisodeOne, series.DateSemantics?.SourceKind);
+        Assert.Contains(series.MergeContributions, contribution => contribution.Source == "TMDb");
         Assert.Equal(8.6, series.TvmazeRating);
         Assert.Equal("https://www.tvmaze.com/shows/82/game-of-thrones", series.TvmazeUrl);
 
@@ -59,6 +61,9 @@ public sealed class PremiereServiceIntegrationTests
         Assert.Null(movie.RottenTomatoesScore);
         Assert.Contains("Netflix", movie.SourceNames);
         Assert.Contains("Apple TV", movie.SourceNames);
+        Assert.Equal(PremiereDateSourceKind.TmdbMovieReleaseDate, movie.DateSemantics?.SourceKind);
+        Assert.Contains(movie.MergeContributions, contribution => contribution.Source == "TMDb");
+        Assert.Contains(movie.MissingDataIssues, issue => issue.Kind == "score.rotten-tomatoes");
 
         Assert.Contains(tmdbHandler.Requests, request => request.Uri.AbsolutePath.EndsWith("/discover/tv"));
         Assert.Contains(tmdbHandler.Requests, request =>
@@ -330,6 +335,23 @@ public sealed class PremiereServiceIntegrationTests
         if (path.EndsWith("/tv/100"))
         {
             return StubHttpMessageHandler.Json(Fixture.Read("tmdb/tv-details-with-videos.json"));
+        }
+
+        if (path.EndsWith("/tv/100/season/1"))
+        {
+            return StubHttpMessageHandler.Json(
+                """
+                {
+                  "episodes": [
+                    {
+                      "season_number": 1,
+                      "episode_number": 1,
+                      "air_date": "2026-05-04",
+                      "name": "Pilot"
+                    }
+                  ]
+                }
+                """);
         }
 
         if (path.EndsWith("/movie/200"))

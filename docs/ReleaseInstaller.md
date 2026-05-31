@@ -91,6 +91,8 @@ The installer stops the service, replaces the installed binaries, preserves `C:\
 
 If an older install has an in-place `App_Data` folder under the binary directory, the installer excludes that folder from the mirror copy so upgrades do not delete it.
 
+Source-tree installs can also be updated from Settings with `GitHub source update`. That path fetches the configured branch, refuses dirty or non-fast-forward repositories, snapshots installed `App_Data`, installs the fast-forwarded source, health-checks the service, and automatically restores the previous commit plus data snapshot when install or health validation fails.
+
 Rotate source API tokens in the app Settings page, then click Save.
 
 ## Custom Port Or Paths

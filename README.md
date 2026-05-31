@@ -7,6 +7,7 @@ Use it to:
 - Browse new movies and series.
 - Filter by language, provider, score, runtime, and more.
 - See where each card came from.
+- Inspect why a date, source, score, or external ID is missing.
 - Add verified movies to Radarr and verified series to Sonarr, if you use those apps.
 
 TMDb is required for live data. Everything else is optional.
@@ -102,6 +103,7 @@ To build and install the service from the source tree:
 | Open Actions | Press Ctrl+K, or Cmd+K on macOS |
 | Close Actions | Press Escape |
 | Change filters | Click the filter button; a small badge shows how many filters are active |
+| Review active mobile filters | Open the filter button; the compact review is at the top of the pane |
 | Change settings | Click the cog icon |
 
 The arrow keys do not take over while you are typing in a text box.
@@ -129,6 +131,7 @@ All, Series, and Movies keep separate synced views. A browser on Series follows 
 - Unverified cards are shown below normal cards when an outside source found something that does not match TMDb yet.
 - `Source` chips show provider, channel, or streaming source names when known.
 - Scores can be `n/a` when the score provider has no data or is not configured.
+- Open the provenance details on a card to see date confidence, source merge contributions, matched IDs, and missing-data reasons.
 
 ## Providers
 
@@ -150,7 +153,7 @@ The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync grou
 
 Use Update when you want to reuse fresh local cache where possible. Use Refresh sources when you want the visible week checked against providers again. Refresh sources keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 
-Settings includes a Local status center with a cache inspector, background job timeline, release/update checker, and settings backup/restore box. The release checker only reports available GitHub releases; it never installs updates silently.
+Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker, settings backup/restore box, score backfill, and missing-ID repair. Source-tree installs can also run a guarded GitHub source update from Settings. That update path creates a pre-update data snapshot, records commit/log evidence, health-checks the installed app, and rolls back automatically when the install or health check fails.
 
 ## Common Problems
 
@@ -158,7 +161,8 @@ Settings includes a Local status center with a cache inspector, background job t
 | --- | --- |
 | No cards load | Add a TMDb token in Settings, then click Refresh sources |
 | IMDb scores are missing | Wait for the IMDb dataset import to finish, then click Refresh sources |
-| Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key; OMDb free keys can hit daily limits |
+| Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key, then use Settings > Backfill scores |
+| IMDb/TVDB IDs are missing | Use Settings > Repair IDs after TMDb is configured |
 | A source looks slow | Open Settings and check the Local status background job timeline |
 | TVmaze is slow | Use narrower filters or disable TVmaze schedule discovery in Settings |
 | Settings look wrong | Change them in the app Settings page, not in `appsettings.json` |

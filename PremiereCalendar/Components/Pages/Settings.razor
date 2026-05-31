@@ -9,6 +9,8 @@
 @inject IViewSyncService ViewSyncService
 @inject CacheInspectorService CacheInspector
 @inject BackgroundJobTimelineService BackgroundJobTimeline
+@inject SourceHealthService SourceHealthService
+@inject CalendarDataMaintenanceService DataMaintenanceService
 @inject ReleaseUpdateService ReleaseUpdateService
 @inject SettingsBackupService SettingsBackupService
 @inject IApplicationUpdateService ApplicationUpdateService
@@ -112,6 +114,65 @@
                             }
                         </section>
 
+                        <section class="status-mini-panel source-health-panel" aria-label="Source health drilldown" data-testid="source-health-drilldown">
+                            <div class="status-mini-heading">
+                                <strong>Source health</strong>
+                                <div class="settings-action-row compact">
+                                    <button class="tool-button settings-secondary"
+                                            type="button"
+                                            title="Backfill missing scores in recent cached weeks"
+                                            @onclick="BackfillScoresAsync"
+                                            disabled="@_isBackfillingScores">
+                                        @(_isBackfillingScores ? "Backfilling..." : "Backfill scores")
+                                    </button>
+                                    <button class="tool-button settings-secondary"
+                                            type="button"
+                                            title="Repair missing external IDs in recent cached weeks"
+                                            @onclick="RepairExternalIdsAsync"
+                                            disabled="@_isRepairingExternalIds">
+                                        @(_isRepairingExternalIds ? "Repairing..." : "Repair IDs")
+                                    </button>
+                                </div>
+                            </div>
+                            @if (_sourceHealth is null)
+                            {
+                                <p class="settings-help">Source health is not loaded yet.</p>
+                            }
+                            else
+                            {
+                                <div class="source-health-list">
+                                    @foreach (var provider in _sourceHealth.Providers.Take(6))
+                                    {
+                                        <div class="source-health-row">
+                                            <strong>@provider.Provider</strong>
+                                            <span>@provider.Scope · @provider.Key</span>
+                                            <small>@FormatLocalTimestamp(provider.LastCheckedUtc) · @(provider.ItemCount is { } itemCount ? $"{itemCount.ToString("N0", CultureInfo.InvariantCulture)} items" : provider.Watermark ?? "no count")</small>
+                                        </div>
+                                    }
+                                    @if (_sourceHealth.Omdb is { } omdb)
+                                    {
+                                        <div class="source-health-row">
+                                            <strong>OMDb</strong>
+                                            <span>@(string.IsNullOrWhiteSpace(omdb.LastError) ? "No recent error" : omdb.LastError)</span>
+                                            <small>@(omdb.RateLimitedUntilUtc is { } limited ? $"Rate limited until {FormatLocalTimestamp(limited)}" : "No active rate limit")</small>
+                                        </div>
+                                    }
+                                    @if (_sourceHealth.ImdbDataset is { } imdb)
+                                    {
+                                        <div class="source-health-row">
+                                            <strong>IMDb dataset</strong>
+                                            <span>@imdb.RatingCount.ToString("N0", CultureInfo.InvariantCulture) ratings</span>
+                                            <small>@(imdb.LastImportedUtc is { } imported ? $"Imported {FormatLocalTimestamp(imported)}" : imdb.LastError ?? "Not imported yet")</small>
+                                        </div>
+                                    }
+                                </div>
+                                @if (_maintenanceResult is not null)
+                                {
+                                    <p class="settings-help" data-testid="data-maintenance-result">@_maintenanceResult</p>
+                                }
+                            }
+                        </section>
+
                         <section class="status-mini-panel update-panel" aria-label="Release updates">
                             <div class="status-mini-heading">
                                 <strong>Release/update checker</strong>
@@ -159,6 +220,29 @@
                                 <p class="settings-help" data-testid="application-update-status">
                                     @ApplicationUpdateStatusText()
                                 </p>
+                                @if (_applicationUpdateStatus is { } updateStatus)
+                                {
+                                    <div class="update-evidence" data-testid="application-update-evidence">
+                                        <span>Current @ShortCommit(updateStatus.CurrentCommit)</span>
+                                        <span>Remote @ShortCommit(updateStatus.RemoteCommit)</span>
+                                        <span>@RepositoryStateText(updateStatus)</span>
+                                        @if (!string.IsNullOrWhiteSpace(updateStatus.LastResult))
+                                        {
+                                            <span>Last result @updateStatus.LastResult</span>
+                                        }
+                                        @if (!string.IsNullOrWhiteSpace(updateStatus.LastBackupPath))
+                                        {
+                                            <span>Backup @Path.GetFileName(updateStatus.LastBackupPath)</span>
+                                        }
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(updateStatus.LatestLogTail))
+                                    {
+                                        <details class="update-log-tail">
+                                            <summary>Latest update log</summary>
+                                            <pre>@updateStatus.LatestLogTail</pre>
+                                        </details>
+                                    }
+                                }
                                 @if (_applicationUpdateResult is not null)
                                 {
                                     <p class="@ApplicationUpdateResultClass" data-testid="application-update-result">
@@ -852,11 +936,15 @@
     private IReadOnlyList<ViewSyncGroupOverview> _viewSyncGroupOverviews = [];
     private CacheInspectorSummary? _cacheSummary;
     private IReadOnlyList<BackgroundJobEvent> _jobEvents = [];
+    private SourceHealthOverview? _sourceHealth;
     private ReleaseUpdateResult? _releaseResult;
     private bool _isCheckingRelease;
     private ApplicationUpdateStatus? _applicationUpdateStatus;
     private ApplicationUpdateStartResult? _applicationUpdateResult;
     private bool _isStartingApplicationUpdate;
+    private bool _isBackfillingScores;
+    private bool _isRepairingExternalIds;
+    private string? _maintenanceResult;
     private string _backupJson = "";
     private bool _includeBackupSecrets;
 
@@ -1096,6 +1184,7 @@
         {
             _cacheSummary = CacheInspector.GetSummary();
             _jobEvents = await BackgroundJobTimeline.GetRecentAsync(_disposeCancellation.Token);
+            _sourceHealth = await SourceHealthService.GetOverviewAsync(_disposeCancellation.Token);
             _applicationUpdateStatus = ApplicationUpdateService.GetStatus();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1154,6 +1243,46 @@
         finally
         {
             _isStartingApplicationUpdate = false;
+        }
+    }
+
+    private async Task BackfillScoresAsync()
+    {
+        _isBackfillingScores = true;
+        try
+        {
+            var result = await DataMaintenanceService.BackfillRecentScoresAsync(_disposeCancellation.Token);
+            _maintenanceResult = $"Score backfill scanned {result.ScannedCount.ToString("N0", CultureInfo.InvariantCulture)} cached cards and updated {result.ChangedCount.ToString("N0", CultureInfo.InvariantCulture)}.";
+            ShowToast(ToastKind.Success, "Score backfill complete", _maintenanceResult);
+            await RefreshLocalStatusAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowToast(ToastKind.Error, "Score backfill failed", ex.Message);
+        }
+        finally
+        {
+            _isBackfillingScores = false;
+        }
+    }
+
+    private async Task RepairExternalIdsAsync()
+    {
+        _isRepairingExternalIds = true;
+        try
+        {
+            var result = await DataMaintenanceService.RepairRecentExternalIdsAsync(_disposeCancellation.Token);
+            _maintenanceResult = $"External ID repair scanned {result.ScannedCount.ToString("N0", CultureInfo.InvariantCulture)} cached cards and updated {result.ChangedCount.ToString("N0", CultureInfo.InvariantCulture)}.";
+            ShowToast(ToastKind.Success, "External ID repair complete", _maintenanceResult);
+            await RefreshLocalStatusAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowToast(ToastKind.Error, "External ID repair failed", ex.Message);
+        }
+        finally
+        {
+            _isRepairingExternalIds = false;
         }
     }
 
@@ -1222,6 +1351,23 @@
             ? ""
             : $" Latest log: {Path.GetFileName(_applicationUpdateStatus.LatestLogPath)}.";
         return $"{prefix}: {_applicationUpdateStatus.Remote}/{_applicationUpdateStatus.Branch} at {_applicationUpdateStatus.RepositoryPath}. {_applicationUpdateStatus.Message}{logText}";
+    }
+
+    private static string ShortCommit(string? commit)
+    {
+        return string.IsNullOrWhiteSpace(commit)
+            ? "unknown"
+            : commit.Length <= 8 ? commit : commit[..8];
+    }
+
+    private static string RepositoryStateText(ApplicationUpdateStatus status)
+    {
+        return status.IsRepositoryDirty switch
+        {
+            true => "Repository dirty",
+            false => "Repository clean",
+            _ => "Repository state unknown"
+        };
     }
 
     private IEnumerable<BackgroundJobEvent> VisibleJobEvents()

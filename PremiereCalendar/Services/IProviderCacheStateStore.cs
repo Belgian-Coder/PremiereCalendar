@@ -27,6 +27,10 @@ public interface IProviderCacheStateStore
 
     Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken);
 
+    Task<IReadOnlyList<ProviderCacheState>> GetRecentAsync(int take, CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(string provider, int take, CancellationToken cancellationToken);
+
     async Task SaveManyAsync(IEnumerable<ProviderCacheState> states, CancellationToken cancellationToken)
     {
         foreach (var state in states)

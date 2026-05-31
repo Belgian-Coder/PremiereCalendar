@@ -116,18 +116,43 @@ public sealed class ProviderDeltaSyncServiceTests
 
     private sealed class InMemoryProviderCacheStateStore : IProviderCacheStateStore
     {
+        private readonly List<ProviderCacheState> _states = [];
+
         public Task<ProviderCacheState?> GetAsync(
             string provider,
             ProviderCacheScope scope,
             string key,
             CancellationToken cancellationToken)
         {
-            return Task.FromResult<ProviderCacheState?>(null);
+            return Task.FromResult(_states.LastOrDefault(state =>
+                string.Equals(state.Provider, provider, StringComparison.OrdinalIgnoreCase)
+                && state.Scope == scope
+                && string.Equals(state.Key, key, StringComparison.Ordinal)));
         }
 
         public Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken)
         {
+            _states.Add(state);
             return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<ProviderCacheState>> GetRecentAsync(int take, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<ProviderCacheState>>(
+                _states
+                    .OrderByDescending(state => state.LastCheckedUtc)
+                    .Take(take)
+                    .ToArray());
+        }
+
+        public Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(string provider, int take, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<ProviderCacheState>>(
+                _states
+                    .Where(state => string.Equals(state.Provider, provider, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(state => state.LastCheckedUtc)
+                    .Take(take)
+                    .ToArray());
         }
     }
 

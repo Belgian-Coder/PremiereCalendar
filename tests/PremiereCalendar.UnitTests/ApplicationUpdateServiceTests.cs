@@ -61,6 +61,9 @@ public sealed class ApplicationUpdateServiceTests : IDisposable
         Assert.Equal("main", request.Branch);
         Assert.Equal(Path.Combine(repo, "Install-PremiereCalendar.ps1"), request.InstallScriptPath);
         Assert.Equal(Path.Combine(repo, "deploy", "Update-And-Install-PremiereCalendar.ps1"), request.UpdateScriptPath);
+        Assert.Equal("D:\\Apps\\PremiereCalendar", request.TargetDirectory);
+        Assert.Equal("http://localhost:5298/health", request.HealthUrl);
+        Assert.True(request.RollbackOnFailure);
         Assert.StartsWith(Path.Combine(_root, "App_Data", "logs", "application-updates"), request.LogPath, StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith(".log", request.LogPath, StringComparison.OrdinalIgnoreCase);
     }

@@ -44,7 +44,8 @@ Arrow keys are ignored while you type in an input field.
 | TVmaze is always slow | Use new-series mode, choose fewer languages, or disable TVmaze schedule discovery |
 | Watchmode shows no cards | That is expected; Watchmode is used as availability fallback, not broad discovery |
 | IMDb scores are missing | Wait for the IMDb dataset import to finish, then click Refresh sources |
-| Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key; free OMDb keys can hit daily limits |
+| Rotten Tomatoes or Metacritic is missing | Enable OMDb with a working API key, then run Backfill scores in Settings |
+| IMDb or TVDB IDs are missing | Run Repair IDs in Settings after TMDb is configured |
 | Posters are missing | Check artwork provider settings, then click Refresh sources |
 | Settings do not match `appsettings.json` | The Settings page wins; change values in the app |
 | GitHub source update is disabled | Check `ApplicationUpdate:RepositoryPath`, `Remote`, `Branch`, and the update log in Settings > Local status |
@@ -62,11 +63,23 @@ Source diagnostics are compact by default and appear only when there is useful s
 - A timed-out provider was skipped so the page could finish.
 - Clicking a source chip filters the visible cards to that source only.
 
+Source details and Settings can also show week anomalies. A low-count warning means the week has fewer cards than expected for the active mode and filters. A language-skew warning means one original language dominates the week. Missing-score, missing-ID, and unmapped-candidate warnings point to enrichment or mapping gaps rather than a rendering problem.
+
+## Card Provenance
+
+Open a card's provenance/details section when the date, score, or source looks wrong.
+
+- Date confidence explains whether the row came from TMDb first air date, season 1 episode 1, an episode air date, a movie release date, or an external provider date.
+- Merge contributions show which providers contributed and how they matched IDs.
+- Missing-data reasons explain absent IMDb IDs, TVDB IDs, Rotten Tomatoes, IMDb scores, posters, trailers, or source names.
+
 ## Cache
 
 Calendar, image, IMDb rating, OMDb response, and provider-sync cache data are stored on disk. They survive app restarts, crashes, and updates.
 
 Refresh sources does not delete everything. It checks the week again and reuses useful existing details when it can.
+
+Settings maintenance actions can update cached weeks without clearing the whole cache. Use Backfill scores after IMDb or OMDb data becomes available. Use Repair IDs when cards lack IMDb, TVDB, or Wikidata IDs but TMDb details can fill them.
 
 If the cache looks wrong, delete only the affected week under:
 

@@ -81,6 +81,10 @@ public sealed record PremiereItem
     public int? RottenTomatoesAudienceScore { get; init; }
     public int? MetacriticScore { get; init; }
 
+    public PremiereDateSemantics? DateSemantics { get; init; }
+    public PremiereMergeContribution[] MergeContributions { get; init; } = [];
+    public PremiereMissingDataIssue[] MissingDataIssues { get; init; } = [];
+
     public string? NetworkName { get; init; }
     public string? WebChannelName { get; init; }
     public int? TvmazeAverageRuntimeMinutes { get; init; }
