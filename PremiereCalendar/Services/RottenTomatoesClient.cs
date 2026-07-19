@@ -50,6 +50,30 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
     }
 
+    public bool TryGetCachedScores(
+        PremiereMediaType mediaType,
+        string title,
+        int? year,
+        string? wikidataId,
+        out RottenTomatoesScores scores)
+    {
+        scores = RottenTomatoesScores.Empty;
+        if (!_options.Enabled || string.IsNullOrWhiteSpace(title))
+        {
+            return false;
+        }
+
+        var normalizedTitle = NormalizeTitle(title);
+        if (string.IsNullOrWhiteSpace(normalizedTitle))
+        {
+            return false;
+        }
+
+        return _cache.TryGetValue(
+            ScoreCacheKey(mediaType, normalizedTitle, year, wikidataId),
+            out scores!);
+    }
+
     public async Task<RottenTomatoesScores> GetScoresAsync(
         PremiereMediaType mediaType,
         string title,
@@ -69,7 +93,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
             return RottenTomatoesScores.Empty;
         }
 
-        var cacheKey = $"rt:score:{mediaType}:{normalizedTitle}:{year?.ToString(CultureInfo.InvariantCulture) ?? ""}:{wikidataId?.Trim() ?? ""}";
+        var cacheKey = ScoreCacheKey(mediaType, normalizedTitle, year, wikidataId);
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out RottenTomatoesScores? cachedScores) && cachedScores is not null)
         {
             return cachedScores;
@@ -101,6 +125,15 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                 return scores;
             },
             cancellationToken);
+    }
+
+    private static string ScoreCacheKey(
+        PremiereMediaType mediaType,
+        string normalizedTitle,
+        int? year,
+        string? wikidataId)
+    {
+        return $"rt:score:{mediaType}:{normalizedTitle}:{year?.ToString(CultureInfo.InvariantCulture) ?? ""}:{wikidataId?.Trim() ?? ""}";
     }
 
     public async Task<int?> GetTomatometerScoreAsync(

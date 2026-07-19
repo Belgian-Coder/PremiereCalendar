@@ -184,6 +184,8 @@ Trakt calendar rows are candidate rows only. The app accepts them only when a TM
 
 Watchmode is optional and API-key gated through Settings. It is used only as a streaming availability fallback when TMDb has no provider data for a verified card. Release discovery is disabled by default and is not registered in the calendar discovery pipeline because the free API is too request-limited for broad week refreshes.
 
+The configured Watchmode API key is sent with the `X-API-Key` request header. The app does not put the key in Watchmode query strings.
+
 Useful non-secret defaults:
 
 - `Watchmode:Enabled` - enables the availability fallback client.
