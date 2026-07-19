@@ -11,6 +11,42 @@ namespace PremiereCalendar.IntegrationTests;
 public sealed class RottenTomatoesClientIntegrationTests
 {
     [Fact]
+    public async Task TryGetCachedScores_ReturnsOnlyPreviouslyFetchedScoresWithoutAnotherRequest()
+    {
+        var handler = new StubHttpMessageHandler(_ => Html(
+            """
+            <search-page-media-row release-year="2026" tomatometer-score="72">
+              <a href="https://www.rottentomatoes.com/m/saccharine" data-qa="info-name" slot="title">Saccharine</a>
+            </search-page-media-row>
+            """));
+        var client = CreateClient(handler);
+
+        Assert.False(client.TryGetCachedScores(
+            PremiereMediaType.Movie,
+            "Saccharine",
+            2026,
+            wikidataId: null,
+            out _));
+
+        await client.GetScoresAsync(
+            PremiereMediaType.Movie,
+            "Saccharine",
+            2026,
+            wikidataId: null,
+            CancellationToken.None);
+        var requestCountAfterFetch = handler.Requests.Count;
+
+        Assert.True(client.TryGetCachedScores(
+            PremiereMediaType.Movie,
+            "Saccharine",
+            2026,
+            wikidataId: null,
+            out var cachedScores));
+        Assert.Equal(72, cachedScores.CriticScore);
+        Assert.Equal(requestCountAfterFetch, handler.Requests.Count);
+    }
+
+    [Fact]
     public async Task GetScoresAsync_FetchesAudienceScoreWhenSearchRowAlreadyHasTomatometerScore()
     {
         var handler = new StubHttpMessageHandler(request =>

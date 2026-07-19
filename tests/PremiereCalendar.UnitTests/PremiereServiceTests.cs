@@ -1507,7 +1507,7 @@ public sealed class PremiereServiceTests
     }
 
     [Fact]
-    public async Task GetPremieresAsync_HydratesCachedItemsWithCurrentRottenTomatoesAudienceScore()
+    public async Task GetPremieresAsync_HydratesCachedItemsWithInMemoryRottenTomatoesAudienceScore()
     {
         var cachedItem = new PremiereItem
         {
@@ -1525,7 +1525,7 @@ public sealed class PremiereServiceTests
             LastUpdatedUtc = DateTimeOffset.UtcNow
         };
         var rottenTomatoes = new FakeRottenTomatoesClient();
-        rottenTomatoes.Scores[(PremiereMediaType.Movie, "Cached Audience Movie", 2026, "Q74")] = new RottenTomatoesScores(82, 91);
+        rottenTomatoes.CachedScores[(PremiereMediaType.Movie, "Cached Audience Movie", 2026, "Q74")] = new RottenTomatoesScores(82, 91);
         var service = CreateService(
             new FakeTmdbClient(),
             calendarCache: new FakeCalendarCache { Items = [cachedItem] },
@@ -1540,8 +1540,38 @@ public sealed class PremiereServiceTests
         var item = Assert.Single(items);
         Assert.Equal(80, item.RottenTomatoesScore);
         Assert.Equal(91, item.RottenTomatoesAudienceScore);
-        var call = Assert.Single(rottenTomatoes.Calls);
-        Assert.Equal("Cached Audience Movie", call.Title);
+        Assert.Empty(rottenTomatoes.Calls);
+    }
+
+    [Fact]
+    public async Task GetPremieresAsync_DoesNotFetchMissingRottenTomatoesScoresOnWeekCacheHit()
+    {
+        var cachedItem = new PremiereItem
+        {
+            CanonicalId = "movie:75",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 75,
+            Title = "Fast Cached Movie",
+            PremiereDate = new DateOnly(2026, 5, 4),
+            OriginalLanguage = "en",
+            RuntimeMinutes = 95,
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var rottenTomatoes = new FakeRottenTomatoesClient();
+        var service = CreateService(
+            new FakeTmdbClient(),
+            calendarCache: new FakeCalendarCache { Items = [cachedItem] },
+            rottenTomatoes: rottenTomatoes);
+
+        var items = await service.GetPremieresAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None,
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
+
+        Assert.Equal("Fast Cached Movie", Assert.Single(items).Title);
+        Assert.Empty(rottenTomatoes.Calls);
     }
 
     [Fact]
@@ -4558,7 +4588,19 @@ public sealed class PremiereServiceTests
     private sealed class FakeRottenTomatoesClient : IRottenTomatoesClient
     {
         public Dictionary<(PremiereMediaType MediaType, string Title, int? Year, string? WikidataId), RottenTomatoesScores> Scores { get; } = [];
+        public Dictionary<(PremiereMediaType MediaType, string Title, int? Year, string? WikidataId), RottenTomatoesScores> CachedScores { get; } = [];
         public ConcurrentBag<RottenTomatoesCall> Calls { get; } = [];
+
+        public bool TryGetCachedScores(
+            PremiereMediaType mediaType,
+            string title,
+            int? year,
+            string? wikidataId,
+            out RottenTomatoesScores scores)
+        {
+            scores = CachedScores.GetValueOrDefault((mediaType, title, year, wikidataId)) ?? RottenTomatoesScores.Empty;
+            return scores.HasAnyScore;
+        }
 
         public Task<RottenTomatoesScores> GetScoresAsync(
             PremiereMediaType mediaType,

@@ -123,6 +123,7 @@ public sealed class PremiereService : IPremiereService
                 {
                     var hydratedItems = await HydrateCachedImdbRatingsAsync(
                         MergePremiereItems(sharedCacheSnapshot.Items),
+                        filters,
                         cancellationToken);
                     var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
@@ -133,6 +134,7 @@ public sealed class PremiereService : IPremiereService
                 {
                     var hydratedItems = await HydrateCachedImdbRatingsAsync(
                         MergePremiereItems(sharedCacheSnapshot.Items),
+                        filters,
                         cancellationToken);
                     seededItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", seededItems, seededItems, fromCache: true);
@@ -159,6 +161,7 @@ public sealed class PremiereService : IPremiereService
                 {
                     var hydratedItems = await HydrateCachedImdbRatingsAsync(
                         MergePremiereItems(cached),
+                        filters,
                         cancellationToken);
                     var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
@@ -378,6 +381,7 @@ public sealed class PremiereService : IPremiereService
 
         var hydratedItems = await HydrateCachedImdbRatingsAsync(
             MergePremiereItems(cachedItems),
+            filters,
             cancellationToken);
         var mergedItems = ApplyRequestedFilters(hydratedItems, filters);
         return CreateProgress(
@@ -556,6 +560,7 @@ public sealed class PremiereService : IPremiereService
 
         var hydratedItems = await HydrateCachedImdbRatingsAsync(
             MergePremiereItems(cached),
+            filters,
             cancellationToken);
         var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
         _logger.LogWarning(
@@ -1013,6 +1018,7 @@ public sealed class PremiereService : IPremiereService
 
     private async Task<IReadOnlyList<PremiereItem>> HydrateCachedImdbRatingsAsync(
         IReadOnlyList<PremiereItem> items,
+        CalendarFilters? filters,
         CancellationToken cancellationToken)
     {
         if (items.Count == 0 || (_imdbRatingsStore is null && _rottenTomatoesClient is null))
@@ -1062,13 +1068,30 @@ public sealed class PremiereService : IPremiereService
                 var rottenTomatoesKey = RottenTomatoesHydrationKey(hydratedItem);
                 if (!rottenTomatoesByItemKey.TryGetValue(rottenTomatoesKey, out var rottenTomatoesScores))
                 {
-                    rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+                    if (_rottenTomatoesClient.TryGetCachedScores(
                         hydratedItem.MediaType,
                         hydratedItem.Title,
                         hydratedItem.PremiereDate.Year,
                         hydratedItem.WikidataId,
-                        cancellationToken,
-                        forceRefresh: false);
+                        out var cachedScores))
+                    {
+                        rottenTomatoesScores = cachedScores;
+                    }
+                    else if (filters?.ScoreSource == ScoreSource.RottenTomatoes)
+                    {
+                        rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+                            hydratedItem.MediaType,
+                            hydratedItem.Title,
+                            hydratedItem.PremiereDate.Year,
+                            hydratedItem.WikidataId,
+                            cancellationToken,
+                            forceRefresh: false);
+                    }
+                    else
+                    {
+                        rottenTomatoesScores = RottenTomatoesScores.Empty;
+                    }
+
                     rottenTomatoesByItemKey[rottenTomatoesKey] = rottenTomatoesScores;
                 }
 

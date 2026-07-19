@@ -126,15 +126,16 @@ public sealed class WatchmodeClient : IWatchmodeClient
                     return flightCached;
                 }
 
+                var apiKey = settings.ApiKey.Trim();
                 var query = ToQueryString(new Dictionary<string, string?>
                 {
-                    ["apiKey"] = settings.ApiKey.Trim(),
                     ["start_date"] = start.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
                     ["end_date"] = end.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
                     ["limit"] = "250"
                 });
                 var response = await GetJsonWithRetryResultAsync<WatchmodeReleasesResponse>(
                     $"releases/{query}",
+                    apiKey,
                     token);
                 if (!response.IsSuccess)
                 {
@@ -161,10 +162,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
         CancellationToken cancellationToken)
     {
         var regionsKey = string.Join(',', sourceRegions);
-        var query = new Dictionary<string, string?>
-        {
-            ["apiKey"] = apiKey
-        };
+        var query = new Dictionary<string, string?>();
         if (sourceRegions.Length > 0)
         {
             query["regions"] = regionsKey;
@@ -172,6 +170,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
 
         var combined = await GetJsonWithRetryResultAsync<IReadOnlyList<WatchmodeTitleSource>>(
             $"title/{titleId.ToString(CultureInfo.InvariantCulture)}/sources/{ToQueryString(query)}",
+            apiKey,
             cancellationToken);
         if (combined.IsSuccess || sourceRegions.Length <= 1)
         {
@@ -205,11 +204,11 @@ public sealed class WatchmodeClient : IWatchmodeClient
     {
         var regionQuery = ToQueryString(new Dictionary<string, string?>
         {
-            ["apiKey"] = apiKey,
             ["regions"] = region
         });
         return await GetJsonWithRetryResultAsync<IReadOnlyList<WatchmodeTitleSource>>(
             $"title/{titleId.ToString(CultureInfo.InvariantCulture)}/sources/{regionQuery}",
+            apiKey,
             cancellationToken);
     }
 
@@ -262,14 +261,14 @@ public sealed class WatchmodeClient : IWatchmodeClient
                     return flightCached;
                 }
 
+                var apiKey = settings.ApiKey.Trim();
                 var query = ToQueryString(new Dictionary<string, string?>
                 {
-                    ["apiKey"] = settings.ApiKey.Trim(),
                     ["search_field"] = field,
                     ["search_value"] = value,
                     ["types"] = mediaType == PremiereMediaType.Movie ? "movie" : "tv_series,tv_miniseries,tv_special"
                 });
-                var response = await GetJsonWithRetryAsync<WatchmodeSearchResponse>($"search/{query}", token);
+                var response = await GetJsonWithRetryAsync<WatchmodeSearchResponse>($"search/{query}", apiKey, token);
                 var titleId = response?.TitleResults
                     .Where(result => result.Id > 0)
                     .Select(result => (int?)result.Id)
@@ -285,12 +284,18 @@ public sealed class WatchmodeClient : IWatchmodeClient
             cancellationToken);
     }
 
-    private async Task<T?> GetJsonWithRetryAsync<T>(string path, CancellationToken cancellationToken)
+    private async Task<T?> GetJsonWithRetryAsync<T>(
+        string path,
+        string apiKey,
+        CancellationToken cancellationToken)
     {
-        return (await GetJsonWithRetryResultAsync<T>(path, cancellationToken)).Value;
+        return (await GetJsonWithRetryResultAsync<T>(path, apiKey, cancellationToken)).Value;
     }
 
-    private async Task<JsonFetchResult<T>> GetJsonWithRetryResultAsync<T>(string path, CancellationToken cancellationToken)
+    private async Task<JsonFetchResult<T>> GetJsonWithRetryResultAsync<T>(
+        string path,
+        string apiKey,
+        CancellationToken cancellationToken)
     {
         const int maxAttempts = 3;
 
@@ -303,7 +308,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
         {
             try
             {
-                using var response = await GetAsync(path, cancellationToken);
+                using var response = await GetAsync(path, apiKey, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
                 {
                     var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
@@ -389,13 +394,18 @@ public sealed class WatchmodeClient : IWatchmodeClient
         return TimeSpan.FromSeconds(Math.Clamp(_options.MaxRetryAfterDelaySeconds, 0, 60));
     }
 
-    private async Task<HttpResponseMessage> GetAsync(string path, CancellationToken cancellationToken)
+    private async Task<HttpResponseMessage> GetAsync(
+        string path,
+        string apiKey,
+        CancellationToken cancellationToken)
     {
         using var lease = await _requestThrottler.AcquireAsync(
             "watchmode",
             _options.MaxConcurrentRequests,
             cancellationToken);
-        return await _httpClient.GetAsync(path, cancellationToken);
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.TryAddWithoutValidation("X-API-Key", apiKey);
+        return await _httpClient.SendAsync(request, cancellationToken);
     }
 
     private async ValueTask<WatchmodeSourceSettings> GetEffectiveSettingsAsync(CancellationToken cancellationToken)

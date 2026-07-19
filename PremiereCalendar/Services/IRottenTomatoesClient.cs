@@ -4,6 +4,17 @@ namespace PremiereCalendar.Services;
 
 public interface IRottenTomatoesClient
 {
+    bool TryGetCachedScores(
+        PremiereMediaType mediaType,
+        string title,
+        int? year,
+        string? wikidataId,
+        out RottenTomatoesScores scores)
+    {
+        scores = RottenTomatoesScores.Empty;
+        return false;
+    }
+
     Task<RottenTomatoesScores> GetScoresAsync(
         PremiereMediaType mediaType,
         string title,

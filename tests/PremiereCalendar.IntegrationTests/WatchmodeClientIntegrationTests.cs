@@ -16,7 +16,7 @@ public sealed class WatchmodeClientIntegrationTests
         var handler = new StubHttpMessageHandler(request =>
         {
             var uri = request.RequestUri ?? throw new InvalidOperationException("Watchmode request URI is missing.");
-            Assert.Equal("test-watchmode-key", QueryString.Parse(uri)["apiKey"]);
+            AssertUsesApiKeyHeader(request);
 
             if (uri.AbsolutePath.EndsWith("/search/", StringComparison.Ordinal))
             {
@@ -73,6 +73,8 @@ public sealed class WatchmodeClientIntegrationTests
         var handler = new StubHttpMessageHandler(request =>
         {
             var uri = request.RequestUri ?? throw new InvalidOperationException("Watchmode request URI is missing.");
+            AssertUsesApiKeyHeader(request);
+
             Assert.EndsWith("/releases/", uri.AbsolutePath, StringComparison.Ordinal);
             var query = QueryString.Parse(uri);
             Assert.Equal("20260504", query["start_date"]);
@@ -393,5 +395,15 @@ public sealed class WatchmodeClientIntegrationTests
                 EnableReleaseDiscovery = true,
                 EnableAvailabilityEnrichment = true
             }));
+    }
+
+    private static void AssertUsesApiKeyHeader(HttpRequestMessage request)
+    {
+        var uri = request.RequestUri ?? throw new InvalidOperationException("Watchmode request URI is missing.");
+        var query = QueryString.Parse(uri);
+
+        Assert.DoesNotContain("apiKey", query.Keys);
+        Assert.True(request.Headers.TryGetValues("X-API-Key", out var values));
+        Assert.Equal("test-watchmode-key", Assert.Single(values));
     }
 }
