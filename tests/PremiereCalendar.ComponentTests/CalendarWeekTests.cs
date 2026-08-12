@@ -510,6 +510,36 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
+    public void CalendarDay_SwitchingDenseSeriesToMoviesRebuildsProgressiveCards()
+    {
+        var day = new DateOnly(2026, 5, 4);
+        var series = Enumerable.Range(1, 55).Select(index => new PremiereItem
+        {
+            CanonicalId = $"tv:{index}", Type = PremiereItemType.SeriesEpisode,
+            MediaType = PremiereMediaType.Series, TmdbId = index, Title = $"Series {index}", PremiereDate = day
+        }).ToArray();
+        var movies = Enumerable.Range(1, 55).Select(index => new PremiereItem
+        {
+            CanonicalId = $"movie:{index}", Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie, TmdbId = 100 + index, Title = $"Movie {index}", PremiereDate = day
+        }).ToArray();
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, day).Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, series).Add(x => x.ScoreSource, ScoreSource.Tmdb));
+        Assert.Single(component.FindAll("[data-testid='virtualized-day']"));
+
+        component.Render(parameters => parameters
+            .Add(x => x.Day, day).Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, movies).Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Empty(component.FindAll("[data-testid='virtualized-day']"));
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Contains("Movie 1", component.Markup);
+        Assert.DoesNotContain("Series 1", component.Markup);
+    }
+
+    [Fact]
     public void CalendarWeek_UsesTenCardBatchesForSmallerDays()
     {
         var items = Enumerable.Range(1, 12)

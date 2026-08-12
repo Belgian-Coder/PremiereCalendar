@@ -221,6 +221,11 @@
             && !string.IsNullOrEmpty(_itemsSignature);
         var signature = canReuseItemsSignature ? _itemsSignature : BuildItemsSignature();
         var itemsChanged = !string.Equals(signature, _itemsSignature, StringComparison.Ordinal);
+        if (itemsChanged)
+        {
+            RebuildItemCounts();
+        }
+
         var useVirtualizedRows = UseVirtualizedRows;
         var virtualizationModeChanged = useVirtualizedRows != _lastUseVirtualizedRows;
         _lastItemsReference = Items;
@@ -245,11 +250,6 @@
             {
                 _autoLoadAll = false;
             }
-        }
-
-        if (itemsChanged)
-        {
-            RebuildItemCounts();
         }
 
         if (!useVirtualizedRows
