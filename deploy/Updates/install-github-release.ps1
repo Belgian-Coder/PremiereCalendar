@@ -8,6 +8,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Net.Http
 
 function Save-BoundedReleaseAsset {
     param(
@@ -17,11 +18,11 @@ function Save-BoundedReleaseAsset {
     )
     if ($Uri.Scheme -ne 'https' -or $Uri.Host -ne 'github.com') { throw 'Release asset URL is not trusted.' }
     if (Test-Path -LiteralPath $Destination) { throw "Refusing to overwrite release asset: $Destination" }
-    $client = [Net.Http.HttpClient]::new()
+    $client = [System.Net.Http.HttpClient]::new()
     $client.Timeout = [TimeSpan]::FromMinutes(10)
     $client.DefaultRequestHeaders.UserAgent.ParseAdd('PremiereCalendar-Updater/1.0')
     try {
-        $response = $client.GetAsync($Uri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
         try {
             $response.EnsureSuccessStatusCode()
             if ($response.Content.Headers.ContentLength -gt $MaxBytes) { throw 'Release asset exceeds its size limit.' }
