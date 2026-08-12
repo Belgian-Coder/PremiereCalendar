@@ -617,6 +617,36 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public async Task CalendarPage_MediaRouteChangeWaitsForStableFinalCardOrder()
+    {
+        var service = new RouteTransitionPremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+            Assert.Contains("Initial Series", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent));
+
+        navigation.NavigateTo("/movies?week=2026-05-04");
+        await service.MoviePartialYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(component.FindAll("[data-testid='loading']"));
+            Assert.Empty(component.FindAll("[data-testid='premiere-card']"));
+        });
+
+        service.ReleaseFinalMovieResult();
+        component.WaitForAssertion(() =>
+        {
+            var titles = component.FindAll("[data-testid='premiere-card'] h3").Select(node => node.TextContent).ToArray();
+            Assert.Equal(["Alpha Movie", "Zulu Movie"], titles);
+        });
+    }
+
+    [Fact]
     public void CalendarPage_DayTabsOnlyReferenceMountedPanel()
     {
         var service = new FakePremiereService();
@@ -2765,6 +2795,79 @@ public sealed class CalendarPageTests : BunitContext
                 }
             ];
         }
+    }
+
+    private sealed class RouteTransitionPremiereService : IPremiereService
+    {
+        private readonly TaskCompletionSource<bool> _releaseFinalMovieResult =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> MoviePartialYielded { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ReleaseFinalMovieResult() => _releaseFinalMovieResult.TrySetResult(true);
+
+        public async IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(
+            DateOnly start,
+            DateOnly end,
+            bool forceRefresh = false,
+            CalendarFilters? filters = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
+            if (criteria.IncludeMovies && !criteria.IncludeSeries)
+            {
+                var zulu = Movie("movie:zulu", "Zulu Movie", start);
+                yield return new PremiereLoadProgress("Movie discovery", 1, 1, [zulu]);
+                MoviePartialYielded.TrySetResult(true);
+                await _releaseFinalMovieResult.Task.WaitAsync(cancellationToken);
+
+                var alpha = Movie("movie:alpha", "Alpha Movie", start);
+                yield return new PremiereLoadProgress("Complete", 0, 2, [alpha, zulu], IsFinal: true);
+                yield break;
+            }
+
+            var series = new PremiereItem
+            {
+                CanonicalId = "series:initial",
+                Type = PremiereItemType.SeriesPremiere,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 101,
+                Title = "Initial Series",
+                PremiereDate = start,
+                OriginalLanguage = "en"
+            };
+            yield return new PremiereLoadProgress("Complete", 0, 1, [series], IsFinal: true);
+        }
+
+        public async Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
+            DateOnly start,
+            DateOnly end,
+            CancellationToken cancellationToken,
+            bool forceRefresh = false,
+            IProgress<PremiereLoadProgress>? progress = null,
+            CalendarFilters? filters = null)
+        {
+            IReadOnlyList<PremiereItem> items = [];
+            await foreach (var update in StreamPremieresAsync(start, end, forceRefresh, filters, cancellationToken))
+            {
+                progress?.Report(update);
+                items = update.Items;
+            }
+
+            return items;
+        }
+
+        private static PremiereItem Movie(string canonicalId, string title, DateOnly date) => new()
+        {
+            CanonicalId = canonicalId,
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = canonicalId == "movie:alpha" ? 201 : 202,
+            Title = title,
+            PremiereDate = date,
+            OriginalLanguage = "en"
+        };
     }
 
     private sealed class FakeAdjacentWeekPrefetcher : IAdjacentWeekPrefetcher

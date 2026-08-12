@@ -274,11 +274,15 @@ The background warmer runs on startup and then wakes on a schedule to fill stale
   "MaximumProfilesPerWake": 5,
   "TopFilterProfileCount": 4,
   "CycleBudgetSeconds": 600,
-  "WindowBudgetSeconds": 30,
+  "WindowBudgetSeconds": 90,
   "StaleOnlyRemoteRefresh": true,
   "CleanupRetentionDays": 60
 }
 ```
+
+`WindowBudgetSeconds` defaults to 90 seconds. Large series weeks can take longer than a foreground
+cache hit to assemble; keep this comfortably above the observed provider-fetch duration so a warmup
+does not repeatedly time out and retry the same missing week on every wake.
 
 Foreground UI loads have their own budget:
 

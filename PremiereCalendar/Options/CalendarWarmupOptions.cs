@@ -13,6 +13,6 @@ public sealed class CalendarWarmupOptions
     public bool SkipWhenForegroundLoadActive { get; set; } = true;
     public int CleanupRetentionDays { get; set; } = 60;
     public int CycleBudgetSeconds { get; set; } = 600;
-    public int WindowBudgetSeconds { get; set; } = 30;
+    public int WindowBudgetSeconds { get; set; } = 90;
     public bool StaleOnlyRemoteRefresh { get; set; } = true;
 }

@@ -880,7 +880,7 @@
                     || !string.Equals(previousCriteriaKey, nextCriteriaKey, StringComparison.Ordinal))
                 {
                     RecalculateVisibleItems();
-                    await LoadAsync();
+                    await LoadAsync(stabilizeVisibleItems: _pageMode != previousMode);
                 }
                 else if (sortChanged)
                 {
@@ -940,7 +940,7 @@
         await LoadAsync(forceRefresh: false);
     }
 
-    private async Task LoadAsync(bool forceRefresh)
+    private async Task LoadAsync(bool forceRefresh = false, bool stabilizeVisibleItems = false)
     {
         if (!await EnsureIntegrationSettingsLoadedAsync())
         {
@@ -1047,7 +1047,13 @@
                     {
                         renderedFirstUpdate = true;
                         lastUiUpdateUtc = now;
-                        RecalculateVisibleItems();
+                        // A media-route transition can stream many differently ordered provider batches.
+                        // Keep the existing grid stable until the final sorted result is available; the
+                        // source progress still updates while the new route is loading.
+                        if (!stabilizeVisibleItems || update.IsFinal)
+                        {
+                            RecalculateVisibleItems();
+                        }
                         StateHasChanged();
                     }
                 });
