@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.HttpOverrides;
 using PremiereCalendar.Hosting;
 using PremiereCalendar.Options;
 
@@ -16,6 +18,21 @@ public sealed class HostingHardeningTests
         using var provider = services.BuildServiceProvider();
 
         AssertStartupValidationSucceeds(provider);
+    }
+
+    [Fact]
+    public void Configured_forwarded_proxy_is_trusted_exactly()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Hosting:ForwardedProxies:0"] = "192.168.68.22" }).Build();
+        var services = new ServiceCollection();
+        services.AddHostingHardening(configuration);
+        using var provider = services.BuildServiceProvider();
+
+        var options = provider.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value;
+
+        Assert.Contains(System.Net.IPAddress.Parse("192.168.68.22"), options.KnownProxies);
+        Assert.DoesNotContain(System.Net.IPAddress.Parse("192.168.68.23"), options.KnownProxies);
     }
 
     [Fact]
