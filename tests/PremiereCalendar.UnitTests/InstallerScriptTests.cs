@@ -148,6 +148,9 @@ public sealed class InstallerScriptTests
         Assert.Contains("Move-Item -LiteralPath $previous -Destination $current", script, StringComparison.Ordinal);
         Assert.Contains("[IO.Directory]::Delete($previous)", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Remove-Item -LiteralPath $previous", script, StringComparison.Ordinal);
+        Assert.Contains("$updaterPayload = Join-Path $current 'updater-payload'", script, StringComparison.Ordinal);
+        Assert.Contains(".backup-$version-$payloadName", script, StringComparison.Ordinal);
+        Assert.Contains("Copy-Item -LiteralPath $backup -Destination $destination -Force", script, StringComparison.Ordinal);
         Assert.Contains("$previousServicePath", script, StringComparison.Ordinal);
         Assert.Contains("sc.exe config $ServiceName binPath= $previousServicePath", script, StringComparison.Ordinal);
         Assert.Contains("$serviceWasCreated", script, StringComparison.Ordinal);
@@ -159,6 +162,16 @@ public sealed class InstallerScriptTests
         Assert.True(
             script.IndexOf("Stop-Service -Name $ServiceName", StringComparison.Ordinal)
             < script.IndexOf("Copy-Item -Path (Join-Path $legacyData '*')", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ApplicationPackageCarriesSignedUpdaterPayload()
+    {
+        var project = ReadRepoFile("PremiereCalendar/PremiereCalendar.csproj");
+
+        Assert.Contains("updater-payload\\install-github-release.ps1", project, StringComparison.Ordinal);
+        Assert.Contains("updater-payload\\update-helper.ps1", project, StringComparison.Ordinal);
+        Assert.Contains("CopyToPublishDirectory=\"Always\"", project, StringComparison.Ordinal);
     }
 
     [Fact]

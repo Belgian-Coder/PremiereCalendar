@@ -20,4 +20,13 @@
     </AssemblyAttribute>
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\deploy\Updates\install-github-release.ps1"
+             Link="updater-payload\install-github-release.ps1"
+             CopyToPublishDirectory="Always" />
+    <Content Include="..\deploy\Updates\update-helper.ps1"
+             Link="updater-payload\update-helper.ps1"
+             CopyToPublishDirectory="Always" />
+  </ItemGroup>
+
 </Project>

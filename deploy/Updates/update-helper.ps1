@@ -171,6 +171,8 @@ $databaseDirectory = Join-Path $resolvedDataRoot 'data'
 $databaseBackup = Join-Path (Join-Path $resolvedDataRoot 'backups') "pre-$version-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
 $databaseFiles = @('premiere-calendar.db', 'premiere-calendar.db-wal', 'premiere-calendar.db-shm')
 $databaseStateCaptured = $false
+$updaterReplacementBackups = @{}
+$updaterReplacementFiles = @()
 try {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     Expand-SafeArchive -ArchivePath $PackagePath -Destination $stage
@@ -227,13 +229,49 @@ try {
     Start-Service -Name $ServiceName
     (Get-Service -Name $ServiceName).WaitForStatus('Running', '00:00:45')
     Wait-ForHealthyVersion -ExpectedVersion $version
+    $updaterPayload = Join-Path $current 'updater-payload'
+    if (Test-Path -LiteralPath $updaterPayload -PathType Container) {
+        $payloadNames = @('install-github-release.ps1', 'update-helper.ps1')
+        foreach ($payloadName in $payloadNames) {
+            $payloadSource = Join-Path $updaterPayload $payloadName
+            if (-not (Test-Path -LiteralPath $payloadSource -PathType Leaf)) { throw "Updater payload is missing $payloadName." }
+            $nextPath = Join-Path $updaterRoot ".next-$version-$payloadName"
+            Copy-Item -LiteralPath $payloadSource -Destination $nextPath -Force
+            $updaterReplacementFiles += $nextPath
+        }
+        foreach ($payloadName in $payloadNames) {
+            $destination = Join-Path $updaterRoot $payloadName
+            if (Test-Path -LiteralPath $destination -PathType Leaf) {
+                $backup = Join-Path $updaterRoot ".backup-$version-$payloadName"
+                Copy-Item -LiteralPath $destination -Destination $backup -Force
+                $updaterReplacementBackups[$destination] = $backup
+            }
+            else {
+                $updaterReplacementBackups[$destination] = $null
+            }
+            Copy-Item -LiteralPath (Join-Path $updaterRoot ".next-$version-$payloadName") -Destination $destination -Force
+        }
+    }
     if (Test-Path -LiteralPath $previous) { [IO.Directory]::Delete($previous) }
     [IO.File]::WriteAllText((Join-Path $updaterRoot 'active-version.txt'), $version, [Text.UTF8Encoding]::new($false))
+    foreach ($backup in $updaterReplacementBackups.Values) {
+        if ($null -ne $backup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
+    }
+    $updaterReplacementBackups.Clear()
     Write-Host "PremiereCalendar $version installed and healthy."
 }
 catch {
     $failure = $_
     try {
+        foreach ($destination in @($updaterReplacementBackups.Keys)) {
+            $backup = $updaterReplacementBackups[$destination]
+            if ($null -ne $backup -and (Test-Path -LiteralPath $backup -PathType Leaf)) {
+                Copy-Item -LiteralPath $backup -Destination $destination -Force
+            }
+            elseif (Test-Path -LiteralPath $destination -PathType Leaf) {
+                Remove-Item -LiteralPath $destination -Force
+            }
+        }
         $rollbackService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
         if ($null -ne $rollbackService -and $rollbackService.Status -ne 'Stopped') {
             Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
@@ -272,5 +310,11 @@ catch {
     throw $failure
 }
 finally {
+    foreach ($replacementFile in $updaterReplacementFiles) {
+        if (Test-Path -LiteralPath $replacementFile -PathType Leaf) { Remove-Item -LiteralPath $replacementFile -Force -ErrorAction SilentlyContinue }
+    }
+    foreach ($backup in $updaterReplacementBackups.Values) {
+        if ($null -ne $backup -and (Test-Path -LiteralPath $backup -PathType Leaf)) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
+    }
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
 }

@@ -49,6 +49,10 @@ RSA signature and SHA-256, rejects unsafe ZIP paths, installs under
 service is repointed to `current\PremiereCalendar.exe`; activation succeeds only
 when both liveness and the expected `/health/version` pass. A failed activation
 restores the previous junction, service binary, and pre-update SQLite files.
+After the new application version passes its health/version checks, its signed
+`updater-payload` refreshes the installed updater scripts transactionally. Existing
+scripts are backed up until both replacements succeed, and are restored if activation
+later rolls back. This lets future updater fixes travel inside the same verified package.
 
 Persistent state is outside immutable releases under
 `D:\Apps\PremiereCalendarData`. The first install copies legacy `App_Data`
@@ -62,3 +66,11 @@ update button, wait for the page to reconnect, and verify all of the following:
 - The transcript ends with `installed and healthy`.
 - Public HTTPS, readiness, HSTS, CSP and `nosniff` still pass.
 - Clicking Update again reports `already the latest stable release` without restarting the service.
+
+### Upgrade note for 1.1.4 and older
+
+The pre-1.1.5 package layout did not carry updater scripts. Upgrade those installations
+once with the 1.1.5-or-newer installer bundle, or have an administrator replace
+`updater/install-github-release.ps1` and `updater/update-helper.ps1` from the reviewed
+release bundle. After that one-time bootstrap, Settings updates refresh the updater
+payload automatically.

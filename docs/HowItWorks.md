@@ -217,7 +217,7 @@ That makes it reachable from other LAN devices when Windows Firewall allows inbo
 
 Use the root `Install-PremiereCalendar.ps1` wrapper only for development/source-tree installation. Production updates use immutable, signed GitHub releases.
 
-Settings starts the installed `updater/install-github-release.ps1` through `Signed GitHub release update`. The detached updater downloads the stable manifest and its exact declared package, verifies the administrator-pinned certificate, RSA signature and SHA-256, rejects unsafe or oversized archives, backs up SQLite, activates an immutable version directory, and requires both liveness and the expected `/health/version` before success. Failure restores the previous junction, service binary and database files. The Blazor circuit disconnects while the Windows Service restarts and reconnects to the verified release. Attempt transcripts are retained under the external data root.
+Settings starts the installed `updater/install-github-release.ps1` through `Signed GitHub release update`. The detached updater downloads the stable manifest and its exact declared package, verifies the administrator-pinned certificate, RSA signature and SHA-256, rejects unsafe or oversized archives, backs up SQLite, activates an immutable version directory, and requires both liveness and the expected `/health/version` before success. After health succeeds, the signed package transactionally refreshes its installed updater scripts. Failure restores the previous junction, service binary, database files and any partially replaced updater payload. The Blazor circuit disconnects while the Windows Service restarts and reconnects to the verified release. Attempt transcripts are retained under the external data root.
 
 The health endpoint is:
 
