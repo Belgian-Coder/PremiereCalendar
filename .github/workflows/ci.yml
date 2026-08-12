@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned .NET SDK
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'dotnet-install.ps1'
+          Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile $installer
+          & $installer -Version 11.0.100-preview.7.26381.103 -InstallDir (Join-Path $env:GITHUB_WORKSPACE '.dotnet') -NoPath
+      - name: Restore
+        run: .\.dotnet\dotnet.exe restore PremiereCalendar.slnx --nologo
+      - name: Build
+        run: .\.dotnet\dotnet.exe build PremiereCalendar.slnx -c Release --no-restore --nologo -p:UseSharedCompilation=false
+      - name: Test
+        run: .\.dotnet\dotnet.exe test PremiereCalendar.slnx -c Release --no-build --no-restore --nologo --logger "trx;LogFilePrefix=ci"
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: '**/TestResults/*.trx'
+          if-no-files-found: warn

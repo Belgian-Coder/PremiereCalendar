@@ -131,6 +131,7 @@ Latest local Playwright validation on 2026-05-16 after the quiet filter/header r
 - Filter checks covered active filter URLs, verified `q=24` renders badge `1`, verified `q=24` plus runtime renders badge `2`, verified `seriesScope=new` plus `seriesLang=en,nl` renders badge `2`, verified stale unsupported cross-media query parameters do not inflate the filter badge or saved-filter restore state, verified sort-only changes do not render a filter badge, verified the old active-filter chip strip was absent, and verified there was no header-level clear-filters button.
 - Filter pane checks verified runtime fields and the in-pane clear controls are present.
 - Actions palette checks pressed `Ctrl+K`, verified the palette opened, pressed Escape, and verified the palette closed.
+- Unit tests cover ICS all-day dates and escaping, CSV quoting and spreadsheet-formula neutralization, JSON canonical identity, trusted-proxy defaults, and startup option validation.
 - Settings checks verified the Local status center rendered and provider delta failures stay visible above routine job entries.
 - Layout checks reported no horizontal overflow. The deployed first-viewport measurements were command bar `82.75px` and calendar top `209.125px` on desktop, and command bar `150.8125px` and calendar top `342.359375px` on mobile with source diagnostics visible.
 

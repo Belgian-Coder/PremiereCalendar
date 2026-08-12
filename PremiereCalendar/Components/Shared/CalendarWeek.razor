@@ -32,7 +32,7 @@
                             role="tab"
                             data-day-button
                             data-day-target="@DayElementId(day)"
-                            aria-label="@DayButtonAriaLabel(day)"
+                            title="@DayButtonTitle(day)"
                             aria-selected="@AriaSelected(day)"
                             tabindex="@DayTabIndex(day)"
                             aria-controls="@ControlledPanelId(day)"
@@ -319,7 +319,7 @@
     {
         if (!_dayGroups.TryGetValue(day, out var group) || group.Items.Count == 0)
         {
-            return "Empty";
+            return IsUpdating ? "Loading…" : "Empty";
         }
 
         return group.MovieCount switch
@@ -330,11 +330,13 @@
         };
     }
 
-    private string DayButtonAriaLabel(DateOnly day)
+    private string DayButtonTitle(DateOnly day)
     {
         if (!_dayGroups.TryGetValue(day, out var group) || group.Items.Count == 0)
         {
-            return $"{day.ToString("dddd, dd MMMM yyyy", CultureInfo.CurrentCulture)}, no premieres";
+            return IsUpdating
+                ? $"{day.ToString("dddd, dd MMMM yyyy", CultureInfo.CurrentCulture)}, loading premieres"
+                : $"{day.ToString("dddd, dd MMMM yyyy", CultureInfo.CurrentCulture)}, no premieres";
         }
 
         var countText = new List<string>();

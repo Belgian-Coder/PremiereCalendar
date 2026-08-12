@@ -31,7 +31,8 @@ public sealed class CalendarWeekTests : BunitContext
         Assert.NotEmpty(component.FindAll("button[data-day-target='premiere-day-20260504']"));
         Assert.Equal(
             "Monday, 04 May 2026, no premieres",
-            component.Find("button[data-day-target='premiere-day-20260504']").GetAttribute("aria-label"));
+            component.Find("button[data-day-target='premiere-day-20260504']").GetAttribute("title"));
+        Assert.Null(component.Find("button[data-day-target='premiere-day-20260504']").GetAttribute("aria-label"));
         Assert.NotEmpty(component.FindAll("#premiere-day-20260504"));
         Assert.Equal("tabpanel", component.Find("[data-testid='calendar-day']").GetAttribute("role"));
         Assert.Equal("premiere-day-tab-20260504", component.Find("[data-testid='calendar-day']").GetAttribute("aria-labelledby"));
@@ -68,7 +69,8 @@ public sealed class CalendarWeekTests : BunitContext
         Assert.Contains("1 series", component.Markup);
         Assert.Equal(
             "Monday, 04 May 2026, 1 series",
-            component.Find("button[data-day-target='premiere-day-20260504']").GetAttribute("aria-label"));
+            component.Find("button[data-day-target='premiere-day-20260504']").GetAttribute("title"));
+        Assert.Null(component.Find("button[data-day-target='premiere-day-20260504']").GetAttribute("aria-label"));
         Assert.Contains("w=185&amp;v=abc123", component.Markup);
         Assert.DoesNotContain("ImageCacheVersion", component.Markup);
         Assert.Empty(component.FindAll(".empty-day"));
@@ -449,7 +451,7 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
-    public void CalendarDay_RendersStaticDensePreviewWhileUpdating()
+    public void CalendarDay_KeepsDenseDaysVirtualizedWhileUpdating()
     {
         var items = Enumerable.Range(1, 45)
             .Select(index => new PremiereItem
@@ -471,9 +473,10 @@ public sealed class CalendarWeekTests : BunitContext
             .Add(x => x.ScoreSource, ScoreSource.Tmdb)
             .Add(x => x.IsUpdating, true));
 
-        Assert.Empty(component.FindAll("[data-testid='virtualized-day']"));
-        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
-        Assert.Single(component.FindAll("[data-day-load-more]"));
+        Assert.Single(component.FindAll("[data-testid='virtualized-day']"));
+        Assert.Contains("Showing all 45 with virtual scrolling", component.Markup);
+        Assert.Empty(component.FindAll("[data-day-load-more]"));
+        Assert.Empty(component.FindAll("[data-day-autoload-sentinel]"));
     }
 
     [Fact]

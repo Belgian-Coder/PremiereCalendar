@@ -683,6 +683,7 @@ public sealed class PremiereService : IPremiereService
 
         var orderedSources = OrderSourcesForPriority(sources, filters?.PriorityDate).ToArray();
         var latestBatchesByKey = new Dictionary<string, PremiereSourceBatch>(StringComparer.Ordinal);
+        var currentItemsAccumulator = new SourceAwarePremiereMergeAccumulator();
         var errors = new List<Exception>();
         var failedSourceNames = new HashSet<string>(StringComparer.Ordinal);
         var active = new List<ActivePremiereSource>();
@@ -723,6 +724,7 @@ public sealed class PremiereService : IPremiereService
                 {
                     var batch = source.Enumerator.Current;
                     latestBatchesByKey[source.Key] = batch;
+                    currentItemsAccumulator.ReplaceSource(source.Key, batch.Items);
                     if (batch.Error is not null)
                     {
                         errors.Add(batch.Error);
@@ -730,7 +732,7 @@ public sealed class PremiereService : IPremiereService
                     }
 
                     var sourceItems = MergePremiereItems(batch.Items);
-                    var currentItems = MergePremiereItems(latestBatchesByKey.Values.SelectMany(candidate => candidate.Items));
+                    var currentItems = currentItemsAccumulator.ToMergedItems();
                     yield return CreateProgress(
                         batch.Name,
                         sourceItems,
@@ -761,7 +763,7 @@ public sealed class PremiereService : IPremiereService
         }
 
 
-        var items = MergePremiereItems(latestBatchesByKey.Values.SelectMany(batch => batch.Items));
+        var items = currentItemsAccumulator.ToMergedItems();
         if (items.Count == 0 && errors.Count > 0)
         {
             throw new AggregateException("Premiere discovery failed before any source returned items.", errors);
@@ -1142,23 +1144,7 @@ public sealed class PremiereService : IPremiereService
             .GroupBy(item => item.CanonicalId)
             .Select(MergeCanonicalGroup)
             .ToArray();
-
-        var daysWithExactEpisodes = mergedByCanonicalId
-            .Where(IsExactSeriesEpisode)
-            .Select(item => new SeriesDayKey(item.TmdbId, item.PremiereDate))
-            .ToHashSet();
-
-        var withoutGenericAirDateRows = mergedByCanonicalId
-            .Where(item => !IsGenericSeriesAirDate(item)
-                || !daysWithExactEpisodes.Contains(new SeriesDayKey(item.TmdbId, item.PremiereDate)))
-            .ToArray();
-
-        return MergeVerifiedAndUnverifiedItems(withoutGenericAirDateRows)
-            .OrderBy(item => item.PremiereDate)
-            .ThenBy(VerificationSortRank)
-            .ThenBy(item => item.MediaType)
-            .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        return ReconcileAndSortMergedItems(mergedByCanonicalId);
     }
 
     private static PremiereItem MergeCanonicalGroup(IGrouping<string, PremiereItem> group)
@@ -1532,9 +1518,66 @@ public sealed class PremiereService : IPremiereService
 
     private readonly record struct SeriesDayKey(int TmdbId, DateOnly PremiereDate);
 
+    private sealed class SourceAwarePremiereMergeAccumulator
+    {
+        private readonly Dictionary<string, IReadOnlyList<PremiereItem>> _itemsBySource = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, List<PremiereItem>> _itemsByCanonicalId = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, PremiereItem> _mergedByCanonicalId = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _dirtyCanonicalIds = new(StringComparer.Ordinal);
+
+        public void ReplaceSource(string sourceKey, IReadOnlyList<PremiereItem> items)
+        {
+            if (_itemsBySource.TryGetValue(sourceKey, out var previousItems))
+            {
+                foreach (var item in previousItems)
+                {
+                    if (_itemsByCanonicalId.TryGetValue(item.CanonicalId, out var existing))
+                    {
+                        existing.Remove(item);
+                        _dirtyCanonicalIds.Add(item.CanonicalId);
+                        if (existing.Count == 0)
+                        {
+                            _itemsByCanonicalId.Remove(item.CanonicalId);
+                            _mergedByCanonicalId.Remove(item.CanonicalId);
+                        }
+                    }
+                }
+            }
+
+            _itemsBySource[sourceKey] = items;
+            foreach (var item in items)
+            {
+                if (!_itemsByCanonicalId.TryGetValue(item.CanonicalId, out var existing))
+                {
+                    existing = [];
+                    _itemsByCanonicalId[item.CanonicalId] = existing;
+                }
+
+                existing.Add(item);
+                _dirtyCanonicalIds.Add(item.CanonicalId);
+            }
+        }
+
+        public List<PremiereItem> ToMergedItems()
+        {
+            foreach (var canonicalId in _dirtyCanonicalIds)
+            {
+                if (_itemsByCanonicalId.TryGetValue(canonicalId, out var items) && items.Count > 0)
+                {
+                    _mergedByCanonicalId[canonicalId] = MergeCanonicalGroup(items.GroupBy(item => item.CanonicalId, StringComparer.Ordinal).Single());
+                }
+            }
+
+            _dirtyCanonicalIds.Clear();
+            return ReconcileAndSortMergedItems(_mergedByCanonicalId.Values);
+        }
+    }
+
     private sealed class PremiereMergeAccumulator
     {
         private readonly Dictionary<string, List<PremiereItem>> _itemsByCanonicalId = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, PremiereItem> _mergedByCanonicalId = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _dirtyCanonicalIds = new(StringComparer.Ordinal);
 
         public void AddRange(IEnumerable<PremiereItem> items)
         {
@@ -1547,6 +1590,7 @@ public sealed class PremiereService : IPremiereService
                 }
 
                 existingItems.Add(item);
+                _dirtyCanonicalIds.Add(item.CanonicalId);
             }
         }
 
@@ -1557,8 +1601,36 @@ public sealed class PremiereService : IPremiereService
                 return [];
             }
 
-            return MergePremiereItems(_itemsByCanonicalId.Values.SelectMany(static items => items));
+            foreach (var canonicalId in _dirtyCanonicalIds)
+            {
+                var items = _itemsByCanonicalId[canonicalId];
+                _mergedByCanonicalId[canonicalId] = MergeCanonicalGroup(items.GroupBy(item => item.CanonicalId, StringComparer.Ordinal).Single());
+            }
+
+            _dirtyCanonicalIds.Clear();
+            return ReconcileAndSortMergedItems(_mergedByCanonicalId.Values);
         }
+    }
+
+    private static List<PremiereItem> ReconcileAndSortMergedItems(IEnumerable<PremiereItem> mergedItems)
+    {
+        var mergedByCanonicalId = mergedItems.ToArray();
+        var daysWithExactEpisodes = mergedByCanonicalId
+            .Where(IsExactSeriesEpisode)
+            .Select(item => new SeriesDayKey(item.TmdbId, item.PremiereDate))
+            .ToHashSet();
+
+        var withoutGenericAirDateRows = mergedByCanonicalId
+            .Where(item => !IsGenericSeriesAirDate(item)
+                || !daysWithExactEpisodes.Contains(new SeriesDayKey(item.TmdbId, item.PremiereDate)))
+            .ToArray();
+
+        return MergeVerifiedAndUnverifiedItems(withoutGenericAirDateRows)
+            .OrderBy(item => item.PremiereDate)
+            .ThenBy(VerificationSortRank)
+            .ThenBy(item => item.MediaType)
+            .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static PremiereLoadProgress CreateProgress(

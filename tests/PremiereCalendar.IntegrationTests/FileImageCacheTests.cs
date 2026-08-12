@@ -200,6 +200,26 @@ public sealed class FileImageCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task GetOrAddAsync_RejectsDeclaredOversizedResponseBeforeWriting()
+    {
+        var handler = new StubHttpMessageHandler(_ =>
+        {
+            var response = Image([1, 2, 3]);
+            response.Content.Headers.ContentLength = 4096;
+            return response;
+        });
+        var cache = CreateCache(handler);
+
+        await Assert.ThrowsAsync<ExternalApiException>(() => cache.GetOrAddAsync(
+            "https://image.tmdb.org/t/p/w342/declared-large.jpg",
+            forceRefresh: false,
+            CancellationToken.None));
+
+        var cacheDirectory = Path.Combine(_root, "cache", "images");
+        Assert.True(!Directory.Exists(cacheDirectory) || !Directory.EnumerateFiles(cacheDirectory).Any());
+    }
+
+    [Fact]
     public async Task GetOrAddAsync_RejectsNonAllowedHosts()
     {
         var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("Unexpected image fetch."));

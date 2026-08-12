@@ -141,7 +141,7 @@ public sealed class SqliteSimklSyncStateStore : ISimklSyncStateStore
             Cache = SqliteCacheMode.Shared
         };
 
-        return new SqliteConnection(builder.ToString());
+        return SqliteConnectionFactory.Create(builder.ToString());
     }
 
     private string ResolveDatabasePath()

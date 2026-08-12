@@ -188,7 +188,7 @@
     private int _seriesCount;
 
     private const int VirtualizeThreshold = 40;
-    private const int VirtualizedOverscanRows = 4;
+    private const int VirtualizedOverscanRows = 2;
     private const float VirtualizedRowItemSize = 520;
 
     private int MovieCount => _movieCount;
@@ -207,7 +207,10 @@
 
     private IReadOnlyList<PremiereItem> VisibleUnverifiedItems => _visibleUnverifiedItems;
 
-    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold && !IsUpdating;
+    // Keep dense days virtualized while provider batches stream in. Falling back to
+    // the progressive grid during updates lets the autoload sentinel materialize
+    // hundreds of cards and tens of thousands of DOM nodes before loading ends.
+    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold;
 
     protected override void OnParametersSet()
     {

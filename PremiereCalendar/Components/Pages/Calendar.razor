@@ -47,7 +47,7 @@
             @if (_isLoading && hasVisibleItemsForCurrentWeek)
             {
                 <span class="calendar-refresh-status" data-testid="refreshing" aria-live="polite">
-                    Updating
+                    Updating visible premieres…
                 </span>
             }
 
@@ -100,6 +100,13 @@
                 <button type="button" class="command-palette-item" @onclick="OpenFilters">Filters</button>
                 <button type="button" class="command-palette-item" @onclick="CurrentWeekFromCommandPaletteAsync">This week</button>
                 <button type="button" class="command-palette-item" @onclick="OpenSettings">Settings</button>
+                <button type="button" class="command-palette-item" aria-pressed="@_compactDensity" @onclick="ToggleDensityAsync">@(_compactDensity ? "Use comfortable cards" : "Use compact cards")</button>
+                <div class="command-palette-export-actions" role="group" aria-label="Share or export the current filtered view">
+                    <button type="button" class="command-palette-item" @onclick="ShareCurrentViewAsync">Copy view link</button>
+                    <button type="button" class="command-palette-item" disabled="@(_visibleItems.Count == 0)" @onclick='() => ExportVisibleItemsAsync("ics")'>Export ICS</button>
+                    <button type="button" class="command-palette-item" disabled="@(_visibleItems.Count == 0)" @onclick='() => ExportVisibleItemsAsync("csv")'>Export CSV</button>
+                    <button type="button" class="command-palette-item" disabled="@(_visibleItems.Count == 0)" @onclick='() => ExportVisibleItemsAsync("json")'>Export JSON</button>
+                </div>
                 <div class="command-palette-presets" aria-label="Saved filter presets">
                     <strong>Saved filter presets</strong>
                     <input class="preset-name-input"
@@ -264,7 +271,7 @@
     }
     else if (_isLoading && !hasVisibleItemsForCurrentWeek)
     {
-        <div class="status-panel" data-testid="loading">Loading premieres...</div>
+        <div class="status-panel" data-testid="loading" role="status" aria-live="polite">Loading premieres for the selected week… Empty days will appear after loading completes.</div>
     }
     else
     {
@@ -315,6 +322,7 @@
     private bool _isLoading = true;
     private bool _isQueryProgressExpanded;
     private bool _isCommandPaletteOpen;
+    private bool _compactDensity;
     private bool _isSavingPreset;
     private bool _hasRendered;
     private bool _focusCalendarHeadingAfterRender;
@@ -450,6 +458,14 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (firstRender)
+        {
+            try
+            {
+                _compactDensity = await JS.InvokeAsync<bool>("premiereCalendarDensity.initialize", "premiere-calendar:density");
+            }
+            catch (JSException) { }
+        }
         if (_focusCalendarHeadingAfterRender)
         {
             await FocusCalendarHeadingAsync();
@@ -488,6 +504,48 @@
 
         await PublishCurrentViewSyncUrlAsync(Navigation.Uri, requireQuery: true);
         await Task.WhenAll(LoadFilterCatalogAsync(), LoadAsync());
+    }
+
+    private async Task ToggleDensityAsync()
+    {
+        try { _compactDensity = await JS.InvokeAsync<bool>("premiereCalendarDensity.toggle", "premiere-calendar:density"); } catch (JSException) { return; }
+    }
+
+    private async Task ShareCurrentViewAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarActions.copyText", Navigation.Uri);
+            ShowToast(ToastKind.Success, "View link copied", "The current route, week, and filters are ready to paste.");
+        }
+        catch (JSException ex)
+        {
+            ShowToast(ToastKind.Error, "Copy failed", ex.Message);
+        }
+    }
+
+    private async Task ExportVisibleItemsAsync(string format)
+    {
+        var normalizedFormat = format.ToLowerInvariant();
+        var (content, contentType) = normalizedFormat switch
+        {
+            "ics" => (CalendarExportService.ToIcs(_visibleItems), "text/calendar;charset=utf-8"),
+            "csv" => (CalendarExportService.ToCsv(_visibleItems), "text/csv;charset=utf-8"),
+            "json" => (CalendarExportService.ToJson(_visibleItems), "application/json;charset=utf-8"),
+            _ => throw new ArgumentOutOfRangeException(nameof(format), format, "Unsupported calendar export format.")
+        };
+
+        var route = _pageMode.ToString().ToLowerInvariant();
+        var fileName = $"premiere-calendar-{route}-{_filters.WeekStart:yyyy-MM-dd}.{normalizedFormat}";
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarActions.downloadText", fileName, contentType, content);
+            ShowToast(ToastKind.Success, "Export ready", $"Downloaded {_visibleItems.Count:N0} visible premieres as {normalizedFormat.ToUpperInvariant()}.");
+        }
+        catch (JSException ex)
+        {
+            ShowToast(ToastKind.Error, "Export failed", ex.Message);
+        }
     }
 
     private async Task<bool> LoadIntegrationSettingsAsync()
@@ -980,9 +1038,12 @@
                     InvalidateLoadProgressCache();
 
                     var now = DateTimeOffset.UtcNow;
+                    var minimumUiUpdateInterval = update.Items.Count >= 200
+                        ? TimeSpan.FromMilliseconds(750)
+                        : TimeSpan.FromMilliseconds(250);
                     if (!renderedFirstUpdate
                         || update.IsFinal
-                        || now - lastUiUpdateUtc >= TimeSpan.FromMilliseconds(250))
+                        || now - lastUiUpdateUtc >= minimumUiUpdateInterval)
                     {
                         renderedFirstUpdate = true;
                         lastUiUpdateUtc = now;
@@ -1746,7 +1807,6 @@
         var targetWeekStart = CalendarFilters.StartOfWeek(day);
         if (_filters.WeekStart == targetWeekStart)
         {
-            StateHasChanged();
             return;
         }
 
@@ -1882,7 +1942,6 @@
 
         try
         {
-            StateHasChanged();
             var result = await ArrIntegrationService.AddAsync(item);
             if (result.Succeeded)
             {
@@ -1902,7 +1961,6 @@
         finally
         {
             _arrAddInProgress.Remove(item.CanonicalId);
-            StateHasChanged();
         }
     }
 
@@ -2524,7 +2582,18 @@
 
     private async Task<string?> GetSavedFilterQueryAsync(CalendarPageMode mode)
     {
-        return await JS.InvokeAsync<string?>("premiereFilterStorage.get", StorageKey(mode));
+        try
+        {
+            return await JS.InvokeAsync<string?>("premiereFilterStorage.get", StorageKey(mode));
+        }
+        catch (JSDisconnectedException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     private static bool HasMeaningfulFilterQuery(string location)

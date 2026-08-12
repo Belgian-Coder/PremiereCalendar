@@ -106,6 +106,12 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
         }
         catch (Exception ex)
         {
+            // Cancellation can race the filtered catch above between filter
+            // evaluation and entering this block during service shutdown.
+            if (ex is OperationCanceledException && stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
             _logger.LogWarning(ex, "Current-week calendar warmup cycle failed.");
             await RecordTimelineAsync(
                 "Calendar warmup",
@@ -147,6 +153,10 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException && stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
             _logger.LogWarning(ex, "Cache maintenance failed.");
             await RecordTimelineAsync(
                 "Cache maintenance",

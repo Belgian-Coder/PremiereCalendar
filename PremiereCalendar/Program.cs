@@ -5,10 +5,13 @@ using Microsoft.AspNetCore.Components.Server;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Components;
+using PremiereCalendar.Hosting;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddHostingHardening(builder.Configuration);
 
 builder.Host.UseWindowsService(options =>
 {
@@ -50,8 +53,6 @@ builder.Services.Configure<RottenTomatoesOptions>(builder.Configuration.GetSecti
 builder.Services.Configure<WatchmodeOptions>(builder.Configuration.GetSection("Watchmode"));
 builder.Services.Configure<SimklOptions>(builder.Configuration.GetSection("Simkl"));
 builder.Services.Configure<CalendarCacheOptions>(builder.Configuration.GetSection("CalendarCache"));
-builder.Services.Configure<ImageCacheOptions>(builder.Configuration.GetSection("ImageCache"));
-builder.Services.Configure<AppDatabaseOptions>(builder.Configuration.GetSection("AppDatabase"));
 builder.Services.Configure<CalendarWarmupOptions>(builder.Configuration.GetSection("CalendarWarmup"));
 builder.Services.Configure<CalendarLoadOptions>(builder.Configuration.GetSection("CalendarLoad"));
 builder.Services.Configure<CacheMaintenanceOptions>(builder.Configuration.GetSection("CacheMaintenance"));
@@ -69,7 +70,11 @@ builder.Services.AddResponseCompression(options =>
     ]);
 });
 builder.Services.AddHttpContextAccessor();
-builder.Services.AddHealthChecks();
+builder.Services.AddHealthChecks()
+    .AddCheck<SqliteHealthCheck>("sqlite", tags: ["ready"]);
+builder.Services.AddSingleton<SqliteDatabaseInitializer>();
+// Register first so WAL and busy-timeout settings are applied before cache warmers start.
+builder.Services.AddHostedService<SqliteDatabaseInitializerHostedService>();
 builder.Services.AddSingleton<CircuitHandler, CalendarCircuitDiagnostics>();
 
 builder.Services.AddHttpClient<ITmdbClient, TmdbClient>((sp, client) =>
@@ -91,6 +96,7 @@ builder.Services.AddHttpClient<IOmdbClient, OmdbClient>((sp, client) =>
     var options = sp.GetRequiredService<IOptions<OmdbOptions>>().Value;
 
     client.BaseAddress = new Uri(options.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 });
 
@@ -108,6 +114,7 @@ builder.Services.AddHttpClient<ITvmazeClient, TvmazeClient>((sp, client) =>
     var options = sp.GetRequiredService<IOptions<TvmazeOptions>>().Value;
 
     client.BaseAddress = new Uri(options.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
 });
@@ -117,6 +124,7 @@ builder.Services.AddHttpClient<IFanartClient, FanartClient>((sp, client) =>
     var options = sp.GetRequiredService<IOptions<FanartOptions>>().Value;
 
     client.BaseAddress = new Uri(options.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 });
 
@@ -125,6 +133,7 @@ builder.Services.AddHttpClient<ITraktClient, TraktClient>((sp, client) =>
     var options = sp.GetRequiredService<IOptions<TraktOptions>>().Value;
 
     client.BaseAddress = new Uri(options.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
 });
@@ -134,6 +143,7 @@ builder.Services.AddHttpClient<ITheTvdbClient, TheTvdbClient>((sp, client) =>
     var options = sp.GetRequiredService<IOptions<TheTvdbOptions>>().Value;
 
     client.BaseAddress = new Uri(options.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 });
 
@@ -248,6 +258,9 @@ builder.Services.AddScoped<IPremiereService, PremiereService>();
 
 var app = builder.Build();
 
+// Forwarded headers must be applied before HTTPS redirection and HSTS determine the scheme.
+app.UseHostingHardening();
+
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
@@ -264,7 +277,23 @@ app.MapStaticAssets()
     .ShortCircuit();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = _ => false
+});
+app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
+app.MapGet("/health/version", () => Results.Json(new
+{
+    version = typeof(Program).Assembly
+        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+        .SingleOrDefault()?.InformationalVersion
+        ?? typeof(Program).Assembly.GetName().Version?.ToString()
+        ?? "0.0.0"
+}));
 app.MapGet(
     "/cached-image",
     async Task<IResult> (

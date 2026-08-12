@@ -234,7 +234,7 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
             Cache = SqliteCacheMode.Shared
         };
 
-        return new SqliteConnection(builder.ToString());
+        return SqliteConnectionFactory.Create(builder.ToString());
     }
 
     private string ResolveDatabasePath()

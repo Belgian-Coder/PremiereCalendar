@@ -238,7 +238,10 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
     {
         try
         {
-            using var response = await _httpClient.GetAsync(url, cancellationToken);
+            using var response = await ProviderHttpRetry.SendAsync(
+                _httpClient,
+                () => new HttpRequestMessage(HttpMethod.Get, url),
+                cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 return null;

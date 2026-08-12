@@ -78,8 +78,10 @@ public sealed class FanartClient : IFanartClient
         try
         {
             var separator = path.Contains('?', StringComparison.Ordinal) ? '&' : '?';
-            using var response = await _httpClient.GetAsync(
-                $"{path}{separator}api_key={Uri.EscapeDataString(apiKey)}",
+            var requestPath = $"{path}{separator}api_key={Uri.EscapeDataString(apiKey)}";
+            using var response = await ProviderHttpRetry.SendAsync(
+                _httpClient,
+                () => new HttpRequestMessage(HttpMethod.Get, requestPath),
                 cancellationToken);
 
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound

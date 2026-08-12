@@ -111,6 +111,67 @@ public sealed class InstallerScriptTests
         Assert.Contains("/p:InformationalVersion=$Version", script, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void GitHubReleasePublisherRequiresReviewedSourceAndSignedAssets()
+    {
+        var script = ReadRepoFile("eng/Publish-GitHubRelease.ps1");
+
+        Assert.Contains("branch --show-current", script, StringComparison.Ordinal);
+        Assert.Contains("status --porcelain=v1", script, StringComparison.Ordinal);
+        Assert.Contains("main must exactly match origin/main", script, StringComparison.Ordinal);
+        Assert.Contains("Version $Version must be newer", script, StringComparison.Ordinal);
+        Assert.Contains("--self-contained", script, StringComparison.Ordinal);
+        Assert.Contains("restore (Join-Path $projectRoot 'PremiereCalendar\\PremiereCalendar.csproj') -r win-x64", script, StringComparison.Ordinal);
+        Assert.Contains("stable.manifest.json", script, StringComparison.Ordinal);
+        Assert.Contains("RSASignaturePadding", script, StringComparison.Ordinal);
+        Assert.Contains("SHA256SUMS.txt", script, StringComparison.Ordinal);
+        Assert.Contains("tag -a $tag", script, StringComparison.Ordinal);
+        Assert.Contains("push origin $tag", script, StringComparison.Ordinal);
+        Assert.Contains("--verify-tag", script, StringComparison.Ordinal);
+        Assert.Contains("--draft", script, StringComparison.Ordinal);
+        Assert.Contains("--draft=false", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReleaseUpdaterPinsTrustAndRollsBackVersionedActivation()
+    {
+        var script = ReadRepoFile("deploy/Updates/update-helper.ps1");
+
+        Assert.Contains("administrator-pinned certificate", script, StringComparison.Ordinal);
+        Assert.Contains("Release manifest signature is invalid", script, StringComparison.Ordinal);
+        Assert.Contains("Release archive contains an unsafe path", script, StringComparison.Ordinal);
+        Assert.Contains("New-Item -ItemType Junction", script, StringComparison.Ordinal);
+        Assert.Contains("Stop-Service", script, StringComparison.Ordinal);
+        Assert.Contains("Wait-ForHealthyVersion", script, StringComparison.Ordinal);
+        Assert.Contains("Move-Item -LiteralPath $previous -Destination $current", script, StringComparison.Ordinal);
+        Assert.Contains("$previousServicePath", script, StringComparison.Ordinal);
+        Assert.Contains("sc.exe config $ServiceName binPath= $previousServicePath", script, StringComparison.Ordinal);
+        Assert.Contains("$serviceWasCreated", script, StringComparison.Ordinal);
+        Assert.Contains("Urls=http://0.0.0.0:$Port", script, StringComparison.Ordinal);
+        Assert.Contains("PremiereCalendarData", script, StringComparison.Ordinal);
+        Assert.Contains("$databaseStateCaptured", script, StringComparison.Ordinal);
+        Assert.Contains("pre-$version-", script, StringComparison.Ordinal);
+        Assert.Contains("must not be filesystem roots", script, StringComparison.Ordinal);
+        Assert.True(
+            script.IndexOf("Stop-Service -Name $ServiceName", StringComparison.Ordinal)
+            < script.IndexOf("Copy-Item -Path (Join-Path $legacyData '*')", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GitHubUpdaterDownloadsManifestBeforeExactDeclaredPackage()
+    {
+        var script = ReadRepoFile("deploy/Updates/install-github-release.ps1");
+
+        var manifestDownload = script.IndexOf("stable.manifest.json", StringComparison.Ordinal);
+        var packageDeclaration = script.IndexOf("manifest.packageFileName", StringComparison.Ordinal);
+        Assert.True(manifestDownload >= 0 && packageDeclaration > manifestDownload);
+        Assert.Contains("No administrator-pinned release certificate exists", script, StringComparison.Ordinal);
+        Assert.Contains("browser_download_url", script, StringComparison.Ordinal);
+        Assert.Contains("size -gt 1GB", script, StringComparison.Ordinal);
+        Assert.Contains("is already the latest stable release", script, StringComparison.Ordinal);
+        Assert.Contains("Refusing to downgrade", script, StringComparison.Ordinal);
+    }
+
     private static string ReadRepoFile(string relativePath, [CallerFilePath] string sourceFile = "")
     {
         var repoRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourceFile)!, "..", ".."));

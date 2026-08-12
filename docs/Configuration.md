@@ -5,6 +5,18 @@ Configuration is handled with two layers:
 - Runtime app settings edited on the Settings page are stored in the local SQLite parameter database.
 - Infrastructure values still use standard ASP.NET Core providers. Non-secret defaults live in `PremiereCalendar/appsettings.json`; API credentials must not be committed.
 
+Startup validates the application database path and enabled image-cache limits. Invalid startup-critical values fail before the service begins accepting requests.
+
+When a reverse proxy terminates HTTPS, add each trusted proxy IP under `Hosting:ForwardedProxies`. Loopback proxies are trusted by default. Forwarded headers are processed before HTTPS redirection and HSTS; browser responses also receive content-type, referrer-policy, and content-security-policy headers. This hosting hardening does not add application authentication or change access to Settings and integration actions.
+
+```json
+{
+  "Hosting": {
+    "ForwardedProxies": [ "192.168.1.10" ]
+  }
+}
+```
+
 Release installs write infrastructure values such as `AppDatabase__Path`, `CalendarCache__Directory`, and `ImageCache__Directory` to the Windows Service `Environment` registry value. Source API credentials are configured only in the app Settings page and are stored in the SQLite settings database. The release package builder clears API credentials from packaged `appsettings.json`.
 
 Local application settings edited through the Settings page are stored in a SQLite parameter database. The default path is `App_Data/data/premiere-calendar.db`; release installs set `AppDatabase__Path` to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db`.

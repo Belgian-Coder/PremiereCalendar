@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
@@ -6,6 +7,61 @@ using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
+
+internal static class ProviderHttpRetry
+{
+    private const int MaxAttempts = 3;
+    private static readonly TimeSpan MaxDelay = TimeSpan.FromMilliseconds(250);
+
+    public static async Task<HttpResponseMessage> SendAsync(
+        HttpClient client,
+        Func<HttpRequestMessage> requestFactory,
+        CancellationToken cancellationToken,
+        TimeProvider? timeProvider = null)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using var request = requestFactory();
+                var response = await client.SendAsync(request, cancellationToken);
+                if (attempt >= MaxAttempts || !IsTransient(response.StatusCode))
+                {
+                    return response;
+                }
+
+                var delay = RetryAfter(response) ?? TimeSpan.FromMilliseconds(50 * attempt);
+                response.Dispose();
+                await Task.Delay(Clamp(delay), timeProvider ?? TimeProvider.System, cancellationToken);
+            }
+            catch (HttpRequestException) when (attempt < MaxAttempts)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50 * attempt), timeProvider ?? TimeProvider.System, cancellationToken);
+            }
+        }
+    }
+
+    private static bool IsTransient(HttpStatusCode statusCode) =>
+        statusCode == HttpStatusCode.RequestTimeout
+        || statusCode == HttpStatusCode.TooManyRequests
+        || (int)statusCode >= 500;
+
+    private static TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        var value = response.Headers.RetryAfter;
+        if (value?.Delta is { } delta && delta > TimeSpan.Zero) return delta;
+        if (value?.Date is { } date)
+        {
+            var deltaFromNow = date - DateTimeOffset.UtcNow;
+            if (deltaFromNow > TimeSpan.Zero) return deltaFromNow;
+        }
+
+        return null;
+    }
+
+    private static TimeSpan Clamp(TimeSpan value) =>
+        value < TimeSpan.Zero ? TimeSpan.Zero : value > MaxDelay ? MaxDelay : value;
+}
 
 public sealed class OmdbClient : IOmdbClient
 {
@@ -86,7 +142,11 @@ public sealed class OmdbClient : IOmdbClient
                 try
                 {
                     var path = $"?apikey={Uri.EscapeDataString(settings.ApiKey)}&i={Uri.EscapeDataString(imdbId)}";
-                    using var response = await _httpClient.GetAsync(path, token);
+                    using var response = await ProviderHttpRetry.SendAsync(
+                        _httpClient,
+                        () => new HttpRequestMessage(HttpMethod.Get, path),
+                        token,
+                        _timeProvider);
 
                     if (!response.IsSuccessStatusCode)
                     {

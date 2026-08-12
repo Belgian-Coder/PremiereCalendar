@@ -102,6 +102,9 @@ To build and install the service from the source tree:
 | Apply a saved filter preset | Open Actions, choose a preset, and click Apply preset |
 | Open Actions | Press Ctrl+K, or Cmd+K on macOS |
 | Close Actions | Press Escape |
+| Copy the current filtered view | Open Actions and click Copy view link |
+| Export visible premieres | Open Actions and choose ICS, CSV, or JSON |
+| Fit more cards on screen | Open Actions and choose Use compact cards |
 | Change filters | Click the filter button; a small badge shows how many filters are active |
 | Review active mobile filters | Open the filter button; the compact review is at the top of the pane |
 | Change settings | Click the cog icon |
@@ -153,7 +156,7 @@ The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync grou
 
 Use Update when you want to reuse fresh local cache where possible. Use Refresh sources when you want the visible week checked against providers again. Refresh sources keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 
-Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker, settings backup/restore box, score backfill, and missing-ID repair. Source-tree installs can also run a guarded GitHub source update from Settings. That update path creates a pre-update data snapshot, records commit/log evidence, health-checks the installed app, and rolls back automatically when the install or health check fails.
+Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker, settings backup/restore box, score backfill, and missing-ID repair. Installed releases use a signed GitHub asset feed with certificate pinning, immutable version directories, expected-version health checks, and automatic activation rollback. The older guarded source-tree updater remains available only for development checkouts.
 
 ## Common Problems
 
@@ -185,6 +188,7 @@ Most users only need this README and [Troubleshooting](docs/Troubleshooting.md).
 Technical references:
 
 - [Release Installer](docs/ReleaseInstaller.md)
+- [Signed GitHub Releases and Updates](docs/ReleaseUpdates.md)
 - [Configuration](docs/Configuration.md)
 - [How It Works](docs/HowItWorks.md)
 - [Architecture](docs/Architecture.md)

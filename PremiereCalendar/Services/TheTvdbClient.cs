@@ -108,9 +108,12 @@ public sealed class TheTvdbClient : ITheTvdbClient
         string token,
         CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"series/{tvdbId}/artworks");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        return await _httpClient.SendAsync(request, cancellationToken);
+        return await ProviderHttpRetry.SendAsync(_httpClient, () =>
+        {
+            var retryRequest = new HttpRequestMessage(HttpMethod.Get, $"series/{tvdbId}/artworks");
+            retryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return retryRequest;
+        }, cancellationToken);
     }
 
     private static async Task<IReadOnlyList<TheTvdbArtwork>?> ReadSeriesArtworkAsync(
@@ -137,11 +140,14 @@ public sealed class TheTvdbClient : ITheTvdbClient
             return cached;
         }
 
-        using var response = await _httpClient.PostAsJsonAsync(
-            "login",
-            new { apikey = apiKey },
-            JsonOptions,
-            cancellationToken);
+        using var response = await ProviderHttpRetry.SendAsync(_httpClient, () =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, "login")
+            {
+                Content = JsonContent.Create(new { apikey = apiKey }, options: JsonOptions)
+            };
+            return request;
+        }, cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {

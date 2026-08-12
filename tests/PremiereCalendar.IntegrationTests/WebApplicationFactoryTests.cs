@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using System.Net.Http.Headers;
+using System.Text.Json;
 
 namespace PremiereCalendar.IntegrationTests;
 
@@ -38,6 +39,21 @@ public sealed class WebApplicationFactoryTests
         var response = await client.GetAsync("/health");
 
         response.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task ReadinessAndVersionEndpoints_ReturnOperationalEvidence()
+    {
+        await using var factory = new WebApplicationFactory<Program>();
+        using var client = factory.CreateClient();
+
+        using var readiness = await client.GetAsync("/health/ready");
+        readiness.EnsureSuccessStatusCode();
+        using var versionDocument = JsonDocument.Parse(await client.GetStringAsync("/health/version"));
+
+        var version = versionDocument.RootElement.GetProperty("version").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(version));
+        Assert.Matches(@"^\d+\.\d+\.\d+", version);
     }
 
     [Fact]

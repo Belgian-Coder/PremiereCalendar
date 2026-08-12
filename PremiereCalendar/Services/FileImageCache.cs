@@ -16,7 +16,7 @@ namespace PremiereCalendar.Services;
 public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 {
     private const int StreamBufferSize = 81920;
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> CacheKeyLocks = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, CacheKeyGate> CacheKeyLocks = new(StringComparer.Ordinal);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -28,6 +28,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<FileImageCache> _logger;
     private readonly ProviderRequestThrottler _requestThrottler;
+    private readonly SemaphoreSlim _decodeGate;
 
     public FileImageCache(
         HttpClient httpClient,
@@ -41,6 +42,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         _environment = environment;
         _logger = logger;
         _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
+        _decodeGate = new SemaphoreSlim(Math.Clamp(_options.MaxConcurrentDecodes, 1, 64));
     }
 
     public async Task<CachedImage> GetOrAddAsync(
@@ -55,9 +57,17 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         var filePath = ImagePath(cacheKey);
         var metadataPath = MetadataPath(cacheKey);
         var browserMaxAge = TimeSpan.FromDays(Math.Max(1, _options.CacheDays));
-        var cacheKeyLock = CacheKeyLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+        var cacheKeyLock = AcquireCacheKeyGate(cacheKey);
 
-        await cacheKeyLock.WaitAsync(cancellationToken);
+        try
+        {
+            await cacheKeyLock.WaitAsync(cancellationToken);
+        }
+        catch
+        {
+            cacheKeyLock.Release(entered: false);
+            throw;
+        }
         try
         {
             if (!forceRefresh && TryReadFreshMetadata(metadataPath, out var metadata) && File.Exists(filePath))
@@ -85,7 +95,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         }
         finally
         {
-            cacheKeyLock.Release();
+            cacheKeyLock.Release(entered: true);
         }
     }
 
@@ -256,6 +266,14 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             throw new ExternalApiException($"Image fetch failed with HTTP {(int)response.StatusCode} {response.ReasonPhrase}.");
         }
 
+        var maxBytes = Math.Max(1024, _options.MaxBytes);
+        var contentLength = response.Content.Headers.ContentLength;
+        if (contentLength is > 0 && contentLength > maxBytes)
+        {
+            throw new ExternalApiException(
+                string.Create(CultureInfo.InvariantCulture, $"Image exceeds cache size limit of {maxBytes} bytes."));
+        }
+
         var contentType = response.Content.Headers.ContentType?.MediaType;
         if (string.IsNullOrWhiteSpace(contentType) || !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
         {
@@ -322,20 +340,28 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         {
             await WriteLimitedResponseContentToFileAsync(content, tempSourcePath, maxBytes, cancellationToken);
 
-            await using var sourceFile = File.OpenRead(tempSourcePath);
-            using var image = await Image.LoadAsync(sourceFile, cancellationToken);
-            if (image.Width > targetWidth)
+            await _decodeGate.WaitAsync(cancellationToken);
+            try
             {
-                image.Mutate(operation => operation.Resize(new ResizeOptions
+                await using var sourceFile = File.OpenRead(tempSourcePath);
+                using var image = await Image.LoadAsync(sourceFile, cancellationToken);
+                if (image.Width > targetWidth)
                 {
-                    Size = new Size(targetWidth, 0),
-                    Mode = ResizeMode.Max
-                }));
-            }
+                    image.Mutate(operation => operation.Resize(new ResizeOptions
+                    {
+                        Size = new Size(targetWidth, 0),
+                        Mode = ResizeMode.Max
+                    }));
+                }
 
-            await using (var target = File.Create(tempImagePath))
+                await using (var target = File.Create(tempImagePath))
+                {
+                    await image.SaveAsJpegAsync(target, new JpegEncoder { Quality = 82 }, cancellationToken);
+                }
+            }
+            finally
             {
-                await image.SaveAsJpegAsync(target, new JpegEncoder { Quality = 82 }, cancellationToken);
+                _decodeGate.Release();
             }
 
             File.Move(tempImagePath, filePath, overwrite: true);
@@ -489,6 +515,84 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             : sourceUri.AbsoluteUri;
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedUrl));
         return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    private static CacheKeyGateLease AcquireCacheKeyGate(string cacheKey)
+    {
+        while (true)
+        {
+            var gate = CacheKeyLocks.GetOrAdd(cacheKey, static _ => new CacheKeyGate());
+            if (gate.TryAcquireReference())
+            {
+                return new CacheKeyGateLease(cacheKey, gate);
+            }
+
+            CacheKeyLocks.TryRemove(new KeyValuePair<string, CacheKeyGate>(cacheKey, gate));
+        }
+    }
+
+    private sealed class CacheKeyGate
+    {
+        private int _references;
+        private readonly SemaphoreSlim _semaphore = new(1, 1);
+
+        public bool TryAcquireReference()
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _references);
+                if (current < 0)
+                {
+                    return false;
+                }
+
+                if (Interlocked.CompareExchange(ref _references, current + 1, current) == current)
+                {
+                    return true;
+                }
+            }
+        }
+
+        public Task WaitAsync(CancellationToken cancellationToken) => _semaphore.WaitAsync(cancellationToken);
+
+        public bool IsRetired => Volatile.Read(ref _references) < 0;
+
+        public void Release()
+        {
+            ReleaseReference();
+            _semaphore.Release();
+        }
+
+        public void ReleaseReference()
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _references);
+                if (current <= 0) return;
+                var next = current == 1 ? -1 : current - 1;
+                if (Interlocked.CompareExchange(ref _references, next, current) == current) return;
+            }
+        }
+    }
+
+    private sealed class CacheKeyGateLease(string cacheKey, CacheKeyGate gate)
+    {
+        public Task WaitAsync(CancellationToken cancellationToken) => gate.WaitAsync(cancellationToken);
+        public void Release(bool entered)
+        {
+            if (entered)
+            {
+                gate.Release();
+            }
+            else
+            {
+                gate.ReleaseReference();
+            }
+            if (gate.IsRetired)
+            {
+                CacheKeyLocks.TryRemove(new KeyValuePair<string, CacheKeyGate>(cacheKey, gate));
+            }
+        }
     }
 
     private sealed record ImageCacheMetadata(

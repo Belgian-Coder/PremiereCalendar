@@ -18,8 +18,8 @@
     scheduled = true;
     window.requestAnimationFrame(() => {
       scheduled = false;
-      const currentRoots = Array.from(roots);
-      const currentCleanupRoots = Array.from(cleanupRoots);
+      const currentRoots = coalesceRoots(roots);
+      const currentCleanupRoots = coalesceRoots(cleanupRoots);
       const shouldCleanup = cleanupScheduled;
       roots.clear();
       cleanupRoots.clear();
@@ -37,6 +37,20 @@
         }
       }
     });
+  };
+
+  // Blazor commonly emits a parent and several child mutations in one batch.
+  // Passing only the minimal ancestor roots prevents every registered callback
+  // from rescanning the same subtree repeatedly.
+  const coalesceRoots = (pending) => {
+    const candidates = Array.from(pending).filter(Boolean);
+    if (candidates.some(root => root === document || root === document.documentElement)) {
+      return [document];
+    }
+
+    return candidates.filter((root, index) =>
+      !candidates.some((other, otherIndex) =>
+        otherIndex !== index && other instanceof Node && root instanceof Node && other.contains(root)));
   };
 
   const schedule = (root) => {

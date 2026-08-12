@@ -173,6 +173,10 @@ The filter pane is its own component with local draft state. Search text, checkb
 
 The top-bar lightbulb toggles light and dark themes. The selected theme is stored in browser local storage as `premiere-calendar:theme`, not in the server API/week cache. The same non-secret value is mirrored to a `premiere-calendar-theme` cookie so the server can render `<html data-theme="dark">` or `<html data-theme="light">` on the first response. The head script still checks local storage before CSS loads, then the theme script re-applies the saved value after route/enhanced-navigation events and if another render resets the root `data-theme` attribute.
 
+The Actions palette also stores the comfortable/compact card choice in browser local storage as `premiere-calendar:density`. Compact mode keeps the title, metadata, primary score, sources, and links visible while collapsing descriptions, genre chips, enrichment, and provenance for faster desktop scanning.
+
+Copy view link uses the current canonical route and query. ICS, CSV, and JSON exports are generated from the page's already-filtered `_visibleItems` collection and downloaded by the browser; no external provider calls or cache refreshes occur during export.
+
 Client-side lazy images, day auto-loading, and filter-pane swipe closing share one requestAnimationFrame-batched DOM observer. Feature scripts receive only the added roots they need to scan, which keeps virtualized row mounts from triggering multiple full-document rescans. Day highlighting does not use a scroll observer; selected day state lives in Blazor.
 
 ## Images
@@ -238,12 +242,15 @@ GET /health
 - `PremiereCalendar/Services/ScoreBackfillService.cs` - cached-card rating hydration from IMDb and OMDb.
 - `PremiereCalendar/Services/MissingExternalIdRepairService.cs` - cached-card external-ID repair from TMDb details.
 - `PremiereCalendar/Services/SettingsBackupService.cs` - JSON export/import for integration settings and local app state.
+- `PremiereCalendar/Services/CalendarExportService.cs` - side-effect-free ICS, CSV, and JSON formatting for the visible calendar.
 - `PremiereCalendar/Components/Shared/MediaFilterPanel.razor` - TMDb-style per-media filter groups for series and movies.
 - `PremiereCalendar/Components/Shared/CalendarWeek.razor` - sticky day selector and one mounted selected-day section.
 - `PremiereCalendar/Components/Shared/CalendarDay.razor` - per-day grouping, render fingerprinting, 10-card batching, scroll auto-load sentinels, and .NET 11 Blazor `Virtualize` for dense days.
 - `PremiereCalendar/Components/Shared/PremiereCard.razor` - poster, metadata, source chips, scores, links, description, and card-level render fingerprinting.
 - `PremiereCalendar/wwwroot/dom-observer.js` - shared batched DOM initializer for lazy images, filter-pane swipe setup, and day auto-loading.
 - `PremiereCalendar/wwwroot/command-palette.js` - global Ctrl+K/Cmd+K and Escape handling for the calendar Actions palette.
+- `PremiereCalendar/wwwroot/density-toggle.js` - persisted compact/comfortable card density.
+- `PremiereCalendar/wwwroot/calendar-actions.js` - clipboard and local text-download helpers for sharing and export.
 - `PremiereCalendar/Services/PremiereService.cs` - orchestration, normalization, enrichment, de-duplication, and week cache writes.
 - `PremiereCalendar/Services/PremiereDiscoveryCriteria.cs` - converts saved UI filters to TMDb-supported request filters and cache keys.
 - `PremiereCalendar/Services/PremiereLoadProgress.cs` - source-batch progress messages used by the page during fresh loads.

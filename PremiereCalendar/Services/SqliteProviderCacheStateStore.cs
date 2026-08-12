@@ -300,7 +300,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             Cache = SqliteCacheMode.Shared
         };
 
-        return new SqliteConnection(builder.ToString());
+        return SqliteConnectionFactory.Create(builder.ToString());
     }
 
     private string ResolveDatabasePath()

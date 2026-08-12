@@ -272,13 +272,45 @@
     private const int PosterCacheWidth = 185;
     private const int MaxVisibleSourceNames = 6;
     private string _renderFingerprint = "";
+    private PremiereItem? _fingerprintedItem;
+    private IntegrationSettings? _fingerprintedIntegrationSettings;
+    private ScoreSource _fingerprintedScoreSource;
+    private string? _fingerprintedImageCacheVersion;
+    private bool _fingerprintedRefreshImageCache;
+    private bool _fingerprintedArrActionBusy;
+    private bool _fingerprintedSonarrEnabled;
+    private bool _fingerprintedRadarrEnabled;
     private bool _shouldRender = true;
 
     protected override void OnParametersSet()
     {
+        // Parent calendar renders are frequent while provider batches arrive. Most cards
+        // retain the same immutable record and parameters; avoid rebuilding a large
+        // fingerprint (and enumerating all metadata arrays) in that common case.
+        if (ReferenceEquals(Item, _fingerprintedItem)
+            && ReferenceEquals(IntegrationSettings, _fingerprintedIntegrationSettings)
+            && ScoreSource == _fingerprintedScoreSource
+            && string.Equals(ImageCacheVersion, _fingerprintedImageCacheVersion, StringComparison.Ordinal)
+            && RefreshImageCache == _fingerprintedRefreshImageCache
+            && IsArrActionBusy == _fingerprintedArrActionBusy
+            && IntegrationSettings.Sonarr.Enabled == _fingerprintedSonarrEnabled
+            && IntegrationSettings.Radarr.Enabled == _fingerprintedRadarrEnabled)
+        {
+            _shouldRender = false;
+            return;
+        }
+
         var fingerprint = BuildRenderFingerprint();
         _shouldRender = !string.Equals(fingerprint, _renderFingerprint, StringComparison.Ordinal);
         _renderFingerprint = fingerprint;
+        _fingerprintedItem = Item;
+        _fingerprintedIntegrationSettings = IntegrationSettings;
+        _fingerprintedScoreSource = ScoreSource;
+        _fingerprintedImageCacheVersion = ImageCacheVersion;
+        _fingerprintedRefreshImageCache = RefreshImageCache;
+        _fingerprintedArrActionBusy = IsArrActionBusy;
+        _fingerprintedSonarrEnabled = IntegrationSettings.Sonarr.Enabled;
+        _fingerprintedRadarrEnabled = IntegrationSettings.Radarr.Enabled;
     }
 
     protected override bool ShouldRender()

@@ -167,8 +167,42 @@ a:hover {
     padding: 0.65rem var(--page-x) 2rem;
 }
 
-h1:focus {
-    outline: none;
+h1:focus-visible,
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+    outline: 3px solid var(--amber);
+    outline-offset: 3px;
+}
+
+html[data-density="compact"] {
+    --card-grid-gap: 0.65rem;
+}
+
+html[data-density="compact"] .premiere-card {
+    grid-template-columns: 78px minmax(0, 1fr);
+    padding: 0.55rem;
+    gap: 0.65rem;
+    border-left-width: 8px;
+}
+
+html[data-density="compact"] .poster-frame {
+    width: 78px;
+}
+
+html[data-density="compact"] .card-description,
+html[data-density="compact"] .genre-tags,
+html[data-density="compact"] .source-details,
+html[data-density="compact"] .series-enrichment,
+html[data-density="compact"] .scores span:not(.selected-score) {
+    display: none;
+}
+
+html[data-density="comfortable"] .premiere-card {
+    padding: 0.8rem;
 }
 
 .valid.modified:not([type=checkbox]) {
@@ -873,6 +907,13 @@ h1:focus {
     overscroll-behavior: contain;
     padding: 1rem;
     background: var(--surface);
+}
+
+.command-palette-export-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
 }
 
 .mobile-filter-review {
@@ -3138,6 +3179,27 @@ html[data-theme="dark"] .source-status-item {
 html[data-theme="dark"] .source-status-item strong.inactive {
     background: color-mix(in srgb, var(--surface) 86%, white 14%);
     color: var(--ink);
+}
+
+html[data-theme="dark"] .empty-day,
+html[data-theme="dark"] .day-jump-count,
+html[data-theme="dark"] .calendar-refresh-status {
+    color: #c5d1da;
+}
+
+html[data-theme="dark"] .day-date {
+    color: #e5a27d;
+}
+
+html[data-theme="dark"] .item-facts .item-fact-label,
+html[data-theme="dark"] .episode-facts .episode-label,
+html[data-theme="dark"] .provider-sources .provider-source-label {
+    color: #ffffff;
+}
+
+html[data-theme="dark"] .unverified-day-separator span,
+html[data-theme="dark"] .unverified-day-separator small {
+    color: #f2c766;
 }
 
 .blazor-error-boundary {

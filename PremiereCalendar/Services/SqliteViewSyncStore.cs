@@ -478,7 +478,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             Cache = SqliteCacheMode.Shared
         };
 
-        return new SqliteConnection(builder.ToString());
+        return SqliteConnectionFactory.Create(builder.ToString());
     }
 
     private string ResolveDatabasePath()
