@@ -24,7 +24,7 @@ function Save-BoundedReleaseAsset {
     try {
         $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
         try {
-            $response.EnsureSuccessStatusCode()
+            [void]$response.EnsureSuccessStatusCode()
             if ($response.Content.Headers.ContentLength -gt $MaxBytes) { throw 'Release asset exceeds its size limit.' }
             $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
             try {

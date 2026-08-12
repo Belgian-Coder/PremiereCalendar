@@ -146,6 +146,8 @@ public sealed class InstallerScriptTests
         Assert.Contains("Stop-Service", script, StringComparison.Ordinal);
         Assert.Contains("Wait-ForHealthyVersion", script, StringComparison.Ordinal);
         Assert.Contains("Move-Item -LiteralPath $previous -Destination $current", script, StringComparison.Ordinal);
+        Assert.Contains("[IO.Directory]::Delete($previous)", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove-Item -LiteralPath $previous", script, StringComparison.Ordinal);
         Assert.Contains("$previousServicePath", script, StringComparison.Ordinal);
         Assert.Contains("sc.exe config $ServiceName binPath= $previousServicePath", script, StringComparison.Ordinal);
         Assert.Contains("$serviceWasCreated", script, StringComparison.Ordinal);
@@ -172,6 +174,7 @@ public sealed class InstallerScriptTests
         Assert.Contains("size -gt 1GB", script, StringComparison.Ordinal);
         Assert.Contains("Add-Type -AssemblyName System.Net.Http", script, StringComparison.Ordinal);
         Assert.Contains("System.Net.Http.HttpCompletionOption]::ResponseHeadersRead", script, StringComparison.Ordinal);
+        Assert.Contains("[void]$response.EnsureSuccessStatusCode()", script, StringComparison.Ordinal);
         Assert.Contains("Release asset exceeds its size limit", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Invoke-WebRequest -Uri $assets[$packageName]", script, StringComparison.Ordinal);
         Assert.Contains("is already the latest stable release", script, StringComparison.Ordinal);

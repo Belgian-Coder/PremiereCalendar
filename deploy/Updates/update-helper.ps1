@@ -227,7 +227,7 @@ try {
     Start-Service -Name $ServiceName
     (Get-Service -Name $ServiceName).WaitForStatus('Running', '00:00:45')
     Wait-ForHealthyVersion -ExpectedVersion $version
-    if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Force }
+    if (Test-Path -LiteralPath $previous) { [IO.Directory]::Delete($previous) }
     [IO.File]::WriteAllText((Join-Path $updaterRoot 'active-version.txt'), $version, [Text.UTF8Encoding]::new($false))
     Write-Host "PremiereCalendar $version installed and healthy."
 }
