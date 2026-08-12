@@ -106,7 +106,8 @@ After configuring real secrets, run the app and verify:
 - Card provenance explains the date source and missing score or ID reasons.
 - Settings source health lists provider cache state, OMDb state, IMDb state, and recent background jobs.
 - Settings backfill and repair actions complete without changing unrelated weeks.
-- GitHub source update evidence shows current/remote commits, dirty state, latest log tail, and the latest backup path.
+- Signed GitHub release update evidence shows the active version, configured repository, latest result, and persistent transcript tail.
+- Release acceptance is performed through Settings: publish a newer signed release, click `Install latest signed GitHub release`, allow the circuit to reconnect, then verify the active marker, junction target, runtime version and transcript.
 
 ## Browser Performance Checks
 

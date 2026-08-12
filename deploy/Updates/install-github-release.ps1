@@ -3,7 +3,8 @@
 param(
     [string] $Repository = 'Belgian-Coder/PremiereCalendar',
     [string] $InstallRoot = 'D:\Apps\PremiereCalendar',
-    [string] $DataRoot = 'D:\Apps\PremiereCalendarData'
+    [string] $DataRoot = 'D:\Apps\PremiereCalendarData',
+    [string] $LogPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -51,6 +52,17 @@ function Save-BoundedReleaseAsset {
     finally { $client.Dispose() }
 }
 
+$transcriptStarted = $false
+$updateMutex = $null
+if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+    $resolvedLogPath = [IO.Path]::GetFullPath($LogPath)
+    New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($resolvedLogPath)) -Force | Out-Null
+    Start-Transcript -LiteralPath $resolvedLogPath -Force | Out-Null
+    $transcriptStarted = $true
+}
+try {
+$updateMutex = [Threading.Mutex]::new($false, 'Global\PremiereCalendar-SignedReleaseUpdate')
+if (-not $updateMutex.WaitOne(0)) { throw 'Another PremiereCalendar update is already running.' }
 $pinnedCertificate = Join-Path $InstallRoot 'updater\signing.cer'
 if (-not (Test-Path -LiteralPath $pinnedCertificate -PathType Leaf)) {
     throw 'No administrator-pinned release certificate exists. Perform one offline install before enabling GitHub updates.'
@@ -93,4 +105,12 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue }
+}
+}
+finally {
+    if ($null -ne $updateMutex) {
+        try { $updateMutex.ReleaseMutex() } catch [ApplicationException] { }
+        $updateMutex.Dispose()
+    }
+    if ($transcriptStarted) { Stop-Transcript | Out-Null }
 }

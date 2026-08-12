@@ -215,9 +215,9 @@ http://0.0.0.0:5298
 
 That makes it reachable from other LAN devices when Windows Firewall allows inbound TCP `5298`.
 
-Use the root `Install-PremiereCalendar.ps1` wrapper for source-tree app updates. It publishes the self-contained build, copies it to the configured install directory while preserving runtime data, and installs or updates the automatic Windows Service. The wrapper restarts itself elevated when service installation needs administrator rights. `Run-PremiereCalendar.ps1` is the foreground build-and-run helper for local development and does not install a service.
+Use the root `Install-PremiereCalendar.ps1` wrapper only for development/source-tree installation. Production updates use immutable, signed GitHub releases.
 
-Settings can also start a guarded source update through `GitHub source update`. That path launches `deploy/Update-And-Install-PremiereCalendar.ps1` in the configured source checkout, fetches the configured remote branch, refuses dirty or non-fast-forward repositories, creates a pre-update snapshot of installed `App_Data`, runs `git pull --ff-only`, and then calls the same install wrapper. The script health-checks the installed app after the update. If install or health-check fails and rollback is enabled, it resets the clean source checkout back to the previous commit, restores the data snapshot, reinstalls the previous version, and records the result in the update log. The request returns before the service restart, so the app can briefly become unavailable while the installer replaces binaries.
+Settings starts the installed `updater/install-github-release.ps1` through `Signed GitHub release update`. The detached updater downloads the stable manifest and its exact declared package, verifies the administrator-pinned certificate, RSA signature and SHA-256, rejects unsafe or oversized archives, backs up SQLite, activates an immutable version directory, and requires both liveness and the expected `/health/version` before success. Failure restores the previous junction, service binary and database files. The Blazor circuit disconnects while the Windows Service restarts and reconnects to the verified release. Attempt transcripts are retained under the external data root.
 
 The health endpoint is:
 
@@ -236,7 +236,7 @@ GET /health
 - `PremiereCalendar/Services/CalendarPresetService.cs` - route-scoped saved filter presets that preserve the current week when applied.
 - `PremiereCalendar/Services/CalendarVisitChangeService.cs` - subtle per-week change summaries comparing the current visible IDs to the last visit.
 - `PremiereCalendar/Services/ReleaseUpdateService.cs` - on-demand GitHub latest-release check used by Settings.
-- `PremiereCalendar/Services/ApplicationUpdateService.cs` - guarded Settings-triggered GitHub source update launcher with commit, dirty-state, log-tail, and backup evidence.
+- `PremiereCalendar/Services/ApplicationUpdateService.cs` - Settings-triggered signed GitHub release updater with active-version and persistent transcript evidence.
 - `PremiereCalendar/Services/WeekDiagnosticsService.cs` - week-level source counts, score coverage, language distribution, and anomaly detection.
 - `PremiereCalendar/Services/SourceHealthService.cs` - Settings source-health drilldown from provider cache, OMDb, IMDb, and background jobs.
 - `PremiereCalendar/Services/ScoreBackfillService.cs` - cached-card rating hydration from IMDb and OMDb.

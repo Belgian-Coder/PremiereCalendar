@@ -156,7 +156,7 @@ The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync grou
 
 Use Update when you want to reuse fresh local cache where possible. Use Refresh sources when you want the visible week checked against providers again. Refresh sources keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 
-Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker, settings backup/restore box, score backfill, and missing-ID repair. Installed releases use a signed GitHub asset feed with certificate pinning, immutable version directories, expected-version health checks, and automatic activation rollback. The older guarded source-tree updater remains available only for development checkouts.
+Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker and installer, settings backup/restore box, score backfill, and missing-ID repair. The Settings Update button consumes the signed GitHub asset feed with certificate pinning, immutable version directories, expected-version health checks, persistent transcripts, and automatic activation rollback. Releases are published manually; GitHub CI runs on pull requests or manual dispatch, not on pushes to `main`.
 
 ## Common Problems
 

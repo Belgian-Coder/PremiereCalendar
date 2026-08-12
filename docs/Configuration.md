@@ -94,26 +94,21 @@ The same SQLite file also stores IMDb ratings, OMDb response cache, and provider
 
 ## Application Updates
 
-Settings includes a guarded `GitHub source update` action for source-tree installs. It uses the non-secret `ApplicationUpdate` infrastructure settings from `appsettings.json`, not the SQLite settings database:
+Settings includes a `Signed GitHub release update` action for installed releases. It uses the non-secret `ApplicationUpdate` infrastructure settings from `appsettings.json`, not the SQLite settings database:
 
 ```json
 "ApplicationUpdate": {
   "Enabled": true,
-  "RepositoryPath": "D:\\Projects\\PremiereCalendar",
-  "Remote": "origin",
-  "Branch": "main",
-  "InstallScriptPath": "Install-PremiereCalendar.ps1",
-  "UpdateScriptPath": "deploy/Update-And-Install-PremiereCalendar.ps1",
-  "TargetDirectory": "D:\\Apps\\PremiereCalendar",
-  "BackupDirectory": "D:\\Apps\\PremiereCalendar\\App_Data\\backups\\application-updates",
-  "HealthUrl": "http://localhost:5298/health",
-  "RollbackOnFailure": true,
-  "LogDirectory": "App_Data/logs/application-updates",
-  "PowerShellPath": "powershell.exe"
+  "UpdaterScriptPath": "D:\\Apps\\PremiereCalendar\\updater\\install-github-release.ps1",
+  "LogDirectory": "D:\\Apps\\PremiereCalendarData\\logs\\application-updates",
+  "PowerShellPath": "powershell.exe",
+  "InstallRoot": "D:\\Apps\\PremiereCalendar",
+  "DataRoot": "D:\\Apps\\PremiereCalendarData",
+  "Repository": "Belgian-Coder/PremiereCalendar"
 }
 ```
 
-The updater starts a detached PowerShell process, fetches the configured remote branch, refuses dirty working trees, refuses non-fast-forward branch divergence, creates a pre-update snapshot of installed `App_Data`, runs `git pull --ff-only`, then calls the existing install wrapper with `-NoElevate`. It does not accept arbitrary shell commands from the UI and writes attempt logs under `ApplicationUpdate:LogDirectory`. Rollback can run `git reset --hard <previousHead>` only after the script has already proved the repository was clean before starting; it then restores the `App_Data` snapshot, reinstalls, and health-checks the previous version.
+The app starts the fixed updater script as a detached Windows PowerShell process. The UI cannot provide arbitrary commands or asset URLs. The updater accepts only the configured GitHub `owner/name`, downloads the stable release manifest first, selects its exact package, enforces size and archive-path limits, verifies the pinned certificate/signature/hash, and writes a transcript under `ApplicationUpdate:LogDirectory`. Activation and rollback behavior is documented in [Signed GitHub Releases and Updates](ReleaseUpdates.md).
 
 ## Sonarr And Radarr
 

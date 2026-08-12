@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
@@ -16,115 +15,115 @@ public sealed class ApplicationUpdateServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task StartUpdateAsync_RefusesMissingRepositoryPath()
+    public async Task StartUpdateAsync_RefusesMissingSignedUpdater()
     {
         var starter = new CapturingApplicationUpdateProcessStarter();
         var service = CreateService(
             new ApplicationUpdateOptions
             {
-                RepositoryPath = Path.Combine(_root, "missing"),
-                LogDirectory = "App_Data/logs/updates"
+                UpdaterScriptPath = Path.Combine(_root, "missing.ps1"),
+                InstallRoot = Path.Combine(_root, "install"),
+                DataRoot = Path.Combine(_root, "data")
             },
             starter);
 
         var result = await service.StartUpdateAsync(CancellationToken.None);
 
         Assert.False(result.Started);
-        Assert.Contains("Repository path", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("updater was not found", result.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(starter.Request);
     }
 
     [Fact]
-    public async Task StartUpdateAsync_StartsDetachedScriptWithConfiguredRepoRemoteAndBranch()
+    public async Task StartUpdateAsync_StartsInstalledSignedReleaseUpdater()
     {
-        var repo = CreateRepositoryWithUpdateScripts();
+        var updater = CreateUpdater();
+        var installRoot = Path.Combine(_root, "install");
+        var dataRoot = Path.Combine(_root, "data");
         var starter = new CapturingApplicationUpdateProcessStarter();
         var service = CreateService(
             new ApplicationUpdateOptions
             {
-                RepositoryPath = repo,
-                Remote = "origin",
-                Branch = "main",
-                InstallScriptPath = "Install-PremiereCalendar.ps1",
-                UpdateScriptPath = "deploy/Update-And-Install-PremiereCalendar.ps1",
-                LogDirectory = "App_Data/logs/application-updates"
+                UpdaterScriptPath = updater,
+                InstallRoot = installRoot,
+                DataRoot = dataRoot,
+                LogDirectory = Path.Combine(dataRoot, "logs", "application-updates"),
+                Repository = "Belgian-Coder/PremiereCalendar"
             },
             starter);
 
         var result = await service.StartUpdateAsync(CancellationToken.None);
 
         Assert.True(result.Started);
-        Assert.Contains("Update started", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Signed GitHub release update started", result.Message, StringComparison.Ordinal);
         var request = Assert.IsType<ApplicationUpdateProcessStartRequest>(starter.Request);
-        Assert.Equal(repo, request.RepositoryPath);
-        Assert.Equal("origin", request.Remote);
-        Assert.Equal("main", request.Branch);
-        Assert.Equal(Path.Combine(repo, "Install-PremiereCalendar.ps1"), request.InstallScriptPath);
-        Assert.Equal(Path.Combine(repo, "deploy", "Update-And-Install-PremiereCalendar.ps1"), request.UpdateScriptPath);
-        Assert.Equal("D:\\Apps\\PremiereCalendar", request.TargetDirectory);
-        Assert.Equal("http://localhost:5298/health", request.HealthUrl);
-        Assert.True(request.RollbackOnFailure);
-        Assert.StartsWith(Path.Combine(_root, "App_Data", "logs", "application-updates"), request.LogPath, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(updater, request.UpdaterScriptPath);
+        Assert.Equal("Belgian-Coder/PremiereCalendar", request.Repository);
+        Assert.Equal(installRoot, request.InstallRoot);
+        Assert.Equal(dataRoot, request.DataRoot);
+        Assert.StartsWith(Path.Combine(dataRoot, "logs", "application-updates"), request.LogPath, StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith(".log", request.LogPath, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
-    public async Task StartUpdateAsync_DefaultsToMainWhenBranchIsOmitted()
+    [Theory]
+    [InlineData("owner")]
+    [InlineData("owner/repo/extra")]
+    [InlineData("owner/repo name")]
+    public async Task StartUpdateAsync_RefusesInvalidRepository(string repository)
     {
-        var repo = CreateRepositoryWithUpdateScripts();
-        var starter = new CapturingApplicationUpdateProcessStarter();
         var service = CreateService(
             new ApplicationUpdateOptions
             {
-                RepositoryPath = repo,
-                Remote = "origin",
-                InstallScriptPath = "Install-PremiereCalendar.ps1",
-                UpdateScriptPath = "deploy/Update-And-Install-PremiereCalendar.ps1",
-                LogDirectory = "App_Data/logs/application-updates"
+                UpdaterScriptPath = CreateUpdater(),
+                InstallRoot = Path.Combine(_root, "install"),
+                DataRoot = Path.Combine(_root, "data"),
+                Repository = repository
             },
-            starter);
+            new CapturingApplicationUpdateProcessStarter());
 
         var result = await service.StartUpdateAsync(CancellationToken.None);
 
-        Assert.True(result.Started);
-        var request = Assert.IsType<ApplicationUpdateProcessStartRequest>(starter.Request);
-        Assert.Equal("main", request.Branch);
+        Assert.False(result.Started);
+        Assert.Contains("owner/name", result.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void GetStatus_ReportsConfiguredRepositoryAndLatestLog()
+    public void GetStatus_ReportsActiveVersionAndLatestSignedUpdateLog()
     {
-        var repo = CreateRepositoryWithUpdateScripts();
-        var logDirectory = Path.Combine(_root, "App_Data", "logs", "application-updates");
+        var updater = CreateUpdater();
+        var installRoot = Path.Combine(_root, "install");
+        var dataRoot = Path.Combine(_root, "data");
+        var updaterRoot = Path.Combine(installRoot, "updater");
+        var logDirectory = Path.Combine(dataRoot, "logs", "application-updates");
+        Directory.CreateDirectory(updaterRoot);
         Directory.CreateDirectory(logDirectory);
+        File.WriteAllText(Path.Combine(updaterRoot, "active-version.txt"), "1.1.5\n");
         var oldLog = Path.Combine(logDirectory, "application-update-20260530-120000.log");
         var newLog = Path.Combine(logDirectory, "application-update-20260530-121000.log");
         File.WriteAllText(oldLog, "old");
-        File.WriteAllText(newLog, "new");
+        File.WriteAllText(newLog, "PremiereCalendar 1.1.5 installed and healthy.");
         File.SetLastWriteTimeUtc(oldLog, new DateTime(2026, 5, 30, 12, 0, 0, DateTimeKind.Utc));
         File.SetLastWriteTimeUtc(newLog, new DateTime(2026, 5, 30, 12, 10, 0, DateTimeKind.Utc));
         var service = CreateService(
             new ApplicationUpdateOptions
             {
-                RepositoryPath = repo,
-                Remote = "origin",
-                Branch = "main",
-                LogDirectory = "App_Data/logs/application-updates"
+                UpdaterScriptPath = updater,
+                InstallRoot = installRoot,
+                DataRoot = dataRoot,
+                LogDirectory = logDirectory
             },
             new CapturingApplicationUpdateProcessStarter());
 
         var status = service.GetStatus();
 
         Assert.True(status.IsConfigured);
-        Assert.Equal(repo, status.RepositoryPath);
-        Assert.Equal("origin", status.Remote);
-        Assert.Equal("main", status.Branch);
+        Assert.Equal("1.1.5", status.ActiveVersion);
+        Assert.Equal("Succeeded", status.LastResult);
         Assert.Equal(newLog, status.LatestLogPath);
+        Assert.Contains("installed and healthy", status.LatestLogTail, StringComparison.Ordinal);
     }
 
-    private ApplicationUpdateService CreateService(
-        ApplicationUpdateOptions options,
-        IApplicationUpdateProcessStarter starter)
+    private ApplicationUpdateService CreateService(ApplicationUpdateOptions options, IApplicationUpdateProcessStarter starter)
     {
         return new ApplicationUpdateService(
             Microsoft.Extensions.Options.Options.Create(options),
@@ -133,14 +132,12 @@ public sealed class ApplicationUpdateServiceTests : IDisposable
             TimeProvider.System);
     }
 
-    private string CreateRepositoryWithUpdateScripts()
+    private string CreateUpdater()
     {
-        var repo = Path.Combine(_root, "repo");
-        Directory.CreateDirectory(Path.Combine(repo, ".git"));
-        Directory.CreateDirectory(Path.Combine(repo, "deploy"));
-        File.WriteAllText(Path.Combine(repo, "Install-PremiereCalendar.ps1"), "# install");
-        File.WriteAllText(Path.Combine(repo, "deploy", "Update-And-Install-PremiereCalendar.ps1"), "# update");
-        return repo;
+        var updater = Path.Combine(_root, "updater", "install-github-release.ps1");
+        Directory.CreateDirectory(Path.GetDirectoryName(updater)!);
+        File.WriteAllText(updater, "# signed updater");
+        return updater;
     }
 
     public void Dispose()

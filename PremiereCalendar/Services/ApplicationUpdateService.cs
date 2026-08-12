@@ -35,23 +35,24 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
 
     public ApplicationUpdateStatus GetStatus()
     {
-        var validation = ValidateOptions(requireScripts: true);
+        var validation = ValidateOptions(requireScript: true);
         var options = NormalizedOptions();
-        var repositoryPath = ResolvePath(options.RepositoryPath, _environment.ContentRootPath);
-        var latestLogPath = FindLatestLogPath(ResolvePath(options.LogDirectory, _environment.ContentRootPath));
+        var updaterScriptPath = ResolvePath(options.UpdaterScriptPath, _environment.ContentRootPath);
+        var installRoot = ResolvePath(options.InstallRoot, _environment.ContentRootPath);
+        var dataRoot = ResolvePath(options.DataRoot, _environment.ContentRootPath);
+        var latestLogPath = FindLatestLogPath(ResolvePath(options.LogDirectory, dataRoot));
+        var activeVersionPath = Path.Combine(installRoot, "updater", "active-version.txt");
         return new ApplicationUpdateStatus(
             options.Enabled,
             validation.IsValid,
-            repositoryPath,
-            options.Remote,
-            options.Branch,
+            updaterScriptPath,
+            installRoot,
+            dataRoot,
+            options.Repository,
             latestLogPath,
-            TryGit(repositoryPath, "rev-parse", "HEAD"),
-            TryGit(repositoryPath, "rev-parse", $"{options.Remote}/{options.Branch}"),
-            IsRepositoryDirty(repositoryPath),
+            ReadSingleLine(activeVersionPath),
             ReadLogTail(latestLogPath),
             LastLogResult(latestLogPath),
-            LastBackupPath(latestLogPath),
             validation.Message);
     }
 
@@ -60,7 +61,7 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            var validation = ValidateOptions(requireScripts: true);
+            var validation = ValidateOptions(requireScript: true);
             if (!validation.IsValid || validation.Request is null)
             {
                 return new ApplicationUpdateStartResult(false, validation.Message, null);
@@ -70,7 +71,7 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
             _processStarter.Start(validation.Request);
             return new ApplicationUpdateStartResult(
                 true,
-                $"Update started from {validation.Request.Remote}/{validation.Request.Branch}. The app may restart while the installer runs.",
+                "Signed GitHub release update started. The app will reconnect after a verified update, or remain on the current version when already up to date.",
                 validation.Request.LogPath);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -83,7 +84,7 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
         }
     }
 
-    private ValidationResult ValidateOptions(bool requireScripts)
+    private ValidationResult ValidateOptions(bool requireScript)
     {
         var options = NormalizedOptions();
         if (!options.Enabled)
@@ -91,45 +92,20 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
             return ValidationResult.Invalid("Application updates are disabled.");
         }
 
-        if (string.IsNullOrWhiteSpace(options.RepositoryPath))
+        if (!IsValidRepository(options.Repository))
         {
-            return ValidationResult.Invalid("Repository path is not configured.");
+            return ValidationResult.Invalid("The GitHub repository must use the owner/name format.");
         }
 
-        if (string.IsNullOrWhiteSpace(options.Remote))
+        var updaterScriptPath = ResolvePath(options.UpdaterScriptPath, _environment.ContentRootPath);
+        if (requireScript && !File.Exists(updaterScriptPath))
         {
-            return ValidationResult.Invalid("Git remote is not configured.");
+            return ValidationResult.Invalid($"The signed GitHub updater was not found: {updaterScriptPath}");
         }
 
-        if (string.IsNullOrWhiteSpace(options.Branch))
-        {
-            return ValidationResult.Invalid("Git branch is not configured.");
-        }
-
-        var repositoryPath = ResolvePath(options.RepositoryPath, _environment.ContentRootPath);
-        if (!Directory.Exists(repositoryPath))
-        {
-            return ValidationResult.Invalid($"Repository path does not exist: {repositoryPath}");
-        }
-
-        if (!HasGitMetadata(repositoryPath))
-        {
-            return ValidationResult.Invalid($"Repository path is not a Git repository: {repositoryPath}");
-        }
-
-        var updateScriptPath = ResolvePath(options.UpdateScriptPath, repositoryPath);
-        var installScriptPath = ResolvePath(options.InstallScriptPath, repositoryPath);
-        if (requireScripts && !File.Exists(updateScriptPath))
-        {
-            return ValidationResult.Invalid($"Update script was not found: {updateScriptPath}");
-        }
-
-        if (requireScripts && !File.Exists(installScriptPath))
-        {
-            return ValidationResult.Invalid($"Install script was not found: {installScriptPath}");
-        }
-
-        var logDirectory = ResolvePath(options.LogDirectory, _environment.ContentRootPath);
+        var installRoot = ResolvePath(options.InstallRoot, _environment.ContentRootPath);
+        var dataRoot = ResolvePath(options.DataRoot, _environment.ContentRootPath);
+        var logDirectory = ResolvePath(options.LogDirectory, dataRoot);
         var stamp = _timeProvider
             .GetUtcNow()
             .UtcDateTime
@@ -137,17 +113,12 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
         var logPath = Path.Combine(logDirectory, $"application-update-{stamp}.log");
         var request = new ApplicationUpdateProcessStartRequest(
             options.PowerShellPath,
-            updateScriptPath,
-            repositoryPath,
-            options.Remote,
-            options.Branch,
-            installScriptPath,
-            logPath,
-            ResolvePath(options.TargetDirectory, _environment.ContentRootPath),
-            ResolvePath(options.BackupDirectory, _environment.ContentRootPath),
-            options.HealthUrl,
-            options.RollbackOnFailure);
-        return ValidationResult.Valid("Ready to update from GitHub.", request);
+            updaterScriptPath,
+            options.Repository,
+            installRoot,
+            dataRoot,
+            logPath);
+        return ValidationResult.Valid("Ready to install signed GitHub releases.", request);
     }
 
     private ApplicationUpdateOptions NormalizedOptions()
@@ -156,38 +127,31 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
         return new ApplicationUpdateOptions
         {
             Enabled = options.Enabled,
-            RepositoryPath = options.RepositoryPath.Trim(),
-            Remote = string.IsNullOrWhiteSpace(options.Remote) ? "origin" : options.Remote.Trim(),
-            Branch = string.IsNullOrWhiteSpace(options.Branch) ? "main" : options.Branch.Trim(),
-            InstallScriptPath = string.IsNullOrWhiteSpace(options.InstallScriptPath)
-                ? "Install-PremiereCalendar.ps1"
-                : options.InstallScriptPath.Trim(),
-            UpdateScriptPath = string.IsNullOrWhiteSpace(options.UpdateScriptPath)
-                ? "deploy/Update-And-Install-PremiereCalendar.ps1"
-                : options.UpdateScriptPath.Trim(),
+            UpdaterScriptPath = string.IsNullOrWhiteSpace(options.UpdaterScriptPath)
+                ? "D:\\Apps\\PremiereCalendar\\updater\\install-github-release.ps1"
+                : options.UpdaterScriptPath.Trim(),
             LogDirectory = string.IsNullOrWhiteSpace(options.LogDirectory)
-                ? "App_Data/logs/application-updates"
+                ? "D:\\Apps\\PremiereCalendarData\\logs\\application-updates"
                 : options.LogDirectory.Trim(),
             PowerShellPath = string.IsNullOrWhiteSpace(options.PowerShellPath)
                 ? "powershell.exe"
                 : options.PowerShellPath.Trim(),
-            TargetDirectory = string.IsNullOrWhiteSpace(options.TargetDirectory)
+            InstallRoot = string.IsNullOrWhiteSpace(options.InstallRoot)
                 ? "D:\\Apps\\PremiereCalendar"
-                : options.TargetDirectory.Trim(),
-            BackupDirectory = string.IsNullOrWhiteSpace(options.BackupDirectory)
-                ? "D:\\Apps\\PremiereCalendar\\App_Data\\backups\\application-updates"
-                : options.BackupDirectory.Trim(),
-            HealthUrl = string.IsNullOrWhiteSpace(options.HealthUrl)
-                ? "http://localhost:5298/health"
-                : options.HealthUrl.Trim(),
-            RollbackOnFailure = options.RollbackOnFailure
+                : options.InstallRoot.Trim(),
+            DataRoot = string.IsNullOrWhiteSpace(options.DataRoot)
+                ? "D:\\Apps\\PremiereCalendarData"
+                : options.DataRoot.Trim(),
+            Repository = string.IsNullOrWhiteSpace(options.Repository)
+                ? "Belgian-Coder/PremiereCalendar"
+                : options.Repository.Trim()
         };
     }
 
-    private static bool HasGitMetadata(string repositoryPath)
+    private static bool IsValidRepository(string repository)
     {
-        var gitPath = Path.Combine(repositoryPath, ".git");
-        return Directory.Exists(gitPath) || File.Exists(gitPath);
+        var parts = repository.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length == 2 && parts.All(part => part.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.'));
     }
 
     private static string ResolvePath(string path, string basePath)
@@ -208,51 +172,16 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
             : null;
     }
 
-    private static string? TryGit(string repositoryPath, params string[] arguments)
+    private static string? ReadSingleLine(string path)
     {
-        if (!Directory.Exists(repositoryPath))
-        {
-            return null;
-        }
-
         try
         {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "git",
-                WorkingDirectory = repositoryPath,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            startInfo.ArgumentList.Add("-c");
-            startInfo.ArgumentList.Add($"safe.directory={repositoryPath}");
-            foreach (var argument in arguments)
-            {
-                startInfo.ArgumentList.Add(argument);
-            }
-
-            using var process = Process.Start(startInfo);
-            if (process is null)
-            {
-                return null;
-            }
-
-            var output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit(3000);
-            return process.ExitCode == 0 ? output.Trim() : null;
+            return File.Exists(path) ? File.ReadLines(path).FirstOrDefault()?.Trim() : null;
         }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
+        catch (IOException)
         {
             return null;
         }
-    }
-
-    private static bool? IsRepositoryDirty(string repositoryPath)
-    {
-        var status = TryGit(repositoryPath, "status", "--porcelain=v1");
-        return status is null ? null : !string.IsNullOrWhiteSpace(status);
     }
 
     private static string? ReadLogTail(string? logPath)
@@ -264,9 +193,7 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
 
         try
         {
-            return string.Join(
-                Environment.NewLine,
-                File.ReadLines(logPath).Reverse().Take(12).Reverse());
+            return string.Join(Environment.NewLine, File.ReadLines(logPath).Reverse().Take(12).Reverse());
         }
         catch (IOException)
         {
@@ -282,9 +209,14 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
             return null;
         }
 
-        if (tail.Contains("Update completed successfully", StringComparison.OrdinalIgnoreCase))
+        if (tail.Contains("installed and healthy", StringComparison.OrdinalIgnoreCase))
         {
             return "Succeeded";
+        }
+
+        if (tail.Contains("already the latest stable release", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Already current";
         }
 
         if (tail.Contains("Rollback completed", StringComparison.OrdinalIgnoreCase))
@@ -292,44 +224,16 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
             return "Rolled back";
         }
 
-        return tail.Contains("failed", StringComparison.OrdinalIgnoreCase) ? "Failed" : null;
+        return tail.Contains("failed", StringComparison.OrdinalIgnoreCase) || tail.Contains("Exception", StringComparison.OrdinalIgnoreCase)
+            ? "Failed"
+            : "Running";
     }
 
-    private static string? LastBackupPath(string? logPath)
+    private sealed record ValidationResult(bool IsValid, string Message, ApplicationUpdateProcessStartRequest? Request)
     {
-        var tail = ReadLogTail(logPath);
-        if (string.IsNullOrWhiteSpace(tail))
-        {
-            return null;
-        }
+        public static ValidationResult Valid(string message, ApplicationUpdateProcessStartRequest request) => new(true, message, request);
 
-        const string marker = "Backup snapshot:";
-        var line = tail
-            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-            .LastOrDefault(candidate => candidate.Contains(marker, StringComparison.OrdinalIgnoreCase));
-        if (line is null)
-        {
-            return null;
-        }
-
-        var index = line.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-        return index < 0 ? null : line[(index + marker.Length)..].Trim();
-    }
-
-    private sealed record ValidationResult(
-        bool IsValid,
-        string Message,
-        ApplicationUpdateProcessStartRequest? Request)
-    {
-        public static ValidationResult Valid(string message, ApplicationUpdateProcessStartRequest request)
-        {
-            return new ValidationResult(true, message, request);
-        }
-
-        public static ValidationResult Invalid(string message)
-        {
-            return new ValidationResult(false, message, null);
-        }
+        public static ValidationResult Invalid(string message) => new(false, message, null);
     }
 }
 
@@ -345,35 +249,24 @@ public sealed class DefaultApplicationUpdateProcessStarter : IApplicationUpdateP
         var startInfo = new ProcessStartInfo
         {
             FileName = request.PowerShellPath,
-            WorkingDirectory = request.RepositoryPath,
+            WorkingDirectory = Path.GetDirectoryName(request.UpdaterScriptPath)!,
             UseShellExecute = false,
             CreateNoWindow = true
         };
         startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-NonInteractive");
         startInfo.ArgumentList.Add("-ExecutionPolicy");
         startInfo.ArgumentList.Add("Bypass");
         startInfo.ArgumentList.Add("-File");
-        startInfo.ArgumentList.Add(request.UpdateScriptPath);
-        startInfo.ArgumentList.Add("-RepositoryPath");
-        startInfo.ArgumentList.Add(request.RepositoryPath);
-        startInfo.ArgumentList.Add("-Remote");
-        startInfo.ArgumentList.Add(request.Remote);
-        startInfo.ArgumentList.Add("-Branch");
-        startInfo.ArgumentList.Add(request.Branch);
-        startInfo.ArgumentList.Add("-InstallScriptPath");
-        startInfo.ArgumentList.Add(request.InstallScriptPath);
+        startInfo.ArgumentList.Add(request.UpdaterScriptPath);
+        startInfo.ArgumentList.Add("-Repository");
+        startInfo.ArgumentList.Add(request.Repository);
+        startInfo.ArgumentList.Add("-InstallRoot");
+        startInfo.ArgumentList.Add(request.InstallRoot);
+        startInfo.ArgumentList.Add("-DataRoot");
+        startInfo.ArgumentList.Add(request.DataRoot);
         startInfo.ArgumentList.Add("-LogPath");
         startInfo.ArgumentList.Add(request.LogPath);
-        startInfo.ArgumentList.Add("-TargetDirectory");
-        startInfo.ArgumentList.Add(request.TargetDirectory);
-        startInfo.ArgumentList.Add("-BackupDirectory");
-        startInfo.ArgumentList.Add(request.BackupDirectory);
-        startInfo.ArgumentList.Add("-HealthUrl");
-        startInfo.ArgumentList.Add(request.HealthUrl);
-        if (!request.RollbackOnFailure)
-        {
-            startInfo.ArgumentList.Add("-RollbackOnFailure:$false");
-        }
 
         var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("PowerShell update process did not start.");
@@ -386,34 +279,24 @@ public sealed class DefaultApplicationUpdateProcessStarter : IApplicationUpdateP
 public sealed record ApplicationUpdateStatus(
     bool IsEnabled,
     bool IsConfigured,
-    string RepositoryPath,
-    string Remote,
-    string Branch,
+    string UpdaterScriptPath,
+    string InstallRoot,
+    string DataRoot,
+    string Repository,
     string? LatestLogPath,
-    string? CurrentCommit,
-    string? RemoteCommit,
-    bool? IsRepositoryDirty,
+    string? ActiveVersion,
     string? LatestLogTail,
     string? LastResult,
-    string? LastBackupPath,
     string Message);
 
-public sealed record ApplicationUpdateStartResult(
-    bool Started,
-    string Message,
-    string? LogPath);
+public sealed record ApplicationUpdateStartResult(bool Started, string Message, string? LogPath);
 
 public sealed record ApplicationUpdateProcessStartRequest(
     string PowerShellPath,
-    string UpdateScriptPath,
-    string RepositoryPath,
-    string Remote,
-    string Branch,
-    string InstallScriptPath,
-    string LogPath,
-    string TargetDirectory,
-    string BackupDirectory,
-    string HealthUrl,
-    bool RollbackOnFailure);
+    string UpdaterScriptPath,
+    string Repository,
+    string InstallRoot,
+    string DataRoot,
+    string LogPath);
 
 public sealed record ApplicationUpdateProcessStartResult(int ProcessId);

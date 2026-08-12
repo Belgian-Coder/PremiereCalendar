@@ -19,6 +19,10 @@ tests, makes a self-contained Windows x64 package, emits deterministic build
 metadata, signs `stable.manifest.json`, writes `SHA256SUMS.txt`, creates a draft,
 uploads all assets, and only then publishes it.
 
+Publishing is always an explicit operator action; no GitHub Actions workflow creates
+releases. CI runs for pull requests targeting `main` and can also be started manually
+with `workflow_dispatch`. A push to `main` does not start CI.
+
 The first administrator-reviewed installation uses the local release directory:
 
 ```powershell
@@ -32,6 +36,12 @@ from GitHub with:
 D:\Apps\PremiereCalendar\updater\install-github-release.ps1
 ```
 
+The normal acceptance and user path is Settings > Local status >
+`Signed GitHub release update` > `Update`. The Settings action runs the same installed
+updater as a detached Windows PowerShell process and stores its transcript under
+`D:\Apps\PremiereCalendarData\logs\application-updates`. During activation the page
+may briefly show the reconnect UI while the service restarts.
+
 The updater downloads the manifest first, selects exactly its declared package,
 enforces download and expanded-size limits, verifies the pinned certificate,
 RSA signature and SHA-256, rejects unsafe ZIP paths, installs under
@@ -43,3 +53,12 @@ restores the previous junction, service binary, and pre-update SQLite files.
 Persistent state is outside immutable releases under
 `D:\Apps\PremiereCalendarData`. The first install copies legacy `App_Data`
 without deleting it, providing a recovery boundary.
+
+For release acceptance, start from an older installed version, click the Settings
+update button, wait for the page to reconnect, and verify all of the following:
+
+- Settings and `/health/version` report the new version.
+- `current` targets `releases/<new-version>` and the Windows Service is running.
+- The transcript ends with `installed and healthy`.
+- Public HTTPS, readiness, HSTS, CSP and `nosniff` still pass.
+- Clicking Update again reports `already the latest stable release` without restarting the service.

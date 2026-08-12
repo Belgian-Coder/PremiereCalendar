@@ -202,7 +202,7 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Contains("Backfill scores", status.TextContent);
             Assert.Contains("Repair IDs", status.TextContent);
             Assert.Contains("Backup", status.TextContent);
-            Assert.Contains("GitHub source update", status.TextContent);
+            Assert.Contains("Signed GitHub release update", status.TextContent);
         });
 
         component.Find("button[title='Check for application updates']").Click();
@@ -212,7 +212,7 @@ public sealed class SettingsPageTests : BunitContext
     }
 
     [Fact]
-    public void SettingsPage_StartsConfiguredApplicationUpdateFromGitHub()
+    public void SettingsPage_StartsConfiguredSignedReleaseUpdate()
     {
         var store = new FakeIntegrationSettingsStore();
         Services.AddSingleton<IIntegrationSettingsStore>(store);
@@ -221,15 +221,15 @@ public sealed class SettingsPageTests : BunitContext
 
         var component = Render<PremiereCalendar.Components.Pages.Settings>();
 
-        component.WaitForElement("button[title='Update application from GitHub source']");
-        component.Find("button[title='Update application from GitHub source']").Click();
+        component.WaitForElement("button[title='Install latest signed GitHub release']");
+        component.Find("button[title='Install latest signed GitHub release']").Click();
 
         component.WaitForAssertion(() =>
         {
             Assert.Equal(1, _applicationUpdateService.StartCount);
             var result = component.Find("[data-testid='application-update-result']");
-            Assert.Contains("Update started", result.TextContent);
-            Assert.Contains("main", result.TextContent);
+            Assert.Contains("release update started", result.TextContent, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("application-update.log", result.TextContent);
         });
     }
 
@@ -1314,22 +1314,20 @@ public sealed class SettingsPageTests : BunitContext
         public ApplicationUpdateStatus Status { get; set; } = new(
             IsEnabled: true,
             IsConfigured: true,
-            RepositoryPath: "D:\\Projects\\PremiereCalendar",
-            Remote: "origin",
-            Branch: "main",
+            UpdaterScriptPath: "D:\\Apps\\PremiereCalendar\\updater\\install-github-release.ps1",
+            InstallRoot: "D:\\Apps\\PremiereCalendar",
+            DataRoot: "D:\\Apps\\PremiereCalendarData",
+            Repository: "Belgian-Coder/PremiereCalendar",
             LatestLogPath: null,
-            CurrentCommit: "abc123",
-            RemoteCommit: "def456",
-            IsRepositoryDirty: false,
+            ActiveVersion: "1.1.4",
             LatestLogTail: null,
             LastResult: null,
-            LastBackupPath: null,
-            Message: "Ready to update from GitHub.");
+            Message: "Ready to install signed GitHub releases.");
 
         public ApplicationUpdateStartResult Result { get; set; } = new(
             Started: true,
-            Message: "Update started from origin/main. The app may restart while the installer runs.",
-            LogPath: "D:\\Apps\\PremiereCalendar\\App_Data\\logs\\application-updates\\application-update.log");
+            Message: "Signed GitHub release update started. The app may restart while the installer runs.",
+            LogPath: "D:\\Apps\\PremiereCalendarData\\logs\\application-updates\\application-update.log");
 
         public ApplicationUpdateStatus GetStatus()
         {

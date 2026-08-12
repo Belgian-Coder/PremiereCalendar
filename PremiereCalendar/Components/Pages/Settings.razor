@@ -207,11 +207,11 @@
                             }
                             <div class="application-update-block">
                                 <div class="status-mini-heading compact">
-                                    <strong>GitHub source update</strong>
+                                    <strong>Signed GitHub release update</strong>
                                     <button class="tool-button settings-secondary"
                                             type="button"
-                                            title="Update application from GitHub source"
-                                            aria-label="Update application from GitHub source"
+                                            title="Install latest signed GitHub release"
+                                            aria-label="Install latest signed GitHub release"
                                             @onclick="StartApplicationUpdateAsync"
                                             disabled="@(_isStartingApplicationUpdate || _applicationUpdateStatus?.IsConfigured != true)">
                                         @(_isStartingApplicationUpdate ? "Starting..." : "Update")
@@ -223,16 +223,11 @@
                                 @if (_applicationUpdateStatus is { } updateStatus)
                                 {
                                     <div class="update-evidence" data-testid="application-update-evidence">
-                                        <span>Current @ShortCommit(updateStatus.CurrentCommit)</span>
-                                        <span>Remote @ShortCommit(updateStatus.RemoteCommit)</span>
-                                        <span>@RepositoryStateText(updateStatus)</span>
+                                        <span>Active @(updateStatus.ActiveVersion ?? "unknown")</span>
+                                        <span>@updateStatus.Repository</span>
                                         @if (!string.IsNullOrWhiteSpace(updateStatus.LastResult))
                                         {
                                             <span>Last result @updateStatus.LastResult</span>
-                                        }
-                                        @if (!string.IsNullOrWhiteSpace(updateStatus.LastBackupPath))
-                                        {
-                                            <span>Backup @Path.GetFileName(updateStatus.LastBackupPath)</span>
                                         }
                                     </div>
                                     @if (!string.IsNullOrWhiteSpace(updateStatus.LatestLogTail))
@@ -1228,7 +1223,7 @@
                 ShowToast(
                     ToastKind.Info,
                     "Application update started",
-                    "GitHub update and local install were started. The app may restart shortly.");
+                    "The signed GitHub release updater started. The app may reconnect after verified activation.");
             }
             else
             {
@@ -1350,24 +1345,7 @@
         var logText = string.IsNullOrWhiteSpace(_applicationUpdateStatus.LatestLogPath)
             ? ""
             : $" Latest log: {Path.GetFileName(_applicationUpdateStatus.LatestLogPath)}.";
-        return $"{prefix}: {_applicationUpdateStatus.Remote}/{_applicationUpdateStatus.Branch} at {_applicationUpdateStatus.RepositoryPath}. {_applicationUpdateStatus.Message}{logText}";
-    }
-
-    private static string ShortCommit(string? commit)
-    {
-        return string.IsNullOrWhiteSpace(commit)
-            ? "unknown"
-            : commit.Length <= 8 ? commit : commit[..8];
-    }
-
-    private static string RepositoryStateText(ApplicationUpdateStatus status)
-    {
-        return status.IsRepositoryDirty switch
-        {
-            true => "Repository dirty",
-            false => "Repository clean",
-            _ => "Repository state unknown"
-        };
+        return $"{prefix}: signed releases from {_applicationUpdateStatus.Repository}. {_applicationUpdateStatus.Message}{logText}";
     }
 
     private IEnumerable<BackgroundJobEvent> VisibleJobEvents()
