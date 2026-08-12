@@ -105,94 +105,97 @@
             </div>
         }
 
-        <details class="source-details">
-            <summary>Provenance</summary>
-            @if (Item.DateSemantics is not null)
+        <details class="source-details" data-provenance-loaded="@_isProvenanceLoaded.ToString().ToLowerInvariant()">
+            <summary @onclick="LoadProvenance">Provenance</summary>
+            @if (_isProvenanceLoaded)
             {
-                <section class="provenance-section" aria-label="Data confidence">
-                    <h4>Data confidence</h4>
-                    <p>
-                        <strong>@FormatDateSource(Item.DateSemantics.SourceKind)</strong>
-                        <span>@FormatConfidence(Item.DateSemantics.Confidence)</span>
-                        <small>@Item.DateSemantics.Reason</small>
-                    </p>
-                </section>
-            }
+                @if (Item.DateSemantics is not null)
+                {
+                    <section class="provenance-section" aria-label="Data confidence">
+                        <h4>Data confidence</h4>
+                        <p>
+                            <strong>@FormatDateSource(Item.DateSemantics.SourceKind)</strong>
+                            <span>@FormatConfidence(Item.DateSemantics.Confidence)</span>
+                            <small>@Item.DateSemantics.Reason</small>
+                        </p>
+                    </section>
+                }
 
-            @if (Item.MergeContributions.Length > 0)
-            {
-                <section class="provenance-section" aria-label="Merge inspector">
-                    <h4>Merge inspector</h4>
-                    <div class="merge-contribution-list">
-                        @foreach (var contribution in Item.MergeContributions)
-                        {
-                            <span title="@MergeContributionTitle(contribution)">
-                                <strong>@contribution.Source</strong>
-                                @if (!string.IsNullOrWhiteSpace(contribution.MatchMethod))
-                                {
-                                    <em>@contribution.MatchMethod</em>
-                                }
-                            </span>
-                        }
-                    </div>
-                </section>
-            }
+                @if (Item.MergeContributions.Length > 0)
+                {
+                    <section class="provenance-section" aria-label="Merge inspector">
+                        <h4>Merge inspector</h4>
+                        <div class="merge-contribution-list">
+                            @foreach (var contribution in Item.MergeContributions)
+                            {
+                                <span title="@MergeContributionTitle(contribution)">
+                                    <strong>@contribution.Source</strong>
+                                    @if (!string.IsNullOrWhiteSpace(contribution.MatchMethod))
+                                    {
+                                        <em>@contribution.MatchMethod</em>
+                                    }
+                                </span>
+                            }
+                        </div>
+                    </section>
+                }
 
-            @if (Item.MissingDataIssues.Length > 0)
-            {
-                <section class="provenance-section" aria-label="Missing data">
-                    <h4>Missing data</h4>
-                    <ul class="missing-data-list">
-                        @foreach (var issue in Item.MissingDataIssues.Take(6))
-                        {
-                            <li>@issue.Message</li>
-                        }
-                    </ul>
-                </section>
-            }
+                @if (Item.MissingDataIssues.Length > 0)
+                {
+                    <section class="provenance-section" aria-label="Missing data">
+                        <h4>Missing data</h4>
+                        <ul class="missing-data-list">
+                            @foreach (var issue in Item.MissingDataIssues.Take(6))
+                            {
+                                <li>@issue.Message</li>
+                            }
+                        </ul>
+                    </section>
+                }
 
-            <div class="source-tags" aria-label="Sources">
-                @if (!IsUnverified)
-                {
-                    <span>TMDb score</span>
-                }
-                @if (Item.ImdbScore is not null)
-                {
-                    <span>IMDb rating</span>
-                }
-                @if (Item.RottenTomatoesScore is not null)
-                {
-                    <span>RT critics score</span>
-                }
-                @if (Item.RottenTomatoesAudienceScore is not null)
-                {
-                    <span>RT audience score</span>
-                }
-                @if (Item.MetacriticScore is not null)
-                {
-                    <span>Metacritic via OMDb</span>
-                }
-                @if (Item.TvmazeUrl is not null)
-                {
-                    <span>TVmaze enrichment</span>
-                }
-                @if (Item.EpisodeSource is not null)
-                {
-                    <span>@Item.EpisodeSource</span>
-                }
-                @if (Item.TrailerUrl is not null)
-                {
-                    <span>Trailer via TMDb Videos</span>
-                }
-                @if (Item.ImageSource is not null)
-                {
-                    <span>@Item.ImageSource</span>
-                }
-                @if (IsUnverified)
-                {
-                    <span>External source</span>
-                }
-            </div>
+                <div class="source-tags" aria-label="Sources">
+                    @if (!IsUnverified)
+                    {
+                        <span>TMDb score</span>
+                    }
+                    @if (Item.ImdbScore is not null)
+                    {
+                        <span>IMDb rating</span>
+                    }
+                    @if (Item.RottenTomatoesScore is not null)
+                    {
+                        <span>RT critics score</span>
+                    }
+                    @if (Item.RottenTomatoesAudienceScore is not null)
+                    {
+                        <span>RT audience score</span>
+                    }
+                    @if (Item.MetacriticScore is not null)
+                    {
+                        <span>Metacritic via OMDb</span>
+                    }
+                    @if (Item.TvmazeUrl is not null)
+                    {
+                        <span>TVmaze enrichment</span>
+                    }
+                    @if (Item.EpisodeSource is not null)
+                    {
+                        <span>@Item.EpisodeSource</span>
+                    }
+                    @if (Item.TrailerUrl is not null)
+                    {
+                        <span>Trailer via TMDb Videos</span>
+                    }
+                    @if (Item.ImageSource is not null)
+                    {
+                        <span>@Item.ImageSource</span>
+                    }
+                    @if (IsUnverified)
+                    {
+                        <span>External source</span>
+                    }
+                </div>
+            }
         </details>
 
         <div class="links" aria-label="Links">
@@ -281,6 +284,7 @@
     private bool _fingerprintedSonarrEnabled;
     private bool _fingerprintedRadarrEnabled;
     private bool _shouldRender = true;
+    private bool _isProvenanceLoaded;
 
     protected override void OnParametersSet()
     {
@@ -498,6 +502,17 @@
     private Task AddToArrAsync()
     {
         return OnAddToArr.InvokeAsync(Item);
+    }
+
+    private void LoadProvenance()
+    {
+        if (_isProvenanceLoaded)
+        {
+            return;
+        }
+
+        _isProvenanceLoaded = true;
+        _shouldRender = true;
     }
 
     private string BuildRenderFingerprint()

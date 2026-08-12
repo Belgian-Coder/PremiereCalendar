@@ -57,6 +57,14 @@ public sealed class PremiereCardTests : BunitContext
         Assert.Contains("RT critics 83%", component.Markup);
         Assert.Contains("RT audience 91%", component.Markup);
         Assert.Contains("Meta 72/100", component.Markup);
+        var provenance = component.Find(".source-details");
+        Assert.Equal("false", provenance.GetAttribute("data-provenance-loaded"));
+        Assert.DoesNotContain("Trailer via TMDb Videos", component.Markup);
+        Assert.DoesNotContain("TMDb poster", component.Markup);
+
+        provenance.QuerySelector("summary")!.Click();
+
+        Assert.Equal("true", component.Find(".source-details").GetAttribute("data-provenance-loaded"));
         Assert.Contains("Trailer via TMDb Videos", component.Markup);
         Assert.Contains("TMDb poster", component.Markup);
         var image = component.Find("img");
@@ -141,6 +149,45 @@ public sealed class PremiereCardTests : BunitContext
             .Add(x => x.ScoreSource, ScoreSource.Tmdb));
 
         Assert.Equal(renderCount, component.RenderCount);
+    }
+
+    [Fact]
+    public void PremiereCard_RendersProvenanceOnlyAfterItIsOpened()
+    {
+        var item = new PremiereItem
+        {
+            CanonicalId = "movie:201",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 201,
+            Title = "Deferred Provenance",
+            PremiereDate = new DateOnly(2026, 5, 6),
+            DateSemantics = new PremiereDateSemantics(
+                new DateOnly(2026, 5, 6),
+                PremiereDateSourceKind.TmdbMovieReleaseDate,
+                PremiereDataConfidence.High,
+                "Verified release date"),
+            MergeContributions =
+            [
+                new PremiereMergeContribution
+                {
+                    Source = "TMDb",
+                    MatchMethod = "TMDb ID",
+                    Reason = "Canonical match"
+                }
+            ]
+        };
+
+        var component = Render<PremiereCard>(parameters => parameters.Add(x => x.Item, item));
+
+        Assert.Empty(component.FindAll(".provenance-section"));
+        Assert.Equal("false", component.Find(".source-details").GetAttribute("data-provenance-loaded"));
+
+        component.Find(".source-details summary").Click();
+
+        Assert.NotEmpty(component.FindAll(".provenance-section"));
+        Assert.Contains("Verified release date", component.Markup);
+        Assert.Equal("true", component.Find(".source-details").GetAttribute("data-provenance-loaded"));
     }
 
     [Fact]

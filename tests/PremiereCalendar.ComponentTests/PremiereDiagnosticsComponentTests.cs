@@ -58,6 +58,12 @@ public sealed class PremiereDiagnosticsComponentTests : BunitContext
         var component = Render<PremiereCard>(parameters => parameters.Add(x => x.Item, item));
 
         var details = component.Find("details.source-details");
+        Assert.Equal("Provenance", details.TextContent.Trim());
+        Assert.DoesNotContain("Data confidence", details.TextContent);
+
+        details.QuerySelector("summary")!.Click();
+        details = component.Find("details.source-details");
+
         Assert.Contains("Data confidence", details.TextContent);
         Assert.Contains("Season 1 episode 1", details.TextContent);
         Assert.Contains("Merge inspector", details.TextContent);

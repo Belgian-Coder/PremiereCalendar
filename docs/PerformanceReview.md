@@ -24,6 +24,10 @@ Automatic scroll loading advances only one ten-card batch when the sentinel is w
 
 Streamed item/metadata updates preserve the number of cards the user has already revealed. The component clamps that count only when the result set becomes smaller, preventing a background update from collapsing (for example) 70 visible cards back to 10 and moving the scroll position unexpectedly.
 
+Closed card provenance is demand-rendered. The disclosure summary remains keyboard-accessible, but its confidence, merge, missing-data, and source markup is not added to the DOM until that card's Provenance disclosure is opened for the first time. A live Series baseline measured about 27 provenance descendants inside an average 68-descendant card, so this removes roughly 40% of the initial per-card DOM without hiding primary metadata or reintroducing fixed-height virtualization.
+
+The public edge is already HTTP/2. Caddy intentionally advertises HTTP/1.1 and HTTP/2 (HTTP/3 is disabled for compatibility), and live Chromium network events confirmed `h2` for the document, Blazor negotiation, static assets, and cached images. Caddy's private Premiere upstream remains plain HTTP on the trusted LAN; changing that single backend hop would not reduce browser-side DOM, style, or paint work.
+
 Response compression is enabled for dynamic text responses and static text assets. The middleware negotiates `zstd`, Brotli, or gzip based on `Accept-Encoding`; HTTPS compression is left at the framework default because the app does not need to compress secret-bearing HTTPS responses. Static assets are mapped with `MapStaticAssets().ShortCircuit()` so matched asset requests skip the remaining middleware pipeline and still keep ASP.NET Core's build-time compression, fingerprinting, ETag, and immutable-cache behavior.
 
 References:
