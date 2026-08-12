@@ -2836,7 +2836,9 @@ public sealed class CalendarPageTests : BunitContext
                 await _releaseFinalMovieResult.Task.WaitAsync(cancellationToken);
 
                 var alpha = Movie("movie:alpha", "Alpha Movie", start);
-                yield return new PremiereLoadProgress("Complete", 0, partialMovies.Length + 1, [alpha, .. partialMovies], IsFinal: true);
+                // A provider progress snapshot may omit cards yielded by an earlier source batch.
+                // The UI should retain those already-visible cards and append this discovery.
+                yield return new PremiereLoadProgress("Complete", 0, 1, [alpha], IsFinal: true);
                 yield break;
             }
 

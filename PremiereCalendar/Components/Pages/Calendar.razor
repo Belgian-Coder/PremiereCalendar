@@ -1374,8 +1374,15 @@
             if (nextById.TryGetValue(visibleItem.CanonicalId, out var updatedItem))
             {
                 reconciled.Add(updatedItem);
-                retainedIds.Add(updatedItem.CanonicalId);
             }
+            else
+            {
+                // Provider progress is not guaranteed to be a cumulative snapshot. Once a card has
+                // been shown during this load, retain it so a temporary omission cannot blank or
+                // reshuffle the day. A later explicit filter/sort/navigation performs a clean pass.
+                reconciled.Add(visibleItem);
+            }
+            retainedIds.Add(visibleItem.CanonicalId);
         }
 
         foreach (var nextItem in nextItems)
