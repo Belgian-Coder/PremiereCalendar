@@ -52,6 +52,9 @@ RSA signature and SHA-256, rejects unsafe ZIP paths, installs under
 service is repointed to `current\PremiereCalendar.exe`; activation succeeds only
 when both liveness and the expected `/health/version` pass. A failed activation
 restores the previous junction, service binary, and pre-update SQLite files.
+Asset downloads retry transient transport failures up to three times with bounded
+exponential backoff. Each failed attempt removes its partial file; exhausting the
+retry budget leaves the active release untouched and records the failure in the log.
 After the new application version passes its health/version checks, its signed
 `updater-payload` refreshes the installed updater scripts transactionally. Existing
 scripts are backed up until both replacements succeed, and are restored if activation

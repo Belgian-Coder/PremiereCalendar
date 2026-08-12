@@ -19,37 +19,44 @@ function Save-BoundedReleaseAsset {
     )
     if ($Uri.Scheme -ne 'https' -or $Uri.Host -ne 'github.com') { throw 'Release asset URL is not trusted.' }
     if (Test-Path -LiteralPath $Destination) { throw "Refusing to overwrite release asset: $Destination" }
-    $client = [System.Net.Http.HttpClient]::new()
-    $client.Timeout = [TimeSpan]::FromMinutes(10)
-    $client.DefaultRequestHeaders.UserAgent.ParseAdd('PremiereCalendar-Updater/1.0')
-    try {
-        $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $client = [System.Net.Http.HttpClient]::new()
+        $client.Timeout = [TimeSpan]::FromMinutes(10)
+        $client.DefaultRequestHeaders.UserAgent.ParseAdd('PremiereCalendar-Updater/1.0')
         try {
-            [void]$response.EnsureSuccessStatusCode()
-            if ($response.Content.Headers.ContentLength -gt $MaxBytes) { throw 'Release asset exceeds its size limit.' }
-            $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
             try {
-                $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536, $false)
+                [void]$response.EnsureSuccessStatusCode()
+                if ($response.Content.Headers.ContentLength -gt $MaxBytes) { throw 'Release asset exceeds its size limit.' }
+                $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
                 try {
-                    $buffer = [byte[]]::new(65536)
-                    [long]$total = 0
-                    while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                        $total += $read
-                        if ($total -gt $MaxBytes) { throw 'Release asset exceeds its size limit.' }
-                        $output.Write($buffer, 0, $read)
+                    $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536, $false)
+                    try {
+                        $buffer = [byte[]]::new(65536)
+                        [long]$total = 0
+                        while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                            $total += $read
+                            if ($total -gt $MaxBytes) { throw 'Release asset exceeds its size limit.' }
+                            $output.Write($buffer, 0, $read)
+                        }
                     }
+                    finally { $output.Dispose() }
                 }
-                finally { $output.Dispose() }
+                finally { $input.Dispose() }
             }
-            finally { $input.Dispose() }
+            finally { $response.Dispose() }
+            return
         }
-        finally { $response.Dispose() }
+        catch {
+            if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+            if ($attempt -eq 3) {
+                throw "Release asset download failed after 3 attempts: $($_.Exception.Message)"
+            }
+            Write-Warning "Release asset download attempt $attempt failed; retrying. $($_.Exception.Message)"
+            Start-Sleep -Seconds ([Math]::Pow(2, $attempt))
+        }
+        finally { $client.Dispose() }
     }
-    catch {
-        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
-        throw
-    }
-    finally { $client.Dispose() }
 }
 
 $transcriptStarted = $false
