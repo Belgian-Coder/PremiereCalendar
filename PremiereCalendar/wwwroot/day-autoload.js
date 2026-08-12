@@ -1,5 +1,5 @@
 const dayAutoloadSelector = "[data-day-autoload-sentinel]";
-const dayLoadAllSelector = "[data-day-load-all]";
+const dayLoadMoreSelector = "[data-day-load-more]";
 const observedDayAutoloadSentinels = new Set();
 
 function findDayAutoloadSentinels(roots) {
@@ -41,7 +41,7 @@ function initializeDayAutoload(roots = [document]) {
           loadMoreUntilComplete(entry.target);
         }
       },
-      { rootMargin: "1200px 0px" });
+      { rootMargin: "400px 0px" });
   }
 
   for (const sentinel of sentinels) {
@@ -69,7 +69,7 @@ function loadMoreUntilComplete(sentinel) {
       return;
     }
 
-    const button = sentinel.closest("[data-testid='calendar-day']")?.querySelector(dayLoadAllSelector);
+    const button = sentinel.closest("[data-testid='calendar-day']")?.querySelector(dayLoadMoreSelector);
     if (!(button instanceof HTMLElement)) {
       sentinel.dataset.autoloadLoading = "false";
       return;

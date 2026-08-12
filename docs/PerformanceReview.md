@@ -20,6 +20,8 @@ All streamed calendar loads preserve existing card positions, update matching ca
 
 All days use the bounded progressive card grid instead of fixed-height row virtualization. Rich premiere cards change height as poster and metadata content settle, and the virtualizer was observed recycling different rows while streamed collections grew. Rendering ten cards initially and revealing explicit batches preserves card identity and prevents flashing without materializing an entire dense day.
 
+Automatic scroll loading advances only one ten-card batch when the sentinel is within 400 pixels of the viewport. It never invokes the explicit `Show all` action. A live Series trace previously showed that behavior mounting 435 rich cards and 27,554 DOM elements at once, including a 2.1-second style recalculation that blocked scrolling; bounded batch loading removes that main-thread spike.
+
 Response compression is enabled for dynamic text responses and static text assets. The middleware negotiates `zstd`, Brotli, or gzip based on `Accept-Encoding`; HTTPS compression is left at the framework default because the app does not need to compress secret-bearing HTTPS responses. Static assets are mapped with `MapStaticAssets().ShortCircuit()` so matched asset requests skip the remaining middleware pipeline and still keep ASP.NET Core's build-time compression, fingerprinting, ETag, and immutable-cache behavior.
 
 References:
