@@ -14,6 +14,8 @@ The .NET 11 release notes drove the current dense-list change:
 
 The variable-height `Virtualize` improvement is the item that directly helps the dense calendar. The app keeps one selected day mounted, uses two-card virtualized rows, provides a conservative initial `ItemSize`, and uses app-level overscan of 4 rows. That keeps scrolling buffered while staying well under the mounted-card and DOM-node budgets in dense-week validation.
 
+Top-level All/Series/Movies navigation resets the desktop calendar to its command bar before replacing the virtualized day. This prevents a new media route from briefly mounting rows for the previous route's scroll offset and then jumping to its first rows after measurement.
+
 Response compression is enabled for dynamic text responses and static text assets. The middleware negotiates `zstd`, Brotli, or gzip based on `Accept-Encoding`; HTTPS compression is left at the framework default because the app does not need to compress secret-bearing HTTPS responses. Static assets are mapped with `MapStaticAssets().ShortCircuit()` so matched asset requests skip the remaining middleware pipeline and still keep ASP.NET Core's build-time compression, fingerprinting, ETag, and immutable-cache behavior.
 
 References:

@@ -94,6 +94,16 @@ function focusSelector(selector) {
     window.setTimeout(focus, 2500);
 }
 
+function scrollCalendarToTop() {
+    const target = document.querySelector("[data-testid='calendar-command-bar']");
+    if (target instanceof HTMLElement) {
+        target.scrollIntoView({ behavior: "instant", block: "start" });
+        return;
+    }
+
+    window.scrollTo({ top: 0, behavior: "instant" });
+}
+
 function rememberCalendarHeadingFocus() {
     try {
         window.sessionStorage?.setItem(focusRestoreStorageKey, "calendar-heading");
@@ -462,6 +472,7 @@ window.premiereCalendarWeek = {
     scrollSelectedDayIntoView,
     focusDayButton,
     focusSelector,
+    scrollCalendarToTop,
     registerAutoDayNavigation,
     disposeAutoDayNavigation
 };

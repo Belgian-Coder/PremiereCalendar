@@ -863,6 +863,7 @@
                 ApplyPageMode();
                 if (_pageMode != previousMode)
                 {
+                    await ResetCalendarScrollAsync();
                     await LoadPresetsAsync();
                 }
 
@@ -2491,6 +2492,23 @@
         try
         {
             await JS.InvokeVoidAsync("premiereCalendarWeek.focusSelector", "[data-testid='calendar-focus-target']");
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (JSException)
+        {
+        }
+    }
+
+    private async Task ResetCalendarScrollAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarWeek.scrollCalendarToTop");
         }
         catch (InvalidOperationException)
         {
