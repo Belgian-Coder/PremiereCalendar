@@ -170,6 +170,9 @@ public sealed class InstallerScriptTests
         Assert.Contains("No administrator-pinned release certificate exists", script, StringComparison.Ordinal);
         Assert.Contains("browser_download_url", script, StringComparison.Ordinal);
         Assert.Contains("size -gt 1GB", script, StringComparison.Ordinal);
+        Assert.Contains("HttpCompletionOption]::ResponseHeadersRead", script, StringComparison.Ordinal);
+        Assert.Contains("Release asset exceeds its size limit", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("Invoke-WebRequest -Uri $assets[$packageName]", script, StringComparison.Ordinal);
         Assert.Contains("is already the latest stable release", script, StringComparison.Ordinal);
         Assert.Contains("Refusing to downgrade", script, StringComparison.Ordinal);
     }

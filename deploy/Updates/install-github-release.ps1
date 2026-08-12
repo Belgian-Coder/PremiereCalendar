@@ -8,6 +8,48 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Save-BoundedReleaseAsset {
+    param(
+        [Parameter(Mandatory)][Uri] $Uri,
+        [Parameter(Mandatory)][string] $Destination,
+        [Parameter(Mandatory)][long] $MaxBytes
+    )
+    if ($Uri.Scheme -ne 'https' -or $Uri.Host -ne 'github.com') { throw 'Release asset URL is not trusted.' }
+    if (Test-Path -LiteralPath $Destination) { throw "Refusing to overwrite release asset: $Destination" }
+    $client = [Net.Http.HttpClient]::new()
+    $client.Timeout = [TimeSpan]::FromMinutes(10)
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd('PremiereCalendar-Updater/1.0')
+    try {
+        $response = $client.GetAsync($Uri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        try {
+            $response.EnsureSuccessStatusCode()
+            if ($response.Content.Headers.ContentLength -gt $MaxBytes) { throw 'Release asset exceeds its size limit.' }
+            $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            try {
+                $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536, $false)
+                try {
+                    $buffer = [byte[]]::new(65536)
+                    [long]$total = 0
+                    while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $total += $read
+                        if ($total -gt $MaxBytes) { throw 'Release asset exceeds its size limit.' }
+                        $output.Write($buffer, 0, $read)
+                    }
+                }
+                finally { $output.Dispose() }
+            }
+            finally { $input.Dispose() }
+        }
+        finally { $response.Dispose() }
+    }
+    catch {
+        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+        throw
+    }
+    finally { $client.Dispose() }
+}
+
 $pinnedCertificate = Join-Path $InstallRoot 'updater\signing.cer'
 if (-not (Test-Path -LiteralPath $pinnedCertificate -PathType Leaf)) {
     throw 'No administrator-pinned release certificate exists. Perform one offline install before enabling GitHub updates.'
@@ -24,9 +66,8 @@ if (-not $assets.ContainsKey('stable.manifest.json')) { throw 'The release has n
 $temporary = Join-Path ([IO.Path]::GetTempPath()) "premiere-calendar-release-$([Guid]::NewGuid().ToString('N'))"
 try {
     New-Item -ItemType Directory -Path $temporary -Force | Out-Null
-    $headers = @{ 'User-Agent' = 'PremiereCalendar-Updater/1.0' }
     $manifestPath = Join-Path $temporary 'stable.manifest.json'
-    Invoke-WebRequest -Uri $assets['stable.manifest.json'].browser_download_url -Headers $headers -OutFile $manifestPath
+    Save-BoundedReleaseAsset -Uri ([Uri]$assets['stable.manifest.json'].browser_download_url) -Destination $manifestPath -MaxBytes 1MB
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ([string]$manifest.version -notmatch '^\d+\.\d+\.\d+$') { throw 'The manifest version is invalid.' }
     $activeVersionPath = Join-Path $InstallRoot 'updater\active-version.txt'
@@ -46,7 +87,7 @@ try {
     if ($packageName -ne [string]$manifest.packageFileName -or -not $assets.ContainsKey($packageName)) { throw 'The manifest package asset is unavailable.' }
     if ([long]$assets[$packageName].size -gt 1GB) { throw 'The release package exceeds the 1 GB limit.' }
     $packagePath = Join-Path $temporary $packageName
-    Invoke-WebRequest -Uri $assets[$packageName].browser_download_url -Headers $headers -OutFile $packagePath
+    Save-BoundedReleaseAsset -Uri ([Uri]$assets[$packageName].browser_download_url) -Destination $packagePath -MaxBytes 1GB
     & (Join-Path $PSScriptRoot 'update-helper.ps1') -ManifestPath $manifestPath -PackagePath $packagePath -PublicCertificatePath $pinnedCertificate -InstallRoot $InstallRoot -DataRoot $DataRoot
 }
 finally {
