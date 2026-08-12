@@ -124,6 +124,7 @@ public sealed class InstallerScriptTests
         Assert.Contains("restore (Join-Path $projectRoot 'PremiereCalendar\\PremiereCalendar.csproj') -r win-x64", script, StringComparison.Ordinal);
         Assert.Contains("stable.manifest.json", script, StringComparison.Ordinal);
         Assert.Contains("RSASignaturePadding", script, StringComparison.Ordinal);
+        Assert.Contains("RSACertificateExtensions]::GetRSAPrivateKey", script, StringComparison.Ordinal);
         Assert.Contains("SHA256SUMS.txt", script, StringComparison.Ordinal);
         Assert.Contains("tag -a $tag", script, StringComparison.Ordinal);
         Assert.Contains("push origin $tag", script, StringComparison.Ordinal);
@@ -139,6 +140,7 @@ public sealed class InstallerScriptTests
 
         Assert.Contains("administrator-pinned certificate", script, StringComparison.Ordinal);
         Assert.Contains("Release manifest signature is invalid", script, StringComparison.Ordinal);
+        Assert.Contains("RSACertificateExtensions]::GetRSAPublicKey", script, StringComparison.Ordinal);
         Assert.Contains("Release archive contains an unsafe path", script, StringComparison.Ordinal);
         Assert.Contains("New-Item -ItemType Junction", script, StringComparison.Ordinal);
         Assert.Contains("Stop-Service", script, StringComparison.Ordinal);

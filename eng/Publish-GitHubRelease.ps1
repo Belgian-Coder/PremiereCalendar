@@ -122,7 +122,7 @@ Compress-Archive -Path (Join-Path $publishPath '*') -DestinationPath $packagePat
 $packageHash = Get-Sha256 $packagePath
 $normalizedNotes = $ReleaseNotes.Replace("`r`n", "`n").Replace("`r", "`n")
 $payload = @('1', $Version, 'stable', (Split-Path $packagePath -Leaf), $packageHash.ToUpperInvariant(), '0', '2147483647', $normalizedNotes) -join [char]10
-$rsa = $certificate.GetRSAPrivateKey()
+$rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
 try {
     $signature = [Convert]::ToBase64String($rsa.SignData([Text.Encoding]::UTF8.GetBytes($payload), [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
 }
@@ -149,7 +149,7 @@ $checksumLines = @($packagePath, $manifestPath, $certificatePath, $installerPath
 [IO.File]::WriteAllLines($checksumsPath, $checksumLines, [Text.UTF8Encoding]::new($false))
 
 $publicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
-$publicRsa = $publicCertificate.GetRSAPublicKey()
+$publicRsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($publicCertificate)
 try {
     if (-not $publicRsa.VerifyData([Text.Encoding]::UTF8.GetBytes($payload), [Convert]::FromBase64String($signature), [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) {
         throw 'Generated manifest signature verification failed.'

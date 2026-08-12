@@ -61,7 +61,7 @@ function Assert-TrustedPackage {
         if ($packageName -ne [string]$releaseManifest.packageFileName -or $packageName -ne [IO.Path]::GetFileName($Package)) { throw 'Release package filename does not match its manifest.' }
         $actualHash = (Get-FileHash -LiteralPath $Package -Algorithm SHA256).Hash
         if ($actualHash -ne [string]$releaseManifest.packageSha256) { throw 'Release package hash does not match its manifest.' }
-        $rsa = $suppliedCertificate.GetRSAPublicKey()
+        $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($suppliedCertificate)
         try {
             $verified = $null -ne $rsa -and $rsa.VerifyData(
                 [Text.Encoding]::UTF8.GetBytes((Get-ManifestPayload $releaseManifest)),
