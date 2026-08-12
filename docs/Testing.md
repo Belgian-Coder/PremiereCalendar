@@ -53,13 +53,13 @@ Integration tests cover service and HTTP behavior with fake handlers:
 - TMDb external-ID lookup with `/find/{external_id}`.
 - Week cache read/write, warm-cache behavior, and stale fallback behavior.
 - Adaptive warmup, foreground load budgets, cache metadata freshness, cleanup retention, and keyed single-flight coalescing.
-- Image cache host validation, disk reuse, forced refresh behavior, and width-specific resized JPEG variants.
+- Image cache host validation, disk reuse, forced refresh behavior, and separately keyed JPEG/WebP width variants.
 - Response compression negotiation for zstd, Brotli, and gzip HTML responses.
 - App host smoke checks.
 
 Component tests cover Blazor rendering:
 
-- Seven day buttons, one mounted selected day, empty-day states, selected-day switching, dense-day `Virtualize` rendering, and the 10-card incremental path for smaller days.
+- Seven day buttons, one mounted selected day, empty-day states, selected-day switching, and the measured two-way window that keeps at most 40 cards mounted while restoring earlier batches.
 - Premiere card metadata, provider/channel source chips, data provenance tags, scores, and trailer link behavior.
 - Premiere card provenance details, including date confidence, merge inspector, and missing-data reasons.
 - Premiere card render fingerprinting for unchanged inputs and score/image state changes.
@@ -111,7 +111,7 @@ After configuring real secrets, run the app and verify:
 
 ## Browser Performance Checks
 
-Dense-week UI checks use `/series?week=2026-04-20` because that week has hundreds of series rows and exercises the virtualized day path.
+Dense-week UI checks use `/series?week=2026-04-20` because that week has hundreds of series rows and exercises repeated forward/backward movement of the measured card window.
 
 The current day-by-day budget is:
 

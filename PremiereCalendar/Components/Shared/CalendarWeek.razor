@@ -53,6 +53,7 @@
     <div class="calendar-grid" data-testid="calendar-week" @ref="_selectedDayContainer">
         <CalendarDay @key="_selectedDay"
                      Day="_selectedDay"
+                     WindowScope="WindowScope"
                      DayId="@DayElementId(_selectedDay)"
                      LabelledById="@DayButtonId(_selectedDay)"
                      Items="SelectedDayItems"
@@ -71,6 +72,9 @@
 @code {
     [Parameter]
     public DateOnly WeekStart { get; set; }
+
+    [Parameter]
+    public string WindowScope { get; set; } = "";
 
     [Parameter]
     public IReadOnlyList<PremiereItem> Items { get; set; } = [];

@@ -41,6 +41,32 @@ public sealed class ImdbRatingsStoreTests
     }
 
     [Fact]
+    public async Task SqliteImdbRatingsStore_BatchesLookupAcrossSqliteParameterLimits()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var store = CreateStore(root);
+            var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
+            var records = Enumerable.Range(1, 925)
+                .Select(index => new ImdbRatingRecord($"tt{index:0000000}", 7.5, index, importedAt))
+                .ToArray();
+            await store.ReplaceAllAsync(records, importedAt, CancellationToken.None);
+
+            var ids = records.Select(record => record.ImdbId).Append("tt-missing").ToArray();
+            var ratings = await store.GetByImdbIdsAsync(ids, CancellationToken.None);
+
+            Assert.Equal(925, ratings.Count);
+            Assert.Equal(925, ratings["tt0000925"].VoteCount);
+            Assert.False(ratings.ContainsKey("tt-missing"));
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    [Fact]
     public async Task SqliteImdbRatingsStore_ReplaceAllRemovesRatingsMissingFromNewDataset()
     {
         var root = CreateRoot();

@@ -63,8 +63,69 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         }
     }
 
+    public async Task<IReadOnlyDictionary<string, ImdbRatingRecord>> GetByImdbIdsAsync(
+        IReadOnlyCollection<string> imdbIds,
+        CancellationToken cancellationToken)
+    {
+        var normalizedIds = imdbIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(NormalizeImdbId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (normalizedIds.Length == 0)
+        {
+            return new Dictionary<string, ImdbRatingRecord>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureInitializedAsync(cancellationToken);
+            await using var connection = CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            var ratings = new Dictionary<string, ImdbRatingRecord>(normalizedIds.Length, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var batch in normalizedIds.Chunk(400))
+            {
+                await using var command = connection.CreateCommand();
+                var parameterNames = new string[batch.Length];
+                for (var index = 0; index < batch.Length; index++)
+                {
+                    parameterNames[index] = $"$id{index}";
+                    command.Parameters.AddWithValue(parameterNames[index], batch[index]);
+                }
+
+                command.CommandText = $"""
+                    SELECT ImdbId, AverageRating, VoteCount, ImportedAtUtc
+                    FROM ImdbRatings
+                    WHERE ImdbId IN ({string.Join(", ", parameterNames)})
+                    """;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var rating = ReadRating(reader);
+                    ratings[rating.ImdbId] = rating;
+                }
+            }
+
+            return ratings;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task ReplaceAllAsync(
         IEnumerable<ImdbRatingRecord> ratings,
+        DateTimeOffset importedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        await ReplaceAllStreamingAsync(ToAsyncEnumerable(ratings, cancellationToken), importedAtUtc, cancellationToken);
+    }
+
+    public async Task<int> ReplaceAllStreamingAsync(
+        IAsyncEnumerable<ImdbRatingRecord> ratings,
         DateTimeOffset importedAtUtc,
         CancellationToken cancellationToken)
     {
@@ -105,9 +166,8 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
                 var importedAtParameter = insert.Parameters.Add("$importedAtUtc", SqliteType.Text);
                 var importedAt = importedAtUtc.ToString("O", CultureInfo.InvariantCulture);
 
-                foreach (var rating in ratings)
+                await foreach (var rating in ratings.WithCancellation(cancellationToken))
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
                     if (string.IsNullOrWhiteSpace(rating.ImdbId))
                     {
                         continue;
@@ -137,11 +197,34 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             await UpsertStateAsync(connection, transaction, LastErrorKey, "", cancellationToken);
 
             await transaction.CommitAsync(cancellationToken);
+            return count;
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    private static ImdbRatingRecord ReadRating(SqliteDataReader reader)
+    {
+        return new ImdbRatingRecord(
+            reader.GetString(0),
+            reader.GetDouble(1),
+            reader.GetInt32(2),
+            DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+    }
+
+    private static async IAsyncEnumerable<ImdbRatingRecord> ToAsyncEnumerable(
+        IEnumerable<ImdbRatingRecord> ratings,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        foreach (var rating in ratings)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return rating;
+        }
+
+        await Task.CompletedTask;
     }
 
     public async Task<ImdbDatasetState> GetStateAsync(CancellationToken cancellationToken)

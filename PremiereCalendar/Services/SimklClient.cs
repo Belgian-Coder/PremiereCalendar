@@ -3,7 +3,6 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -14,22 +13,23 @@ public sealed class SimklClient : ISimklClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan CalendarCacheDuration = TimeSpan.FromHours(5);
+    private const int MaxCalendarCacheEntries = 8;
 
     private readonly HttpClient _httpClient;
-    private readonly IMemoryCache _cache;
     private readonly SimklOptions _options;
     private readonly ISimklSyncStateStore _stateStore;
     private readonly IIntegrationSettingsStore? _settingsStore;
+    private readonly object _calendarCacheLock = new();
+    private readonly Dictionary<string, LinkedListNode<CalendarCacheEntry>> _calendarCache = new(StringComparer.Ordinal);
+    private readonly LinkedList<CalendarCacheEntry> _calendarCacheLru = new();
 
     public SimklClient(
         HttpClient httpClient,
-        IMemoryCache cache,
         IOptions<SimklOptions> options,
         ISimklSyncStateStore stateStore,
         IIntegrationSettingsStore? settingsStore = null)
     {
         _httpClient = httpClient;
-        _cache = cache;
         _options = options.Value;
         _stateStore = stateStore;
         _settingsStore = settingsStore;
@@ -215,7 +215,7 @@ public sealed class SimklClient : ISimklClient
         var items = new List<SimklCalendarItem>();
         foreach (var (path, type) in CalendarPaths(start, end))
         {
-            var fileItems = await GetCalendarFileAsync(path, type, settings, cancellationToken, forceRefresh);
+            var fileItems = await GetCalendarFileAsync(path, type, settings, start, end, cancellationToken, forceRefresh);
             items.AddRange(fileItems);
         }
 
@@ -246,39 +246,157 @@ public sealed class SimklClient : ISimklClient
         string path,
         SimklCalendarItemType type,
         SimklSourceSettings settings,
+        DateOnly start,
+        DateOnly end,
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
-        var cacheKey = $"simkl:calendar:{path}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<SimklCalendarItem>? cached) && cached is not null)
+        var cacheKey = $"{path}:{start:yyyyMMdd}:{end:yyyyMMdd}";
+        if (!forceRefresh && TryGetCachedCalendar(cacheKey, out var cached))
         {
             return cached;
         }
 
         var uri = BuildCalendarUri(path, settings);
-        var body = await SendPublicTextWithRetryAsync(HttpMethod.Get, uri.ToString(), cancellationToken);
-        if (body is null)
+        var items = await StreamCalendarItemsAsync(uri, type, start, end, cancellationToken);
+        if (items is null)
         {
             return [];
         }
 
-        IReadOnlyList<SimklCalendarItem> items;
-        try
-        {
-            var rawItems = JsonSerializer.Deserialize<List<SimklCalendarPayloadItem>>(body, JsonOptions) ?? [];
-            items = rawItems
-                .Select(item => ToCalendarItem(type, item))
-                .Where(item => item is not null)
-                .Select(item => item!)
-                .ToArray();
-        }
-        catch (JsonException)
-        {
-            return [];
-        }
-
-        _cache.Set(cacheKey, items, CalendarCacheDuration);
+        SetCachedCalendar(cacheKey, items);
         return items;
+    }
+
+    private async Task<IReadOnlyList<SimklCalendarItem>?> StreamCalendarItemsAsync(
+        Uri uri,
+        SimklCalendarItemType type,
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 3;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            try
+            {
+                using var response = await _httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken);
+                if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
+                {
+                    var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
+                    await Task.Delay(delay, cancellationToken);
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                var items = new List<SimklCalendarItem>();
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                await foreach (var rawItem in JsonSerializer.DeserializeAsyncEnumerable<SimklCalendarPayloadItem>(
+                    stream,
+                    JsonOptions,
+                    cancellationToken))
+                {
+                    if (rawItem is null || ToCalendarItem(type, rawItem) is not { } item)
+                    {
+                        continue;
+                    }
+
+                    var date = CalendarItemDate(item);
+                    if (date >= start && date <= end)
+                    {
+                        items.Add(item);
+                    }
+                }
+
+                return items;
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (HttpRequestException)
+            {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private bool TryGetCachedCalendar(string cacheKey, out IReadOnlyList<SimklCalendarItem> items)
+    {
+        lock (_calendarCacheLock)
+        {
+            if (!_calendarCache.TryGetValue(cacheKey, out var node))
+            {
+                items = [];
+                return false;
+            }
+
+            if (node.Value.ExpiresUtc <= DateTimeOffset.UtcNow)
+            {
+                _calendarCache.Remove(cacheKey);
+                _calendarCacheLru.Remove(node);
+                items = [];
+                return false;
+            }
+
+            _calendarCacheLru.Remove(node);
+            _calendarCacheLru.AddFirst(node);
+            items = node.Value.Items;
+            return true;
+        }
+    }
+
+    private void SetCachedCalendar(string cacheKey, IReadOnlyList<SimklCalendarItem> items)
+    {
+        lock (_calendarCacheLock)
+        {
+            if (_calendarCache.Remove(cacheKey, out var existing))
+            {
+                _calendarCacheLru.Remove(existing);
+            }
+
+            var entry = new CalendarCacheEntry(cacheKey, items, DateTimeOffset.UtcNow + CalendarCacheDuration);
+            var node = _calendarCacheLru.AddFirst(entry);
+            _calendarCache[cacheKey] = node;
+
+            while (_calendarCache.Count > MaxCalendarCacheEntries && _calendarCacheLru.Last is { } oldest)
+            {
+                _calendarCache.Remove(oldest.Value.Key);
+                _calendarCacheLru.RemoveLast();
+            }
+        }
+    }
+
+    internal int CalendarCacheEntryCount
+    {
+        get
+        {
+            lock (_calendarCacheLock)
+            {
+                return _calendarCache.Count;
+            }
+        }
     }
 
     private IEnumerable<(string Path, SimklCalendarItemType Type)> CalendarPaths(DateOnly start, DateOnly end)
@@ -681,4 +799,9 @@ public sealed class SimklClient : ISimklClient
         public JsonElement? Episode { get; init; }
         public string? Url { get; init; }
     }
+
+    private sealed record CalendarCacheEntry(
+        string Key,
+        IReadOnlyList<SimklCalendarItem> Items,
+        DateTimeOffset ExpiresUtc);
 }

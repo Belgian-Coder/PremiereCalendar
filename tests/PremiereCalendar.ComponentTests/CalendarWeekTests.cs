@@ -523,11 +523,11 @@ public sealed class CalendarWeekTests : BunitContext
 
         Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
         Assert.Contains("Streamed metadata", component.Markup);
-        Assert.Contains("Showing 40 of 81", component.Markup);
+        Assert.Contains("Showing 1-40 of 81", component.Markup);
     }
 
     [Fact]
-    public void CalendarDay_ShowAllLoadsRemainingSmallDayItemsAtOnce()
+    public void CalendarDay_FinalBatchLoadsRemainingSmallDayItems()
     {
         var items = Enumerable.Range(1, 12)
             .Select(index => new PremiereItem
@@ -550,10 +550,61 @@ public sealed class CalendarWeekTests : BunitContext
 
         Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
 
-        component.FindAll(".day-load-controls button").Last().Click();
+        component.Find("[data-day-load-more]").Click();
 
         Assert.Equal(12, component.FindAll("[data-testid='premiere-card']").Count);
         Assert.Empty(component.FindAll("[data-day-autoload-sentinel]"));
+    }
+
+    [Fact]
+    public void CalendarDay_MeasuredWindowBoundsMountedCardsAndRestoresEarlierBatch()
+    {
+        var day = new DateOnly(2026, 5, 4);
+        var items = Enumerable.Range(1, 60)
+            .Select(index => new PremiereItem
+            {
+                CanonicalId = $"movie:{index}",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = index,
+                Title = $"Movie {index}",
+                PremiereDate = day
+            })
+            .ToArray();
+        JSInterop.Setup<double>("premiereCalendarDayWindow.measureTrimHeight", _ => true).SetResult(2200);
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, day)
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        for (var batch = 0; batch < 4; batch++)
+        {
+            component.Find("[data-day-load-more]").Click();
+        }
+
+        Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Empty(component.FindAll("[data-canonical-id='movie:1']"));
+        Assert.Single(component.FindAll("[data-canonical-id='movie:11']"));
+        Assert.Contains("Showing 11-50 of 60", component.Markup);
+        Assert.Contains("2200px", component.Find("[data-day-window-spacer]").GetAttribute("style"));
+
+        component.Find("[data-day-load-previous]").Click();
+
+        Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Single(component.FindAll("[data-canonical-id='movie:1']"));
+        Assert.Empty(component.FindAll("[data-canonical-id='movie:50']"));
+        Assert.Empty(component.FindAll("[data-day-window-spacer]"));
+
+        component.Render(parameters => parameters
+            .Add(x => x.Day, day)
+            .Add(x => x.WindowScope, "movies")
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
     }
 
     [Fact]

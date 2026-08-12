@@ -1,6 +1,8 @@
 @using System.Globalization
+@inject IJSRuntime JSRuntime
 
 <section class="calendar-day"
+         @ref="_dayElement"
          id="@DayId"
          role="tabpanel"
          aria-labelledby="@LabelledById"
@@ -31,96 +33,76 @@
     }
     else
     {
-        @if (UseVirtualizedRows)
+        @if (_windowStart > 0)
         {
-            <div class="day-virtualized-list" data-testid="virtualized-day">
-                <div class="day-load-controls visually-hidden" aria-label="@($"Virtualized items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
-                    <span class="day-visible-count">Showing all @Items.Count with virtual scrolling</span>
-                </div>
-
-                <Virtualize Items="_cardRows"
-                            Context="row"
-                            ItemSize="VirtualizedRowItemSize"
-                            OverscanCount="VirtualizedOverscanRows">
-                    <div class="day-card-row" @key="row.Index">
-                        @foreach (var item in row.Items)
-                        {
-                            <PremiereCard @key="item.CanonicalId"
-                                          Item="item"
-                                          ScoreSource="ScoreSource"
-                                          ImageCacheVersion="@ImageCacheVersion"
-                                          RefreshImageCache="RefreshImageCache"
-                                          IntegrationSettings="IntegrationSettings"
-                                          OnAddToArr="OnAddToArr"
-                                          IsArrActionBusy="IsArrActionBusy" />
-                        }
-                    </div>
-                </Virtualize>
+            <div class="day-window-spacer"
+                 style="height: @($"{_trimmedHeightPx.ToString("0.##", CultureInfo.InvariantCulture)}px")"
+                 data-day-window-spacer
+                 aria-hidden="true"></div>
+            <div class="day-window-previous" data-day-window-previous>
+                Earlier items load as you scroll up
+                <button class="visually-hidden"
+                        type="button"
+                        data-day-load-previous
+                        @onclick="ShowPrevious">
+                    Show previous items
+                </button>
             </div>
         }
-        else
+
+        <div class="day-items-grid">
+            @foreach (var item in VisibleVerifiedItems)
+            {
+                <PremiereCard @key="item.CanonicalId"
+                              Item="item"
+                              ScoreSource="ScoreSource"
+                              ImageCacheVersion="@ImageCacheVersion"
+                              RefreshImageCache="RefreshImageCache"
+                              IntegrationSettings="IntegrationSettings"
+                              OnAddToArr="OnAddToArr"
+                              IsArrActionBusy="IsArrActionBusy" />
+            }
+        </div>
+
+        @if (VisibleUnverifiedItems.Any())
         {
-            <div class="day-items-grid">
-                @foreach (var item in VisibleVerifiedItems)
-                {
-                    <PremiereCard @key="item.CanonicalId"
-                                  Item="item"
-                                  ScoreSource="ScoreSource"
-                                  ImageCacheVersion="@ImageCacheVersion"
-                                  RefreshImageCache="RefreshImageCache"
-                                  IntegrationSettings="IntegrationSettings"
-                                  OnAddToArr="OnAddToArr"
-                                  IsArrActionBusy="IsArrActionBusy" />
-                }
+            <section class="unverified-day-section" data-testid="unverified-premieres">
+                <div class="unverified-day-separator">
+                    <span>Unverified from external sources</span>
+                    <small>@FormatCount(VisibleUnverifiedItems.Count, "card")</small>
+                </div>
+                <div class="day-items-grid">
+                    @foreach (var item in VisibleUnverifiedItems)
+                    {
+                        <PremiereCard @key="item.CanonicalId"
+                                      Item="item"
+                                      ScoreSource="ScoreSource"
+                                      ImageCacheVersion="@ImageCacheVersion"
+                                      RefreshImageCache="RefreshImageCache"
+                                      IntegrationSettings="IntegrationSettings"
+                                      OnAddToArr="OnAddToArr"
+                                      IsArrActionBusy="IsArrActionBusy" />
+                    }
+                </div>
+            </section>
+        }
+
+        @if (HiddenItemCount > 0)
+        {
+            <div class="day-load-controls" aria-label="@($"More items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
+                <span class="day-visible-count">Showing @WindowStartDisplay-@_visibleCount of @Items.Count</span>
+                <button class="tool-button"
+                        type="button"
+                        data-day-load-more
+                        title="@($"Show {NextBatchCount} more items")"
+                        @onclick="ShowMore">
+                    Show @NextBatchCount more
+                </button>
             </div>
 
-            @if (VisibleUnverifiedItems.Any())
-            {
-                <section class="unverified-day-section" data-testid="unverified-premieres">
-                    <div class="unverified-day-separator">
-                        <span>Unverified from external sources</span>
-                        <small>@FormatCount(VisibleUnverifiedItems.Count, "card")</small>
-                    </div>
-                    <div class="day-items-grid">
-                        @foreach (var item in VisibleUnverifiedItems)
-                        {
-                            <PremiereCard @key="item.CanonicalId"
-                                          Item="item"
-                                          ScoreSource="ScoreSource"
-                                          ImageCacheVersion="@ImageCacheVersion"
-                                          RefreshImageCache="RefreshImageCache"
-                                          IntegrationSettings="IntegrationSettings"
-                                          OnAddToArr="OnAddToArr"
-                                          IsArrActionBusy="IsArrActionBusy" />
-                        }
-                    </div>
-                </section>
-            }
-
-            @if (HiddenItemCount > 0)
-            {
-                <div class="day-load-controls" aria-label="@($"More items for {Day.ToString("dddd", CultureInfo.CurrentCulture)}")">
-                    <span class="day-visible-count">Showing @_visibleCount of @Items.Count</span>
-                    <button class="tool-button"
-                            type="button"
-                            data-day-load-more
-                            title="@($"Show {NextBatchCount} more items")"
-                            @onclick="ShowMore">
-                        Show @NextBatchCount more
-                    </button>
-                    <button class="tool-button"
-                            type="button"
-                            data-day-load-all
-                            title="@($"Show all {Items.Count} items")"
-                            @onclick="ShowAll">
-                        Show all @Items.Count
-                    </button>
-                </div>
-
-                <div class="day-autoload-sentinel" data-day-autoload-sentinel>
-                    More items load as you scroll
-                </div>
-            }
+            <div class="day-autoload-sentinel" data-day-autoload-sentinel>
+                More items load as you scroll
+            </div>
         }
     }
 
@@ -134,6 +116,9 @@
 @code {
     [Parameter]
     public DateOnly Day { get; set; }
+
+    [Parameter]
+    public string WindowScope { get; set; } = "";
 
     [Parameter]
     public string DayId { get; set; } = "";
@@ -171,15 +156,21 @@
     [Parameter]
     public int LoadBatchSize { get; set; } = 10;
 
+    [Parameter]
+    public int MaxMountedItemCount { get; set; } = 40;
+
     private int _visibleCount;
+    private int _windowStart;
+    private double _trimmedHeightPx;
+    private readonly Stack<WindowSlice> _trimmedSlices = new();
+    private ElementReference _dayElement;
+    private DateOnly? _windowDay;
+    private string _lastWindowScope = "";
     private string _itemsSignature = "";
     private IReadOnlyList<PremiereItem>? _lastItemsReference;
     private int _lastItemsCount = -1;
     private int _partitionVisibleCount = -1;
-    private bool _autoLoadAll;
-    private List<CardRow> _cardRows = [];
     private string _lastRenderFingerprint = "";
-    private bool _lastUseVirtualizedRows;
     private bool _shouldRender = true;
     private IReadOnlyList<PremiereItem> _visibleItems = [];
     private IReadOnlyList<PremiereItem> _visibleVerifiedItems = [];
@@ -187,31 +178,23 @@
     private int _movieCount;
     private int _seriesCount;
 
-    private const int VirtualizeThreshold = 40;
-    private const int VirtualizedOverscanRows = 2;
-    private const float VirtualizedRowItemSize = 520;
-
     private int MovieCount => _movieCount;
 
     private int SeriesCount => _seriesCount;
 
     private int HiddenItemCount => Math.Max(0, Items.Count - _visibleCount);
 
+    private int MountedItemCount => Math.Max(0, _visibleCount - _windowStart);
+
+    private int WindowStartDisplay => Items.Count == 0 ? 0 : _windowStart + 1;
+
     private int InitialCount => Math.Min(Items.Count, Math.Max(10, InitialVisibleCount));
 
     private int NextBatchCount => Math.Min(Math.Max(1, LoadBatchSize), HiddenItemCount);
 
-    private IReadOnlyList<PremiereItem> VisibleItems => _visibleItems;
-
     private IReadOnlyList<PremiereItem> VisibleVerifiedItems => _visibleVerifiedItems;
 
     private IReadOnlyList<PremiereItem> VisibleUnverifiedItems => _visibleUnverifiedItems;
-
-    // Rich premiere cards have variable heights as artwork and metadata settle. Blazor's fixed-size
-    // virtualizer can recycle different rows while a streamed collection grows, which visibly flashes
-    // titles even when the backing order is stable. The progressive grid keeps a bounded DOM (ten cards
-    // initially, then explicit batches) and preserves card identity for every media mode.
-    private bool UseVirtualizedRows => false;
 
     protected override void OnParametersSet()
     {
@@ -220,16 +203,29 @@
             && !string.IsNullOrEmpty(_itemsSignature);
         var signature = canReuseItemsSignature ? _itemsSignature : BuildItemsSignature();
         var itemsChanged = !string.Equals(signature, _itemsSignature, StringComparison.Ordinal);
+        var hasMountedItemOverlap = _visibleItems.Count == 0
+            || _visibleItems.Any(previous => Items.Any(current =>
+                string.Equals(current.CanonicalId, previous.CanonicalId, StringComparison.Ordinal)));
+        var resetWindow = _windowDay is { } windowDay && windowDay != Day
+            || !string.Equals(_lastWindowScope, WindowScope, StringComparison.Ordinal)
+            || _lastItemsCount > 0 && Items.Count == 0
+            || _lastItemsCount > 0 && Items.Count > 0 && !hasMountedItemOverlap;
+        _windowDay = Day;
+        _lastWindowScope = WindowScope;
+
+        if (resetWindow)
+        {
+            ResetWindow();
+            itemsChanged = true;
+        }
+
         if (itemsChanged)
         {
             RebuildItemCounts();
         }
 
-        var useVirtualizedRows = UseVirtualizedRows;
-        var virtualizationModeChanged = useVirtualizedRows != _lastUseVirtualizedRows;
         _lastItemsReference = Items;
         _lastItemsCount = Items.Count;
-        _lastUseVirtualizedRows = useVirtualizedRows;
 
         if (itemsChanged)
         {
@@ -237,26 +233,17 @@
             _visibleCount = _visibleCount <= 0
                 ? InitialCount
                 : Math.Min(Items.Count, Math.Max(_visibleCount, InitialCount));
-            _autoLoadAll = false;
+            _windowStart = Math.Min(_windowStart, Math.Max(0, _visibleCount - 1));
         }
 
-        if (itemsChanged || virtualizationModeChanged)
-        {
-            _cardRows = useVirtualizedRows ? CreateCardRows() : [];
-        }
-        else
+        if (!itemsChanged)
         {
             _visibleCount = Math.Min(_visibleCount, Items.Count);
-            if (HiddenItemCount == 0)
-            {
-                _autoLoadAll = false;
-            }
+            _windowStart = Math.Min(_windowStart, _visibleCount);
         }
 
-        if (!useVirtualizedRows
-            && (_partitionVisibleCount != _visibleCount
-                || itemsChanged
-                || virtualizationModeChanged))
+        var partitionWindowFingerprint = HashCode.Combine(_windowStart, _visibleCount);
+        if (_partitionVisibleCount != partitionWindowFingerprint || itemsChanged)
         {
             RebuildVisiblePartitions();
         }
@@ -271,39 +258,64 @@
         return _shouldRender;
     }
 
-    private void ShowMore()
+    private async Task ShowMore()
     {
-        _visibleCount = Math.Min(Items.Count, _visibleCount + Math.Max(1, LoadBatchSize));
-        RebuildVisiblePartitions();
-        _shouldRender = true;
-    }
-
-    private void ShowAll()
-    {
-        _visibleCount = Items.Count;
-        _autoLoadAll = false;
-        RebuildVisiblePartitions();
-        _shouldRender = true;
-    }
-
-    private List<CardRow> CreateCardRows()
-    {
-        var rows = new List<CardRow>((Items.Count + 1) / 2);
-        for (var index = 0; index < Items.Count; index += 2)
+        var nextVisibleCount = Math.Min(Items.Count, _visibleCount + Math.Max(1, LoadBatchSize));
+        var maxMountedItems = Math.Max(Math.Max(1, LoadBatchSize), MaxMountedItemCount);
+        var trimCount = Math.Max(0, nextVisibleCount - _windowStart - maxMountedItems);
+        if (trimCount > 0)
         {
-            var rowItems = new List<PremiereItem>(2)
-            {
-                Items[index]
-            };
-            if (index + 1 < Items.Count)
-            {
-                rowItems.Add(Items[index + 1]);
-            }
-
-            rows.Add(new CardRow(rows.Count, rowItems));
+            var measuredHeight = await MeasureTrimHeightAsync(trimCount);
+            _trimmedSlices.Push(new WindowSlice(trimCount, measuredHeight));
+            _windowStart += trimCount;
+            _trimmedHeightPx += measuredHeight;
         }
 
-        return rows;
+        _visibleCount = nextVisibleCount;
+        RebuildVisiblePartitions();
+        _shouldRender = true;
+    }
+
+    private void ShowPrevious()
+    {
+        if (_trimmedSlices.Count == 0)
+        {
+            return;
+        }
+
+        var restored = _trimmedSlices.Pop();
+        _windowStart = Math.Max(0, _windowStart - restored.ItemCount);
+        _visibleCount = Math.Max(_windowStart, _visibleCount - restored.ItemCount);
+        _trimmedHeightPx = Math.Max(0, _trimmedHeightPx - restored.HeightPx);
+        RebuildVisiblePartitions();
+        _shouldRender = true;
+    }
+
+    private async Task<double> MeasureTrimHeightAsync(int itemCount)
+    {
+        try
+        {
+            return Math.Max(0, await JSRuntime.InvokeAsync<double>(
+                "premiereCalendarDayWindow.measureTrimHeight",
+                _dayElement,
+                itemCount));
+        }
+        catch (InvalidOperationException)
+        {
+            return 0;
+        }
+        catch (JSDisconnectedException)
+        {
+            return 0;
+        }
+    }
+
+    private void ResetWindow()
+    {
+        _visibleCount = 0;
+        _windowStart = 0;
+        _trimmedHeightPx = 0;
+        _trimmedSlices.Clear();
     }
 
     private void RebuildItemCounts()
@@ -325,7 +337,10 @@
 
     private void RebuildVisiblePartitions()
     {
-        var visibleItems = Items.Take(_visibleCount).ToArray();
+        var visibleItems = Items
+            .Skip(_windowStart)
+            .Take(MountedItemCount)
+            .ToArray();
         _visibleItems = visibleItems;
         _visibleVerifiedItems = visibleItems
             .Where(item => item.VerificationState == PremiereVerificationState.Verified)
@@ -333,7 +348,7 @@
         _visibleUnverifiedItems = visibleItems
             .Where(item => item.VerificationState == PremiereVerificationState.Unverified)
             .ToArray();
-        _partitionVisibleCount = _visibleCount;
+        _partitionVisibleCount = HashCode.Combine(_windowStart, _visibleCount);
     }
 
     private static string FormatCount(int count, string noun)
@@ -350,7 +365,7 @@
     {
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"{_itemsSignature}|{ScoreSource}|{ImageCacheVersion}|{RefreshImageCache}|{InitialVisibleCount}|{LoadBatchSize}|{_visibleCount}|{_autoLoadAll}|{UseVirtualizedRows}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}");
+            $"{_itemsSignature}|{WindowScope}|{ScoreSource}|{ImageCacheVersion}|{RefreshImageCache}|{InitialVisibleCount}|{LoadBatchSize}|{MaxMountedItemCount}|{_windowStart}|{_visibleCount}|{_trimmedHeightPx}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}");
     }
 
     private string BuildItemsSignature()
@@ -414,5 +429,5 @@
         }
     }
 
-    private sealed record CardRow(int Index, IReadOnlyList<PremiereItem> Items);
+    private sealed record WindowSlice(int ItemCount, double HeightPx);
 }

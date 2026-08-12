@@ -9,6 +9,7 @@ using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Formats.Webp;
 using SixLabors.ImageSharp.Processing;
 
 namespace PremiereCalendar.Services;
@@ -49,11 +50,13 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         string sourceUrl,
         bool forceRefresh,
         CancellationToken cancellationToken,
-        int? width = null)
+        int? width = null,
+        ImageCacheFormat format = ImageCacheFormat.Original)
     {
         var sourceUri = ValidateSourceUrl(sourceUrl);
         var targetWidth = NormalizeWidth(width);
-        var cacheKey = CacheKey(sourceUri, targetWidth);
+        format = targetWidth is > 0 ? format : ImageCacheFormat.Original;
+        var cacheKey = CacheKey(sourceUri, targetWidth, format);
         var filePath = ImagePath(cacheKey);
         var metadataPath = MetadataPath(cacheKey);
         var browserMaxAge = TimeSpan.FromDays(Math.Max(1, _options.CacheDays));
@@ -77,7 +80,14 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 
             try
             {
-                var fetched = await FetchImageAsync(sourceUri, cacheKey, filePath, targetWidth, browserMaxAge, cancellationToken);
+                var fetched = await FetchImageAsync(
+                    sourceUri,
+                    cacheKey,
+                    filePath,
+                    targetWidth,
+                    format,
+                    browserMaxAge,
+                    cancellationToken);
                 await WriteCachedMetadataAsync(metadataPath, sourceUrl, fetched, cancellationToken);
                 return fetched;
             }
@@ -246,6 +256,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         string cacheKey,
         string filePath,
         int? targetWidth,
+        ImageCacheFormat format,
         TimeSpan browserMaxAge,
         CancellationToken cancellationToken)
     {
@@ -254,6 +265,10 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             _options.MaxConcurrentDownloads,
             cancellationToken);
         using var request = new HttpRequestMessage(HttpMethod.Get, sourceUri);
+        if (format == ImageCacheFormat.Webp)
+        {
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/webp"));
+        }
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
 
         using var response = await _httpClient.SendAsync(
@@ -281,9 +296,9 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         }
 
         var cachedContentType = targetWidth is > 0
-            ? CanUseRemoteImageAsRequestedWidth(sourceUri, targetWidth.Value)
+            ? format == ImageCacheFormat.Original && CanUseRemoteImageAsRequestedWidth(sourceUri, targetWidth.Value)
                 ? await WriteLimitedContentAsync(response.Content, filePath, cancellationToken) ?? contentType
-                : await WriteResizedContentAsync(response.Content, filePath, targetWidth.Value, cancellationToken)
+                : await WriteResizedContentAsync(response.Content, filePath, targetWidth.Value, format, cancellationToken)
             : await WriteLimitedContentAsync(response.Content, filePath, cancellationToken);
 
         return new CachedImage(
@@ -325,6 +340,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         HttpContent content,
         string filePath,
         int targetWidth,
+        ImageCacheFormat format,
         CancellationToken cancellationToken)
     {
         var maxBytes = Math.Max(1024, _options.MaxBytes);
@@ -356,7 +372,14 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 
                 await using (var target = File.Create(tempImagePath))
                 {
-                    await image.SaveAsJpegAsync(target, new JpegEncoder { Quality = 82 }, cancellationToken);
+                    if (format == ImageCacheFormat.Webp)
+                    {
+                        await image.SaveAsWebpAsync(target, new WebpEncoder { Quality = 80 }, cancellationToken);
+                    }
+                    else
+                    {
+                        await image.SaveAsJpegAsync(target, new JpegEncoder { Quality = 82 }, cancellationToken);
+                    }
                 }
             }
             finally
@@ -365,7 +388,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             }
 
             File.Move(tempImagePath, filePath, overwrite: true);
-            return "image/jpeg";
+            return format == ImageCacheFormat.Webp ? "image/webp" : "image/jpeg";
         }
         catch
         {
@@ -508,11 +531,15 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             && remoteWidth <= targetWidth);
     }
 
-    private static string CacheKey(Uri sourceUri, int? width)
+    private static string CacheKey(Uri sourceUri, int? width, ImageCacheFormat format)
     {
         var normalizedUrl = width is > 0
             ? $"{sourceUri.AbsoluteUri}|w:{width.Value}"
             : sourceUri.AbsoluteUri;
+        if (format != ImageCacheFormat.Original)
+        {
+            normalizedUrl += $"|format:{format.ToString().ToLowerInvariant()}";
+        }
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedUrl));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }

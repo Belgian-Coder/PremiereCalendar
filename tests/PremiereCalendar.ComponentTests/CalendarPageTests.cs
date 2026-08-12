@@ -647,7 +647,7 @@ public sealed class CalendarPageTests : BunitContext
             Assert.DoesNotContain("Alpha Movie", titles);
         });
 
-        component.WaitForElement("[data-day-load-all]").Click();
+        component.WaitForElement("[data-day-load-more]").Click();
         component.WaitForAssertion(() =>
         {
             var titles = component.FindAll("[data-testid='premiere-card'] h3").Select(node => node.TextContent).ToArray();

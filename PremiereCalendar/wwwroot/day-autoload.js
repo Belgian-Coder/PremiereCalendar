@@ -1,5 +1,6 @@
-const dayAutoloadSelector = "[data-day-autoload-sentinel]";
+const dayAutoloadSelector = "[data-day-autoload-sentinel], [data-day-window-previous]";
 const dayLoadMoreSelector = "[data-day-load-more]";
+const dayLoadPreviousSelector = "[data-day-load-previous]";
 const observedDayAutoloadSentinels = new Set();
 
 function findDayAutoloadSentinels(roots) {
@@ -69,7 +70,9 @@ function loadMoreUntilComplete(sentinel) {
       return;
     }
 
-    const button = sentinel.closest("[data-testid='calendar-day']")?.querySelector(dayLoadMoreSelector);
+    const isPrevious = sentinel.matches("[data-day-window-previous]");
+    const buttonSelector = isPrevious ? dayLoadPreviousSelector : dayLoadMoreSelector;
+    const button = sentinel.closest("[data-testid='calendar-day']")?.querySelector(buttonSelector);
     if (!(button instanceof HTMLElement)) {
       sentinel.dataset.autoloadLoading = "false";
       return;
@@ -130,3 +133,27 @@ if (window.premiereCalendarDomObserver) {
   initializeDayAutoload([document]);
   document.addEventListener("DOMContentLoaded", () => initializeDayAutoload([document]));
 }
+
+window.premiereCalendarDayWindow = {
+  measureTrimHeight(dayElement, itemCount) {
+    if (!(dayElement instanceof HTMLElement) || !Number.isFinite(itemCount) || itemCount <= 0) {
+      return 0;
+    }
+
+    const cards = Array.from(dayElement.querySelectorAll("[data-testid='premiere-card']"));
+    if (cards.length === 0) {
+      return 0;
+    }
+
+    const firstRect = cards[0].getBoundingClientRect();
+    const nextCard = cards[Math.min(Math.trunc(itemCount), cards.length - 1)];
+    const nextRect = nextCard.getBoundingClientRect();
+    if (nextRect.top > firstRect.top) {
+      return nextRect.top - firstRect.top;
+    }
+
+    const lastRemoved = cards[Math.min(Math.trunc(itemCount), cards.length) - 1];
+    const lastRect = lastRemoved.getBoundingClientRect();
+    return Math.max(0, lastRect.bottom - firstRect.top);
+  }
+};

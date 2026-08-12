@@ -39,8 +39,8 @@ TMDb is the canonical identity source. TMDb Discover creates the primary verifie
 8. Detail enrichment runs with bounded concurrency so a busy week does not create unbounded external calls.
 9. Each source batch is yielded from `IPremiereService.StreamPremieresAsync` as soon as partial data is ready. The page updates cards while later pages, days, and providers are still running. Source diagnostics stay compact by default and show only meaningful totals; Source details expands provider chips with counts, progress, and diagnostics. The chips can be clicked to show only one loaded source without making another API request. If the foreground load budget expires, the page stops waiting and renders the best available partial or cached result.
 10. The filtered normalized result set for that week and criteria hash is written to `App_Data/cache/calendar`. Week cache writes are atomic: the app writes a temporary file first and replaces the final cache file only after serialization succeeds. Week-level diagnostics are stored separately in app state so Settings and source details can explain low counts, language skew, missing scores, missing IDs, source failures, and unmapped external candidates.
-11. The UI still applies `PremiereFilter` in memory for local-only filters and final consistency, then renders one selected day. Left Arrow and Right Arrow move between days. Overscrolling at the top moves to yesterday; overscrolling at the bottom moves to tomorrow. Moderate days render 10 cards at a time and auto-load more while browsing. Days over 40 items switch to .NET 11 Blazor `Virtualize`.
-12. Poster/backdrop URLs are routed through `/cached-image`, which stores image bytes locally under `App_Data/cache/images`. Poster cards include `w=185`, so the cache stores a displayed-size variant for the card. TMDb poster URLs that already use the requested card width are stored directly; larger variants and non-TMDb posters are resized to a JPEG variant. Cards place the real image URL in `data-lazy-src`, so the browser does not request offscreen images until they are near the viewport.
+11. The UI still applies `PremiereFilter` in memory for local-only filters and final consistency, then renders one selected day. Left Arrow and Right Arrow move between days. Overscrolling at the top moves to yesterday; overscrolling at the bottom moves to tomorrow. Ten cards render initially, and measured top/bottom sentinels move a rolling window that never mounts more than 40 rich cards.
+12. Poster/backdrop URLs are routed through `/cached-image`, which stores image bytes locally under `App_Data/cache/images`. Poster cards include `w=185`, so the cache stores a displayed-size variant for the card. WebP-capable browsers receive a separately keyed WebP representation; JPEG/original bytes remain the fallback. Cards place the real image URL in `data-lazy-src`, so the browser does not request offscreen images until they are near the viewport.
 13. After the visible week finishes loading, `AdjacentWeekPrefetcher` warms nearby week caches in the background with the same saved filters, without blocking the page. `CurrentWeekCalendarWarmupService` also runs on startup and wakes periodically to warm stale or missing full-week media caches for today, nearby days, the rest of the current week/month, adjacent months, and months +2 through +6. Routine warmup uses `forceRefresh: false`, so fresh disk and memory cache entries are reused. If the app is stopped while prefetch or warmup is running, later cache checks resume only missing or stale weeks.
 
 ## External Sources
@@ -163,7 +163,7 @@ The `/series` route locks the media request to series and shows only TV-oriented
 
 The app uses a top navigation bar with combined, series, movie, and About routes, and gives the calendar the full page width.
 
-On desktop, the week renders as one selected day inside a max-width `1920px` calendar. The sticky day bar is the navigation surface: clicking a day updates the selected day and scrolls the board back to the top. Cards are laid out two per row when the viewport has room. Moderate days start with 10 cards and continue loading in 10-card batches as the scroll sentinel approaches the viewport; very dense days switch to .NET 11 Blazor `Virtualize`.
+On desktop, the week renders as one selected day inside a max-width `1920px` calendar. The sticky day bar is the navigation surface: clicking a day updates the selected day and scrolls the board back to the top. Cards are laid out two per row when the viewport has room. Days start with 10 cards and continue in 10-card batches; after 40 cards, each new batch retires the oldest measured batch and scrolling upward restores it.
 
 On mobile, the day selector remains sticky and cards use the full available width.
 
@@ -177,7 +177,7 @@ The Actions palette also stores the comfortable/compact card choice in browser l
 
 Copy view link uses the current canonical route and query. ICS, CSV, and JSON exports are generated from the page's already-filtered `_visibleItems` collection and downloaded by the browser; no external provider calls or cache refreshes occur during export.
 
-Client-side lazy images, day auto-loading, and filter-pane swipe closing share one requestAnimationFrame-batched DOM observer. Feature scripts receive only the added roots they need to scan, which keeps virtualized row mounts from triggering multiple full-document rescans. Day highlighting does not use a scroll observer; selected day state lives in Blazor.
+Client-side lazy images, day-window auto-loading, and filter-pane swipe closing share one requestAnimationFrame-batched DOM observer. Feature scripts receive only the added roots they need to scan, which keeps card-window moves from triggering multiple full-document rescans. Day highlighting does not use a scroll observer; selected day state lives in Blazor.
 
 ## Images
 
@@ -185,7 +185,7 @@ Client-side lazy images, day auto-loading, and filter-pane swipe closing share o
 
 1. Validates the remote host against the image cache allow-list.
 2. Downloads the bytes when missing or explicitly refreshed.
-3. Optionally resizes poster requests that include `w` into a width-specific JPEG variant and keys that variant separately from the original source URL.
+3. Optionally resizes poster requests that include `w` into a width- and format-specific variant. WebP is negotiated from `Accept`; JPEG/original bytes are the fallback.
 4. Saves the file under the local image cache directory without buffering the whole image in the final response path.
 5. Serves the cached file as a stream with browser cache headers, ETags, and `304 Not Modified` support.
 
@@ -245,7 +245,7 @@ GET /health
 - `PremiereCalendar/Services/CalendarExportService.cs` - side-effect-free ICS, CSV, and JSON formatting for the visible calendar.
 - `PremiereCalendar/Components/Shared/MediaFilterPanel.razor` - TMDb-style per-media filter groups for series and movies.
 - `PremiereCalendar/Components/Shared/CalendarWeek.razor` - sticky day selector and one mounted selected-day section.
-- `PremiereCalendar/Components/Shared/CalendarDay.razor` - per-day grouping, render fingerprinting, 10-card batching, scroll auto-load sentinels, and .NET 11 Blazor `Virtualize` for dense days.
+- `PremiereCalendar/Components/Shared/CalendarDay.razor` - per-day grouping, render fingerprinting, and a measured two-way 40-card window with ten-card scroll batches.
 - `PremiereCalendar/Components/Shared/PremiereCard.razor` - poster, metadata, source chips, scores, links, description, and card-level render fingerprinting.
 - `PremiereCalendar/wwwroot/dom-observer.js` - shared batched DOM initializer for lazy images, filter-pane swipe setup, and day auto-loading.
 - `PremiereCalendar/wwwroot/command-palette.js` - global Ctrl+K/Cmd+K and Escape handling for the calendar Actions palette.
@@ -280,4 +280,4 @@ The test layers are:
 - Integration tests for HTTP clients, cache behavior, and service flow.
 - Component tests for Blazor rendering and UI interactions.
 
-Manual validation after deployment should check the health endpoint, week navigation, Refresh behavior, filter Save/Cancel behavior, source chips, image rendering, desktop two-card day layout, virtualized dense days, show-more/auto-load controls, and mobile stacked layout.
+Manual validation after deployment should check the health endpoint, week navigation, Refresh behavior, filter Save/Cancel behavior, source chips, image rendering, desktop two-card day layout, downward and upward dense-day windowing, show-more/auto-load controls, and mobile stacked layout.

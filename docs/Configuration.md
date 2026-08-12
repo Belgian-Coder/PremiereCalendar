@@ -66,7 +66,7 @@ IMDb scores and vote counts come from the official non-commercial `title.ratings
 }
 ```
 
-The app downloads it on startup when due, imports it into SQLite, and reuses it for exact IMDb ID matches. IMDb does not provide a per-item change endpoint for this dataset.
+The app downloads it on startup when due, decompresses and imports it into SQLite as a line-by-line async stream, and reuses it for exact IMDb ID matches. The importer does not retain the full dataset in managed memory. Calendar enrichment resolves the needed IDs in bounded SQLite batches. IMDb does not provide a per-item change endpoint for this dataset.
 
 ## Health Check
 
@@ -308,6 +308,6 @@ Poster and backdrop image bytes are cached through a local endpoint by default:
 }
 ```
 
-Cards render image sources as `/cached-image?url=...`, so browser requests hit the local app first. Poster cards include `w=185`; the endpoint folds that width into the cache key and stores a resized JPEG variant for the display size. The endpoint allow-lists image hosts, stores the bytes on disk, and serves subsequent requests locally as streamed files with browser cache headers and ETags. Cards lazy-load the real cached-image URL with an intersection observer, so offscreen posters do not request bytes during the first render. If image caching is disabled, the endpoint still validates the source URL before redirecting to the remote image.
+Cards render image sources as `/cached-image?url=...`, so browser requests hit the local app first. Poster cards include `w=185`; the endpoint folds that width and the negotiated browser format into the cache key. WebP-capable browsers receive a resized WebP representation, while JPEG/original bytes remain the fallback. The endpoint allow-lists image hosts, stores the bytes on disk, and serves subsequent requests locally as streamed files with browser cache headers and ETags. Cards lazy-load the real cached-image URL with an intersection observer, so offscreen posters do not request bytes during the first render. If image caching is disabled, the endpoint still validates the source URL before redirecting to the remote image.
 
 The UI Refresh button still fetches fresh calendar data. During that refreshed render, image URLs include refresh parameters so the image cache can update the poster files for visible cards.

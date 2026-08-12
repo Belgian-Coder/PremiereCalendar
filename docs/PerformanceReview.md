@@ -1,6 +1,6 @@
 # Performance Review
 
-Last reviewed: 2026-05-08.
+Last reviewed: 2026-08-12.
 
 ## .NET 11 Notes
 
@@ -12,15 +12,15 @@ The .NET 11 release notes drove the current dense-list change:
 - Kestrel has HTTP parser allocation/throughput improvements for malformed HTTP/1.1 traffic, which does not materially affect normal LAN browsing.
 - Zstandard compression is added to ASP.NET Core response compression.
 
-The variable-height `Virtualize` improvement is the item that directly helps the dense calendar. The app keeps one selected day mounted, uses two-card virtualized rows, provides a conservative initial `ItemSize`, and uses app-level overscan of 4 rows. That keeps scrolling buffered while staying well under the mounted-card and DOM-node budgets in dense-week validation.
+The calendar does not use fixed-height `Virtualize` for rich cards. Poster, description, provider, and provenance content produces genuinely variable heights, and live testing showed recycled rows flashing while a streamed result set grew. The selected day now uses a measured two-way window instead: ten cards appear initially, scrolling reveals ten more, and no more than 40 rich cards remain mounted. When the oldest batch is retired, JavaScript measures its actual rendered height and a spacer preserves the scroll position. Scrolling back to that spacer restores the prior batch and retires an equal batch from the bottom.
 
-Top-level All/Series/Movies navigation resets the desktop calendar to its command bar before replacing the virtualized day. This prevents a new media route from briefly mounting rows for the previous route's scroll offset and then jumping to its first rows after measurement.
+Top-level All/Series/Movies navigation resets the desktop calendar to its command bar before replacing the measured day window. This prevents a new media route from briefly mounting cards for the previous route's scroll offset and then jumping to its first batch.
 
 All streamed calendar loads preserve existing card positions, update matching cards in place, and append newly discovered cards within their day as provider batches arrive. Because intermediate provider snapshots are not necessarily cumulative, a card already shown during a load is retained even when a later snapshot temporarily omits it. All, Series, Movies, and week/filter route changes first perform one stable reconciliation against the new criteria; Update and Refresh sources retain the current presentation. This avoids blank pages and repeated full-grid reshuffling, while an explicit sort change still applies a clean full sort.
 
-All days use the bounded progressive card grid instead of fixed-height row virtualization. Rich premiere cards change height as poster and metadata content settle, and the virtualizer was observed recycling different rows while streamed collections grew. Rendering ten cards initially and revealing explicit batches preserves card identity and prevents flashing without materializing an entire dense day.
+All days use the bounded measured card window instead of fixed-height row virtualization. Rendering ten cards initially and revealing explicit batches preserves card identity and prevents flashing without materializing an entire dense day. The 40-card ceiling applies even after long downward scrolling; the earlier implementation bounded each increment but could eventually mount every card.
 
-Automatic scroll loading advances only one ten-card batch when the sentinel is within 400 pixels of the viewport. It never invokes the explicit `Show all` action. A live Series trace previously showed that behavior mounting 435 rich cards and 27,554 DOM elements at once, including a 2.1-second style recalculation that blocked scrolling; bounded batch loading removes that main-thread spike.
+Automatic scroll loading advances only one ten-card batch when the sentinel is within 400 pixels of the viewport. A matching upper sentinel restores earlier batches. A live Series trace previously showed 435 rich cards and 27,554 DOM elements mounted at once, including a 2.1-second style recalculation that blocked scrolling; the rolling ceiling removes that unbounded main-thread growth.
 
 Streamed item/metadata updates preserve the number of cards the user has already revealed. The component clamps that count only when the result set becomes smaller, preventing a background update from collapsing (for example) 70 visible cards back to 10 and moving the scroll position unexpectedly.
 
@@ -63,8 +63,8 @@ Image optimization status:
 - Remote image URLs are allow-listed.
 - Posters go through `/cached-image`.
 - Card posters request width-specific variants using `w=185`.
-- Resized variants are stored on disk as JPEGs.
-- TMDb card-poster requests that already target the requested `w=185` width are stored directly instead of decoded and re-encoded.
+- Browsers advertise image formats through `Accept`; width-specific poster requests are stored as WebP when supported and JPEG/original bytes remain the fallback.
+- Format is part of the cache key and `/cached-image` returns `Vary: Accept`, so WebP and fallback representations cannot collide.
 - Browser responses include cache headers, ETags, Last-Modified, range support, and stale fallback.
 - Resized image fetches now use a bounded temporary source file instead of a `MemoryStream`, reducing managed byte-array pressure for large remote posters.
 - Deployment updates should use `deploy/Publish-PremiereCalendar.ps1` so the hosted `App_Data` folder is preserved. The local calendar and image caches are runtime data, not publish artifacts.
@@ -74,6 +74,8 @@ Remaining practical limit: ImageSharp still has to decode the image into image m
 ## Streaming
 
 `PremiereService.StreamPremieresAsync` is real streaming at the source, provider, and enrichment-batch level. Trakt, TVmaze schedules, and TMDb day batches run as separate bounded source work instead of one combined external-calendar bucket. TMDb fetches page 1 first, then later page chunks; raw TMDb metadata is emitted before detail enrichment, and enriched chunks follow in smaller batches so the page receives `PremiereLoadProgress` after about 10 newly enriched cards instead of waiting for an entire large page batch.
+
+IMDb's daily gzip import is also streamed line-by-line into one SQLite transaction. It no longer retains roughly 1.7 million `ImdbRatingRecord` objects before writing. Calendar enrichment gathers the visible IMDb IDs and resolves them in bounded SQLite `IN` batches instead of opening one query per card. SIMKL calendar JSON is deserialized as an async stream, filtered to the requested date range before retention, and stored in an eight-entry range-scoped LRU rather than the shared unbounded memory cache.
 
 Benefit today:
 
@@ -129,4 +131,4 @@ Nearby-week prefetch now runs after the visible week completes. The default queu
 
 ## Browser Rendering
 
-The calendar renders one selected day at a time. Dense days use .NET 11 `Virtualize`; moderate days render 10 cards and auto-load more as the user scrolls. The card grid uses one shared gap variable so left/right columns and virtualized rows keep consistent spacing across desktop and mobile. Day switching keys the selected day so the short entrance animation reliably runs, scrolls the board immediately on browser navigation, and avoids `content-visibility:auto` on cards to reduce visible paint flicker.
+The calendar renders one selected day at a time. Every day starts with 10 cards and uses the measured 40-card two-way window described above. The card grid uses one shared gap variable so both desktop columns remain consistent. Day switching keys the selected day so the short entrance animation reliably runs, scrolls the board immediately on browser navigation, and avoids `content-visibility:auto` on cards because it caused visible paint flicker in this variable-height layout.

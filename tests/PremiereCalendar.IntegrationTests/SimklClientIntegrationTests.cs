@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Caching.Memory;
 using System.Net;
 using System.Net.Http.Headers;
 using PremiereCalendar.IntegrationTests.Support;
@@ -287,6 +286,26 @@ public sealed class SimklClientIntegrationTests
         Assert.Empty(handler.Requests);
     }
 
+    [Fact]
+    public async Task GetCalendarAsync_BoundsRangeScopedCalendarCache()
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("[]"));
+        var client = CreateClient(handler, new FakeSimklSyncStateStore());
+
+        for (var offset = 0; offset < 5; offset++)
+        {
+            var day = today.AddDays(offset);
+            await client.GetCalendarAsync(day, day, CancellationToken.None);
+        }
+
+        Assert.Equal(10, handler.Requests.Count);
+
+        await client.GetCalendarAsync(today, today, CancellationToken.None);
+
+        Assert.Equal(12, handler.Requests.Count);
+    }
+
     private static SimklClient CreateClient(
         StubHttpMessageHandler handler,
         ISimklSyncStateStore stateStore,
@@ -295,7 +314,6 @@ public sealed class SimklClientIntegrationTests
     {
         return new SimklClient(
             new HttpClient(handler) { BaseAddress = new Uri("https://api.simkl.com/") },
-            new MemoryCache(new MemoryCacheOptions()),
             Microsoft.Extensions.Options.Options.Create(new SimklOptions
             {
                 Enabled = true,

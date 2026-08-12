@@ -1,12 +1,19 @@
 namespace PremiereCalendar.Services;
 
+public enum ImageCacheFormat
+{
+    Original,
+    Webp
+}
+
 public interface IImageCache
 {
     Task<CachedImage> GetOrAddAsync(
         string sourceUrl,
         bool forceRefresh,
         CancellationToken cancellationToken,
-        int? width = null);
+        int? width = null,
+        ImageCacheFormat format = ImageCacheFormat.Original);
 }
 
 public interface IImageCacheMaintenance

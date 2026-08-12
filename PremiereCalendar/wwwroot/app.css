@@ -1659,19 +1659,6 @@ html[data-density="comfortable"] .premiere-card {
     color: #8a5620;
 }
 
-.day-virtualized-list {
-    display: grid;
-    gap: 0.85rem;
-}
-
-.day-card-row {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--card-grid-gap);
-    align-items: stretch;
-    padding-bottom: var(--card-grid-gap);
-}
-
 .day-load-controls {
     display: flex;
     flex-wrap: wrap;
@@ -1684,7 +1671,8 @@ html[data-density="comfortable"] .premiere-card {
 }
 
 .day-visible-count,
-.day-autoload-sentinel {
+.day-autoload-sentinel,
+.day-window-previous {
     color: var(--muted);
     font-size: 0.84rem;
     font-weight: 750;
@@ -1695,6 +1683,22 @@ html[data-density="comfortable"] .premiere-card {
     place-items: center;
     min-height: 2.75rem;
     margin-top: 0.6rem;
+    border: 1px dashed rgba(20, 125, 115, 0.36);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--teal-soft) 35%, transparent);
+    color: var(--teal-strong);
+}
+
+.day-window-spacer {
+    min-height: 0;
+    pointer-events: none;
+}
+
+.day-window-previous {
+    display: grid;
+    place-items: center;
+    min-height: 2.75rem;
+    margin-bottom: 0.6rem;
     border: 1px dashed rgba(20, 125, 115, 0.36);
     border-radius: 8px;
     background: color-mix(in srgb, var(--teal-soft) 35%, transparent);
@@ -3575,11 +3579,6 @@ html[data-theme="dark"] .unverified-day-separator small {
     }
 
     .day-items-grid {
-        grid-template-columns: 1fr;
-        gap: 0.85rem;
-    }
-
-    .day-card-row {
         grid-template-columns: 1fr;
         gap: 0.85rem;
     }

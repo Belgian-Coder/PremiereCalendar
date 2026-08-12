@@ -1029,7 +1029,24 @@ public sealed class PremiereService : IPremiereService
         }
 
         List<PremiereItem>? hydratedItems = null;
-        var ratingsByImdbId = new Dictionary<string, ImdbRatingRecord?>(StringComparer.OrdinalIgnoreCase);
+        IReadOnlyDictionary<string, ImdbRatingRecord> ratingsByImdbId =
+            new Dictionary<string, ImdbRatingRecord>(StringComparer.OrdinalIgnoreCase);
+        if (_imdbRatingsStore is not null)
+        {
+            var imdbIds = items
+                .Where(HasCachedImdbId)
+                .Select(item => item.ImdbId!.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            try
+            {
+                ratingsByImdbId = await _imdbRatingsStore.GetByImdbIdsAsync(imdbIds, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Skipping cached IMDb dataset batch lookup for {Count} IMDb IDs.", imdbIds.Length);
+            }
+        }
         var rottenTomatoesByItemKey = new Dictionary<string, RottenTomatoesScores>(StringComparer.Ordinal);
         for (var index = 0; index < items.Count; index++)
         {
@@ -1038,20 +1055,7 @@ public sealed class PremiereService : IPremiereService
             if (_imdbRatingsStore is not null && HasCachedImdbId(item))
             {
                 var imdbId = item.ImdbId!.Trim();
-                if (!ratingsByImdbId.TryGetValue(imdbId, out var rating))
-                {
-                    try
-                    {
-                        rating = await _imdbRatingsStore.GetByImdbIdAsync(imdbId, cancellationToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(ex, "Skipping cached IMDb dataset rating lookup for IMDb ID {ImdbId}.", imdbId);
-                        rating = null;
-                    }
-
-                    ratingsByImdbId[imdbId] = rating;
-                }
+                ratingsByImdbId.TryGetValue(imdbId, out var rating);
 
                 if (rating is not null
                     && (item.ImdbScore != rating.AverageRating || item.ImdbVoteCount != rating.VoteCount))

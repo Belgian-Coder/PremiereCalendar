@@ -146,6 +146,32 @@ public sealed class FileImageCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task GetOrAddAsync_WithWebpNegotiationCachesSeparateWebpVariant()
+    {
+        var handler = new StubHttpMessageHandler(_ => Image(SamplePngBytes(), "image/png"));
+        var cache = CreateCache(handler);
+
+        var jpeg = await cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/1/format.png",
+            forceRefresh: false,
+            CancellationToken.None,
+            width: 80);
+        var webp = await cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/1/format.png",
+            forceRefresh: false,
+            CancellationToken.None,
+            width: 80,
+            format: ImageCacheFormat.Webp);
+        var bytes = await File.ReadAllBytesAsync(webp.FilePath);
+
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.NotEqual(jpeg.CacheKey, webp.CacheKey);
+        Assert.Equal("image/webp", webp.ContentType);
+        Assert.Equal("RIFF", System.Text.Encoding.ASCII.GetString(bytes, 0, 4));
+        Assert.Equal("WEBP", System.Text.Encoding.ASCII.GetString(bytes, 8, 4));
+    }
+
+    [Fact]
     public async Task GetOrAddAsync_WithTmdbRequestedWidthStoresRemoteVariantWithoutDecoding()
     {
         var originalBytes = new byte[] { 9, 8, 7, 6 };

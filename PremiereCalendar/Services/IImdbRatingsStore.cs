@@ -15,10 +15,43 @@ public interface IImdbRatingsStore
 {
     Task<ImdbRatingRecord?> GetByImdbIdAsync(string imdbId, CancellationToken cancellationToken);
 
+    async Task<IReadOnlyDictionary<string, ImdbRatingRecord>> GetByImdbIdsAsync(
+        IReadOnlyCollection<string> imdbIds,
+        CancellationToken cancellationToken)
+    {
+        var ratings = new Dictionary<string, ImdbRatingRecord>(StringComparer.OrdinalIgnoreCase);
+        foreach (var imdbId in imdbIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var rating = await GetByImdbIdAsync(imdbId, cancellationToken);
+            if (rating is not null)
+            {
+                ratings[rating.ImdbId] = rating;
+            }
+        }
+
+        return ratings;
+    }
+
     Task ReplaceAllAsync(
         IEnumerable<ImdbRatingRecord> ratings,
         DateTimeOffset importedAtUtc,
         CancellationToken cancellationToken);
+
+    async Task<int> ReplaceAllStreamingAsync(
+        IAsyncEnumerable<ImdbRatingRecord> ratings,
+        DateTimeOffset importedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        var buffered = new List<ImdbRatingRecord>();
+        await foreach (var rating in ratings.WithCancellation(cancellationToken))
+        {
+            buffered.Add(rating);
+        }
+
+        await ReplaceAllAsync(buffered, importedAtUtc, cancellationToken);
+        return buffered.Count;
+    }
 
     Task<ImdbDatasetState> GetStateAsync(CancellationToken cancellationToken);
 

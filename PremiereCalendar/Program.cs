@@ -319,11 +319,17 @@ app.MapGet(
 
         try
         {
-            var image = await imageCache.GetOrAddAsync(url, refresh == true, cancellationToken, w);
+            var format = w is > 0
+                && httpContext.Request.GetTypedHeaders().Accept?.Any(mediaType =>
+                    string.Equals(mediaType.MediaType.Value, "image/webp", StringComparison.OrdinalIgnoreCase)) == true
+                    ? ImageCacheFormat.Webp
+                    : ImageCacheFormat.Original;
+            var image = await imageCache.GetOrAddAsync(url, refresh == true, cancellationToken, w, format);
             var maxAgeSeconds = Math.Max(60, Convert.ToInt32(image.BrowserMaxAge.TotalSeconds));
             var entityTag = $"\"{image.CacheKey}\"";
 
             httpContext.Response.Headers.CacheControl = $"public, max-age={maxAgeSeconds}";
+            httpContext.Response.Headers.Vary = "Accept";
             httpContext.Response.Headers.ETag = entityTag;
             httpContext.Response.Headers.LastModified = image.LastModifiedUtc.UtcDateTime.ToString("R", CultureInfo.InvariantCulture);
 

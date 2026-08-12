@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO.Compression;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -43,32 +44,12 @@ public sealed class ImdbDatasetImporter : IImdbDatasetImporter
             await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var gzip = new GZipStream(responseStream, CompressionMode.Decompress);
             using var reader = new StreamReader(gzip);
-            var records = new List<ImdbRatingRecord>();
-            var isHeader = true;
-
-            while (await reader.ReadLineAsync(cancellationToken) is { } line)
-            {
-                if (isHeader)
-                {
-                    isHeader = false;
-                    continue;
-                }
-
-                var parts = line.Split('\t');
-                if (parts.Length < 3
-                    || string.IsNullOrWhiteSpace(parts[0])
-                    || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var averageRating)
-                    || !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var voteCount))
-                {
-                    continue;
-                }
-
-                records.Add(new ImdbRatingRecord(parts[0].Trim(), averageRating, voteCount, importedAtUtc));
-            }
-
-            await _ratingsStore.ReplaceAllAsync(records, importedAtUtc, cancellationToken);
-            _logger.LogInformation("Imported {Count} IMDb title ratings.", records.Count);
-            return records.Count;
+            var count = await _ratingsStore.ReplaceAllStreamingAsync(
+                ReadRatingsAsync(reader, importedAtUtc, cancellationToken),
+                importedAtUtc,
+                cancellationToken);
+            _logger.LogInformation("Imported {Count} IMDb title ratings.", count);
+            return count;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -78,6 +59,33 @@ public sealed class ImdbDatasetImporter : IImdbDatasetImporter
                 state with { LastError = ex.Message },
                 cancellationToken);
             throw;
+        }
+    }
+
+    private static async IAsyncEnumerable<ImdbRatingRecord> ReadRatingsAsync(
+        StreamReader reader,
+        DateTimeOffset importedAtUtc,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var isHeader = true;
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            if (isHeader)
+            {
+                isHeader = false;
+                continue;
+            }
+
+            var parts = line.Split('\t');
+            if (parts.Length < 3
+                || string.IsNullOrWhiteSpace(parts[0])
+                || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var averageRating)
+                || !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var voteCount))
+            {
+                continue;
+            }
+
+            yield return new ImdbRatingRecord(parts[0].Trim(), averageRating, voteCount, importedAtUtc);
         }
     }
 }
