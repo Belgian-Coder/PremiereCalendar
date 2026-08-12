@@ -882,7 +882,9 @@
                     || _filters.WeekStart != previousWeekStart
                     || !string.Equals(previousCriteriaKey, nextCriteriaKey, StringComparison.Ordinal))
                 {
-                    RecalculateVisibleItems();
+                    // Reconcile the new route/filter against the cards already on screen once.
+                    // Subsequent streamed batches retain that presentation and append discoveries.
+                    RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: false);
                     await LoadAsync();
                 }
                 else if (sortChanged)
@@ -981,7 +983,9 @@
         _loadProgress.Clear();
         InvalidateLoadProgressCache();
         _sourceProgressFilter = null;
-        RecalculateVisibleItems(preserveCurrentOrder: _visibleItems.Count > 0);
+        RecalculateVisibleItems(
+            preserveCurrentOrder: _visibleItems.Count > 0,
+            retainMissingItems: true);
         _refreshImageCache = forceRefresh;
         _imageCacheVersion = forceRefresh
             ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)
@@ -1052,7 +1056,7 @@
                         // A calendar load can stream many differently ordered provider batches.
                         // Keep existing cards in place, update matching cards, and append discoveries so
                         // the page fills progressively without rebuilding or reshuffling the whole grid.
-                        RecalculateVisibleItems(preserveCurrentOrder: true);
+                        RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
                         StateHasChanged();
                     }
                 });
@@ -1083,7 +1087,7 @@
 
                 FinalizeOpenProgressEntries();
                 AddLoadBudgetProgressEntry(budgetSeconds);
-                RecalculateVisibleItems(preserveCurrentOrder: true);
+                RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
                 _hasLoadedAtLeastOnce = true;
             });
         }
@@ -1355,7 +1359,9 @@
         }
     }
 
-    private void RecalculateVisibleItems(bool preserveCurrentOrder = false)
+    private void RecalculateVisibleItems(
+        bool preserveCurrentOrder = false,
+        bool retainMissingItems = false)
     {
         var items = SourceProgressFilteredItems();
         var nextItems = PremiereFilter.Apply(items, _filters);
@@ -1375,7 +1381,7 @@
             {
                 reconciled.Add(updatedItem);
             }
-            else
+            else if (retainMissingItems)
             {
                 // Provider progress is not guaranteed to be a cumulative snapshot. Once a card has
                 // been shown during this load, retain it so a temporary omission cannot blank or
