@@ -617,7 +617,7 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
-    public async Task CalendarPage_MediaRouteChangeWaitsForStableFinalCardOrder()
+    public async Task CalendarPage_MediaRouteChangeAppendsStreamedCardsWithoutReorderingExistingCards()
     {
         var service = new RouteTransitionPremiereService();
         Services.AddSingleton<IPremiereService>(service);
@@ -643,8 +643,17 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() =>
         {
             var titles = component.FindAll("[data-testid='premiere-card'] h3").Select(node => node.TextContent).ToArray();
-            Assert.Equal("Alpha Movie", titles[0]);
-            Assert.Equal("Zulu Movie 01", titles[1]);
+            Assert.Equal("Zulu Movie 01", titles[0]);
+            Assert.DoesNotContain("Alpha Movie", titles);
+        });
+
+        component.WaitForElement("[data-day-load-all]").Click();
+        component.WaitForAssertion(() =>
+        {
+            var titles = component.FindAll("[data-testid='premiere-card'] h3").Select(node => node.TextContent).ToArray();
+            Assert.Equal(11, titles.Length);
+            Assert.Equal("Zulu Movie 01", titles[0]);
+            Assert.Equal("Alpha Movie", titles[^1]);
         });
     }
 

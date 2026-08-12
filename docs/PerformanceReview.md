@@ -16,7 +16,7 @@ The variable-height `Virtualize` improvement is the item that directly helps the
 
 Top-level All/Series/Movies navigation resets the desktop calendar to its command bar before replacing the virtualized day. This prevents a new media route from briefly mounting rows for the previous route's scroll offset and then jumping to its first rows after measurement.
 
-Media-route loads publish the first meaningful sorted snapshot and then keep that grid stable until completion. This avoids both a blank Series page during a long provider pass and repeated card reshuffling as incremental source batches arrive.
+All streamed calendar loads preserve existing card positions, update matching cards in place, and append newly discovered cards within their day as provider batches arrive. This applies to All, Series, Movies, week changes, Update, and Refresh sources, avoiding blank pages and repeated full-grid reshuffling. Changing the selected sort still applies a clean full sort.
 
 Movie-only days use the progressive card grid instead of variable-height row virtualization. Their per-day counts are modest, while the grid avoids the visible first-row correction that can occur when poster and metadata heights settle. Dense series and mixed days remain virtualized.
 

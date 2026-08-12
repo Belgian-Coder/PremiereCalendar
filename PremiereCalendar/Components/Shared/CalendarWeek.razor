@@ -85,6 +85,9 @@
     public SortDirection SortDirection { get; set; } = SortDirection.Ascending;
 
     [Parameter]
+    public bool PreserveItemOrder { get; set; }
+
+    [Parameter]
     public string? ImageCacheVersion { get; set; }
 
     [Parameter]
@@ -175,7 +178,7 @@
 
         var groupKey = string.Create(
             CultureInfo.InvariantCulture,
-            $"{WeekStart:yyyyMMdd}|{Items.Count}|{SortMode}|{SortDirection}|{ScoreSource}");
+            $"{WeekStart:yyyyMMdd}|{Items.Count}|{SortMode}|{SortDirection}|{ScoreSource}|{PreserveItemOrder}");
 
         if (!ReferenceEquals(Items, _lastGroupedItems)
             || !string.Equals(groupKey, _lastGroupKey, StringComparison.Ordinal))
@@ -266,7 +269,10 @@
         var end = start.AddDays(6);
         var groups = new Dictionary<DateOnly, DayGroupBuilder>();
 
-        foreach (var item in PremiereFilter.SortItems(Items, SortMode, SortDirection, ScoreSource))
+        IEnumerable<PremiereItem> orderedItems = PreserveItemOrder
+            ? Items
+            : PremiereFilter.SortItems(Items, SortMode, SortDirection, ScoreSource);
+        foreach (var item in orderedItems)
         {
             if (item.PremiereDate < start || item.PremiereDate > end)
             {
