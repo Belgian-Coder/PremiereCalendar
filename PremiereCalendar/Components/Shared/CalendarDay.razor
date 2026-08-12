@@ -210,7 +210,9 @@
     // Keep dense days virtualized while provider batches stream in. Falling back to
     // the progressive grid during updates lets the autoload sentinel materialize
     // hundreds of cards and tens of thousands of DOM nodes before loading ends.
-    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold;
+    // Movie-only days are small enough for the progressive grid and avoiding virtualization
+    // prevents its initial variable-height estimate from inserting the first row after paint.
+    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold && MovieCount != Items.Count;
 
     protected override void OnParametersSet()
     {
