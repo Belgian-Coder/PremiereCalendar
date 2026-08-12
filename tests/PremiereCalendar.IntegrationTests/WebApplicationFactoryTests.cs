@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using System.Net.Http.Headers;
 using System.Text.Json;
 
@@ -54,6 +57,16 @@ public sealed class WebApplicationFactoryTests
         var version = versionDocument.RootElement.GetProperty("version").GetString();
         Assert.False(string.IsNullOrWhiteSpace(version));
         Assert.Matches(@"^\d+\.\d+\.\d+", version);
+    }
+
+    [Fact]
+    public async Task HostShutdown_IsBoundedForWindowsServiceUpdates()
+    {
+        await using var factory = new WebApplicationFactory<Program>();
+
+        var options = factory.Services.GetRequiredService<IOptions<HostOptions>>().Value;
+
+        Assert.Equal(TimeSpan.FromSeconds(15), options.ShutdownTimeout);
     }
 
     [Fact]

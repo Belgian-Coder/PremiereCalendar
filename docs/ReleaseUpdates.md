@@ -41,6 +41,9 @@ The normal acceptance and user path is Settings > Local status >
 updater as a detached Windows PowerShell process and stores its transcript under
 `D:\Apps\PremiereCalendarData\logs\application-updates`. During activation the page
 may briefly show the reconnect UI while the service restarts.
+Service shutdown is bounded to 15 seconds so a provider call that is slow to observe cancellation
+cannot hold a signed update in `StopPending`; cancellation from the Windows service lifetime is
+treated as a normal shutdown rather than an application crash.
 
 The updater downloads the manifest first, selects exactly its declared package,
 enforces download and expanded-size limits, verifies the pinned certificate,

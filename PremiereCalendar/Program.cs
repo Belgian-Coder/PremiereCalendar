@@ -17,6 +17,11 @@ builder.Host.UseWindowsService(options =>
 {
     options.ServiceName = "PremiereCalendar";
 });
+builder.Services.Configure<HostOptions>(options =>
+{
+    // Keep signed-update restarts bounded even when a provider request is slow to observe cancellation.
+    options.ShutdownTimeout = TimeSpan.FromSeconds(15);
+});
 builder.WebHost.UseUrls(builder.Configuration["Urls"] ?? "http://0.0.0.0:5298");
 
 builder.Services.AddRazorComponents()
@@ -348,8 +353,10 @@ try
 {
     app.Run();
 }
-catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested)
+catch (OperationCanceledException)
 {
+    // WindowsServiceLifetime can surface its canceled stop token after the application-stopping
+    // signal has already completed. A canceled host run is a normal service shutdown, not a crash.
 }
 
 static bool RequestHasMatchingEntityTag(HttpContext httpContext, string entityTag)
