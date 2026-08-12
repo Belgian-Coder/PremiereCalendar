@@ -994,6 +994,7 @@
             loadFilters.PriorityDate = PriorityDateForCurrentWeek(start, end);
             var lastUiUpdateUtc = DateTimeOffset.MinValue;
             var renderedFirstUpdate = false;
+            var renderedStableRouteSnapshot = false;
 
             await foreach (var update in PremiereService.StreamPremieresAsync(start, end, forceRefresh, loadFilters, token)
                 .WithCancellation(token))
@@ -1049,11 +1050,15 @@
                         renderedFirstUpdate = true;
                         lastUiUpdateUtc = now;
                         // A media-route transition can stream many differently ordered provider batches.
-                        // Keep the existing grid stable until the final sorted result is available; the
-                        // source progress still updates while the new route is loading.
-                        if (!stabilizeVisibleItems || update.IsFinal)
+                        // Publish one useful sorted snapshot quickly, then freeze the grid until the final
+                        // result so large Series loads do not stay blank or reshuffle on every provider batch.
+                        var publishStableRouteSnapshot = stabilizeVisibleItems
+                            && !renderedStableRouteSnapshot
+                            && update.Items.Count >= 10;
+                        if (!stabilizeVisibleItems || update.IsFinal || publishStableRouteSnapshot)
                         {
                             RecalculateVisibleItems();
+                            renderedStableRouteSnapshot |= publishStableRouteSnapshot;
                         }
                         StateHasChanged();
                     }

@@ -634,15 +634,17 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
         {
-            Assert.Single(component.FindAll("[data-testid='loading']"));
-            Assert.Empty(component.FindAll("[data-testid='premiere-card']"));
+            var cards = component.FindAll("[data-testid='premiere-card']");
+            Assert.Equal(10, cards.Count);
+            Assert.Contains("Zulu Movie 01", cards[0].TextContent);
         });
 
         service.ReleaseFinalMovieResult();
         component.WaitForAssertion(() =>
         {
             var titles = component.FindAll("[data-testid='premiere-card'] h3").Select(node => node.TextContent).ToArray();
-            Assert.Equal(["Alpha Movie", "Zulu Movie"], titles);
+            Assert.Equal("Alpha Movie", titles[0]);
+            Assert.Equal("Zulu Movie 01", titles[1]);
         });
     }
 
@@ -2817,13 +2819,15 @@ public sealed class CalendarPageTests : BunitContext
             var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
             if (criteria.IncludeMovies && !criteria.IncludeSeries)
             {
-                var zulu = Movie("movie:zulu", "Zulu Movie", start);
-                yield return new PremiereLoadProgress("Movie discovery", 1, 1, [zulu]);
+                var partialMovies = Enumerable.Range(1, 10)
+                    .Select(index => Movie($"movie:zulu:{index}", $"Zulu Movie {index:00}", start))
+                    .ToArray();
+                yield return new PremiereLoadProgress("Movie discovery", partialMovies.Length, partialMovies.Length, partialMovies);
                 MoviePartialYielded.TrySetResult(true);
                 await _releaseFinalMovieResult.Task.WaitAsync(cancellationToken);
 
                 var alpha = Movie("movie:alpha", "Alpha Movie", start);
-                yield return new PremiereLoadProgress("Complete", 0, 2, [alpha, zulu], IsFinal: true);
+                yield return new PremiereLoadProgress("Complete", 0, partialMovies.Length + 1, [alpha, .. partialMovies], IsFinal: true);
                 yield break;
             }
 

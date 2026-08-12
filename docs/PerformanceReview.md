@@ -16,6 +16,8 @@ The variable-height `Virtualize` improvement is the item that directly helps the
 
 Top-level All/Series/Movies navigation resets the desktop calendar to its command bar before replacing the virtualized day. This prevents a new media route from briefly mounting rows for the previous route's scroll offset and then jumping to its first rows after measurement.
 
+Media-route loads publish the first meaningful sorted snapshot and then keep that grid stable until completion. This avoids both a blank Series page during a long provider pass and repeated card reshuffling as incremental source batches arrive.
+
 Movie-only days use the progressive card grid instead of variable-height row virtualization. Their per-day counts are modest, while the grid avoids the visible first-row correction that can occur when poster and metadata heights settle. Dense series and mixed days remain virtualized.
 
 Response compression is enabled for dynamic text responses and static text assets. The middleware negotiates `zstd`, Brotli, or gzip based on `Accept-Encoding`; HTTPS compression is left at the framework default because the app does not need to compress secret-bearing HTTPS responses. Static assets are mapped with `MapStaticAssets().ShortCircuit()` so matched asset requests skip the remaining middleware pipeline and still keep ASP.NET Core's build-time compression, fingerprinting, ETag, and immutable-cache behavior.
