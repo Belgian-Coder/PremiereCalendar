@@ -18,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 
 function Get-ManifestPayload {
     param([Parameter(Mandatory)] $Manifest)
-    $notes = ([string]$Manifest.releaseNotes).Replace([Environment]::NewLine, [char]10).Replace([char]13, [char]10)
+    $notes = ([string]$Manifest.releaseNotes).Replace("`r`n", "`n").Replace("`r", "`n")
     return @(
         [string]$Manifest.schemaVersion,
         [string]$Manifest.version,

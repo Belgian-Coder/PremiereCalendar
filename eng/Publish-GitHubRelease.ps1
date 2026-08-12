@@ -120,7 +120,7 @@ foreach ($required in @('PremiereCalendar.exe', 'PremiereCalendar.dll', 'build-m
 
 Compress-Archive -Path (Join-Path $publishPath '*') -DestinationPath $packagePath -CompressionLevel Optimal
 $packageHash = Get-Sha256 $packagePath
-$normalizedNotes = $ReleaseNotes.Replace([Environment]::NewLine, [char]10).Replace([char]13, [char]10)
+$normalizedNotes = $ReleaseNotes.Replace("`r`n", "`n").Replace("`r", "`n")
 $payload = @('1', $Version, 'stable', (Split-Path $packagePath -Leaf), $packageHash.ToUpperInvariant(), '0', '2147483647', $normalizedNotes) -join [char]10
 $rsa = $certificate.GetRSAPrivateKey()
 try {
