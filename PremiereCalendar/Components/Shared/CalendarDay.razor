@@ -234,7 +234,9 @@
         if (itemsChanged)
         {
             _itemsSignature = signature;
-            _visibleCount = InitialCount;
+            _visibleCount = _visibleCount <= 0
+                ? InitialCount
+                : Math.Min(Items.Count, Math.Max(_visibleCount, InitialCount));
             _autoLoadAll = false;
         }
 

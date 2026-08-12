@@ -477,6 +477,56 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
+    public void CalendarDay_PreservesRevealedBatchCountAcrossStreamedItemUpdates()
+    {
+        var day = new DateOnly(2026, 5, 4);
+        var items = Enumerable.Range(1, 80)
+            .Select(index => new PremiereItem
+            {
+                CanonicalId = $"tv:{index}",
+                Type = PremiereItemType.SeriesEpisode,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = index,
+                Title = $"Episode {index}",
+                PremiereDate = day
+            })
+            .ToArray();
+
+        var component = Render<CalendarDay>(parameters => parameters
+            .Add(x => x.Day, day)
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, items)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        component.Find("[data-day-load-more]").Click();
+        component.Find("[data-day-load-more]").Click();
+        component.Find("[data-day-load-more]").Click();
+        Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+
+        var updatedItems = items
+            .Select(item => item with { Overview = "Streamed metadata" })
+            .Append(new PremiereItem
+            {
+                CanonicalId = "tv:81",
+                Type = PremiereItemType.SeriesEpisode,
+                MediaType = PremiereMediaType.Series,
+                TmdbId = 81,
+                Title = "Episode 81",
+                PremiereDate = day
+            })
+            .ToArray();
+        component.Render(parameters => parameters
+            .Add(x => x.Day, day)
+            .Add(x => x.DayId, "premiere-day-20260504")
+            .Add(x => x.Items, updatedItems)
+            .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Contains("Streamed metadata", component.Markup);
+        Assert.Contains("Showing 40 of 81", component.Markup);
+    }
+
+    [Fact]
     public void CalendarDay_ShowAllLoadsRemainingSmallDayItemsAtOnce()
     {
         var items = Enumerable.Range(1, 12)
