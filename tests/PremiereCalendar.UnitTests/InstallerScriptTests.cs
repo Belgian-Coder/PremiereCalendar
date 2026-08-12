@@ -192,8 +192,9 @@ public sealed class InstallerScriptTests
         Assert.Contains("Start-Transcript -LiteralPath $resolvedLogPath", script, StringComparison.Ordinal);
         Assert.Contains("Global\\PremiereCalendar-SignedReleaseUpdate", script, StringComparison.Ordinal);
         Assert.Contains("Release asset exceeds its size limit", script, StringComparison.Ordinal);
-        Assert.Contains("for ($attempt = 1; $attempt -le 3; $attempt++)", script, StringComparison.Ordinal);
-        Assert.Contains("Release asset download failed after 3 attempts", script, StringComparison.Ordinal);
+        Assert.Contains("for ($attempt = 1; $attempt -le 4; $attempt++)", script, StringComparison.Ordinal);
+        Assert.Contains("@(10, 30, 60)[$attempt - 1]", script, StringComparison.Ordinal);
+        Assert.Contains("Release asset download failed after 4 attempts", script, StringComparison.Ordinal);
         Assert.Contains("Remove-Item -LiteralPath $Destination -Force", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Invoke-WebRequest -Uri $assets[$packageName]", script, StringComparison.Ordinal);
         Assert.Contains("is already the latest stable release", script, StringComparison.Ordinal);

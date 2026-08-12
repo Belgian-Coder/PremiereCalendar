@@ -19,7 +19,7 @@ function Save-BoundedReleaseAsset {
     )
     if ($Uri.Scheme -ne 'https' -or $Uri.Host -ne 'github.com') { throw 'Release asset URL is not trusted.' }
     if (Test-Path -LiteralPath $Destination) { throw "Refusing to overwrite release asset: $Destination" }
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
         $client = [System.Net.Http.HttpClient]::new()
         $client.Timeout = [TimeSpan]::FromMinutes(10)
         $client.DefaultRequestHeaders.UserAgent.ParseAdd('PremiereCalendar-Updater/1.0')
@@ -49,11 +49,12 @@ function Save-BoundedReleaseAsset {
         }
         catch {
             if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
-            if ($attempt -eq 3) {
-                throw "Release asset download failed after 3 attempts: $($_.Exception.Message)"
+            if ($attempt -eq 4) {
+                throw "Release asset download failed after 4 attempts: $($_.Exception.Message)"
             }
-            Write-Warning "Release asset download attempt $attempt failed; retrying. $($_.Exception.Message)"
-            Start-Sleep -Seconds ([Math]::Pow(2, $attempt))
+            $retryDelaySeconds = @(10, 30, 60)[$attempt - 1]
+            Write-Warning "Release asset download attempt $attempt failed; retrying in $retryDelaySeconds seconds. $($_.Exception.Message)"
+            Start-Sleep -Seconds $retryDelaySeconds
         }
         finally { $client.Dispose() }
     }
