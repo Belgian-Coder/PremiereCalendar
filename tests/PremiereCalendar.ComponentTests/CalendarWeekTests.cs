@@ -396,7 +396,7 @@ public sealed class CalendarWeekTests : BunitContext
     }
 
     [Fact]
-    public void CalendarWeek_UsesVirtualizedRowsForDenseDays()
+    public void CalendarWeek_UsesProgressiveGridForDenseDays()
     {
         var items = Enumerable.Range(1, 45)
             .Select(index => new PremiereItem
@@ -416,14 +416,13 @@ public sealed class CalendarWeekTests : BunitContext
             .Add(x => x.Items, items)
             .Add(x => x.ScoreSource, ScoreSource.Tmdb));
 
-        Assert.Single(component.FindAll("[data-testid='virtualized-day']"));
-        Assert.Contains("Showing all 45 with virtual scrolling", component.Markup);
-        Assert.Contains("visually-hidden", component.Find(".day-virtualized-list .day-load-controls").ClassName);
-        Assert.Empty(component.FindAll("[data-day-load-more]"));
+        Assert.Empty(component.FindAll("[data-testid='virtualized-day']"));
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Single(component.FindAll("[data-day-load-more]"));
     }
 
     [Fact]
-    public void CalendarWeek_VirtualizedRowsPackTwoCardsForDesktopDensity()
+    public void CalendarWeek_ProgressiveGridKeepsDenseDayDomBounded()
     {
         var items = Enumerable.Range(1, 45)
             .Select(index => new PremiereItem
@@ -443,15 +442,13 @@ public sealed class CalendarWeekTests : BunitContext
             .Add(x => x.Items, items)
             .Add(x => x.ScoreSource, ScoreSource.Tmdb));
 
-        var rows = component.FindAll(".day-card-row");
-        Assert.NotEmpty(rows);
-        Assert.Equal(2, rows[0].QuerySelectorAll("[data-testid='premiere-card']").Length);
-        Assert.Equal(2, rows[1].QuerySelectorAll("[data-testid='premiere-card']").Length);
-        Assert.All(rows, row => Assert.InRange(row.QuerySelectorAll("[data-testid='premiere-card']").Length, 1, 2));
+        Assert.Single(component.FindAll(".day-items-grid"));
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Single(component.FindAll("[data-day-autoload-sentinel]"));
     }
 
     [Fact]
-    public void CalendarDay_KeepsDenseDaysVirtualizedWhileUpdating()
+    public void CalendarDay_KeepsDenseUpdatingDaysInBoundedProgressiveGrid()
     {
         var items = Enumerable.Range(1, 45)
             .Select(index => new PremiereItem
@@ -473,10 +470,10 @@ public sealed class CalendarWeekTests : BunitContext
             .Add(x => x.ScoreSource, ScoreSource.Tmdb)
             .Add(x => x.IsUpdating, true));
 
-        Assert.Single(component.FindAll("[data-testid='virtualized-day']"));
-        Assert.Contains("Showing all 45 with virtual scrolling", component.Markup);
-        Assert.Empty(component.FindAll("[data-day-load-more]"));
-        Assert.Empty(component.FindAll("[data-day-autoload-sentinel]"));
+        Assert.Empty(component.FindAll("[data-testid='virtualized-day']"));
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
+        Assert.Single(component.FindAll("[data-day-load-more]"));
+        Assert.Single(component.FindAll("[data-day-autoload-sentinel]"));
     }
 
     [Fact]
@@ -527,7 +524,8 @@ public sealed class CalendarWeekTests : BunitContext
         var component = Render<CalendarDay>(parameters => parameters
             .Add(x => x.Day, day).Add(x => x.DayId, "premiere-day-20260504")
             .Add(x => x.Items, series).Add(x => x.ScoreSource, ScoreSource.Tmdb));
-        Assert.Single(component.FindAll("[data-testid='virtualized-day']"));
+        Assert.Empty(component.FindAll("[data-testid='virtualized-day']"));
+        Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
 
         component.Render(parameters => parameters
             .Add(x => x.Day, day).Add(x => x.DayId, "premiere-day-20260504")

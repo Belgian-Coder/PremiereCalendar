@@ -207,12 +207,11 @@
 
     private IReadOnlyList<PremiereItem> VisibleUnverifiedItems => _visibleUnverifiedItems;
 
-    // Keep dense days virtualized while provider batches stream in. Falling back to
-    // the progressive grid during updates lets the autoload sentinel materialize
-    // hundreds of cards and tens of thousands of DOM nodes before loading ends.
-    // Movie-only days are small enough for the progressive grid and avoiding virtualization
-    // prevents its initial variable-height estimate from inserting the first row after paint.
-    private bool UseVirtualizedRows => Items.Count > VirtualizeThreshold && MovieCount != Items.Count;
+    // Rich premiere cards have variable heights as artwork and metadata settle. Blazor's fixed-size
+    // virtualizer can recycle different rows while a streamed collection grows, which visibly flashes
+    // titles even when the backing order is stable. The progressive grid keeps a bounded DOM (ten cards
+    // initially, then explicit batches) and preserves card identity for every media mode.
+    private bool UseVirtualizedRows => false;
 
     protected override void OnParametersSet()
     {
