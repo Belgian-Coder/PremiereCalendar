@@ -13,7 +13,8 @@ public static class DatabaseSchema
     internal static IReadOnlyList<DatabaseMigration> Migrations { get; } =
     [
         new(1, "baseline-current-schema", BaselineSql, ApplyLegacyViewSyncMigrationAsync),
-        new(2, "durable-provider-scheduler", SchedulerSql)
+        new(2, "durable-provider-scheduler", SchedulerSql),
+        new(3, "scheduler-leases-and-centralized-stores", SchedulerLeaseSql)
     ];
 
     private static int ReadCurrentVersion()
@@ -25,6 +26,18 @@ public static class DatabaseSchema
         return int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var version)
             ? version
             : Migrations.Count;
+    }
+
+    internal static async Task AssertCurrentAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA user_version";
+        var version = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        if (version != CurrentVersion)
+        {
+            throw new InvalidOperationException(
+                $"SQLite schema {version} is not ready; startup migration must complete schema {CurrentVersion} before stores are used.");
+        }
     }
 
     private static async Task ApplyLegacyViewSyncMigrationAsync(
@@ -178,6 +191,22 @@ public static class DatabaseSchema
             LastThrottledUtc TEXT NULL,
             UpdatedUtc TEXT NOT NULL
         );
+        """;
+
+    private const string SchedulerLeaseSql = """
+        CREATE TABLE IF NOT EXISTS ProviderWorkLeases (
+            JobId TEXT NOT NULL PRIMARY KEY,
+            LeaseOwner TEXT NOT NULL,
+            LeaseExpiresUtc TEXT NOT NULL,
+            UpdatedUtc TEXT NOT NULL,
+            FOREIGN KEY (JobId) REFERENCES ProviderWorkJobs(JobId) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS IX_ProviderWorkLeases_Expiry
+            ON ProviderWorkLeases (LeaseExpiresUtc);
+        INSERT OR REPLACE INTO ProviderWorkLeases (JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc)
+        SELECT JobId, LeaseOwner, LeaseExpiresUtc, COALESCE(StartedUtc, EnqueuedUtc)
+        FROM ProviderWorkJobs
+        WHERE State = 'Running' AND LeaseOwner IS NOT NULL AND LeaseExpiresUtc IS NOT NULL;
         """;
 
     private const string LegacyViewSyncSql = """

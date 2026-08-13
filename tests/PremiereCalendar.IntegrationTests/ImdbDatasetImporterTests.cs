@@ -17,6 +17,7 @@ public sealed class ImdbDatasetImporterTests
         var root = CreateRoot();
         try
         {
+            TestSqliteDatabase.Initialize(root, "data/app.db");
             var handler = new GzipHandler(
                 "tconst\taverageRating\tnumVotes\n" +
                 "tt0000001\t7.6\t12345\n" +

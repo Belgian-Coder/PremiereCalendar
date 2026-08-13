@@ -1,10 +1,34 @@
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.Hosting;
 
 public static class FeatureServiceExtensions
 {
+    public static IServiceCollection AddPremiereOptions(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.Configure<TmdbOptions>(configuration.GetSection("Tmdb"));
+        services.Configure<OmdbOptions>(configuration.GetSection("Omdb"));
+        services.Configure<TvmazeOptions>(configuration.GetSection("Tvmaze"));
+        services.Configure<FanartOptions>(configuration.GetSection("Fanart"));
+        services.Configure<TraktOptions>(configuration.GetSection("Trakt"));
+        services.Configure<TheTvdbOptions>(configuration.GetSection("TheTvdb"));
+        services.Configure<WikimediaOptions>(configuration.GetSection("Wikimedia"));
+        services.Configure<RottenTomatoesOptions>(configuration.GetSection("RottenTomatoes"));
+        services.Configure<WatchmodeOptions>(configuration.GetSection("Watchmode"));
+        services.Configure<SimklOptions>(configuration.GetSection("Simkl"));
+        services.Configure<CalendarCacheOptions>(configuration.GetSection("CalendarCache"));
+        services.Configure<CalendarWarmupOptions>(configuration.GetSection("CalendarWarmup"));
+        services.Configure<CalendarLoadOptions>(configuration.GetSection("CalendarLoad"));
+        services.Configure<CacheMaintenanceOptions>(configuration.GetSection("CacheMaintenance"));
+        services.Configure<ImdbDatasetOptions>(configuration.GetSection("ImdbDataset"));
+        services.Configure<ProviderDeltaSyncOptions>(configuration.GetSection("ProviderDeltaSync"));
+        services.Configure<ApplicationUpdateOptions>(configuration.GetSection("ApplicationUpdate"));
+        services.Configure<ProviderSchedulerOptions>(configuration.GetSection("ProviderScheduler"));
+        return services;
+    }
+
     public static IServiceCollection AddPremierePersistence(this IServiceCollection services)
     {
         services.AddSingleton(TimeProvider.System);
@@ -63,7 +87,8 @@ public static class FeatureServiceExtensions
         services.AddSingleton<IApplicationUpdateService, ApplicationUpdateService>();
         services.AddSingleton<ISingleFlightCoordinator, SingleFlightCoordinator>();
         services.AddSingleton<ProviderRequestThrottler>();
-        services.AddSingleton<CalendarLoadCoordinator>();
+        services.AddSingleton<CalendarPageCoordinator>();
+        services.AddSingleton<CalendarLoadCoordinator>(provider => provider.GetRequiredService<CalendarPageCoordinator>());
         services.AddSingleton<IFilterCatalogService, TmdbFilterCatalogService>();
         services.AddSingleton<TmdbRequestLimiter>();
         services.AddSingleton<TrailerSelector>();

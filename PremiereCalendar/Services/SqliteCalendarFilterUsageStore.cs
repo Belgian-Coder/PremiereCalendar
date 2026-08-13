@@ -359,32 +359,9 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
             return;
         }
 
-        var databasePath = ResolveDatabasePath();
-        var directory = Path.GetDirectoryName(databasePath);
-        if (!string.IsNullOrWhiteSpace(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS CalendarFilterUsage (
-                ProfileKey TEXT NOT NULL PRIMARY KEY,
-                PageMode TEXT NOT NULL,
-                CacheKey TEXT NOT NULL,
-                FilterJson TEXT NOT NULL,
-                UseCount INTEGER NOT NULL,
-                LastUsedUtc TEXT NOT NULL,
-                LastWarmedUtc TEXT NULL,
-                LastItemCount INTEGER NULL,
-                LastFailure TEXT NULL,
-                IsDefault INTEGER NOT NULL DEFAULT 0
-            )
-            """;
-        await command.ExecuteNonQueryAsync(cancellationToken);
-
+        await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
         _initialized = true;
     }
 
@@ -393,7 +370,7 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Shared
         };
 

@@ -110,7 +110,7 @@ public sealed class TmdbClientIntegrationTests
     }
 
     [Fact]
-    public async Task DiscoverMoviesAsync_RetriesAfterTmdbRateLimitResponse()
+    public async Task DiscoverMoviesAsync_LeavesRateLimitRetriesToSharedProviderPolicy()
     {
         var calls = 0;
         var handler = new StubHttpMessageHandler(_ =>
@@ -127,17 +127,16 @@ public sealed class TmdbClientIntegrationTests
         });
         var client = CreateTmdbClient(handler, maxPages: 5);
 
-        var results = await client.DiscoverMoviesAsync(
+        await Assert.ThrowsAsync<ExternalApiException>(() => client.DiscoverMoviesAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
             new TmdbDiscoverFilters
             {
                 OriginalLanguage = "en"
             },
-            CancellationToken.None);
+            CancellationToken.None));
 
-        Assert.NotEmpty(results);
-        Assert.Equal(2, handler.Requests.Count);
+        Assert.Single(handler.Requests);
     }
 
     [Fact]

@@ -118,6 +118,118 @@ public sealed class SqliteDatabaseInitializerTests
         }
     }
 
+    [Fact]
+    public async Task InitializeAsync_MigratesSchemaTwoToThreeAndCreatesDurableLeases()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "premiere-calendar-sqlite-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var state = new DatabaseRecoveryState();
+            var initializer = Create(root, "schema-two.db", state);
+            await initializer.InitializeAsync();
+            var path = initializer.ResolvePath();
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var downgrade = connection.CreateCommand();
+                downgrade.CommandText = "DROP TABLE ProviderWorkLeases; DELETE FROM SchemaMigrations WHERE Version = 3; PRAGMA user_version = 2;";
+                await downgrade.ExecuteNonQueryAsync();
+            }
+
+            await initializer.InitializeAsync();
+
+            Assert.True(state.Snapshot.IsHealthy);
+            Assert.Equal(3, state.Snapshot.CurrentVersion);
+            await using var migrated = new SqliteConnection($"Data Source={path}");
+            await migrated.OpenAsync();
+            await using var verify = migrated.CreateCommand();
+            verify.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ProviderWorkLeases';";
+            Assert.Equal(1L, await verify.ExecuteScalarAsync());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task InitializeAsync_RestoresVerifiedSnapshotWhenMigrationFails()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "premiere-calendar-sqlite-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var state = new DatabaseRecoveryState();
+            var initializer = Create(root, "interrupted.db", state);
+            await initializer.InitializeAsync();
+            var path = initializer.ResolvePath();
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var damage = connection.CreateCommand();
+                damage.CommandText = "DROP TABLE ProviderWorkLeases; CREATE TABLE ProviderWorkLeases (WrongColumn TEXT); DELETE FROM SchemaMigrations WHERE Version = 3; PRAGMA user_version = 2;";
+                await damage.ExecuteNonQueryAsync();
+            }
+
+            await initializer.InitializeAsync();
+
+            Assert.False(state.Snapshot.IsHealthy);
+            Assert.NotNull(state.Snapshot.LastBackupPath);
+            await using var restored = new SqliteConnection($"Data Source={path}" );
+            await restored.OpenAsync();
+            await using var version = restored.CreateCommand();
+            version.CommandText = "PRAGMA user_version";
+            Assert.Equal(2L, await version.ExecuteScalarAsync());
+            await using var columns = restored.CreateCommand();
+            columns.CommandText = "SELECT COUNT(*) FROM pragma_table_info('ProviderWorkLeases') WHERE name='WrongColumn';";
+            Assert.Equal(1L, await columns.ExecuteScalarAsync());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_VerifiesBackupAndPreservesReplacedDatabase()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "premiere-calendar-sqlite-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var state = new DatabaseRecoveryState();
+            var initializer = Create(root, "restore.db", state);
+            await initializer.InitializeAsync();
+            var target = initializer.ResolvePath();
+            var backup = Path.Combine(root, "verified-backup.db");
+            File.Copy(target, backup);
+            await using (var connection = new SqliteConnection($"Data Source={target}"))
+            {
+                await connection.OpenAsync();
+                await using var marker = connection.CreateCommand();
+                marker.CommandText = "INSERT INTO AppParameters(Key, Value, UpdatedUtc) VALUES ('damaged-marker', 'present', '2026-01-01T00:00:00Z');";
+                await marker.ExecuteNonQueryAsync();
+            }
+
+            await initializer.RestoreAsync(backup, CancellationToken.None);
+
+            Assert.True(Directory.EnumerateFiles(root, "restore.db.damaged-*").Any());
+            await using var restored = new SqliteConnection($"Data Source={target}");
+            await restored.OpenAsync();
+            await using var markerCheck = restored.CreateCommand();
+            markerCheck.CommandText = "SELECT COUNT(*) FROM AppParameters WHERE Key='damaged-marker';";
+            Assert.Equal(0L, await markerCheck.ExecuteScalarAsync());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static SqliteDatabaseInitializer Create(string root, string path, DatabaseRecoveryState state) =>
         new(
             Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions

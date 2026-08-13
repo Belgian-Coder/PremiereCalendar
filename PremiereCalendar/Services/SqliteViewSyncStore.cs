@@ -423,49 +423,9 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             return;
         }
 
-        var databasePath = ResolveDatabasePath();
-        var directory = Path.GetDirectoryName(databasePath);
-        if (!string.IsNullOrWhiteSpace(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        await using (var command = connection.CreateCommand())
-        {
-            command.CommandText = """
-                CREATE TABLE IF NOT EXISTS ViewSyncGroups (
-                    GroupId TEXT NOT NULL PRIMARY KEY,
-                    Name TEXT NOT NULL,
-                    CreatedUtc TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS ViewSyncDevices (
-                    DeviceId TEXT NOT NULL PRIMARY KEY,
-                    DisplayName TEXT NOT NULL,
-                    SyncEnabled INTEGER NOT NULL,
-                    GroupId TEXT NULL,
-                    LastSeenUtc TEXT NOT NULL,
-                    FOREIGN KEY (GroupId) REFERENCES ViewSyncGroups(GroupId) ON DELETE SET NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS ViewSyncGroupState (
-                    GroupId TEXT NOT NULL,
-                    RouteKey TEXT NOT NULL,
-                    RelativeUrl TEXT NOT NULL,
-                    Revision INTEGER NOT NULL,
-                    UpdatedUtc TEXT NOT NULL,
-                    UpdatedByDeviceId TEXT NOT NULL,
-                    UpdatedByDeviceName TEXT NOT NULL,
-                    PRIMARY KEY (GroupId, RouteKey),
-                    FOREIGN KEY (GroupId) REFERENCES ViewSyncGroups(GroupId) ON DELETE CASCADE
-                );
-                """;
-            await command.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await EnsureGroupStateRouteSchemaAsync(connection, cancellationToken);
+        await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
         _initialized = true;
     }
 
@@ -474,7 +434,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Shared
         };
 
@@ -490,77 +450,6 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
         return Path.IsPathFullyQualified(configuredPath)
             ? configuredPath
             : Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configuredPath));
-    }
-
-    private static async Task EnsureGroupStateRouteSchemaAsync(
-        SqliteConnection connection,
-        CancellationToken cancellationToken)
-    {
-        await using var info = connection.CreateCommand();
-        info.CommandText = "PRAGMA table_info(ViewSyncGroupState)";
-        var hasRouteKey = false;
-        await using (var reader = await info.ExecuteReaderAsync(cancellationToken))
-        {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                if (string.Equals(reader.GetString(1), "RouteKey", StringComparison.OrdinalIgnoreCase))
-                {
-                    hasRouteKey = true;
-                    break;
-                }
-            }
-        }
-
-        if (hasRouteKey)
-        {
-            return;
-        }
-
-        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            ALTER TABLE ViewSyncGroupState RENAME TO ViewSyncGroupState_Old;
-
-            CREATE TABLE ViewSyncGroupState (
-                GroupId TEXT NOT NULL,
-                RouteKey TEXT NOT NULL,
-                RelativeUrl TEXT NOT NULL,
-                Revision INTEGER NOT NULL,
-                UpdatedUtc TEXT NOT NULL,
-                UpdatedByDeviceId TEXT NOT NULL,
-                UpdatedByDeviceName TEXT NOT NULL,
-                PRIMARY KEY (GroupId, RouteKey),
-                FOREIGN KEY (GroupId) REFERENCES ViewSyncGroups(GroupId) ON DELETE CASCADE
-            );
-
-            INSERT INTO ViewSyncGroupState (
-                GroupId,
-                RouteKey,
-                RelativeUrl,
-                Revision,
-                UpdatedUtc,
-                UpdatedByDeviceId,
-                UpdatedByDeviceName
-            )
-            SELECT
-                GroupId,
-                CASE
-                    WHEN RelativeUrl LIKE '/series%' THEN 'series'
-                    WHEN RelativeUrl LIKE '/movies%' THEN 'movies'
-                    ELSE 'all'
-                END,
-                RelativeUrl,
-                Revision,
-                UpdatedUtc,
-                UpdatedByDeviceId,
-                UpdatedByDeviceName
-            FROM ViewSyncGroupState_Old;
-
-            DROP TABLE ViewSyncGroupState_Old;
-            """;
-        await command.ExecuteNonQueryAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
     }
 
     private static async Task EnsureGroupExistsAsync(

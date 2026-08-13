@@ -306,7 +306,7 @@ public sealed class LocalObservabilityServiceTests : IDisposable
 
     private SqliteAppStateStore CreateAppStateStore()
     {
-        Directory.CreateDirectory(_root);
+        TestSqliteDatabase.Initialize(_root, "data/app-state.db");
         return new SqliteAppStateStore(
             Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app-state.db" }),
             new FakeWebHostEnvironment(_root));

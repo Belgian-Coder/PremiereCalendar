@@ -177,24 +177,9 @@ public sealed class SqliteAppStateStore : IAppStateStore
             return;
         }
 
-        var databasePath = ResolveDatabasePath();
-        var directory = Path.GetDirectoryName(databasePath);
-        if (!string.IsNullOrWhiteSpace(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS AppParameters (
-                Key TEXT NOT NULL PRIMARY KEY,
-                Value TEXT NOT NULL,
-                UpdatedUtc TEXT NOT NULL
-            )
-            """;
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
         _initialized = true;
     }
 
@@ -203,7 +188,7 @@ public sealed class SqliteAppStateStore : IAppStateStore
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Shared
         };
 

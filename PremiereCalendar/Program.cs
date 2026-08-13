@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.Components.Server;
 using Microsoft.AspNetCore.ResponseCompression;
@@ -54,24 +53,7 @@ builder.Services.Configure<CircuitOptions>(options =>
     options.DetailedErrors = builder.Environment.IsDevelopment();
 });
 
-builder.Services.Configure<TmdbOptions>(builder.Configuration.GetSection("Tmdb"));
-builder.Services.Configure<OmdbOptions>(builder.Configuration.GetSection("Omdb"));
-builder.Services.Configure<TvmazeOptions>(builder.Configuration.GetSection("Tvmaze"));
-builder.Services.Configure<FanartOptions>(builder.Configuration.GetSection("Fanart"));
-builder.Services.Configure<TraktOptions>(builder.Configuration.GetSection("Trakt"));
-builder.Services.Configure<TheTvdbOptions>(builder.Configuration.GetSection("TheTvdb"));
-builder.Services.Configure<WikimediaOptions>(builder.Configuration.GetSection("Wikimedia"));
-builder.Services.Configure<RottenTomatoesOptions>(builder.Configuration.GetSection("RottenTomatoes"));
-builder.Services.Configure<WatchmodeOptions>(builder.Configuration.GetSection("Watchmode"));
-builder.Services.Configure<SimklOptions>(builder.Configuration.GetSection("Simkl"));
-builder.Services.Configure<CalendarCacheOptions>(builder.Configuration.GetSection("CalendarCache"));
-builder.Services.Configure<CalendarWarmupOptions>(builder.Configuration.GetSection("CalendarWarmup"));
-builder.Services.Configure<CalendarLoadOptions>(builder.Configuration.GetSection("CalendarLoad"));
-builder.Services.Configure<CacheMaintenanceOptions>(builder.Configuration.GetSection("CacheMaintenance"));
-builder.Services.Configure<ImdbDatasetOptions>(builder.Configuration.GetSection("ImdbDataset"));
-builder.Services.Configure<ProviderDeltaSyncOptions>(builder.Configuration.GetSection("ProviderDeltaSync"));
-builder.Services.Configure<ApplicationUpdateOptions>(builder.Configuration.GetSection("ApplicationUpdate"));
-builder.Services.Configure<ProviderSchedulerOptions>(builder.Configuration.GetSection("ProviderScheduler"));
+builder.Services.AddPremiereOptions(builder.Configuration);
 
 builder.Services.AddMemoryCache();
 builder.Services.AddResponseCompression(options =>
@@ -91,139 +73,16 @@ builder.Services.AddSingleton<SqliteDatabaseInitializer>();
 builder.Services.AddHostedService<SqliteDatabaseInitializerHostedService>();
 builder.Services.AddSingleton<CircuitHandler, CalendarCircuitDiagnostics>();
 
-builder.Services.AddHttpClient<ITmdbClient, TmdbClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<TmdbOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-    if (!string.IsNullOrWhiteSpace(options.BearerToken))
-    {
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", options.BearerToken);
-    }
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("tmdb", 4));
-
-builder.Services.AddHttpClient<IOmdbClient, OmdbClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<OmdbOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(30);
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("omdb", 2));
-
-builder.Services.AddHttpClient<IImdbDatasetImporter, ImdbDatasetImporter>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<ImdbDatasetOptions>>().Value;
-
-    client.BaseAddress = new Uri("https://datasets.imdbws.com/");
-    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 30, 600));
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/Belgian-Coder/PremiereCalendar)");
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("imdb-dataset", 1));
-
-builder.Services.AddHttpClient<ITvmazeClient, TvmazeClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<TvmazeOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(30);
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("tvmaze", 4));
-
-builder.Services.AddHttpClient<IFanartClient, FanartClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<FanartOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(30);
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("fanart", 2));
-
-builder.Services.AddHttpClient<ITraktClient, TraktClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<TraktOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(30);
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("trakt", 2));
-
-builder.Services.AddHttpClient<ITheTvdbClient, TheTvdbClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<TheTvdbOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(30);
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("thetvdb", 2));
-
-builder.Services.AddHttpClient<IWikimediaClient, WikimediaClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<WikimediaOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.WikidataBaseUrl);
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("wikimedia", 2));
-
-builder.Services.AddHttpClient<IRottenTomatoesClient, RottenTomatoesClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<RottenTomatoesOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("rottentomatoes", 2));
-
-builder.Services.AddHttpClient<IWatchmodeClient, WatchmodeClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<WatchmodeOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("watchmode", 2));
-
-builder.Services.AddHttpClient<ISimklClient, SimklClient>((sp, client) =>
-{
-    var options = sp.GetRequiredService<IOptions<SimklOptions>>().Value;
-
-    client.BaseAddress = new Uri(options.BaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("simkl", 2));
-
-builder.Services.AddHttpClient<FileImageCache>(client =>
-{
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
-    client.Timeout = TimeSpan.FromSeconds(20);
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("images", 4));
-builder.Services.AddHttpClient<IArrIntegrationService, ArrIntegrationService>(client =>
-{
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-    client.Timeout = TimeSpan.FromSeconds(20);
-});
-builder.Services.AddHttpClient<ReleaseUpdateService>(client =>
-{
-    client.BaseAddress = new Uri("https://api.github.com/");
-    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-    client.Timeout = TimeSpan.FromSeconds(20);
-});
-
 builder.Services
     .AddPremierePersistence()
     .AddPremiereScheduling()
+    .AddPremiereProviderClients()
     .AddPremiereCalendarServices(builder.Configuration);
 
 var app = builder.Build();
+app.Services.GetRequiredService<PremiereTelemetry>().RecordVersionValidation(
+    "database_schema",
+    BuildVersionInfo.Current.DatabaseSchemaVersion == DatabaseSchema.CurrentVersion);
 
 // Forwarded headers must be applied before HTTPS redirection and HSTS determine the scheme.
 app.UseHostingHardening();

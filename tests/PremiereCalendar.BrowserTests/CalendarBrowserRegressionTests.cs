@@ -58,6 +58,24 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync();
             Assert.True(daySwitch.ElapsedMilliseconds <= 750, $"Day switch took {daySwitch.ElapsedMilliseconds} ms.");
 
+            var rollingWindow = Stopwatch.StartNew();
+            for (var movement = 0; movement < 3; movement++)
+            {
+                var loadMore = Page.Locator("[data-day-load-more]").First;
+                if (await loadMore.IsVisibleAsync()) await loadMore.ClickAsync(new() { Force = true });
+            }
+            var loadPrevious = Page.Locator("[data-day-load-previous]").First;
+            if (await loadPrevious.IsVisibleAsync()) await loadPrevious.ClickAsync(new() { Force = true });
+            Assert.InRange(await Page.Locator("[data-testid='premiere-card']").CountAsync(), 1, 40);
+            Assert.True(rollingWindow.ElapsedMilliseconds <= 3_000, $"Rolling-window navigation took {rollingWindow.ElapsedMilliseconds} ms.");
+
+            var initialWeek = await Page.Locator("[data-testid='week-range']").InnerTextAsync();
+            await Page.GetByRole(AriaRole.Button, new() { Name = "Next week" }).ClickAsync();
+            await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync(new() { Timeout = 5_000 });
+            Assert.NotEqual(initialWeek, await Page.Locator("[data-testid='week-range']").InnerTextAsync());
+            await Page.GetByRole(AriaRole.Button, new() { Name = "Previous week" }).ClickAsync();
+            await Expect(Page.Locator("[data-testid='week-range']")).ToHaveTextAsync(initialWeek);
+
             await Page.GotoAsync($"{application.BaseUrl}/settings");
             await Expect(Page.Locator("[data-testid='local-status-center']")).ToBeVisibleAsync();
             await Expect(Page.GetByRole(AriaRole.Article, new() { Name = "View sync settings" })).ToBeVisibleAsync();

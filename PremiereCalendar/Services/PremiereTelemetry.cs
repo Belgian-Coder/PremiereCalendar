@@ -16,7 +16,9 @@ public sealed class PremiereTelemetry
         "premierecalendar.provider.request.duration",
         "ms");
     private readonly Counter<long> _providerRequests = Meter.CreateCounter<long>("premierecalendar.provider.requests");
+    private readonly Counter<long> _providerRetries = Meter.CreateCounter<long>("premierecalendar.provider.retries");
     private readonly Histogram<double> _jobDuration = Meter.CreateHistogram<double>("premierecalendar.scheduler.job.duration", "ms");
+    private readonly Histogram<double> _jobWaitDuration = Meter.CreateHistogram<double>("premierecalendar.scheduler.job.wait.duration", "ms");
     private readonly Counter<long> _jobOutcomes = Meter.CreateCounter<long>("premierecalendar.scheduler.job.outcomes");
     private readonly Histogram<double> _migrationDuration = Meter.CreateHistogram<double>("premierecalendar.database.migration.duration", "ms");
     private readonly Histogram<double> _calendarFirstResult = Meter.CreateHistogram<double>("premierecalendar.calendar.first_result.duration", "ms");
@@ -25,6 +27,8 @@ public sealed class PremiereTelemetry
     private readonly Counter<long> _circuitEvents = Meter.CreateCounter<long>("premierecalendar.blazor.circuit.events");
     private readonly Counter<long> _providerCircuitEvents = Meter.CreateCounter<long>("premierecalendar.provider.circuit.events");
     private readonly Counter<long> _updateOutcomes = Meter.CreateCounter<long>("premierecalendar.application_update.outcomes");
+    private readonly Counter<long> _databaseEvents = Meter.CreateCounter<long>("premierecalendar.database.events");
+    private readonly Counter<long> _versionValidationOutcomes = Meter.CreateCounter<long>("premierecalendar.version.validation.outcomes");
     private readonly ConcurrentDictionary<string, ProviderGaugeState> _providerGauges = new(StringComparer.OrdinalIgnoreCase);
     private long _queuedJobs;
     private long _runningJobs;
@@ -55,6 +59,9 @@ public sealed class PremiereTelemetry
     public void SetProviderConcurrency(string provider, int limit, int active, string circuit)
         => _providerGauges[provider] = new ProviderGaugeState(limit, active, circuit);
 
+    public void RecordProviderRetry(string provider, string reason)
+        => _providerRetries.Add(1, new TagList { { "provider", provider }, { "reason", reason } });
+
     public void SetSchedulerCounts(long queued, long running)
     {
         Interlocked.Exchange(ref _queuedJobs, queued);
@@ -67,6 +74,10 @@ public sealed class PremiereTelemetry
         _jobOutcomes.Add(1, tags);
         _jobDuration.Record(duration.TotalMilliseconds, tags);
     }
+
+    public void RecordJobWait(string kind, TimeSpan duration, bool resumed)
+        => _jobWaitDuration.Record(duration.TotalMilliseconds,
+            new TagList { { "kind", kind }, { "resumed", resumed } });
 
     public void RecordMigration(int version, string outcome, TimeSpan duration)
         => _migrationDuration.Record(duration.TotalMilliseconds,
@@ -90,6 +101,21 @@ public sealed class PremiereTelemetry
 
     public void RecordApplicationUpdate(string operation, string outcome)
         => _updateOutcomes.Add(1, new TagList { { "operation", operation }, { "outcome", outcome } });
+
+    public void RecordDatabaseEvent(string operation, string outcome)
+        => _databaseEvents.Add(1, new TagList { { "operation", operation }, { "outcome", outcome } });
+
+    public void RecordDatabaseException(Exception exception)
+    {
+        if (exception is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 5 or 6 })
+        {
+            RecordDatabaseEvent("busy", "observed");
+        }
+    }
+
+    public void RecordVersionValidation(string contract, bool valid)
+        => _versionValidationOutcomes.Add(1,
+            new TagList { { "contract", contract }, { "outcome", valid ? "valid" : "invalid" } });
 
     private IEnumerable<Measurement<int>> ObserveProviderLimits()
         => _providerGauges.Select(entry => new Measurement<int>(entry.Value.Limit, new KeyValuePair<string, object?>("provider", entry.Key)));

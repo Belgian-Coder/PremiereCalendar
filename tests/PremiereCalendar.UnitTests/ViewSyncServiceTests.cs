@@ -104,6 +104,7 @@ public sealed class ViewSyncServiceTests
 
     private static ViewSyncService CreateService(string root, TimeProvider timeProvider)
     {
+        TestSqliteDatabase.Initialize(root, "data/app.db");
         return new ViewSyncService(
             new SqliteViewSyncStore(
                 Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }),

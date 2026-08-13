@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
@@ -49,6 +50,61 @@ public sealed class ProviderWorkSchedulerTests : IAsyncLifetime
         await _scheduler.PublishAsync(claimed, new ProviderWorkProgress(claimed.JobId, ProviderWorkState.Running, "page 2", 2, 5), CancellationToken.None);
         var persisted = await _scheduler.GetAsync(claimed.JobId);
         Assert.Contains("page 2", persisted!.CheckpointJson);
+        await using var connection = new SqliteConnection($"Data Source={Path.Combine(_root, "scheduler.db")}");
+        await connection.OpenAsync();
+        await using var leases = connection.CreateCommand();
+        leases.CommandText = "SELECT COUNT(*) FROM ProviderWorkLeases WHERE JobId=$id";
+        leases.Parameters.AddWithValue("$id", claimed.JobId);
+        Assert.Equal(1L, await leases.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task PersistedCheckpointRestoresCompletedSourceItemsAndAttachesLateSubscriber()
+    {
+        var handle = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "resume", ProviderWorkPriority.Foreground, "{}"));
+        var claimed = await _scheduler.ClaimNextAsync(false, "test", CancellationToken.None);
+        Assert.NotNull(claimed);
+        var item = new PremiereCalendar.Models.PremiereItem
+        {
+            MediaType = PremiereCalendar.Models.PremiereMediaType.Movie,
+            Type = PremiereCalendar.Models.PremiereItemType.MovieFirstRelease,
+            TmdbId = 42,
+            Title = "Checkpoint movie",
+            PremiereDate = new DateOnly(2026, 8, 13)
+        };
+        var calendar = new PremiereLoadProgress("TMDb movies", 1, 1, [item])
+        {
+            Phase = "complete",
+            CheckpointKey = "tmdb:movies",
+            SourceItems = [item]
+        };
+        await _scheduler.PublishAsync(claimed!, new ProviderWorkProgress(claimed.JobId, ProviderWorkState.Running, "source complete", 1, 2, calendar), CancellationToken.None);
+
+        var persisted = await _scheduler.GetAsync(handle.JobId);
+        var checkpoint = ProviderWorkScheduler.TryReadCheckpoint(persisted!.CheckpointJson);
+        Assert.Equal("Checkpoint movie", Assert.Single(checkpoint!.CompletedSources["tmdb:movies"]).Title);
+        await using var updates = _scheduler.WatchAsync(new ProviderWorkHandle(handle.JobId, false)).GetAsyncEnumerator();
+        Assert.True(await updates.MoveNextAsync());
+        Assert.Equal("source complete", updates.Current.Message);
+    }
+
+    [Fact]
+    public async Task ForegroundEnqueuePreemptsBackgroundWithoutConsumingRetry()
+    {
+        var background = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarWarmup, "background", ProviderWorkPriority.Warmup, "{}"));
+        var claimed = await _scheduler.ClaimNextAsync(false, "test", CancellationToken.None);
+        Assert.NotNull(claimed);
+        using var execution = _scheduler.BeginExecution(claimed!, CancellationToken.None);
+
+        await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "foreground-preempt", ProviderWorkPriority.Foreground, "{}"));
+        Assert.True(execution.IsCancellationRequested);
+        await _scheduler.PreemptAsync(claimed, CancellationToken.None);
+
+        var snapshot = await _scheduler.GetAsync(background.JobId);
+        Assert.NotNull(snapshot);
+        Assert.Equal(ProviderWorkState.Queued, snapshot!.State);
+        Assert.Equal(0, snapshot.AttemptCount);
+        _scheduler.EndExecution(claimed, execution);
     }
 
     [Fact]

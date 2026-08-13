@@ -11,9 +11,11 @@ namespace PremiereCalendar.Services;
 public sealed class AdaptiveProviderPolicy(
     ProviderAdaptiveStateStore store,
     TimeProvider timeProvider,
-    PremiereTelemetry telemetry)
+    PremiereTelemetry telemetry,
+    IOptions<ProviderSchedulerOptions>? schedulerOptions = null)
 {
     private readonly ConcurrentDictionary<string, ProviderRuntimeState> _states = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ProviderSchedulerOptions _schedulerOptions = schedulerOptions?.Value ?? new ProviderSchedulerOptions();
 
     public async Task<ProviderExecutionLease> AcquireAsync(
         string provider,
@@ -91,7 +93,9 @@ public sealed class AdaptiveProviderPolicy(
                     state.CircuitState = ProviderCircuitState.Closed;
                     state.CooldownUntilUtc = null;
                 }
-                if (state.ConsecutiveSuccesses >= 20 && state.CurrentConcurrency < state.MaximumConcurrency)
+                if (state.ConsecutiveSuccesses >= 20
+                    && state.CurrentConcurrency < state.MaximumConcurrency
+                    && state.EwmaLatencyMilliseconds <= Math.Clamp(_schedulerOptions.AcceptableLatencyMilliseconds, 100, 30_000))
                 {
                     state.CurrentConcurrency++;
                     state.ConsecutiveSuccesses = 0;
@@ -142,10 +146,23 @@ public sealed class AdaptiveProviderPolicy(
     public IReadOnlyList<ProviderAdaptiveSnapshot> GetSnapshots()
         => _states.Values.Select(state => state.ToSnapshot(timeProvider.GetUtcNow())).OrderBy(state => state.Provider).ToArray();
 
-    private static TimeSpan ClampRetryAfter(TimeSpan? retryAfter)
+    internal async Task DelayBeforeRetryAsync(string provider, int attempt, TimeSpan? retryAfter, CancellationToken cancellationToken)
     {
-        var seconds = retryAfter?.TotalSeconds ?? 2;
-        return TimeSpan.FromSeconds(Math.Clamp(seconds, 1, 60));
+        telemetry.RecordProviderRetry(provider, retryAfter is null ? "transient" : "retry_after");
+        var maximum = TimeSpan.FromSeconds(Math.Clamp(_schedulerOptions.RetryMaximumSeconds, 1, 300));
+        var delay = retryAfter is { } declared
+            ? declared
+            : TimeSpan.FromMilliseconds(
+                Math.Clamp(_schedulerOptions.RetryBaseMilliseconds, 50, 30_000)
+                * Math.Pow(2, Math.Max(0, attempt - 1))
+                * (0.75 + (Random.Shared.NextDouble() * 0.5)));
+        await Task.Delay(delay > maximum ? maximum : delay, timeProvider, cancellationToken);
+    }
+
+    private TimeSpan ClampRetryAfter(TimeSpan? retryAfter)
+    {
+        var seconds = retryAfter?.TotalSeconds ?? Math.Clamp(_schedulerOptions.RetryBaseMilliseconds, 50, 30_000) / 1000d;
+        return TimeSpan.FromSeconds(Math.Clamp(seconds, 0.05, Math.Clamp(_schedulerOptions.RetryMaximumSeconds, 1, 300)));
     }
 
     internal sealed class ProviderRuntimeState(string provider, int maximumConcurrency)
@@ -282,24 +299,62 @@ public sealed class AdaptiveProviderHandler(
         using var activity = PremiereTelemetry.ActivitySource.StartActivity("provider.request", ActivityKind.Client);
         activity?.SetTag("provider", provider);
         activity?.SetTag("operation", request.Method.Method);
-        var lease = await policy.AcquireAsync(provider, maximumConcurrency, cancellationToken);
-        try
+        var canRetry = request.Method == HttpMethod.Get || request.Method == HttpMethod.Head;
+        var maximumAttempts = canRetry ? 3 : 1;
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
-            var response = await base.SendAsync(request, cancellationToken);
-            var result = response.StatusCode == HttpStatusCode.TooManyRequests
-                ? ProviderExecutionResult.Throttled
-                : (int)response.StatusCode >= 500
-                    ? ProviderExecutionResult.Failed
-                    : ProviderExecutionResult.Success;
-            var retryAfter = response.Headers.RetryAfter?.Delta;
-            await lease.CompleteAsync(result, retryAfter, CancellationToken.None);
-            return response;
+            await using var lease = await policy.AcquireAsync(provider, maximumConcurrency, cancellationToken);
+            try
+            {
+                using var retryRequest = attempt == 1 ? null : await CloneAsync(request, cancellationToken);
+                var response = await base.SendAsync(retryRequest ?? request, cancellationToken);
+                var result = response.StatusCode == HttpStatusCode.TooManyRequests
+                    ? ProviderExecutionResult.Throttled
+                    : (int)response.StatusCode >= 500
+                        ? ProviderExecutionResult.Failed
+                        : ProviderExecutionResult.Success;
+                var retryAfter = RetryAfter(response);
+                await lease.CompleteAsync(result, retryAfter, CancellationToken.None);
+                if (attempt == maximumAttempts || result == ProviderExecutionResult.Success) return response;
+                response.Dispose();
+                await policy.DelayBeforeRetryAsync(provider, attempt, retryAfter, cancellationToken);
+            }
+            catch (Exception ex) when ((ex is HttpRequestException or TaskCanceledException) && !cancellationToken.IsCancellationRequested)
+            {
+                await lease.CompleteAsync(ProviderExecutionResult.Failed, null, CancellationToken.None);
+                if (attempt == maximumAttempts) throw;
+                await policy.DelayBeforeRetryAsync(provider, attempt, null, cancellationToken);
+            }
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        throw new UnreachableException();
+    }
+
+    private static TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        if (response.Headers.RetryAfter?.Delta is { } delta) return delta;
+        if (response.Headers.RetryAfter?.Date is { } date)
         {
-            await lease.CompleteAsync(ProviderExecutionResult.Failed, null, CancellationToken.None);
-            throw;
+            var remaining = date - DateTimeOffset.UtcNow;
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
         }
+        return null;
+    }
+
+    private static async Task<HttpRequestMessage> CloneAsync(HttpRequestMessage source, CancellationToken cancellationToken)
+    {
+        var clone = new HttpRequestMessage(source.Method, source.RequestUri)
+        {
+            Version = source.Version,
+            VersionPolicy = source.VersionPolicy
+        };
+        foreach (var header in source.Headers) clone.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        if (source.Content is not null)
+        {
+            var bytes = await source.Content.ReadAsByteArrayAsync(cancellationToken);
+            clone.Content = new ByteArrayContent(bytes);
+            foreach (var header in source.Content.Headers) clone.Content.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
+        return clone;
     }
 }
 
@@ -388,7 +443,7 @@ public sealed class ProviderAdaptiveStateStore(
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = path,
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Shared,
             Pooling = true
         };

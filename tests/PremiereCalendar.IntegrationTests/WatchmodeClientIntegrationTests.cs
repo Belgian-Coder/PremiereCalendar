@@ -137,7 +137,7 @@ public sealed class WatchmodeClientIntegrationTests
     }
 
     [Fact]
-    public async Task GetTitleSourcesAsync_RetryRateLimitResponsesUsingRetryAfter()
+    public async Task GetTitleSourcesAsync_LeavesRateLimitRetriesToSharedProviderPolicy()
     {
         var attempts = 0;
         var handler = new StubHttpMessageHandler(request =>
@@ -172,8 +172,8 @@ public sealed class WatchmodeClientIntegrationTests
             ["BE"],
             CancellationToken.None);
 
-        Assert.Single(sources);
-        Assert.Equal(3, handler.Requests.Count);
+        Assert.Empty(sources);
+        Assert.Equal(2, handler.Requests.Count);
     }
 
     [Fact]

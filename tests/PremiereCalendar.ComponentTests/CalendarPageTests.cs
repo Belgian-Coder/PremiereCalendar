@@ -24,7 +24,7 @@ public sealed class CalendarPageTests : BunitContext
         JSInterop.Setup<string>("premiereViewSync.getOrCreateDeviceId").SetResult("device-a");
         Services.AddLogging();
         Services.AddSingleton<IAdjacentWeekPrefetcher>(_prefetcher);
-        Services.AddSingleton<CalendarLoadCoordinator>();
+        Services.AddSingleton<CalendarPageCoordinator>();
         Services.AddSingleton<ICalendarFilterUsageStore, FakeCalendarFilterUsageStore>();
         Services.AddSingleton<IFilterCatalogService, FakeFilterCatalogService>();
         Services.AddSingleton<IIntegrationSettingsStore>(new FakeIntegrationSettingsStore
@@ -338,7 +338,7 @@ public sealed class CalendarPageTests : BunitContext
     [Fact]
     public void CalendarPage_PrefetchesMovieFiltersAfterForegroundLoadCompletes()
     {
-        var coordinator = new CalendarLoadCoordinator();
+        var coordinator = new CalendarPageCoordinator();
         var prefetcher = new ForegroundAwareAdjacentWeekPrefetcher(coordinator);
         var service = new FakePremiereService();
         Services.AddSingleton(coordinator);

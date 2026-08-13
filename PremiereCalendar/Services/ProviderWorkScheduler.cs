@@ -61,6 +61,17 @@ public sealed record CalendarProviderWorkPayload(
     bool ForceRefresh,
     CalendarFilters? Filters);
 
+public sealed record ProviderWorkResumeState(
+    IReadOnlyDictionary<string, IReadOnlyList<PremiereItem>> CompletedSources,
+    PremiereLoadProgress? LatestProgress);
+
+internal sealed record ProviderWorkCheckpoint(
+    string Message,
+    int? CompletedWork,
+    int? TotalWork,
+    PremiereLoadProgress? CalendarProgress,
+    IReadOnlyDictionary<string, IReadOnlyList<PremiereItem>> CompletedSources);
+
 public interface IProviderWorkScheduler
 {
     Task<ProviderWorkHandle> EnqueueAsync(ProviderWorkRequest request, CancellationToken cancellationToken = default);
@@ -97,6 +108,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     private readonly SemaphoreSlim _signal = new(0);
     private readonly object _preemptionGate = new();
     private CancellationTokenSource? _activeBackgroundCancellation;
+    private readonly Random _jitter = new();
 
     public ProviderWorkScheduler(
         ProviderWorkStore store,
@@ -189,7 +201,11 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             _timeProvider.GetUtcNow(),
             TimeSpan.FromSeconds(Math.Clamp(_options.LeaseSeconds, 30, 900)),
             cancellationToken);
-        if (job is not null) await RefreshCountsAsync(cancellationToken);
+        if (job is not null)
+        {
+            _telemetry.RecordJobWait(job.Kind.ToString(), _timeProvider.GetUtcNow() - job.EnqueuedUtc, !string.IsNullOrWhiteSpace(job.CheckpointJson));
+            await RefreshCountsAsync(cancellationToken);
+        }
         return job;
     }
 
@@ -221,12 +237,20 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         CancellationToken cancellationToken)
     {
         _broadcasts.GetOrAdd(job.JobId, static _ => new JobBroadcast()).Publish(progress);
-        var checkpoint = JsonSerializer.Serialize(new
+        var previous = TryReadCheckpoint(job.CheckpointJson);
+        var completedSources = previous?.CompletedSources is { } sources
+            ? new Dictionary<string, IReadOnlyList<PremiereItem>>(sources, StringComparer.Ordinal)
+            : new Dictionary<string, IReadOnlyList<PremiereItem>>(StringComparer.Ordinal);
+        if (progress.CalendarProgress is { Phase: "complete", IsFinal: false, CheckpointKey: { Length: > 0 } key } calendar)
         {
+            completedSources[key] = calendar.SourceItems;
+        }
+        var checkpoint = JsonSerializer.Serialize(new ProviderWorkCheckpoint(
             progress.Message,
             progress.CompletedWork,
-            progress.TotalWork
-        });
+            progress.TotalWork,
+            progress.CalendarProgress,
+            completedSources));
         await _store.UpdateProgressAsync(
             job.JobId,
             checkpoint,
@@ -258,7 +282,10 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         var sanitized = SanitizeFailure(error);
         if (job.AttemptCount + 1 < Math.Clamp(_options.MaximumAttempts, 1, 20))
         {
-            var delay = TimeSpan.FromSeconds(Math.Min(300, Math.Pow(2, job.AttemptCount + 1)));
+            var exponentialMilliseconds = Math.Min(
+                Math.Clamp(_options.RetryMaximumSeconds, 1, 300) * 1_000d,
+                Math.Clamp(_options.RetryBaseMilliseconds, 50, 30_000) * Math.Pow(2, job.AttemptCount));
+            var delay = TimeSpan.FromMilliseconds(exponentialMilliseconds * (0.75 + (_jitter.NextDouble() * 0.5)));
             await _store.RequeueAsync(job.JobId, _timeProvider.GetUtcNow().Add(delay), true, sanitized, cancellationToken);
             await RefreshCountsAsync(cancellationToken);
             _telemetry.RecordJob(job.Kind.ToString(), "retry", Elapsed(job));
@@ -300,22 +327,28 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         if (string.IsNullOrWhiteSpace(snapshot.CheckpointJson)) return false;
         try
         {
-            using var document = JsonDocument.Parse(snapshot.CheckpointJson);
-            var root = document.RootElement;
-            var message = root.TryGetProperty("Message", out var messageElement) ? messageElement.GetString() : null;
-            var completed = root.TryGetProperty("CompletedWork", out var completedElement) && completedElement.ValueKind == JsonValueKind.Number
-                ? completedElement.GetInt32()
-                : (int?)null;
-            var total = root.TryGetProperty("TotalWork", out var totalElement) && totalElement.ValueKind == JsonValueKind.Number
-                ? totalElement.GetInt32()
-                : (int?)null;
-            progress = new ProviderWorkProgress(snapshot.JobId, snapshot.State, message ?? "Provider work is in progress.", completed, total);
+            var checkpoint = TryReadCheckpoint(snapshot.CheckpointJson);
+            if (checkpoint is null) return false;
+            progress = new ProviderWorkProgress(
+                snapshot.JobId,
+                snapshot.State,
+                checkpoint.Message,
+                checkpoint.CompletedWork,
+                checkpoint.TotalWork,
+                checkpoint.CalendarProgress);
             return true;
         }
         catch (JsonException)
         {
             return false;
         }
+    }
+
+    internal static ProviderWorkCheckpoint? TryReadCheckpoint(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return JsonSerializer.Deserialize<ProviderWorkCheckpoint>(json); }
+        catch (JsonException) { return null; }
     }
 
     private TimeSpan Elapsed(ProviderWorkSnapshot job) => job.StartedUtc is { } started
@@ -332,6 +365,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }
         catch (Exception exception) when (exception is SqliteException or OperationCanceledException)
         {
+            _telemetry.RecordDatabaseException(exception);
         }
     }
 
@@ -464,11 +498,26 @@ public sealed class ProviderWorkSchedulerHostedService(
                 var payload = JsonSerializer.Deserialize<CalendarProviderWorkPayload>(job.PayloadJson)
                     ?? throw new InvalidOperationException("Calendar provider work payload is invalid.");
                 var pipeline = scope.ServiceProvider.GetRequiredService<IPremiereLoadPipeline>();
+                var checkpoint = ProviderWorkScheduler.TryReadCheckpoint(job.CheckpointJson);
+                var resume = checkpoint is null
+                    ? null
+                    : new ProviderWorkResumeState(checkpoint.CompletedSources, checkpoint.CalendarProgress);
+                if (checkpoint?.CalendarProgress is { } persisted)
+                {
+                    await scheduler.PublishAsync(job, new ProviderWorkProgress(
+                        job.JobId,
+                        ProviderWorkState.Running,
+                        "Resumed persisted provider progress.",
+                        persisted.CompletedWork,
+                        persisted.TotalWork,
+                        persisted), cancellationToken);
+                }
                 await foreach (var progress in pipeline.StreamCoreAsync(
                                    payload.Start,
                                    payload.End,
                                    payload.ForceRefresh,
                                    payload.Filters,
+                                   resume,
                                    cancellationToken))
                 {
                     await scheduler.PublishAsync(job, new ProviderWorkProgress(
@@ -613,6 +662,21 @@ public sealed class ProviderWorkStore(
             await transaction.RollbackAsync(cancellationToken);
             return null;
         }
+        await using (var leaseCommand = connection.CreateCommand())
+        {
+            leaseCommand.Transaction = transaction;
+            leaseCommand.CommandText = """
+                INSERT INTO ProviderWorkLeases (JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc)
+                VALUES ($id, $owner, $expires, $now)
+                ON CONFLICT(JobId) DO UPDATE SET LeaseOwner = excluded.LeaseOwner,
+                    LeaseExpiresUtc = excluded.LeaseExpiresUtc, UpdatedUtc = excluded.UpdatedUtc
+                """;
+            leaseCommand.Parameters.AddWithValue("$id", snapshot.JobId);
+            leaseCommand.Parameters.AddWithValue("$owner", owner);
+            leaseCommand.Parameters.AddWithValue("$expires", Format(now.Add(lease)));
+            leaseCommand.Parameters.AddWithValue("$now", Format(now));
+            await leaseCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
         await transaction.CommitAsync(cancellationToken);
         return snapshot with { State = ProviderWorkState.Running, StartedUtc = snapshot.StartedUtc ?? now };
     }
@@ -636,21 +700,24 @@ public sealed class ProviderWorkStore(
         => ExecuteAsync("""
             UPDATE ProviderWorkJobs
             SET CheckpointJson = $value, ProgressJson = $value, LeaseExpiresUtc = $now
-            WHERE JobId = $id AND State = 'Running'
+            WHERE JobId = $id AND State = 'Running';
+            UPDATE ProviderWorkLeases SET LeaseExpiresUtc = $now, UpdatedUtc = $now WHERE JobId = $id;
             """, jobId, checkpointJson, now, cancellationToken);
 
     public Task CompleteAsync(string jobId, DateTimeOffset now, CancellationToken cancellationToken)
         => ExecuteAsync("""
             UPDATE ProviderWorkJobs SET State = 'Completed', CompletedUtc = $now,
                 LeaseOwner = NULL, LeaseExpiresUtc = NULL, NextAttemptUtc = NULL, LastError = NULL
-            WHERE JobId = $id
+            WHERE JobId = $id;
+            DELETE FROM ProviderWorkLeases WHERE JobId = $id;
             """, jobId, null, now, cancellationToken);
 
     public Task FailAsync(string jobId, string error, DateTimeOffset now, CancellationToken cancellationToken)
         => ExecuteAsync("""
             UPDATE ProviderWorkJobs SET State = 'Failed', CompletedUtc = $now, LastError = $value,
                 AttemptCount = AttemptCount + 1, LeaseOwner = NULL, LeaseExpiresUtc = NULL
-            WHERE JobId = $id
+            WHERE JobId = $id;
+            DELETE FROM ProviderWorkLeases WHERE JobId = $id;
             """, jobId, error, now, cancellationToken);
 
     public Task RequeueAsync(
@@ -664,7 +731,8 @@ public sealed class ProviderWorkStore(
                 NextAttemptUtc = $now, LastError = $value,
                 AttemptCount = AttemptCount + {(incrementAttempt ? "1" : "0")},
                 LeaseOwner = NULL, LeaseExpiresUtc = NULL
-            WHERE JobId = $id
+            WHERE JobId = $id;
+            DELETE FROM ProviderWorkLeases WHERE JobId = $id;
             """, jobId, error, nextAttempt, cancellationToken);
 
     public async Task RecoverExpiredLeasesAsync(DateTimeOffset now, CancellationToken cancellationToken)
@@ -675,7 +743,10 @@ public sealed class ProviderWorkStore(
         command.CommandText = """
             UPDATE ProviderWorkJobs SET State = 'Queued', LeaseOwner = NULL, LeaseExpiresUtc = NULL,
                 NextAttemptUtc = $now
-            WHERE State = 'Running' AND (LeaseExpiresUtc IS NULL OR LeaseExpiresUtc < $now)
+            WHERE State = 'Running' AND (
+                NOT EXISTS (SELECT 1 FROM ProviderWorkLeases lease WHERE lease.JobId = ProviderWorkJobs.JobId)
+                OR EXISTS (SELECT 1 FROM ProviderWorkLeases lease WHERE lease.JobId = ProviderWorkJobs.JobId AND lease.LeaseExpiresUtc < $now));
+            DELETE FROM ProviderWorkLeases WHERE LeaseExpiresUtc < $now;
             """;
         command.Parameters.AddWithValue("$now", Format(now));
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -717,7 +788,7 @@ public sealed class ProviderWorkStore(
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = path,
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Shared,
             Pooling = true
         };
@@ -750,5 +821,6 @@ public interface IPremiereLoadPipeline
         DateOnly end,
         bool forceRefresh,
         CalendarFilters? filters,
+        ProviderWorkResumeState? resumeState,
         CancellationToken cancellationToken);
 }

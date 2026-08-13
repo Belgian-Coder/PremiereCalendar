@@ -786,54 +786,16 @@ public sealed class TmdbClient : ITmdbClient
         string operation,
         CancellationToken cancellationToken)
     {
-        const int maxAttempts = 3;
         var bearerToken = await GetBearerTokenAsync(cancellationToken);
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        using var lease = await _requestLimiter.AcquireAsync(cancellationToken);
+        if (!lease.IsAcquired)
         {
-            using var lease = await _requestLimiter.AcquireAsync(cancellationToken);
-            if (!lease.IsAcquired)
-            {
-                throw new ExternalApiException($"{operation} was rate limited locally before the request was sent.");
-            }
-
-            using var request = new HttpRequestMessage(HttpMethod.Get, path);
-            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", bearerToken);
-            var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt == maxAttempts)
-            {
-                return response;
-            }
-
-            var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
-            response.Dispose();
-            _logger.LogWarning(
-                "TMDb returned HTTP 429 for {Operation}. Waiting {RetryDelay} before retry {RetryAttempt}/{MaxAttempts}.",
-                operation,
-                delay,
-                attempt + 1,
-                maxAttempts);
-            await Task.Delay(delay, cancellationToken);
+            throw new ExternalApiException($"{operation} was rate limited locally before the request was sent.");
         }
 
-        throw new ExternalApiException($"{operation} was rate limited by TMDb.");
-    }
-
-    private static TimeSpan? RetryAfterDelay(HttpResponseMessage response)
-    {
-        var retryAfter = response.Headers.RetryAfter;
-        if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
-        {
-            return delta;
-        }
-
-        if (retryAfter?.Date is { } date)
-        {
-            var delay = date - DateTimeOffset.UtcNow;
-            return delay > TimeSpan.Zero ? delay : null;
-        }
-
-        return null;
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", bearerToken);
+        return await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
     }
 
     private void EnsureConfigured()

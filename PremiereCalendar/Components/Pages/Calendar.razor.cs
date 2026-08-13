@@ -1,0 +1,2796 @@
+using System.Globalization;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Routing;
+using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.JSInterop;
+using PremiereCalendar.Models;
+using PremiereCalendar.Services;
+
+namespace PremiereCalendar.Components.Pages;
+
+public partial class Calendar
+{
+    private CalendarPageMode _pageMode;
+    private CalendarFilters _filters = new();
+    private FilterCatalog _filterCatalog = new();
+    private IReadOnlyList<PremiereItem> _items = [];
+    private IReadOnlyList<PremiereItem> _visibleItems = [];
+    private bool _preserveStreamedItemOrder;
+    private IntegrationSettings _integrationSettings = new();
+    private readonly List<LoadProgressEntry> _loadProgress = [];
+    private IReadOnlyList<LoadProgressEntry> _groupedLoadProgressCache = [];
+    private int _loadProgressVersion;
+    private int _groupedLoadProgressCacheVersion = -1;
+    private bool _groupedLoadProgressCacheLoadingState;
+    private readonly HashSet<string> _arrAddInProgress = [];
+    private readonly List<ToastMessage> _toasts = [];
+    private IReadOnlyList<CacheFreshnessEntry> _cacheFreshness = [];
+    private IReadOnlyList<CalendarFilterPreset> _filterPresets = [];
+    private CalendarVisitChangeSummary? _visitChangeSummary;
+    private readonly CancellationTokenSource _disposeCancellation = new();
+    private CancellationTokenSource? _loadCancellation;
+    private bool _isFilterPaneOpen;
+    private bool _refreshImageCache;
+    private string? _imageCacheVersion;
+    private string? _error;
+    private string? _sourceProgressFilter;
+    private DateOnly? _selectedDay;
+    private bool _isLoading = true;
+    private bool _isQueryProgressExpanded;
+    private bool _isCommandPaletteOpen;
+    private bool _compactDensity;
+    private bool _isSavingPreset;
+    private bool _hasRendered;
+    private bool _focusCalendarHeadingAfterRender;
+    private bool _integrationSettingsLoaded;
+    private bool _hasLoadedAtLeastOnce;
+    private string _presetName = "";
+    private string? _selectedPresetId;
+    private bool _forceLoadOnNextLocationChange;
+    private bool _isDisposed;
+    private bool _viewSyncInitialized;
+    private bool _applyingViewSyncNavigation;
+    private bool _suppressLocalFilterRestoreOnce;
+    private string? _viewSyncDeviceId;
+    private ViewSyncOverview? _viewSyncOverview;
+    private ViewSyncGroupState? _queuedViewSyncState;
+    private string? _lastPublishedViewSyncUrl;
+    private readonly Dictionary<string, long> _lastAppliedViewSyncRevisions = new(StringComparer.OrdinalIgnoreCase);
+
+    private string PageTitleText()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => "Series Calendar",
+            CalendarPageMode.Movies => "Movie Calendar",
+            _ => "Premiere Calendar"
+        };
+    }
+
+    private string CalendarModeLabel()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => "Series",
+            CalendarPageMode.Movies => "Movies",
+            _ => "All"
+        };
+    }
+
+    private string CalendarScopeBadgeText()
+    {
+        return _pageMode != CalendarPageMode.Movies
+            && _filters.SeriesFilters.SeriesDateMode == SeriesDateMode.NewSeriesOnly
+                ? "New only"
+                : string.Empty;
+    }
+
+    private string CompactWeekRangeText()
+    {
+        var start = _filters.WeekStart;
+        var end = start.AddDays(6);
+
+        if (start.Year == end.Year && start.Month == end.Month)
+        {
+            return $"{start.ToString("dd MMM", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
+        }
+
+        if (start.Year == end.Year)
+        {
+            return $"{start.ToString("dd MMM", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
+        }
+
+        return $"{start.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
+    }
+
+    private string VisibleResultCountText()
+    {
+        var count = _visibleItems.Count;
+        if (_isLoading && count == 0)
+        {
+            return "Loading";
+        }
+
+        return count == 1
+            ? "1 title"
+            : $"{count.ToString("N0", CultureInfo.InvariantCulture)} titles";
+    }
+
+    private string EyebrowText()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => "TV premieres and network discovery",
+            CalendarPageMode.Movies => "Movie releases and provider discovery",
+            _ => "Local-first TMDb calendar"
+        };
+    }
+
+    private string SourceSectionTitle()
+    {
+        return _pageMode == CalendarPageMode.Movies ? "Providers" : "Sources";
+    }
+
+    private string SourceDropdownLabel()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => "Providers, networks, and web channels",
+            CalendarPageMode.Movies => "Streaming and release providers",
+            _ => "Providers, networks, and channels"
+        };
+    }
+
+    private string SourceInputPlaceholder()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => "Type a provider, TV network, or web channel",
+            CalendarPageMode.Movies => "Type a streaming provider",
+            _ => "Type a provider, TV network, or channel"
+        };
+    }
+
+    private string SourceInputAriaLabel()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => "Provider, TV network, or web channel",
+            CalendarPageMode.Movies => "Streaming provider",
+            _ => "Source, network, or channel"
+        };
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _pageMode = ResolvePageMode();
+        ApplyQueryParameters();
+        ApplyPageMode();
+        RecalculateVisibleItems();
+        Navigation.LocationChanged += OnLocationChanged;
+        ViewSyncService.StateChanged += OnViewSyncStateChanged;
+        await LoadPresetsAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {
+                _compactDensity = await JS.InvokeAsync<bool>("premiereCalendarDensity.initialize", "premiere-calendar:density");
+            }
+            catch (JSException) { }
+        }
+        if (_focusCalendarHeadingAfterRender)
+        {
+            await FocusCalendarHeadingAsync();
+            if (!_isLoading)
+            {
+                _focusCalendarHeadingAfterRender = false;
+            }
+        }
+
+        if (!firstRender)
+        {
+            return;
+        }
+
+        _hasRendered = true;
+        await InitializeViewSyncAsync();
+        if (await ApplyLatestSyncedUrlIfNeededAsync(Navigation.Uri))
+        {
+            return;
+        }
+
+        if (await RestoreSavedFiltersIfNeededAsync(Navigation.Uri))
+        {
+            return;
+        }
+
+        if (!await LoadIntegrationSettingsAsync())
+        {
+            return;
+        }
+
+        if (RedirectToSettingsIfTmdbMissing())
+        {
+            return;
+        }
+
+        await PublishCurrentViewSyncUrlAsync(Navigation.Uri, requireQuery: true);
+        await Task.WhenAll(LoadFilterCatalogAsync(), LoadAsync());
+    }
+
+    private async Task ToggleDensityAsync()
+    {
+        try { _compactDensity = await JS.InvokeAsync<bool>("premiereCalendarDensity.toggle", "premiere-calendar:density"); } catch (JSException) { return; }
+    }
+
+    private async Task ShareCurrentViewAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarActions.copyText", Navigation.Uri);
+            ShowToast(ToastKind.Success, "View link copied", "The current route, week, and filters are ready to paste.");
+        }
+        catch (JSException ex)
+        {
+            ShowToast(ToastKind.Error, "Copy failed", ex.Message);
+        }
+    }
+
+    private async Task ExportVisibleItemsAsync(string format)
+    {
+        var normalizedFormat = format.ToLowerInvariant();
+        var (content, contentType) = normalizedFormat switch
+        {
+            "ics" => (CalendarExportService.ToIcs(_visibleItems), "text/calendar;charset=utf-8"),
+            "csv" => (CalendarExportService.ToCsv(_visibleItems), "text/csv;charset=utf-8"),
+            "json" => (CalendarExportService.ToJson(_visibleItems), "application/json;charset=utf-8"),
+            _ => throw new ArgumentOutOfRangeException(nameof(format), format, "Unsupported calendar export format.")
+        };
+
+        var route = _pageMode.ToString().ToLowerInvariant();
+        var fileName = $"premiere-calendar-{route}-{_filters.WeekStart:yyyy-MM-dd}.{normalizedFormat}";
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarActions.downloadText", fileName, contentType, content);
+            ShowToast(ToastKind.Success, "Export ready", $"Downloaded {_visibleItems.Count:N0} visible premieres as {normalizedFormat.ToUpperInvariant()}.");
+        }
+        catch (JSException ex)
+        {
+            ShowToast(ToastKind.Error, "Export failed", ex.Message);
+        }
+    }
+
+    private async Task<bool> LoadIntegrationSettingsAsync()
+    {
+        try
+        {
+            _integrationSettings = await IntegrationSettingsStore.GetAsync();
+            _integrationSettingsLoaded = true;
+            return true;
+        }
+        catch (OperationCanceledException) when (_disposeCancellation.Token.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Integration settings load failed.");
+            _integrationSettings = new IntegrationSettings();
+            _isLoading = false;
+            _error = "Settings could not be loaded. Check local database access and try again.";
+            await InvokeAsync(StateHasChanged);
+            return false;
+        }
+    }
+
+    private async Task<bool> EnsureIntegrationSettingsLoadedAsync()
+    {
+        if (!_integrationSettingsLoaded)
+        {
+            return await LoadIntegrationSettingsAsync();
+        }
+
+        return true;
+    }
+
+    private bool HasTmdbSettings()
+    {
+        return !string.IsNullOrWhiteSpace(_integrationSettings.Sources.Tmdb.BearerToken);
+    }
+
+    private bool RedirectToSettingsIfTmdbMissing()
+    {
+        if (HasTmdbSettings())
+        {
+            return false;
+        }
+
+        _isLoading = false;
+        _error = null;
+        _loadProgress.Clear();
+        InvalidateLoadProgressCache();
+        _sourceProgressFilter = null;
+        var returnUrl = TmdbSetupReturnUrl();
+        Navigation.NavigateTo($"/settings?reason=tmdb&returnUrl={Uri.EscapeDataString(returnUrl)}", replace: true);
+        return true;
+    }
+
+    private string TmdbSetupReturnUrl()
+    {
+        var currentUri = Navigation.ToAbsoluteUri(Navigation.Uri);
+        if (string.Equals(currentUri.AbsolutePath, "/settings", StringComparison.OrdinalIgnoreCase))
+        {
+            var query = QueryHelpers.ParseQuery(currentUri.Query);
+            if (query.TryGetValue("returnUrl", out var existingReturnUrl)
+                && LocalReturnUrl.IsSafe(existingReturnUrl.ToString()))
+            {
+                return existingReturnUrl.ToString();
+            }
+        }
+
+        return currentUri.PathAndQuery;
+    }
+
+    private async Task InitializeViewSyncAsync()
+    {
+        if (_viewSyncInitialized)
+        {
+            return;
+        }
+
+        try
+        {
+            _viewSyncDeviceId = await JS.InvokeAsync<string?>("premiereViewSync.getOrCreateDeviceId");
+            if (string.IsNullOrWhiteSpace(_viewSyncDeviceId))
+            {
+                _viewSyncDeviceId = Guid.NewGuid().ToString("N");
+            }
+
+            _viewSyncOverview = await ViewSyncService.GetOverviewAsync(_viewSyncDeviceId, _disposeCancellation.Token);
+            _viewSyncInitialized = true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JSException or JSDisconnectedException or OperationCanceledException)
+        {
+            _viewSyncInitialized = false;
+        }
+        catch (Exception ex)
+        {
+            _viewSyncInitialized = false;
+            Logger.LogWarning(ex, "View sync initialization failed.");
+        }
+    }
+
+    private async Task<bool> ApplyLatestSyncedUrlIfNeededAsync(string location)
+    {
+        var routeKey = ViewSyncRouteKeyFor(location);
+        if (!_viewSyncInitialized
+            || _viewSyncOverview?.Device.SyncEnabled != true
+            || string.IsNullOrWhiteSpace(_viewSyncDeviceId)
+            || routeKey is null
+            || HasMeaningfulFilterQuery(location)
+            || await ViewSyncService.GetLatestStateForDeviceAsync(
+                _viewSyncDeviceId,
+                routeKey,
+                _disposeCancellation.Token) is not { } state)
+        {
+            return false;
+        }
+
+        return await ApplyViewSyncStateAsync(state, force: true, blockLocalRestoreWhenAlreadyCurrent: true);
+    }
+
+    private void OnViewSyncStateChanged(object? sender, ViewSyncStateChangedEventArgs args)
+    {
+        _ = HandleViewSyncStateChangedAsync(args);
+    }
+
+    private async Task HandleViewSyncStateChangedAsync(ViewSyncStateChangedEventArgs args)
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                if (_isDisposed
+                    || !_viewSyncInitialized
+                    || _viewSyncOverview?.Device.SyncEnabled != true
+                    || !string.Equals(_viewSyncOverview.Device.GroupId, args.GroupId, StringComparison.Ordinal)
+                    || !string.Equals(args.State.RouteKey, ViewSyncRouteKeyFor(Navigation.Uri), StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args.State.UpdatedByDeviceId, _viewSyncDeviceId, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                await ApplyViewSyncStateAsync(args.State);
+            });
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task<bool> ApplyViewSyncStateAsync(
+        ViewSyncGroupState state,
+        bool force = false,
+        bool blockLocalRestoreWhenAlreadyCurrent = false)
+    {
+        _lastAppliedViewSyncRevisions.TryGetValue(state.RouteKey, out var lastAppliedRevision);
+        if (!force && state.Revision <= lastAppliedRevision)
+        {
+            return false;
+        }
+
+        if (!ViewSyncUrlPolicy.TryNormalize(state.RelativeUrl, out var relativeUrl)
+            || string.IsNullOrWhiteSpace(relativeUrl))
+        {
+            return false;
+        }
+
+        if (!force && _isFilterPaneOpen)
+        {
+            _queuedViewSyncState = state;
+            StateHasChanged();
+            return true;
+        }
+
+        _queuedViewSyncState = null;
+        _lastAppliedViewSyncRevisions[state.RouteKey] = Math.Max(lastAppliedRevision, state.Revision);
+        if (string.Equals(ToRelativeCalendarUrl(Navigation.Uri), relativeUrl, StringComparison.Ordinal))
+        {
+            _suppressLocalFilterRestoreOnce = blockLocalRestoreWhenAlreadyCurrent;
+            return false;
+        }
+
+        _applyingViewSyncNavigation = true;
+        _suppressLocalFilterRestoreOnce = true;
+        _forceLoadOnNextLocationChange = !_hasLoadedAtLeastOnce;
+        Navigation.NavigateTo(relativeUrl, replace: true);
+        await Task.CompletedTask;
+        return true;
+    }
+
+    private async Task PublishCurrentViewSyncUrlAsync(string location, bool requireQuery = false)
+    {
+        if (!_viewSyncInitialized
+            || string.IsNullOrWhiteSpace(_viewSyncDeviceId)
+            || _viewSyncOverview?.Device.SyncEnabled != true
+            || string.IsNullOrWhiteSpace(_viewSyncOverview.Device.GroupId)
+            || (requireQuery && !HasAnyQuery(location)))
+        {
+            return;
+        }
+
+        var relativeUrl = ToRelativeCalendarUrl(location);
+        if (string.IsNullOrWhiteSpace(relativeUrl)
+            || string.Equals(relativeUrl, _lastPublishedViewSyncUrl, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        try
+        {
+            var result = await ViewSyncService.PublishUrlAsync(_viewSyncDeviceId, relativeUrl, _disposeCancellation.Token);
+            if (result.State is not null)
+            {
+                _viewSyncOverview = _viewSyncOverview with { GroupState = result.State };
+                _lastAppliedViewSyncRevisions.TryGetValue(result.State.RouteKey, out var lastAppliedRevision);
+                _lastAppliedViewSyncRevisions[result.State.RouteKey] = Math.Max(lastAppliedRevision, result.State.Revision);
+            }
+
+            if (result.Published || result.State is not null)
+            {
+                _lastPublishedViewSyncUrl = relativeUrl;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "View sync publish failed.");
+        }
+    }
+
+    private string? ToRelativeCalendarUrl(string location)
+    {
+        try
+        {
+            var uri = Navigation.ToAbsoluteUri(location);
+            return CalendarViewSyncNavigationCoordinator.Normalize(uri);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private string? ViewSyncRouteKeyFor(string location)
+    {
+        return ToRelativeCalendarUrl(location) is { } relativeUrl
+            ? ViewSyncUrlPolicy.RouteKeyFor(relativeUrl)
+            : null;
+    }
+
+    private bool HasAnyQuery(string location)
+    {
+        try
+        {
+            return CalendarQueryCodec.HasQuery(Navigation.ToAbsoluteUri(location));
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private async Task ApplyQueuedViewSyncAsync()
+    {
+        if (_queuedViewSyncState is not { } state)
+        {
+            return;
+        }
+
+        _queuedViewSyncState = null;
+        _isFilterPaneOpen = false;
+        await ApplyViewSyncStateAsync(state, force: true);
+    }
+
+    private void DismissQueuedViewSync()
+    {
+        _queuedViewSyncState = null;
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs args)
+    {
+        _ = HandleLocationChangedAsync(args);
+    }
+
+    private async Task HandleLocationChangedAsync(LocationChangedEventArgs args)
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                if (_isDisposed)
+                {
+                    return;
+                }
+
+                var suppressViewSyncPublish = _applyingViewSyncNavigation;
+                _applyingViewSyncNavigation = false;
+                if (await RestoreSavedFiltersIfNeededAsync(args.Location))
+                {
+                    return;
+                }
+
+                var previousWeekStart = _filters.WeekStart;
+                var previousMode = _pageMode;
+                var previousSelectedDay = _selectedDay;
+                var previousSortMode = _filters.SortMode;
+                var previousSortDirection = _filters.SortDirection;
+                var previousCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+                var forceLoad = _forceLoadOnNextLocationChange;
+                _forceLoadOnNextLocationChange = false;
+                _pageMode = ResolvePageMode(args.Location);
+                ApplyQueryParameters(args.Location);
+                ApplyPageMode();
+                if (_pageMode != previousMode)
+                {
+                    await ResetCalendarScrollAsync();
+                    await LoadPresetsAsync();
+                }
+
+                var nextCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+                var sortChanged = _filters.SortMode != previousSortMode
+                    || _filters.SortDirection != previousSortDirection;
+
+                if (!suppressViewSyncPublish)
+                {
+                    await PublishCurrentViewSyncUrlAsync(args.Location);
+                }
+
+                if (forceLoad
+                    || _filters.WeekStart != previousWeekStart
+                    || !string.Equals(previousCriteriaKey, nextCriteriaKey, StringComparison.Ordinal))
+                {
+                    // Reconcile the new route/filter against the cards already on screen once.
+                    // Subsequent streamed batches retain that presentation and append discoveries.
+                    RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: false);
+                    await LoadAsync();
+                }
+                else if (sortChanged)
+                {
+                    RecalculateVisibleItems();
+                    StateHasChanged();
+                }
+                else if (_pageMode != previousMode)
+                {
+                    StateHasChanged();
+                }
+                else if (_selectedDay != previousSelectedDay)
+                {
+                    StateHasChanged();
+                }
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or JSDisconnectedException)
+        {
+            Logger.LogDebug(ex, "Calendar route change stopped after circuit shutdown.");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Calendar route change failed.");
+        }
+    }
+
+    private async Task LoadFilterCatalogAsync(bool forceRefresh = false, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _filterCatalog = await FilterCatalogService.GetCatalogAsync(cancellationToken, forceRefresh);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "Filter catalog load failed.");
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        await LoadAsync(forceRefresh: false);
+    }
+
+    private async Task RefreshAsync()
+    {
+        await LoadAsync(forceRefresh: true);
+    }
+
+    private async Task QuickRefreshAsync()
+    {
+        await LoadAsync(forceRefresh: false);
+    }
+
+    private async Task LoadAsync(bool forceRefresh = false)
+    {
+        if (!await EnsureIntegrationSettingsLoadedAsync())
+        {
+            return;
+        }
+
+        if (RedirectToSettingsIfTmdbMissing())
+        {
+            return;
+        }
+
+        var foregroundLoad = CalendarLoadCoordinator.BeginForegroundLoad();
+        var previousCancellation = _loadCancellation;
+        var budgetSeconds = Math.Max(1, CalendarLoadOptions.Value.ForegroundLoadBudgetSeconds);
+        using var budgetCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(budgetSeconds));
+        var loadCancellation = CancellationTokenSource.CreateLinkedTokenSource(_disposeCancellation.Token, budgetCancellation.Token);
+        _loadCancellation = loadCancellation;
+        var shouldPrefetchAdjacentWeeks = false;
+        var prefetchWeekStart = default(DateOnly);
+        CalendarFilters? prefetchFilters = null;
+        try
+        {
+            previousCancellation?.Cancel();
+        }
+        finally
+        {
+            previousCancellation?.Dispose();
+        }
+
+        var token = loadCancellation.Token;
+
+        _isLoading = true;
+        _error = null;
+        var hasExistingItems = _items.Count > 0;
+        _loadProgress.Clear();
+        InvalidateLoadProgressCache();
+        _sourceProgressFilter = null;
+        RecalculateVisibleItems(
+            preserveCurrentOrder: _visibleItems.Count > 0,
+            retainMissingItems: true);
+        _refreshImageCache = forceRefresh;
+        _imageCacheVersion = forceRefresh
+            ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)
+            : null;
+
+        try
+        {
+            var start = _filters.WeekStart;
+            var end = start.AddDays(6);
+            var pageMode = _pageMode;
+            CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: true, _visibleItems.Count);
+            var loadFilters = CalendarFilterState.Clone(_filters);
+            loadFilters.PriorityDate = PriorityDateForCurrentWeek(start, end);
+            var lastUiUpdateUtc = DateTimeOffset.MinValue;
+            var renderedFirstUpdate = false;
+            await foreach (var update in PremiereService.StreamPremieresAsync(start, end, forceRefresh, loadFilters, token)
+                .WithCancellation(token))
+            {
+                await InvokeAsync(() =>
+                {
+                    if (_isDisposed || token.IsCancellationRequested || !ReferenceEquals(_loadCancellation, loadCancellation))
+                    {
+                        return;
+                    }
+
+                    _items = update.Items;
+                    if (update.IsFinal)
+                    {
+                        FinalizeOpenProgressEntries();
+                    }
+
+                    var progressEntry = new LoadProgressEntry(
+                        update.SourceName,
+                        update.SourceItemCount,
+                        update.TotalItemCount,
+                        update.IsFinal,
+                        update.FromCache,
+                        update.SourceItems,
+                        update.Items,
+                        update.CompletedWork,
+                        update.TotalWork,
+                        update.ProgressText,
+                        update.ElapsedMilliseconds,
+                        update.Phase,
+                        update.UnmappedCount);
+                    var existingProgressIndex = _loadProgress.FindIndex(entry =>
+                        string.Equals(entry.SourceName, progressEntry.SourceName, StringComparison.Ordinal));
+                    if (existingProgressIndex >= 0)
+                    {
+                        _loadProgress[existingProgressIndex] = progressEntry;
+                    }
+                    else
+                    {
+                        _loadProgress.Add(progressEntry);
+                    }
+
+                    InvalidateLoadProgressCache();
+
+                    var now = DateTimeOffset.UtcNow;
+                    var minimumUiUpdateInterval = update.Items.Count >= 200
+                        ? TimeSpan.FromMilliseconds(750)
+                        : TimeSpan.FromMilliseconds(250);
+                    if (!renderedFirstUpdate
+                        || update.IsFinal
+                        || now - lastUiUpdateUtc >= minimumUiUpdateInterval)
+                    {
+                        renderedFirstUpdate = true;
+                        lastUiUpdateUtc = now;
+                        // A calendar load can stream many differently ordered provider batches.
+                        // Keep existing cards in place, update matching cards, and append discoveries so
+                        // the page fills progressively without rebuilding or reshuffling the whole grid.
+                        RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
+                        CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: !update.IsFinal, _visibleItems.Count);
+                        StateHasChanged();
+                    }
+                });
+            }
+
+            if (!token.IsCancellationRequested && ReferenceEquals(_loadCancellation, loadCancellation))
+            {
+                _hasLoadedAtLeastOnce = true;
+                await RecordFilterUsageAsync(pageMode, loadFilters, _items.Count, token);
+                if (!token.IsCancellationRequested && ReferenceEquals(_loadCancellation, loadCancellation))
+                {
+                    shouldPrefetchAdjacentWeeks = true;
+                    prefetchWeekStart = start;
+                    prefetchFilters = CalendarFilterState.Clone(loadFilters);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (budgetCancellation.IsCancellationRequested
+            && !_disposeCancellation.IsCancellationRequested
+            && ReferenceEquals(_loadCancellation, loadCancellation))
+        {
+            await InvokeAsync(() =>
+            {
+                if (_isDisposed || !ReferenceEquals(_loadCancellation, loadCancellation))
+                {
+                    return;
+                }
+
+                FinalizeOpenProgressEntries();
+                AddLoadBudgetProgressEntry(budgetSeconds);
+                RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
+                _hasLoadedAtLeastOnce = true;
+            });
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (!ReferenceEquals(_loadCancellation, loadCancellation))
+            {
+                return;
+            }
+
+            if (!hasExistingItems)
+            {
+                _items = [];
+                RecalculateVisibleItems();
+            }
+
+            _error = ex.Message;
+        }
+        finally
+        {
+            foregroundLoad.Dispose();
+
+            if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
+            {
+                await RefreshCacheFreshnessAsync(_disposeCancellation.Token);
+                await RefreshVisitChangeSummaryAsync(_disposeCancellation.Token);
+                _isLoading = false;
+                CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
+                _loadCancellation = null;
+                await InvokeAsync(() =>
+                {
+                    if (!_isDisposed)
+                    {
+                        StateHasChanged();
+                    }
+                });
+            }
+
+            loadCancellation.Dispose();
+        }
+
+        if (shouldPrefetchAdjacentWeeks && prefetchFilters is not null)
+        {
+            AdjacentWeekPrefetcher.PrefetchAdjacentWeeks(prefetchWeekStart, prefetchFilters);
+        }
+    }
+
+    private async Task RefreshCacheFreshnessAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var start = _filters.WeekStart;
+            var end = start.AddDays(6);
+            var entries = new List<CacheFreshnessEntry>();
+            foreach (var (mode, label) in CacheFreshnessModes())
+            {
+                var filters = FiltersForCacheFreshness(mode);
+                var cacheKey = PremiereDiscoveryCriteria.FromFilters(filters).CacheKey();
+                var metadata = await CalendarCacheMaintenance.GetWeekMetadataAsync(
+                    start,
+                    end,
+                    cacheKey,
+                    cancellationToken);
+                entries.Add(new CacheFreshnessEntry(label, metadata));
+            }
+
+            _cacheFreshness = entries;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _cacheFreshness = [];
+        }
+    }
+
+    private async Task RefreshVisitChangeSummaryAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var cacheKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+            _visitChangeSummary = await CalendarVisitChangeService.RecordVisitAsync(
+                new CalendarVisitScope(_pageMode, _filters.WeekStart, cacheKey),
+                _items.Select(item => item.CanonicalId).ToArray(),
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _visitChangeSummary = null;
+        }
+    }
+
+    private bool ShouldShowVisitChangeSummary()
+    {
+        return _visitChangeSummary is { HasPreviousVisit: true }
+            && (_visitChangeSummary.NewCount > 0 || _visitChangeSummary.RemovedCount > 0);
+    }
+
+    private IReadOnlyList<CacheFreshnessEntry> VisibleCacheFreshnessEntries()
+    {
+        if (_cacheFreshness.Count == 0)
+        {
+            return [];
+        }
+
+        if (ShouldShowCompletedCacheFreshness())
+        {
+            return _cacheFreshness;
+        }
+
+        return _cacheFreshness
+            .Where(IsActionableCacheFreshnessEntry)
+            .ToArray();
+    }
+
+    private bool ShouldShowCompletedCacheFreshness()
+    {
+        return _pageMode != CalendarPageMode.All
+            || _isLoading
+            || _isQueryProgressExpanded
+            || !string.IsNullOrWhiteSpace(_sourceProgressFilter);
+    }
+
+    private static bool IsActionableCacheFreshnessEntry(CacheFreshnessEntry entry)
+    {
+        return entry.Metadata is null
+            || entry.Metadata.Completeness == CalendarCacheCompleteness.Partial;
+    }
+
+    private string VisitChangeText()
+    {
+        if (_visitChangeSummary is not { } summary)
+        {
+            return "";
+        }
+
+        var parts = new List<string>();
+        if (summary.NewCount > 0)
+        {
+            parts.Add(summary.NewCount == 1 ? "1 new" : $"{summary.NewCount.ToString("N0", CultureInfo.InvariantCulture)} new");
+        }
+
+        if (summary.RemovedCount > 0)
+        {
+            parts.Add(summary.RemovedCount == 1 ? "1 removed" : $"{summary.RemovedCount.ToString("N0", CultureInfo.InvariantCulture)} removed");
+        }
+
+        return string.Join(" · ", parts);
+    }
+
+    private IReadOnlyList<(CalendarPageMode Mode, string Label)> CacheFreshnessModes()
+    {
+        return _pageMode switch
+        {
+            CalendarPageMode.Series => [(CalendarPageMode.Series, "Series")],
+            CalendarPageMode.Movies => [(CalendarPageMode.Movies, "Movies")],
+            _ => AllCacheFreshnessModes()
+        };
+    }
+
+    private IReadOnlyList<(CalendarPageMode Mode, string Label)> AllCacheFreshnessModes()
+    {
+        if (_filters.ShowSeries && !_filters.ShowMovies)
+        {
+            return [(CalendarPageMode.Series, "Series")];
+        }
+
+        if (!_filters.ShowSeries && _filters.ShowMovies)
+        {
+            return [(CalendarPageMode.Movies, "Movies")];
+        }
+
+        return [(CalendarPageMode.Series, "Series"), (CalendarPageMode.Movies, "Movies")];
+    }
+
+    private CalendarFilters FiltersForCacheFreshness(CalendarPageMode mode)
+    {
+        var filters = CalendarFilterState.Clone(_filters);
+        CalendarFilterState.ApplyPageMode(filters, mode);
+        CalendarFilterState.Normalize(filters);
+        return filters;
+    }
+
+    private static string CacheFreshnessClass(CacheFreshnessEntry entry)
+    {
+        return entry.Metadata is null
+            ? "cache-freshness-pill missing"
+            : entry.Metadata.Completeness == CalendarCacheCompleteness.Partial
+                ? "cache-freshness-pill partial"
+                : "cache-freshness-pill complete";
+    }
+
+    private string DataFreshnessCardClass(IReadOnlyList<CacheFreshnessEntry> entries)
+    {
+        return IsPassiveDataFreshness(entries)
+            ? "data-freshness-card passive"
+            : "data-freshness-card";
+    }
+
+    private bool IsPassiveDataFreshness(IReadOnlyList<CacheFreshnessEntry> entries)
+    {
+        return !ShouldShowVisitChangeSummary()
+            && entries.Count > 0
+            && entries.All(entry => entry.Metadata is { Completeness: CalendarCacheCompleteness.Complete });
+    }
+
+    private static string CacheFreshnessText(CacheFreshnessEntry entry)
+    {
+        if (entry.Metadata is not { } metadata)
+        {
+            return "not cached yet";
+        }
+
+        var local = metadata.CachedAtUtc.ToLocalTime();
+        var completeness = metadata.Completeness == CalendarCacheCompleteness.Partial
+            ? "partial"
+            : "complete";
+        return $"{local:dd MMM HH:mm} · {metadata.ItemCount.ToString(CultureInfo.InvariantCulture)} items · {completeness}";
+    }
+
+    private void AddLoadBudgetProgressEntry(int budgetSeconds)
+    {
+        var entry = new LoadProgressEntry(
+            "Load budget",
+            _items.Count,
+            _items.Count,
+            IsFinal: true,
+            FromCache: false,
+            SourceItems: _items,
+            Items: _items,
+            CompletedWork: null,
+            TotalWork: null,
+            ProgressText: $"Stopped after {budgetSeconds.ToString(CultureInfo.InvariantCulture)} s foreground budget",
+            ElapsedMilliseconds: budgetSeconds * 1000L,
+            Phase: "complete",
+            UnmappedCount: _items.Count(item => item.VerificationState == PremiereVerificationState.Unverified));
+        var existingIndex = _loadProgress.FindIndex(progress =>
+            string.Equals(progress.SourceName, entry.SourceName, StringComparison.Ordinal));
+        if (existingIndex >= 0)
+        {
+            _loadProgress[existingIndex] = entry;
+        }
+        else
+        {
+            _loadProgress.Add(entry);
+        }
+
+        InvalidateLoadProgressCache();
+    }
+
+    private async Task RecordFilterUsageAsync(
+        CalendarPageMode pageMode,
+        CalendarFilters filters,
+        int itemCount,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await CalendarFilterUsageStore.RecordUseAsync(
+                pageMode,
+                filters,
+                itemCount,
+                DateTimeOffset.UtcNow,
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "Calendar filter usage tracking failed.");
+        }
+    }
+
+    private void RecalculateVisibleItems(
+        bool preserveCurrentOrder = false,
+        bool retainMissingItems = false)
+    {
+        var items = SourceProgressFilteredItems();
+        var nextItems = PremiereFilter.Apply(items, _filters);
+        _preserveStreamedItemOrder = preserveCurrentOrder;
+        if (!preserveCurrentOrder || _visibleItems.Count == 0)
+        {
+            _visibleItems = nextItems;
+            return;
+        }
+
+        var nextById = nextItems.ToDictionary(item => item.CanonicalId, StringComparer.Ordinal);
+        var reconciled = new List<PremiereItem>(nextItems.Count);
+        var retainedIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var visibleItem in _visibleItems)
+        {
+            if (nextById.TryGetValue(visibleItem.CanonicalId, out var updatedItem))
+            {
+                reconciled.Add(updatedItem);
+            }
+            else if (retainMissingItems)
+            {
+                // Provider progress is not guaranteed to be a cumulative snapshot. Once a card has
+                // been shown during this load, retain it so a temporary omission cannot blank or
+                // reshuffle the day. A later explicit filter/sort/navigation performs a clean pass.
+                reconciled.Add(visibleItem);
+            }
+            retainedIds.Add(visibleItem.CanonicalId);
+        }
+
+        foreach (var nextItem in nextItems)
+        {
+            if (retainedIds.Add(nextItem.CanonicalId))
+            {
+                reconciled.Add(nextItem);
+            }
+        }
+
+        _visibleItems = reconciled;
+    }
+
+    private bool HasVisibleItemsForCurrentWeek(IReadOnlyList<PremiereItem> items)
+    {
+        var start = _filters.WeekStart;
+        var end = start.AddDays(6);
+        return items.Any(item => item.PremiereDate >= start && item.PremiereDate <= end);
+    }
+
+    private IReadOnlyList<PremiereItem> SourceProgressFilteredItems()
+    {
+        if (string.IsNullOrWhiteSpace(_sourceProgressFilter))
+        {
+            return _items;
+        }
+
+        var groupedEntry = GroupedLoadProgressEntries()
+            .LastOrDefault(progress => string.Equals(progress.SourceName, _sourceProgressFilter, StringComparison.OrdinalIgnoreCase));
+        if (groupedEntry is not null)
+        {
+            return groupedEntry.SourceItems;
+        }
+
+        var entry = _loadProgress
+            .LastOrDefault(progress => string.Equals(progress.SourceName, _sourceProgressFilter, StringComparison.OrdinalIgnoreCase));
+
+        return entry is null ? _items : entry.SourceItems;
+    }
+
+    private IReadOnlyList<LoadProgressEntry> GroupedLoadProgressEntries()
+    {
+        if (_loadProgress.Count == 0)
+        {
+            return [];
+        }
+
+        if (_groupedLoadProgressCacheVersion == _loadProgressVersion
+            && _groupedLoadProgressCacheLoadingState == _isLoading)
+        {
+            return _groupedLoadProgressCache;
+        }
+
+        var groupedEntries = new List<LoadProgressEntry>();
+        foreach (var group in _loadProgress.GroupBy(entry => ProgressGroupName(entry.SourceName), StringComparer.Ordinal))
+        {
+            var entries = group.ToArray();
+            if (entries.Length == 1 && string.Equals(entries[0].SourceName, group.Key, StringComparison.Ordinal))
+            {
+                groupedEntries.Add(entries[0]);
+                continue;
+            }
+
+            var sourceItems = MergeVisibleItems(entries.SelectMany(entry => entry.SourceItems));
+            var allItems = MergeVisibleItems(entries.SelectMany(entry => entry.Items));
+            var completedWork = entries.Any(entry => entry.CompletedWork is not null)
+                ? entries.Sum(entry => entry.CompletedWork ?? 0)
+                : (int?)null;
+            var totalWork = entries.Any(entry => entry.TotalWork is not null)
+                ? entries.Sum(entry => entry.TotalWork ?? 0)
+                : (int?)null;
+            var latestDetail = entries.LastOrDefault(entry => !string.IsNullOrWhiteSpace(entry.ProgressText))?.ProgressText;
+            var unmappedCount = entries.Sum(entry => entry.UnmappedCount ?? 0);
+            var daySourceGroupStillLoading = IsDaySourceProgressGroup(group.Key) && _isLoading;
+            if (daySourceGroupStillLoading)
+            {
+                latestDetail = StripTerminalProgressPrefix(latestDetail);
+                if (completedWork is { } completed && totalWork is { } total && completed >= total)
+                {
+                    totalWork = completed + 1;
+                }
+            }
+
+            var progressText = daySourceGroupStillLoading
+                ? string.IsNullOrWhiteSpace(latestDetail)
+                    ? FormatDayBatchCount(entries.Length)
+                    : $"{FormatDayBatchCount(entries.Length)} · {latestDetail}"
+                : entries.Length == 1
+                    ? latestDetail
+                    : string.IsNullOrWhiteSpace(latestDetail)
+                        ? FormatDayBatchCount(entries.Length)
+                        : $"{FormatDayBatchCount(entries.Length)} · {latestDetail}";
+            if (daySourceGroupStillLoading && string.IsNullOrWhiteSpace(progressText))
+            {
+                progressText = FormatDayBatchCount(entries.Length);
+            }
+
+            var phase = !daySourceGroupStillLoading
+                && entries.All(entry => entry.IsFinal || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase))
+                ? "complete"
+                : entries.All(entry => string.Equals(entry.Phase, "cache", StringComparison.OrdinalIgnoreCase))
+                    ? "cache"
+                    : "loading";
+
+            groupedEntries.Add(new LoadProgressEntry(
+                group.Key,
+                sourceItems.Count,
+                entries.Max(entry => entry.TotalItemCount),
+                !daySourceGroupStillLoading && entries.All(entry => entry.IsFinal),
+                entries.All(entry => entry.FromCache),
+                sourceItems,
+                allItems,
+                completedWork,
+                totalWork,
+                progressText,
+                entries.Max(entry => entry.ElapsedMilliseconds),
+                phase,
+                unmappedCount));
+        }
+
+        _groupedLoadProgressCache = groupedEntries;
+        _groupedLoadProgressCacheVersion = _loadProgressVersion;
+        _groupedLoadProgressCacheLoadingState = _isLoading;
+        return _groupedLoadProgressCache;
+    }
+
+    private void InvalidateLoadProgressCache()
+    {
+        unchecked
+        {
+            _loadProgressVersion++;
+        }
+    }
+
+    private static bool IsDaySourceProgressGroup(string sourceName)
+    {
+        return string.Equals(sourceName, "TMDb series", StringComparison.Ordinal)
+            || string.Equals(sourceName, "TMDb movies", StringComparison.Ordinal);
+    }
+
+    private static string FormatDayBatchCount(int count)
+    {
+        return count == 1 ? "1 day batch" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} day batches";
+    }
+
+    private static string? StripTerminalProgressPrefix(string? progressText)
+    {
+        if (string.IsNullOrWhiteSpace(progressText))
+        {
+            return progressText;
+        }
+
+        const string donePrefix = "Done - ";
+        if (progressText.StartsWith(donePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return progressText[donePrefix.Length..];
+        }
+
+        return string.Equals(progressText, "Done", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : progressText;
+    }
+
+    private void FinalizeOpenProgressEntries()
+    {
+        for (var index = 0; index < _loadProgress.Count; index++)
+        {
+            var entry = _loadProgress[index];
+            if (entry.IsFinal)
+            {
+                continue;
+            }
+
+            _loadProgress[index] = entry with
+            {
+                IsFinal = true,
+                CompletedWork = entry.TotalWork is > 0 ? entry.TotalWork : entry.CompletedWork,
+                ProgressText = string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(entry.ProgressText)
+                    ? entry.ProgressText
+                    : SourceCompletionProgressText(entry),
+                Phase = "complete"
+            };
+            InvalidateLoadProgressCache();
+        }
+    }
+
+    private static string SourceCompletionProgressText(LoadProgressEntry entry)
+    {
+        return entry.SourceItemCount == 0 ? "Done - no matching cards" : "Done";
+    }
+
+    private static string ProgressGroupName(string sourceName)
+    {
+        if (sourceName.StartsWith("TMDb series ", StringComparison.Ordinal))
+        {
+            return "TMDb series";
+        }
+
+        if (sourceName.StartsWith("TMDb movies ", StringComparison.Ordinal))
+        {
+            return "TMDb movies";
+        }
+
+        return sourceName;
+    }
+
+    private static IReadOnlyList<PremiereItem> MergeVisibleItems(IEnumerable<PremiereItem> items)
+    {
+        return items
+            .GroupBy(item => item.CanonicalId)
+            .Select(group => group
+                .OrderByDescending(item => item.VerificationState == PremiereVerificationState.Verified)
+                .ThenByDescending(item => item.TrailerUrl is not null)
+                .ThenByDescending(item => item.PosterUrl is not null)
+                .ThenByDescending(item => item.SourceNames.Length)
+                .ThenByDescending(item => item.Genres.Length)
+                .First())
+            .OrderBy(item => item.PremiereDate)
+            .ThenBy(item => item.VerificationState == PremiereVerificationState.Unverified ? 1 : 0)
+            .ThenBy(item => item.MediaType)
+            .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private string QueryProgressPanelClass()
+    {
+        var className = _isQueryProgressExpanded ? "query-progress" : "query-progress compact";
+        return ShouldQuietCompactQueryProgressOnMobile()
+            ? $"{className} mobile-quiet"
+            : className;
+    }
+
+    private bool ShouldShowQueryProgress()
+    {
+        var entries = GroupedLoadProgressEntries();
+        if (!HasQueryProgressEntries(entries))
+        {
+            return false;
+        }
+
+        if (_isQueryProgressExpanded || !string.IsNullOrWhiteSpace(_sourceProgressFilter))
+        {
+            return true;
+        }
+
+        if (_isLoading)
+        {
+            if (_hasLoadedAtLeastOnce)
+            {
+                return false;
+            }
+
+            return _items.Count > 0
+            || entries.Any(entry => entry.SourceItemCount > 0 || entry.TotalItemCount > 0);
+        }
+
+        return entries.Any(IsAttentionProgressEntry);
+    }
+
+    private bool HasQueryProgressEntries()
+    {
+        return HasQueryProgressEntries(GroupedLoadProgressEntries());
+    }
+
+    private static bool HasQueryProgressEntries(IReadOnlyList<LoadProgressEntry> entries)
+    {
+        return entries.Any(entry =>
+            !entry.IsFinal
+            || !string.Equals(entry.SourceName, "Complete", StringComparison.Ordinal));
+    }
+
+    private static bool IsAttentionProgressEntry(LoadProgressEntry entry)
+    {
+        return string.Equals(entry.SourceName, "Load budget", StringComparison.Ordinal)
+            || !IsCompletedProgressEntry(entry);
+    }
+
+    private static bool IsCompletedProgressEntry(LoadProgressEntry entry)
+    {
+        return entry.IsFinal
+            || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(entry.Phase, "cache", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool ShouldQuietCompactQueryProgressOnMobile()
+    {
+        if (_isLoading
+            || _isQueryProgressExpanded
+            || !string.IsNullOrWhiteSpace(_sourceProgressFilter))
+        {
+            return false;
+        }
+
+        return !GroupedLoadProgressEntries().Any(IsFailureProgressEntry);
+    }
+
+    private static bool IsFailureProgressEntry(LoadProgressEntry entry)
+    {
+        return string.Equals(entry.Phase, "error", StringComparison.OrdinalIgnoreCase)
+            || entry.ProgressText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true
+            || entry.ProgressText?.StartsWith("Skipped", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private string QueryProgressSummaryText()
+    {
+        if (!string.IsNullOrWhiteSpace(_sourceProgressFilter))
+        {
+            return $"{_sourceProgressFilter}: {_visibleItems.Count.ToString("N0", CultureInfo.InvariantCulture)} shown / {_items.Count.ToString("N0", CultureInfo.InvariantCulture)} total";
+        }
+
+        return $"{_items.Count.ToString("N0", CultureInfo.InvariantCulture)} total";
+    }
+
+    private string? QueryProgressDetailsId()
+    {
+        return _isQueryProgressExpanded ? "query-progress-details" : null;
+    }
+
+    private static string AriaExpanded(bool expanded)
+    {
+        return expanded ? "true" : "false";
+    }
+
+    private void ToggleQueryProgressDetails()
+    {
+        _isQueryProgressExpanded = !_isQueryProgressExpanded;
+    }
+
+    private void ToggleCommandPalette()
+    {
+        _isCommandPaletteOpen = !_isCommandPaletteOpen;
+    }
+
+    private async Task QuickRefreshFromCommandPaletteAsync()
+    {
+        _isCommandPaletteOpen = false;
+        await QuickRefreshAsync();
+    }
+
+    private async Task FullRefreshFromCommandPaletteAsync()
+    {
+        _isCommandPaletteOpen = false;
+        await RefreshAsync();
+    }
+
+    private void ShowSourceDetailsFromCommandPalette()
+    {
+        _isCommandPaletteOpen = false;
+        _isQueryProgressExpanded = true;
+    }
+
+    private async Task CurrentWeekFromCommandPaletteAsync()
+    {
+        _isCommandPaletteOpen = false;
+        await CurrentWeek();
+    }
+
+    private void OpenSettings()
+    {
+        _isCommandPaletteOpen = false;
+        Navigation.NavigateTo("/settings");
+    }
+
+    private string QueryProgressClass(LoadProgressEntry entry)
+    {
+        var classes = new List<string> { "query-progress-entry" };
+        if (IsSourceProgressFilterActive(entry))
+        {
+            classes.Add("active");
+        }
+
+        if (entry.IsFinal || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase))
+        {
+            classes.Add("final");
+        }
+
+        if (entry.FromCache)
+        {
+            classes.Add("cache");
+        }
+
+        return string.Join(' ', classes);
+    }
+
+    private string QueryProgressTitle(LoadProgressEntry entry)
+    {
+        return IsSourceProgressFilterActive(entry)
+            ? "Show all loaded sources"
+            : $"Show only {entry.SourceName} results";
+    }
+
+    private static int QueryProgressPercent(LoadProgressEntry entry)
+    {
+        if (entry.IsFinal || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase))
+        {
+            return 100;
+        }
+
+        if (entry.CompletedWork is not { } completed || entry.TotalWork is not > 0)
+        {
+            return 0;
+        }
+
+        return Math.Clamp((int)Math.Round(completed * 100d / entry.TotalWork.Value), 0, 100);
+    }
+
+    private static string QueryProgressWidth(LoadProgressEntry entry)
+    {
+        return $"{QueryProgressPercent(entry).ToString(CultureInfo.InvariantCulture)}%";
+    }
+
+    private static string FormatElapsed(long elapsedMilliseconds)
+    {
+        return elapsedMilliseconds < 1000
+            ? $"{elapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms"
+            : $"{(elapsedMilliseconds / 1000d).ToString("0.0", CultureInfo.InvariantCulture)} s";
+    }
+
+    private static string FormatSourceCardCount(int itemCount)
+    {
+        return itemCount == 1 ? "1 card" : $"{itemCount.ToString("N0", CultureInfo.InvariantCulture)} cards";
+    }
+
+    private static string FormatUnmappedCount(int count)
+    {
+        return count == 1 ? "1 unverified" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} unverified";
+    }
+
+    private bool IsSourceProgressFilterActive(LoadProgressEntry entry)
+    {
+        return string.Equals(_sourceProgressFilter, entry.SourceName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ToggleSourceProgressFilter(LoadProgressEntry entry)
+    {
+        _sourceProgressFilter = IsSourceProgressFilterActive(entry)
+            ? null
+            : entry.SourceName;
+        RecalculateVisibleItems();
+    }
+
+    private async Task ClearSourceProgressFilterAsync()
+    {
+        await FocusCalendarHeadingAsync();
+        _sourceProgressFilter = null;
+        RecalculateVisibleItems();
+        QueueCalendarHeadingFocus();
+        await FocusCalendarHeadingAsync();
+    }
+
+    private async Task OnSelectedDayChanged(DateOnly day)
+    {
+        _selectedDay = day;
+        UpdateUrl(replace: true, forceLoadOnChange: false);
+        await Task.CompletedTask;
+    }
+
+    private async Task NavigateToCalendarDayAsync(DateOnly day)
+    {
+        _selectedDay = day;
+        var targetWeekStart = CalendarFilters.StartOfWeek(day);
+        if (_filters.WeekStart == targetWeekStart)
+        {
+            return;
+        }
+
+        _filters.WeekStart = targetWeekStart;
+        RecalculateVisibleItems();
+        var navigationChanged = UpdateUrl(replace: true);
+        await PersistCurrentFiltersAsync();
+        if (!navigationChanged)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private DateOnly? PriorityDateForCurrentWeek(DateOnly start, DateOnly end)
+    {
+        return _selectedDay is { } selectedDay && selectedDay >= start && selectedDay <= end
+            ? selectedDay
+            : start;
+    }
+
+    private CalendarPageMode ResolvePageMode()
+    {
+        return ResolvePageMode(Navigation.Uri);
+    }
+
+    private CalendarPageMode ResolvePageMode(string uri)
+    {
+        return CalendarQueryCodec.ResolvePageMode(Navigation.ToAbsoluteUri(uri));
+    }
+
+    private void ApplyPageMode()
+    {
+        ApplyPageMode(_filters);
+    }
+
+    private void ApplyPageMode(CalendarFilters filters)
+    {
+        CalendarFilterState.ApplyPageMode(filters, _pageMode);
+    }
+
+    private void OpenFilters()
+    {
+        _isCommandPaletteOpen = false;
+        _isFilterPaneOpen = true;
+    }
+
+    private async Task LoadPresetsAsync()
+    {
+        try
+        {
+            _filterPresets = await CalendarPresetService.GetPresetsAsync(_pageMode, _disposeCancellation.Token);
+            if (_selectedPresetId is not null && !_filterPresets.Any(preset => preset.Id == _selectedPresetId))
+            {
+                _selectedPresetId = null;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _filterPresets = [];
+        }
+    }
+
+    private async Task SavePresetAsync()
+    {
+        if (_isSavingPreset)
+        {
+            return;
+        }
+
+        _isSavingPreset = true;
+        try
+        {
+            var preset = await CalendarPresetService.SaveAsync(_presetName, _pageMode, _filters, _disposeCancellation.Token);
+            _presetName = preset.Name;
+            _selectedPresetId = preset.Id;
+            await LoadPresetsAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowToast(ToastKind.Error, "Preset failed", ex.Message);
+        }
+        finally
+        {
+            _isSavingPreset = false;
+        }
+    }
+
+    private async Task ApplySelectedPresetAsync()
+    {
+        var preset = _filterPresets.FirstOrDefault(candidate => candidate.Id == _selectedPresetId);
+        if (preset is not null)
+        {
+            await ApplyPresetAsync(preset);
+        }
+    }
+
+    private async Task ApplyPresetAsync(CalendarFilterPreset preset)
+    {
+        var weekStart = _filters.WeekStart;
+        var selectedDay = _selectedDay;
+        var previousCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+        var filters = CalendarFilterState.Clone(preset.Filters);
+        filters.WeekStart = weekStart;
+        CalendarFilterState.ApplyPageMode(filters, _pageMode);
+        CalendarFilterState.Normalize(filters);
+        _filters = filters;
+        _selectedDay = selectedDay;
+        _selectedPresetId = preset.Id;
+        _isCommandPaletteOpen = false;
+        RecalculateVisibleItems();
+        var nextCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+        var forceLoadOnChange = !string.Equals(previousCriteriaKey, nextCriteriaKey, StringComparison.Ordinal);
+        var navigationChanged = UpdateUrl(replace: true, forceLoadOnChange);
+        await PersistCurrentFiltersAsync();
+        if (!navigationChanged && forceLoadOnChange)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private async Task AddToArrAsync(PremiereItem item)
+    {
+        if (!_arrAddInProgress.Add(item.CanonicalId))
+        {
+            return;
+        }
+
+        try
+        {
+            var result = await ArrIntegrationService.AddAsync(item);
+            if (result.Succeeded)
+            {
+                var title = result.Target == ArrIntegrationTarget.Radarr ? "Radarr" : "Sonarr";
+                ShowToast(ToastKind.Success, title, result.Message);
+            }
+            else
+            {
+                var title = result.Target == ArrIntegrationTarget.Radarr ? "Radarr failed" : "Sonarr failed";
+                ShowToast(ToastKind.Error, title, result.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowToast(ToastKind.Error, "Integration failed", ex.Message);
+        }
+        finally
+        {
+            _arrAddInProgress.Remove(item.CanonicalId);
+        }
+    }
+
+    private void ShowToast(ToastKind kind, string title, string message)
+    {
+        var toast = new ToastMessage(Guid.NewGuid(), kind, title, message);
+        _toasts.Add(toast);
+        _ = RemoveToastAfterDelayAsync(toast.Id, _disposeCancellation.Token);
+    }
+
+    private async Task RemoveToastAfterDelayAsync(Guid id, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            _toasts.RemoveAll(toast => toast.Id == id);
+            await InvokeAsync(() =>
+            {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    StateHasChanged();
+                }
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private Task CloseFilters()
+    {
+        _isFilterPaneOpen = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveFilters(CalendarFilters savedFilters)
+    {
+        var weekStart = _filters.WeekStart;
+        var previousCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+        CalendarFilterState.Normalize(savedFilters);
+        CalendarFilterState.ApplyPageMode(savedFilters, _pageMode);
+        _filters = CalendarFilterState.Clone(savedFilters);
+        _filters.WeekStart = weekStart;
+        _isFilterPaneOpen = false;
+        _queuedViewSyncState = null;
+        RecalculateVisibleItems();
+        var nextCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
+        var forceLoadOnChange = !string.Equals(previousCriteriaKey, nextCriteriaKey, StringComparison.Ordinal);
+        var navigationChanged = UpdateUrl(replace: true, forceLoadOnChange);
+        await PersistCurrentFiltersAsync();
+        if (!navigationChanged && forceLoadOnChange)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private int ActiveFilterCount()
+    {
+        var count = 0;
+        if (_pageMode == CalendarPageMode.All && MediaValue(_filters) != "all")
+        {
+            count++;
+        }
+
+        if (_filters.MinScore > 0 || _filters.MaxScore < 10)
+        {
+            count++;
+        }
+
+        if (_filters.MinVoteCount > 0)
+        {
+            count++;
+        }
+
+        count += GlobalFilterCount(_filters);
+
+        if (_pageMode is CalendarPageMode.All or CalendarPageMode.Series)
+        {
+            count += MediaFilterCount(PremiereMediaType.Series, _filters.SeriesFilters, _filters);
+        }
+
+        if (_pageMode is CalendarPageMode.All or CalendarPageMode.Movies)
+        {
+            count += MediaFilterCount(PremiereMediaType.Movie, _filters.MovieFilters, _filters);
+        }
+
+        return count;
+    }
+
+    private static int GlobalFilterCount(CalendarFilters filters)
+    {
+        var count = 0;
+        if (filters.Language != LanguageFilter.Both)
+        {
+            count++;
+        }
+
+        if (filters.OriginGroup != OriginGroupFilter.AllConfigured)
+        {
+            count++;
+        }
+
+        count += CountCriteria(filters.GenreIds.Count > 0);
+        count += CountCriteria(filters.SelectedSources.Count > 0);
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.NetworkText));
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.SearchText));
+        count += CountCriteria(!string.IsNullOrWhiteSpace(filters.KeywordText));
+        count += CountCriteria(HasRuntimeFilter(filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes));
+        return count;
+    }
+
+    private static int MediaFilterCount(PremiereMediaType mediaType, MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        var count = 0;
+        count += CountCriteria(mediaType == PremiereMediaType.Series && filters.SeriesDateMode != SeriesDateMode.AllEpisodes);
+        count += CountCriteria(
+            filters.OriginalLanguages.Count > 0
+            && !MatchesGlobalLanguageFilter(filters, globalFilters));
+        count += CountCriteria(
+            filters.OriginCountries.Count > 0
+            && !MatchesGlobalOriginFilter(filters, globalFilters));
+        count += CountCriteria(
+            filters.GenreIds.Count > 0
+            && !MatchesGlobalGenreFilter(filters, globalFilters));
+        count += CountCriteria(
+            !string.IsNullOrWhiteSpace(filters.WatchRegion)
+            || (filters.SelectedSources.Count > 0 && !MatchesGlobalSourcesFilter(filters, globalFilters)));
+        count += CountCriteria(filters.MonetizationTypes.Count > 0);
+        count += CountCriteria(mediaType == PremiereMediaType.Movie && filters.MovieReleaseTypes.Count > 0);
+        count += CountCriteria(
+            mediaType == PremiereMediaType.Movie
+            && (filters.Certifications.Count > 0 || !string.IsNullOrWhiteSpace(filters.CertificationCountry)));
+        count += CountCriteria(mediaType == PremiereMediaType.Series && filters.TvStatuses.Count > 0);
+        count += CountCriteria(mediaType == PremiereMediaType.Series && filters.TvTypes.Count > 0);
+        count += CountCriteria(
+            !string.IsNullOrWhiteSpace(filters.SearchText)
+            && !MatchesGlobalSearchFilter(filters, globalFilters));
+        count += CountCriteria(
+            !string.IsNullOrWhiteSpace(filters.KeywordText)
+            && !MatchesGlobalKeywordFilter(filters, globalFilters));
+        count += CountCriteria(
+            !string.IsNullOrWhiteSpace(filters.SourceText)
+            && !MatchesGlobalNetworkFilter(filters, globalFilters));
+        count += CountCriteria(
+            HasRuntimeFilter(filters.RuntimeMinMinutes, filters.RuntimeMaxMinutes)
+            && !MatchesGlobalRuntimeFilter(filters, globalFilters));
+        return count;
+    }
+
+    private static int CountCriteria(bool condition)
+    {
+        return condition ? 1 : 0;
+    }
+
+    private static bool MatchesGlobalLanguageFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        var language = LanguageValue(globalFilters.Language);
+        return !string.Equals(language, "both", StringComparison.Ordinal)
+            && filters.OriginalLanguages.Count == 1
+            && string.Equals(filters.OriginalLanguages[0].Trim(), language, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesGlobalOriginFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        var countries = OriginCountryValues(globalFilters.OriginGroup);
+        return countries.Count > 0 && SameStringSet(filters.OriginCountries, countries);
+    }
+
+    private static bool MatchesGlobalGenreFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return globalFilters.GenreIds.Count > 0 && SameIntSet(filters.GenreIds, globalFilters.GenreIds);
+    }
+
+    private static bool MatchesGlobalSourcesFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return globalFilters.SelectedSources.Count > 0 && SameStringSet(filters.SelectedSources, globalFilters.SelectedSources);
+    }
+
+    private static bool MatchesGlobalNetworkFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return SameNonEmptyText(filters.SourceText, globalFilters.NetworkText);
+    }
+
+    private static bool MatchesGlobalSearchFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return SameNonEmptyText(filters.SearchText, globalFilters.SearchText);
+    }
+
+    private static bool MatchesGlobalKeywordFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return SameNonEmptyText(filters.KeywordText, globalFilters.KeywordText);
+    }
+
+    private static bool MatchesGlobalRuntimeFilter(MediaFilterSet filters, CalendarFilters globalFilters)
+    {
+        return HasRuntimeFilter(globalFilters.RuntimeMinMinutes, globalFilters.RuntimeMaxMinutes)
+            && filters.RuntimeMinMinutes == globalFilters.RuntimeMinMinutes
+            && filters.RuntimeMaxMinutes == globalFilters.RuntimeMaxMinutes;
+    }
+
+    private static bool HasRuntimeFilter(int minMinutes, int maxMinutes)
+    {
+        return minMinutes > 0 || maxMinutes < 360;
+    }
+
+    private static bool SameNonEmptyText(string value, string globalValue)
+    {
+        return !string.IsNullOrWhiteSpace(globalValue)
+            && string.Equals(value.Trim(), globalValue.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool SameStringSet(IReadOnlyCollection<string> values, IReadOnlyCollection<string> globalValues)
+    {
+        var normalizedValues = values
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var normalizedGlobalValues = globalValues
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return normalizedGlobalValues.Count > 0 && normalizedValues.SetEquals(normalizedGlobalValues);
+    }
+
+    private static bool SameIntSet(IReadOnlyCollection<int> values, IReadOnlyCollection<int> globalValues)
+    {
+        var normalizedValues = values
+            .Where(id => id > 0)
+            .ToHashSet();
+        var normalizedGlobalValues = globalValues
+            .Where(id => id > 0)
+            .ToHashSet();
+        return normalizedGlobalValues.Count > 0 && normalizedValues.SetEquals(normalizedGlobalValues);
+    }
+
+    private async Task PreviousWeek()
+    {
+        _filters.WeekStart = _filters.WeekStart.AddDays(-7);
+        _selectedDay = _selectedDay?.AddDays(-7) ?? _filters.WeekStart;
+        var navigationChanged = UpdateUrl(replace: true);
+        await PersistCurrentFiltersAsync();
+        if (!navigationChanged)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private async Task CurrentWeek()
+    {
+        _filters.WeekStart = CalendarFilters.StartOfWeek(DateOnly.FromDateTime(DateTime.Today));
+        _selectedDay = DateOnly.FromDateTime(DateTime.Today);
+        var navigationChanged = UpdateUrl(replace: true);
+        await PersistCurrentFiltersAsync();
+        if (!navigationChanged)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private async Task NextWeek()
+    {
+        _filters.WeekStart = _filters.WeekStart.AddDays(7);
+        _selectedDay = _selectedDay?.AddDays(7) ?? _filters.WeekStart;
+        var navigationChanged = UpdateUrl(replace: true);
+        await PersistCurrentFiltersAsync();
+        if (!navigationChanged)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private void ApplyQueryParameters()
+    {
+        ApplyQueryParameters(Navigation.Uri);
+    }
+
+    private void ApplyQueryParameters(string uri)
+    {
+        var query = QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(uri).Query);
+        _filters = new CalendarFilters
+        {
+            WeekStart = _filters.WeekStart
+        };
+        _filters.ShowSeries = true;
+        _filters.ShowMovies = true;
+
+        if (TryGet(query, "week", out var week)
+            && DateOnly.TryParseExact(week, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var weekStart))
+        {
+            _filters.WeekStart = CalendarFilters.StartOfWeek(weekStart);
+        }
+
+        _selectedDay = null;
+        if (TryGet(query, "day", out var day)
+            && DateOnly.TryParseExact(day, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var selectedDay))
+        {
+            _selectedDay = selectedDay;
+            _filters.WeekStart = CalendarFilters.StartOfWeek(selectedDay);
+        }
+
+        if (TryGet(query, "media", out var media))
+        {
+            (_filters.ShowSeries, _filters.ShowMovies) = media.ToLowerInvariant() switch
+            {
+                "series" => (true, false),
+                "movies" => (false, true),
+                _ => (true, true)
+            };
+        }
+
+        if (TryGet(query, "sort", out var sort))
+        {
+            _filters.SortMode = ParseSortMode(sort);
+        }
+
+        if (TryGet(query, "dir", out var direction))
+        {
+            _filters.SortDirection = string.Equals(direction, "desc", StringComparison.OrdinalIgnoreCase)
+                ? SortDirection.Descending
+                : SortDirection.Ascending;
+        }
+
+        _filters.MinScore = ParseDouble(query, "min", _filters.MinScore);
+        _filters.MaxScore = ParseDouble(query, "max", _filters.MaxScore);
+        _filters.MinVoteCount = ParseInt(query, "minVotes", _filters.MinVoteCount);
+        _filters.RuntimeMinMinutes = ParseInt(query, "runtimeMin", _filters.RuntimeMinMinutes);
+        _filters.RuntimeMaxMinutes = ParseInt(query, "runtimeMax", _filters.RuntimeMaxMinutes);
+        if (TryGet(query, "score", out var scoreSource))
+        {
+            _filters.ScoreSource = ParseScoreSource(scoreSource);
+        }
+
+        if (TryGet(query, "lang", out var language))
+        {
+            _filters.Language = language.ToLowerInvariant() switch
+            {
+                "en" => LanguageFilter.English,
+                "nl" => LanguageFilter.Dutch,
+                "fr" => LanguageFilter.French,
+                _ => LanguageFilter.Both
+            };
+        }
+
+        if (TryGet(query, "origin", out var origin))
+        {
+            _filters.OriginGroup = origin.ToLowerInvariant() switch
+            {
+                "be" => OriginGroupFilter.Belgium,
+                "us" => OriginGroupFilter.UnitedStates,
+                "gb" => OriginGroupFilter.UnitedKingdom,
+                "au" => OriginGroupFilter.Australia,
+                "nl" => OriginGroupFilter.DutchLanguage,
+                _ => OriginGroupFilter.AllConfigured
+            };
+        }
+
+        if (TryGet(query, "genres", out var genres))
+        {
+            _filters.GenreIds = genres
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(value => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) ? id : 0)
+                .Where(id => id > 0)
+                .Distinct()
+                .Order()
+                .ToList();
+        }
+
+        if (TryGet(query, "sources", out var sources))
+        {
+            _filters.SelectedSources = sources
+                .Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(source => !string.IsNullOrWhiteSpace(source))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(source => source, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        _filters.NetworkText = QueryText(query, "network");
+        _filters.KeywordText = QueryText(query, "keywords");
+        _filters.SearchText = QueryText(query, "q");
+
+        ApplyMediaFilterQuery(query, PremiereMediaType.Series, "series", _filters.SeriesFilters);
+        ApplyMediaFilterQuery(query, PremiereMediaType.Movie, "movie", _filters.MovieFilters);
+        ApplyLegacyMediaQuery(query);
+        MirrorSingleMediaLanguageQueryForAllView(query);
+        CalendarFilterState.Normalize(_filters);
+    }
+
+    private void ApplyMediaFilterQuery(
+        IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query,
+        PremiereMediaType mediaType,
+        string prefix,
+        MediaFilterSet filters)
+    {
+        if (mediaType == PremiereMediaType.Series && TryGet(query, $"{prefix}Scope", out var scope))
+        {
+            filters.SeriesDateMode = ParseSeriesDateMode(scope);
+        }
+
+        if (TryGet(query, $"{prefix}Lang", out var language))
+        {
+            filters.OriginalLanguages = language
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Trim().ToLowerInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        filters.OriginCountries = ParseStringList(query, $"{prefix}Origins", ',')
+            .Select(country => country.ToUpperInvariant())
+            .ToList();
+        filters.GenreIds = ParseIntList(query, $"{prefix}Genres");
+        filters.SelectedSources = ParseStringList(query, $"{prefix}Sources", '|');
+        filters.WatchRegion = QueryText(query, $"{prefix}WatchRegion").ToUpperInvariant();
+        filters.SourceText = QueryText(query, $"{prefix}SourceText");
+        filters.MonetizationTypes = ParseStringList(query, $"{prefix}Availabilities", ',');
+        if (mediaType == PremiereMediaType.Movie)
+        {
+            filters.MovieReleaseTypes = ParseIntList(query, $"{prefix}ReleaseTypes");
+            filters.Certifications = ParseStringList(query, $"{prefix}Certifications", '|');
+            filters.CertificationCountry = QueryText(query, $"{prefix}CertificationCountry").ToUpperInvariant();
+        }
+
+        if (mediaType == PremiereMediaType.Series)
+        {
+            filters.TvStatuses = ParseStringList(query, $"{prefix}Statuses", '|');
+            filters.TvTypes = ParseStringList(query, $"{prefix}Types", '|');
+        }
+
+        filters.RuntimeMinMinutes = ParseInt(query, $"{prefix}RuntimeMin", filters.RuntimeMinMinutes);
+        filters.RuntimeMaxMinutes = ParseInt(query, $"{prefix}RuntimeMax", filters.RuntimeMaxMinutes);
+        filters.KeywordText = QueryText(query, $"{prefix}Keywords");
+        filters.SearchText = QueryText(query, $"{prefix}Q");
+    }
+
+    private void ApplyLegacyMediaQuery(IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query)
+    {
+        var targets = _pageMode switch
+        {
+            CalendarPageMode.Series => new[] { _filters.SeriesFilters },
+            CalendarPageMode.Movies => new[] { _filters.MovieFilters },
+            _ => new[] { _filters.SeriesFilters, _filters.MovieFilters }
+        };
+
+        foreach (var target in targets)
+        {
+            if (target.HasCriteria)
+            {
+                continue;
+            }
+
+            target.OriginalLanguages = LanguageValue(_filters.Language) == "both"
+                ? []
+                : [LanguageValue(_filters.Language)];
+            target.OriginCountries = OriginCountryValues(_filters.OriginGroup);
+            target.GenreIds = [.. _filters.GenreIds];
+            target.SelectedSources = [.. _filters.SelectedSources];
+            target.SourceText = _filters.NetworkText;
+            target.RuntimeMinMinutes = _filters.RuntimeMinMinutes;
+            target.RuntimeMaxMinutes = _filters.RuntimeMaxMinutes;
+            target.KeywordText = _filters.KeywordText;
+            target.SearchText = _filters.SearchText;
+        }
+    }
+
+    private void MirrorSingleMediaLanguageQueryForAllView(IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query)
+    {
+        if (_pageMode != CalendarPageMode.All || !_filters.ShowSeries || !_filters.ShowMovies)
+        {
+            return;
+        }
+
+        var hasSeriesLanguageQuery = TryGet(query, "seriesLang", out _);
+        var hasMovieLanguageQuery = TryGet(query, "movieLang", out _);
+
+        if (hasSeriesLanguageQuery
+            && !hasMovieLanguageQuery
+            && _filters.SeriesFilters.OriginalLanguages.Count > 0
+            && _filters.MovieFilters.OriginalLanguages.Count == 0)
+        {
+            _filters.MovieFilters.OriginalLanguages = [.. _filters.SeriesFilters.OriginalLanguages];
+        }
+        else if (hasMovieLanguageQuery
+            && !hasSeriesLanguageQuery
+            && _filters.MovieFilters.OriginalLanguages.Count > 0
+            && _filters.SeriesFilters.OriginalLanguages.Count == 0)
+        {
+            _filters.SeriesFilters.OriginalLanguages = [.. _filters.MovieFilters.OriginalLanguages];
+        }
+    }
+
+    private bool UpdateUrl(bool replace, bool forceLoadOnChange = true)
+    {
+        var url = BuildFilterUrl();
+        if (!string.Equals(Navigation.Uri, url, StringComparison.Ordinal))
+        {
+            _forceLoadOnNextLocationChange = forceLoadOnChange;
+            Navigation.NavigateTo(url, replace);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void QueueCalendarHeadingFocus()
+    {
+        _focusCalendarHeadingAfterRender = true;
+    }
+
+    private async Task FocusCalendarHeadingAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarWeek.focusSelector", "[data-testid='calendar-focus-target']");
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (JSException)
+        {
+        }
+    }
+
+    private async Task ResetCalendarScrollAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("premiereCalendarWeek.scrollCalendarToTop");
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (JSException)
+        {
+        }
+    }
+
+    private async Task PersistCurrentFiltersAsync()
+    {
+        if (!_hasRendered)
+        {
+            return;
+        }
+
+        await PersistFiltersForModeAsync(_pageMode, _filters);
+    }
+
+    private async Task PersistFiltersForModeAsync(CalendarPageMode mode, CalendarFilters filters)
+    {
+        try
+        {
+            var query = BuildFilterQuery(mode, filters);
+            await JS.InvokeVoidAsync("premiereFilterStorage.set", StorageKey(mode), query);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (JSException)
+        {
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task<bool> RestoreSavedFiltersIfNeededAsync(string location)
+    {
+        if (!_hasRendered || HasMeaningfulFilterQuery(location))
+        {
+            return false;
+        }
+
+        if (_suppressLocalFilterRestoreOnce)
+        {
+            _suppressLocalFilterRestoreOnce = false;
+            return false;
+        }
+
+        var mode = ResolvePageMode(location);
+        try
+        {
+            var savedQuery = await GetSavedFilterQueryAsync(mode);
+            if (string.IsNullOrWhiteSpace(savedQuery))
+            {
+                return false;
+            }
+
+            var absoluteUri = Navigation.ToAbsoluteUri(location);
+            var path = absoluteUri.GetLeftPart(UriPartial.Path);
+            var restoredQuery = FilterStorageQueryComposer.ComposeRestoredQuery(absoluteUri.Query, savedQuery);
+            if (string.IsNullOrWhiteSpace(restoredQuery)
+                || !FilterStorageQueryComposer.HasMeaningfulFilterQuery($"?{restoredQuery}"))
+            {
+                return false;
+            }
+
+            var target = $"{path}?{restoredQuery}";
+            if (string.Equals(target, $"{path}{absoluteUri.Query}", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            _forceLoadOnNextLocationChange = !_hasLoadedAtLeastOnce;
+            Navigation.NavigateTo(target, replace: true);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (JSException)
+        {
+            return false;
+        }
+        catch (JSDisconnectedException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<string?> GetSavedFilterQueryAsync(CalendarPageMode mode)
+    {
+        try
+        {
+            return await JS.InvokeAsync<string?>("premiereFilterStorage.get", StorageKey(mode));
+        }
+        catch (JSDisconnectedException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static bool HasMeaningfulFilterQuery(string location)
+    {
+        return FilterStorageQueryComposer.HasMeaningfulFilterQuery(new Uri(location, UriKind.Absolute).Query);
+    }
+
+    private static string StorageKey(CalendarPageMode mode)
+    {
+        return mode switch
+        {
+            CalendarPageMode.Series => "premiere-calendar:filters:v2:series",
+            CalendarPageMode.Movies => "premiere-calendar:filters:v2:movies",
+            _ => "premiere-calendar:filters:v2:all"
+        };
+    }
+
+    private string BuildFilterUrl()
+    {
+        return BuildFilterUrl(_pageMode, _filters, _selectedDay);
+    }
+
+    private string BuildFilterUrl(CalendarPageMode mode, CalendarFilters filters, DateOnly? selectedDay = null)
+    {
+        var baseUri = Navigation.ToAbsoluteUri(Navigation.Uri).GetLeftPart(UriPartial.Path);
+        var parameters = BuildFilterParameters(mode, filters, includeWeek: true, selectedDay);
+
+        return parameters.Count == 0
+            ? baseUri
+            : QueryHelpers.AddQueryString(baseUri, parameters);
+    }
+
+    private string BuildFilterQuery(CalendarPageMode mode, CalendarFilters filters)
+    {
+        return ToQueryString(BuildFilterParameters(mode, filters, includeWeek: false));
+    }
+
+    private static Dictionary<string, string?> BuildFilterParameters(
+        CalendarPageMode mode,
+        CalendarFilters filters,
+        bool includeWeek,
+        DateOnly? selectedDay = null)
+    {
+        var parameters = new Dictionary<string, string?>();
+
+        if (includeWeek)
+        {
+            parameters["week"] = filters.WeekStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            if (selectedDay is { } day
+                && day >= filters.WeekStart
+                && day <= filters.WeekStart.AddDays(6))
+            {
+                parameters["day"] = day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            }
+        }
+
+        if (filters.SortMode != PremiereSortMode.PremiereDate)
+        {
+            parameters["sort"] = SortModeValue(filters.SortMode);
+        }
+
+        if (filters.SortDirection != SortDirection.Ascending)
+        {
+            parameters["dir"] = filters.SortDirection == SortDirection.Descending ? "desc" : "asc";
+        }
+
+        if (filters.MinScore > 0)
+        {
+            parameters["min"] = filters.MinScore.ToString("0.0", CultureInfo.InvariantCulture);
+        }
+
+        if (filters.MaxScore < 10)
+        {
+            parameters["max"] = filters.MaxScore.ToString("0.0", CultureInfo.InvariantCulture);
+        }
+
+        if (filters.ScoreSource != ScoreSource.Tmdb)
+        {
+            parameters["score"] = ScoreSourceValue(filters.ScoreSource);
+        }
+
+        if (filters.MinVoteCount > 0)
+        {
+            parameters["minVotes"] = filters.MinVoteCount.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (filters.Language != LanguageFilter.Both)
+        {
+            parameters["lang"] = LanguageValue(filters.Language);
+        }
+
+        if (filters.OriginGroup != OriginGroupFilter.AllConfigured)
+        {
+            parameters["origin"] = OriginValue(filters.OriginGroup);
+        }
+
+        if (filters.RuntimeMinMinutes > 0)
+        {
+            parameters["runtimeMin"] = filters.RuntimeMinMinutes.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (filters.RuntimeMaxMinutes < 360)
+        {
+            parameters["runtimeMax"] = filters.RuntimeMaxMinutes.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (mode == CalendarPageMode.All && MediaValue(filters) != "all")
+        {
+            parameters["media"] = MediaValue(filters);
+        }
+
+        if (filters.GenreIds.Count > 0)
+        {
+            parameters["genres"] = string.Join(',', filters.GenreIds);
+        }
+
+        if (filters.SelectedSources.Count > 0)
+        {
+            parameters["sources"] = string.Join('|', filters.SelectedSources);
+        }
+
+        AddIfNotBlank(parameters, "network", filters.NetworkText);
+        AddIfNotBlank(parameters, "keywords", filters.KeywordText);
+        AddIfNotBlank(parameters, "q", filters.SearchText);
+
+        if (mode is CalendarPageMode.All or CalendarPageMode.Series)
+        {
+            AddMediaFilterParameters(parameters, PremiereMediaType.Series, "series", filters.SeriesFilters);
+        }
+
+        if (mode is CalendarPageMode.All or CalendarPageMode.Movies)
+        {
+            AddMediaFilterParameters(parameters, PremiereMediaType.Movie, "movie", filters.MovieFilters);
+        }
+
+        return parameters;
+    }
+
+    private static void AddMediaFilterParameters(
+        IDictionary<string, string?> parameters,
+        PremiereMediaType mediaType,
+        string prefix,
+        MediaFilterSet filters)
+    {
+        if (mediaType == PremiereMediaType.Series && filters.SeriesDateMode != SeriesDateMode.AllEpisodes)
+        {
+            parameters[$"{prefix}Scope"] = SeriesDateModeValue(filters.SeriesDateMode);
+        }
+
+        AddIfNotEmpty(parameters, $"{prefix}Lang", filters.OriginalLanguages, ',');
+        AddIfNotEmpty(parameters, $"{prefix}Origins", filters.OriginCountries, ',');
+        AddIfNotEmpty(parameters, $"{prefix}Genres", filters.GenreIds, ',');
+        AddIfNotEmpty(parameters, $"{prefix}Sources", filters.SelectedSources, '|');
+        AddIfNotBlank(parameters, $"{prefix}WatchRegion", filters.WatchRegion);
+        AddIfNotBlank(parameters, $"{prefix}SourceText", filters.SourceText);
+        AddIfNotEmpty(parameters, $"{prefix}Availabilities", filters.MonetizationTypes, ',');
+        if (mediaType == PremiereMediaType.Movie)
+        {
+            AddIfNotEmpty(parameters, $"{prefix}ReleaseTypes", filters.MovieReleaseTypes, ',');
+            AddIfNotEmpty(parameters, $"{prefix}Certifications", filters.Certifications, '|');
+            AddIfNotBlank(parameters, $"{prefix}CertificationCountry", filters.CertificationCountry);
+        }
+
+        if (mediaType == PremiereMediaType.Series)
+        {
+            AddIfNotEmpty(parameters, $"{prefix}Statuses", filters.TvStatuses, '|');
+            AddIfNotEmpty(parameters, $"{prefix}Types", filters.TvTypes, '|');
+        }
+
+        if (filters.RuntimeMinMinutes > 0)
+        {
+            parameters[$"{prefix}RuntimeMin"] = filters.RuntimeMinMinutes.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (filters.RuntimeMaxMinutes < 360)
+        {
+            parameters[$"{prefix}RuntimeMax"] = filters.RuntimeMaxMinutes.ToString(CultureInfo.InvariantCulture);
+        }
+
+        AddIfNotBlank(parameters, $"{prefix}Keywords", filters.KeywordText);
+        AddIfNotBlank(parameters, $"{prefix}Q", filters.SearchText);
+    }
+
+    private static void AddIfNotBlank(IDictionary<string, string?> parameters, string key, string value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            parameters[key] = value.Trim();
+        }
+    }
+
+    private static void AddIfNotEmpty<T>(
+        IDictionary<string, string?> parameters,
+        string key,
+        IReadOnlyCollection<T> values,
+        char separator)
+    {
+        if (values.Count > 0)
+        {
+            parameters[key] = string.Join(separator, values);
+        }
+    }
+
+    private static string ToQueryString(IDictionary<string, string?> parameters)
+    {
+        return string.Join(
+            '&',
+            parameters
+                .Where(pair => !string.IsNullOrWhiteSpace(pair.Value))
+                .Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value!)}"));
+    }
+
+    private static string MediaValue(CalendarFilters filters)
+    {
+        if (filters.ShowSeries && !filters.ShowMovies)
+        {
+            return "series";
+        }
+
+        if (!filters.ShowSeries && filters.ShowMovies)
+        {
+            return "movies";
+        }
+
+        return "all";
+    }
+
+    private static PremiereSortMode ParseSortMode(string value)
+    {
+        return value.ToLowerInvariant() switch
+        {
+            "title" => PremiereSortMode.Title,
+            "score" => PremiereSortMode.Score,
+            "votes" => PremiereSortMode.VoteCount,
+            "runtime" => PremiereSortMode.Runtime,
+            _ => PremiereSortMode.PremiereDate
+        };
+    }
+
+    private static string SortModeValue(PremiereSortMode value)
+    {
+        return value switch
+        {
+            PremiereSortMode.Title => "title",
+            PremiereSortMode.Score => "score",
+            PremiereSortMode.VoteCount => "votes",
+            PremiereSortMode.Runtime => "runtime",
+            _ => "date"
+        };
+    }
+
+    private static ScoreSource ParseScoreSource(string value)
+    {
+        return value.ToLowerInvariant() switch
+        {
+            "imdb" => ScoreSource.Imdb,
+            "rt" or "rotten" or "rottentomatoes" => ScoreSource.RottenTomatoes,
+            "meta" or "metacritic" => ScoreSource.Metacritic,
+            _ => ScoreSource.Tmdb
+        };
+    }
+
+    private static string ScoreSourceValue(ScoreSource value)
+    {
+        return value switch
+        {
+            ScoreSource.Imdb => "imdb",
+            ScoreSource.RottenTomatoes => "rt",
+            ScoreSource.Metacritic => "meta",
+            _ => "tmdb"
+        };
+    }
+
+    private static SeriesDateMode ParseSeriesDateMode(string value)
+    {
+        return value.Equals("new", StringComparison.OrdinalIgnoreCase)
+            ? SeriesDateMode.NewSeriesOnly
+            : SeriesDateMode.AllEpisodes;
+    }
+
+    private static string SeriesDateModeValue(SeriesDateMode value)
+    {
+        return value == SeriesDateMode.NewSeriesOnly ? "new" : "episodes";
+    }
+
+    private static string LanguageValue(LanguageFilter value)
+    {
+        return value switch
+        {
+            LanguageFilter.English => "en",
+            LanguageFilter.Dutch => "nl",
+            LanguageFilter.French => "fr",
+            _ => "both"
+        };
+    }
+
+    private static string OriginValue(OriginGroupFilter value)
+    {
+        return value switch
+        {
+            OriginGroupFilter.Belgium => "be",
+            OriginGroupFilter.UnitedStates => "us",
+            OriginGroupFilter.UnitedKingdom => "gb",
+            OriginGroupFilter.Australia => "au",
+            OriginGroupFilter.DutchLanguage => "nl",
+            _ => "all"
+        };
+    }
+
+    private static bool TryGet(IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query, string key, out string value)
+    {
+        if (query.TryGetValue(key, out var values) && values.Count > 0)
+        {
+            for (var index = values.Count - 1; index >= 0; index--)
+            {
+                if (!string.IsNullOrWhiteSpace(values[index]))
+                {
+                    value = values[index]!;
+                    return true;
+                }
+            }
+
+            value = values[0] ?? "";
+            return true;
+        }
+
+        value = "";
+        return false;
+    }
+
+    private static string QueryText(IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query, string key)
+    {
+        return TryGet(query, key, out var value) ? value : "";
+    }
+
+    private static int ParseInt(
+        IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query,
+        string key,
+        int fallback)
+    {
+        return TryGet(query, key, out var value)
+            && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : fallback;
+    }
+
+    private static double ParseDouble(
+        IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query,
+        string key,
+        double fallback)
+    {
+        return TryGet(query, key, out var value)
+            && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : fallback;
+    }
+
+    private static List<string> ParseStringList(
+        IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query,
+        string key,
+        char separator)
+    {
+        return TryGet(query, key, out var value)
+            ? value
+                .Split(separator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                .ToList()
+            : [];
+    }
+
+    private static List<int> ParseIntList(
+        IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query,
+        string key)
+    {
+        return TryGet(query, key, out var value)
+            ? value
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(item => int.TryParse(item, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) ? id : 0)
+                .Where(id => id > 0)
+                .Distinct()
+                .Order()
+                .ToList()
+            : [];
+    }
+
+    private static List<string> OriginCountryValues(OriginGroupFilter value)
+    {
+        return value switch
+        {
+            OriginGroupFilter.Belgium => ["BE"],
+            OriginGroupFilter.UnitedStates => ["US"],
+            OriginGroupFilter.UnitedKingdom => ["GB"],
+            OriginGroupFilter.Australia => ["AU"],
+            _ => []
+        };
+    }
+
+    public void Dispose()
+    {
+        _isDisposed = true;
+        Navigation.LocationChanged -= OnLocationChanged;
+        ViewSyncService.StateChanged -= OnViewSyncStateChanged;
+        _disposeCancellation.Cancel();
+        _loadCancellation?.Cancel();
+        _loadCancellation?.Dispose();
+        _disposeCancellation.Dispose();
+    }
+
+    private sealed record LoadProgressEntry(
+        string SourceName,
+        int SourceItemCount,
+        int TotalItemCount,
+        bool IsFinal,
+        bool FromCache,
+        IReadOnlyList<PremiereItem> SourceItems,
+        IReadOnlyList<PremiereItem> Items,
+        int? CompletedWork,
+        int? TotalWork,
+        string? ProgressText,
+        long? ElapsedMilliseconds,
+        string Phase,
+        int? UnmappedCount);
+
+    private sealed record CacheFreshnessEntry(
+        string Label,
+        CalendarCacheMetadata? Metadata);
+}

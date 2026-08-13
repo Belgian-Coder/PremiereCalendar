@@ -33,7 +33,7 @@ internal sealed class DeterministicBrowserPremiereService : IPremiereService
         var index = 1;
         for (var day = start; day <= end; day = day.AddDays(1))
         {
-            for (var itemIndex = 0; itemIndex < 12; itemIndex++, index++)
+            for (var itemIndex = 0; itemIndex < 72; itemIndex++, index++)
             {
                 var movie = itemIndex % 3 == 0;
                 items.Add(new PremiereItem

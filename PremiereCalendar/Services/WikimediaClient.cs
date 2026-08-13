@@ -254,39 +254,7 @@ public sealed class WikimediaClient : IWikimediaClient
 
     private async Task<HttpResponseMessage> GetWithRetryAsync(string url, CancellationToken cancellationToken)
     {
-        const int maxAttempts = 3;
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            var response = await _httpClient.GetAsync(url, cancellationToken);
-            if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt == maxAttempts)
-            {
-                return response;
-            }
-
-            var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
-            response.Dispose();
-            await Task.Delay(delay, cancellationToken);
-        }
-
         return await _httpClient.GetAsync(url, cancellationToken);
-    }
-
-    private static TimeSpan? RetryAfterDelay(HttpResponseMessage response)
-    {
-        var retryAfter = response.Headers.RetryAfter;
-        if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
-        {
-            return delta;
-        }
-
-        if (retryAfter?.Date is { } date)
-        {
-            var delay = date - DateTimeOffset.UtcNow;
-            return delay > TimeSpan.Zero ? delay : null;
-        }
-
-        return null;
     }
 
     private static string? MetadataValue(JsonElement metadata, string propertyName)

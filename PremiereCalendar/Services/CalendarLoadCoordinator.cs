@@ -1,6 +1,6 @@
 namespace PremiereCalendar.Services;
 
-public sealed class CalendarLoadCoordinator
+public class CalendarLoadCoordinator
 {
     private readonly object _backgroundGate = new();
     private int _activeForegroundLoads;
@@ -103,4 +103,28 @@ public sealed class CalendarLoadCoordinator
             Interlocked.Exchange(ref _release, null)?.Invoke();
         }
     }
+}
+
+public sealed class CalendarPageCoordinator : CalendarLoadCoordinator
+{
+    private readonly object _stateGate = new();
+    private CalendarPageState _state = CalendarPageState.Empty;
+
+    public CalendarPageState Snapshot
+    {
+        get { lock (_stateGate) return _state; }
+    }
+
+    public void UpdatePageState(DateOnly weekStart, string route, bool loading, int cardCount)
+    {
+        lock (_stateGate)
+        {
+            _state = new CalendarPageState(weekStart, route, loading, Math.Max(0, cardCount));
+        }
+    }
+}
+
+public sealed record CalendarPageState(DateOnly? WeekStart, string Route, bool IsLoading, int CardCount)
+{
+    public static CalendarPageState Empty { get; } = new(null, "all", false, 0);
 }

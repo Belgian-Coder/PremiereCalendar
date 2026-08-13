@@ -111,7 +111,7 @@ public sealed class TraktClientIntegrationTests
     }
 
     [Fact]
-    public async Task Calendars_RetryRateLimitResponsesUsingRetryAfter()
+    public async Task Calendars_LeaveRateLimitRetriesToSharedProviderPolicy()
     {
         var attempts = 0;
         var handler = new StubHttpMessageHandler(_ =>
@@ -141,8 +141,8 @@ public sealed class TraktClientIntegrationTests
             new DateOnly(2026, 5, 10),
             CancellationToken.None);
 
-        Assert.Equal(2, handler.Requests.Count);
-        Assert.Equal("Retried Movie", Assert.Single(movies).Movie?.Title);
+        Assert.Single(handler.Requests);
+        Assert.Empty(movies);
     }
 
     [Fact]

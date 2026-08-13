@@ -251,6 +251,7 @@ public sealed class OmdbClientIntegrationTests
 
     private static SqliteOmdbCacheStore CreateCacheStore(string root)
     {
+        TestSqliteDatabase.Initialize(root, "data/app.db");
         return new SqliteOmdbCacheStore(
             Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }),
             new FakeWebHostEnvironment(root),

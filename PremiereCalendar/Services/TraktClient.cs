@@ -111,44 +111,11 @@ public sealed class TraktClient : ITraktClient
         TraktSourceSettings settings,
         CancellationToken cancellationToken)
     {
-        const int maxAttempts = 3;
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Get, path);
-            request.Headers.Add("trakt-api-key", settings.ClientId.Trim());
-            request.Headers.Add("trakt-api-version", string.IsNullOrWhiteSpace(_options.ApiVersion) ? "2" : _options.ApiVersion.Trim());
-            request.Headers.UserAgent.Add(UserAgent);
-
-            var response = await _httpClient.SendAsync(request, cancellationToken);
-            if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt == maxAttempts)
-            {
-                return response;
-            }
-
-            var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
-            response.Dispose();
-            await Task.Delay(delay, cancellationToken);
-        }
-
-        return await _httpClient.GetAsync(path, cancellationToken);
-    }
-
-    private static TimeSpan? RetryAfterDelay(HttpResponseMessage response)
-    {
-        var retryAfter = response.Headers.RetryAfter;
-        if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
-        {
-            return delta;
-        }
-
-        if (retryAfter?.Date is { } date)
-        {
-            var delay = date - DateTimeOffset.UtcNow;
-            return delay > TimeSpan.Zero ? delay : null;
-        }
-
-        return null;
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.Add("trakt-api-key", settings.ClientId.Trim());
+        request.Headers.Add("trakt-api-version", string.IsNullOrWhiteSpace(_options.ApiVersion) ? "2" : _options.ApiVersion.Trim());
+        request.Headers.UserAgent.Add(UserAgent);
+        return await _httpClient.SendAsync(request, cancellationToken);
     }
 
     private async ValueTask<TraktSourceSettings> GetEffectiveSettingsAsync(CancellationToken cancellationToken)

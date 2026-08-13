@@ -52,6 +52,7 @@ public sealed class SqliteDatabaseInitializer(
             await connection.OpenAsync(cancellationToken);
             await ConfigureConnectionAsync(connection, cancellationToken);
             await EnsureIntegrityAsync(connection, cancellationToken);
+            telemetry?.RecordDatabaseEvent("integrity", "passed");
             await EnsureMigrationHistoryAsync(connection, cancellationToken);
 
             var currentVersion = await ReadUserVersionAsync(connection, cancellationToken);
@@ -103,20 +104,24 @@ public sealed class SqliteDatabaseInitializer(
         }
         catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
+            telemetry?.RecordDatabaseException(ex);
             if (!string.IsNullOrWhiteSpace(backupPath))
             {
                 try
                 {
                     RestoreSnapshot(path, backupPath);
+                    telemetry?.RecordDatabaseEvent("migration_restore", "completed");
                     logger.LogError(ex, "Database migration failed; restored {DatabaseBackupPath}.", backupPath);
                 }
                 catch (Exception restoreError) when (restoreError is IOException or UnauthorizedAccessException)
                 {
+                    telemetry?.RecordDatabaseEvent("migration_restore", "failed");
                     logger.LogCritical(restoreError, "Database migration and snapshot restoration both failed.");
                 }
             }
             else
             {
+                telemetry?.RecordDatabaseEvent("integrity", "failed");
                 logger.LogCritical(ex, "SQLite initialization or integrity validation failed.");
             }
 
@@ -178,9 +183,11 @@ public sealed class SqliteDatabaseInitializer(
             PreserveSidecar(target + "-shm", damagedPath + "-shm");
             File.Move(stagedPath, target, overwrite: false);
             await VerifyAsync(target, cancellationToken);
+            telemetry?.RecordDatabaseEvent("offline_restore", "completed");
         }
         catch
         {
+            telemetry?.RecordDatabaseEvent("offline_restore", "failed");
             if (File.Exists(target)) File.Delete(target);
             if (File.Exists(damagedPath)) File.Move(damagedPath, target);
             if (File.Exists(damagedPath + "-wal")) File.Move(damagedPath + "-wal", target + "-wal");

@@ -14,6 +14,7 @@ public sealed class ProviderCacheStateStoreTests
         var root = CreateRoot();
         try
         {
+            TestSqliteDatabase.Initialize(root, "data/app.db");
             var store = new SqliteProviderCacheStateStore(
                 Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }),
                 new FakeWebHostEnvironment(root));

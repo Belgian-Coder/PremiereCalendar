@@ -275,71 +275,40 @@ public sealed class SimklClient : ISimklClient
         DateOnly end,
         CancellationToken cancellationToken)
     {
-        const int maxAttempts = 3;
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-            try
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+            if (!response.IsSuccessStatusCode)
             {
-                using var response = await _httpClient.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken);
-                if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
+                return null;
+            }
+
+            var items = new List<SimklCalendarItem>();
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await foreach (var rawItem in JsonSerializer.DeserializeAsyncEnumerable<SimklCalendarPayloadItem>(
+                stream,
+                JsonOptions,
+                cancellationToken))
+            {
+                if (rawItem is null || ToCalendarItem(type, rawItem) is not { } item)
                 {
-                    var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
-                    await Task.Delay(delay, cancellationToken);
                     continue;
                 }
 
-                if (!response.IsSuccessStatusCode)
-                {
-                    return null;
-                }
-
-                var items = new List<SimklCalendarItem>();
-                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                await foreach (var rawItem in JsonSerializer.DeserializeAsyncEnumerable<SimklCalendarPayloadItem>(
-                    stream,
-                    JsonOptions,
-                    cancellationToken))
-                {
-                    if (rawItem is null || ToCalendarItem(type, rawItem) is not { } item)
-                    {
-                        continue;
-                    }
-
-                    var date = CalendarItemDate(item);
-                    if (date >= start && date <= end)
-                    {
-                        items.Add(item);
-                    }
-                }
-
-                return items;
+                var date = CalendarItemDate(item);
+                if (date >= start && date <= end) items.Add(item);
             }
-            catch (JsonException)
-            {
-                return null;
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                return null;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (HttpRequestException)
-            {
-                return null;
-            }
+            return items;
         }
-
-        return null;
+        catch (JsonException) { return null; }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return null; }
+        catch (OperationCanceledException) { throw; }
+        catch (HttpRequestException) { return null; }
     }
 
     private bool TryGetCachedCalendar(string cacheKey, out IReadOnlyList<SimklCalendarItem> items)
@@ -587,45 +556,16 @@ public sealed class SimklClient : ISimklClient
         string path,
         CancellationToken cancellationToken)
     {
-        const int maxAttempts = 3;
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        try
         {
-            using var request = new HttpRequestMessage(method, path);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-            try
-            {
-                using var response = await _httpClient.SendAsync(request, cancellationToken);
-                if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
-                {
-                    var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
-                    await Task.Delay(delay, cancellationToken);
-                    continue;
-                }
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    return null;
-                }
-
-                return await response.Content.ReadAsStringAsync(cancellationToken);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                return null;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (HttpRequestException)
-            {
-                return null;
-            }
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            return response.IsSuccessStatusCode ? await response.Content.ReadAsStringAsync(cancellationToken) : null;
         }
-
-        return null;
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return null; }
+        catch (OperationCanceledException) { throw; }
+        catch (HttpRequestException) { return null; }
     }
 
     private async Task<string?> SendTextWithRetryAsync(
@@ -634,47 +574,18 @@ public sealed class SimklClient : ISimklClient
         SimklSourceSettings settings,
         CancellationToken cancellationToken)
     {
-        const int maxAttempts = 3;
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.AccessToken.Trim());
+        request.Headers.Add("simkl-api-key", settings.ClientId.Trim());
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        try
         {
-            using var request = new HttpRequestMessage(method, path);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.AccessToken.Trim());
-            request.Headers.Add("simkl-api-key", settings.ClientId.Trim());
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-            try
-            {
-                using var response = await _httpClient.SendAsync(request, cancellationToken);
-                if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
-                {
-                    var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
-                    await Task.Delay(delay, cancellationToken);
-                    continue;
-                }
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    return null;
-                }
-
-                return await response.Content.ReadAsStringAsync(cancellationToken);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                return null;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (HttpRequestException)
-            {
-                return null;
-            }
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            return response.IsSuccessStatusCode ? await response.Content.ReadAsStringAsync(cancellationToken) : null;
         }
-
-        return null;
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return null; }
+        catch (OperationCanceledException) { throw; }
+        catch (HttpRequestException) { return null; }
     }
 
     private static string? GetString(JsonElement root, string propertyName)

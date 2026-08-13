@@ -24,7 +24,7 @@ public sealed class SqliteHealthCheck(
         var path = initializer.ResolvePath();
         try
         {
-            var builder = new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWriteCreate, Cache = SqliteCacheMode.Shared };
+            var builder = new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared };
             await using var connection = SqliteConnectionFactory.Create(builder.ToString());
             await connection.OpenAsync(cancellationToken);
             await using var command = connection.CreateCommand();

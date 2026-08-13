@@ -103,6 +103,7 @@ public sealed class ImdbRatingsStoreTests
 
     private static SqliteImdbRatingsStore CreateStore(string root)
     {
+        TestSqliteDatabase.Initialize(root, "data/app.db");
         return new SqliteImdbRatingsStore(
             Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }),
             new FakeWebHostEnvironment(root));

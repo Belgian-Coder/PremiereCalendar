@@ -3,6 +3,6 @@
     <Version Condition="'$(Version)' == ''">0.0.0-local</Version>
     <FileVersion Condition="'$(FileVersion)' == ''">0.0.0.0</FileVersion>
     <InformationalVersion Condition="'$(InformationalVersion)' == ''">0.0.0-local</InformationalVersion>
-    <DatabaseSchemaVersion>2</DatabaseSchemaVersion>
+    <DatabaseSchemaVersion>3</DatabaseSchemaVersion>
   </PropertyGroup>
 </Project>

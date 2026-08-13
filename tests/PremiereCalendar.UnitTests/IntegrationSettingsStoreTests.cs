@@ -19,6 +19,7 @@ public sealed class IntegrationSettingsStoreTests
 
         try
         {
+            TestSqliteDatabase.Initialize(root, "data/settings.db");
             var store = new SqliteIntegrationSettingsStore(
                 Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/settings.db" }),
                 new FakeWebHostEnvironment(root));
@@ -160,6 +161,7 @@ public sealed class IntegrationSettingsStoreTests
 
         try
         {
+            TestSqliteDatabase.Initialize(root, "data/settings.db");
             var configuration = new ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?>
                 {

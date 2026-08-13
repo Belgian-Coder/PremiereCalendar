@@ -238,6 +238,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
                            window.End,
                            !_options.StaleOnlyRemoteRefresh,
                            filters,
+                           null,
                            cancellationToken).WithCancellation(cancellationToken))
         {
             items = progress.Items;

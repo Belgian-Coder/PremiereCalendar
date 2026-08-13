@@ -140,15 +140,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             await using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
-                command.CommandText = """
-                    DROP TABLE IF EXISTS ImdbRatingsNew;
-                    CREATE TABLE ImdbRatingsNew (
-                        ImdbId TEXT NOT NULL PRIMARY KEY,
-                        AverageRating REAL NOT NULL,
-                        VoteCount INTEGER NOT NULL,
-                        ImportedAtUtc TEXT NOT NULL
-                    )
-                    """;
+                command.CommandText = "DELETE FROM ImdbRatings";
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -157,7 +149,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             {
                 insert.Transaction = transaction;
                 insert.CommandText = """
-                    INSERT OR REPLACE INTO ImdbRatingsNew (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
+                    INSERT OR REPLACE INTO ImdbRatings (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
                     VALUES ($imdbId, $averageRating, $voteCount, $importedAtUtc)
                     """;
                 var imdbIdParameter = insert.Parameters.Add("$imdbId", SqliteType.Text);
@@ -180,16 +172,6 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
                     await insert.ExecuteNonQueryAsync(cancellationToken);
                     count++;
                 }
-            }
-
-            await using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = """
-                    DROP TABLE IF EXISTS ImdbRatings;
-                    ALTER TABLE ImdbRatingsNew RENAME TO ImdbRatings
-                    """;
-                await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
             await UpsertStateAsync(connection, transaction, LastImportedUtcKey, importedAtUtc.ToString("O", CultureInfo.InvariantCulture), cancellationToken);
@@ -293,31 +275,9 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             return;
         }
 
-        var databasePath = ResolveDatabasePath();
-        var directory = Path.GetDirectoryName(databasePath);
-        if (!string.IsNullOrWhiteSpace(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS ImdbRatings (
-                ImdbId TEXT NOT NULL PRIMARY KEY,
-                AverageRating REAL NOT NULL,
-                VoteCount INTEGER NOT NULL,
-                ImportedAtUtc TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS ImdbDatasetState (
-                Key TEXT NOT NULL PRIMARY KEY,
-                Value TEXT NOT NULL,
-                UpdatedUtc TEXT NOT NULL
-            )
-            """;
-        await command.ExecuteNonQueryAsync(cancellationToken);
-
+        await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
         _initialized = true;
     }
 
@@ -348,7 +308,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Shared
         };
 

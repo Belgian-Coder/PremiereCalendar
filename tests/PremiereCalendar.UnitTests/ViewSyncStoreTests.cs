@@ -138,6 +138,7 @@ public sealed class ViewSyncStoreTests
 
     private static SqliteViewSyncStore CreateStore(string root)
     {
+        TestSqliteDatabase.Initialize(root, "data/app.db");
         return new SqliteViewSyncStore(
             Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }),
             new FakeWebHostEnvironment(root));

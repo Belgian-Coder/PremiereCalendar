@@ -33,7 +33,7 @@ jobs:
       - name: Browser, accessibility, and performance tests
         run: .\.dotnet\dotnet.exe test tests\PremiereCalendar.BrowserTests\PremiereCalendar.BrowserTests.csproj -c Release --no-build --no-restore --nologo --logger "trx;LogFilePrefix=browser"
       - name: Publish test results
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-results

@@ -386,20 +386,6 @@ public sealed class TvmazeClient : ITvmazeClient
 
     private async Task<HttpResponseMessage> GetWithRetryAsync(string path, CancellationToken cancellationToken)
     {
-        const int maxAttempts = 3;
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            var response = await GetAsync(path, cancellationToken);
-            if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt == maxAttempts)
-            {
-                return response;
-            }
-
-            var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
-            response.Dispose();
-            await Task.Delay(delay, cancellationToken);
-        }
-
         return await GetAsync(path, cancellationToken);
     }
 
@@ -410,23 +396,6 @@ public sealed class TvmazeClient : ITvmazeClient
             _options.MaxConcurrentRequests,
             cancellationToken);
         return await _httpClient.GetAsync(path, cancellationToken);
-    }
-
-    private static TimeSpan? RetryAfterDelay(HttpResponseMessage response)
-    {
-        var retryAfter = response.Headers.RetryAfter;
-        if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
-        {
-            return delta;
-        }
-
-        if (retryAfter?.Date is { } date)
-        {
-            var delay = date - DateTimeOffset.UtcNow;
-            return delay > TimeSpan.Zero ? delay : null;
-        }
-
-        return null;
     }
 
     private static string? BuildLookupPath(int? tvdbId, string? imdbId)

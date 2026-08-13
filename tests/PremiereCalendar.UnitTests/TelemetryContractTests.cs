@@ -35,10 +35,18 @@ public sealed class TelemetryContractTests
         var telemetry = new PremiereTelemetry();
         telemetry.RecordProviderRequest("tmdb", "Success", TimeSpan.FromMilliseconds(12), 2, ProviderCircuitState.Closed);
         telemetry.RecordJob("CalendarForeground", "completed", TimeSpan.FromMilliseconds(20));
+        telemetry.RecordJobWait("CalendarForeground", TimeSpan.FromMilliseconds(5), resumed: true);
+        telemetry.RecordProviderRetry("tmdb", "retry_after");
+        telemetry.RecordDatabaseEvent("integrity", "passed");
+        telemetry.RecordVersionValidation("database_schema", valid: true);
 
         Assert.Contains("premierecalendar.provider.requests", observed);
         Assert.Contains("premierecalendar.provider.request.duration", observed);
         Assert.Contains("premierecalendar.scheduler.job.outcomes", observed);
+        Assert.Contains("premierecalendar.scheduler.job.wait.duration", observed);
+        Assert.Contains("premierecalendar.provider.retries", observed);
+        Assert.Contains("premierecalendar.database.events", observed);
+        Assert.Contains("premierecalendar.version.validation.outcomes", observed);
     }
 
     [Fact]
@@ -84,10 +92,58 @@ public sealed class TelemetryContractTests
         }
     }
 
+    [Fact]
+    public async Task SharedProviderHandlerRetriesTransientGetAndHonorsRetryAfter()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "premiere-provider-retry-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var environment = new TestEnvironment(root);
+            var options = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "retry.db" });
+            await new SqliteDatabaseInitializer(options, environment, NullLogger<SqliteDatabaseInitializer>.Instance).InitializeAsync();
+            var policy = new AdaptiveProviderPolicy(
+                new ProviderAdaptiveStateStore(options, environment),
+                TimeProvider.System,
+                new PremiereTelemetry(),
+                Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { RetryBaseMilliseconds = 50 }));
+            var terminal = new RetryOnceHandler();
+            using var handler = new AdaptiveProviderHandler("retry-provider", 2, policy) { InnerHandler = terminal };
+            using var invoker = new HttpMessageInvoker(handler);
+
+            using var response = await invoker.SendAsync(new HttpRequestMessage(HttpMethod.Get, "https://provider.test/items"), CancellationToken.None);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(2, terminal.Calls);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private sealed class OkHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+    }
+
+    private sealed class RetryOnceHandler : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            if (Calls == 1)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(50));
+                return Task.FromResult(response);
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        }
     }
 
     private sealed class TestEnvironment(string root) : IWebHostEnvironment

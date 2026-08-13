@@ -98,7 +98,7 @@ public sealed class CalendarFilterUsageStoreTests : IDisposable
 
     private SqliteCalendarFilterUsageStore CreateStore()
     {
-        Directory.CreateDirectory(_root);
+        TestSqliteDatabase.Initialize(_root, "data/usage.db");
         return new SqliteCalendarFilterUsageStore(
             Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/usage.db" }),
             new FakeWebHostEnvironment(_root));

@@ -10,57 +10,26 @@ namespace PremiereCalendar.Services;
 
 internal static class ProviderHttpRetry
 {
-    private const int MaxAttempts = 3;
-    private static readonly TimeSpan MaxDelay = TimeSpan.FromMilliseconds(250);
-
-    public static async Task<HttpResponseMessage> SendAsync(
+    public static Task<HttpResponseMessage> SendAsync(
         HttpClient client,
         Func<HttpRequestMessage> requestFactory,
         CancellationToken cancellationToken,
         TimeProvider? timeProvider = null)
     {
-        for (var attempt = 1; ; attempt++)
-        {
-            try
-            {
-                using var request = requestFactory();
-                var response = await client.SendAsync(request, cancellationToken);
-                if (attempt >= MaxAttempts || !IsTransient(response.StatusCode))
-                {
-                    return response;
-                }
-
-                var delay = RetryAfter(response) ?? TimeSpan.FromMilliseconds(50 * attempt);
-                response.Dispose();
-                await Task.Delay(Clamp(delay), timeProvider ?? TimeProvider.System, cancellationToken);
-            }
-            catch (HttpRequestException) when (attempt < MaxAttempts)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(50 * attempt), timeProvider ?? TimeProvider.System, cancellationToken);
-            }
-        }
+        var request = requestFactory();
+        return SendAndDisposeRequestAsync(client, request, cancellationToken);
     }
 
-    private static bool IsTransient(HttpStatusCode statusCode) =>
-        statusCode == HttpStatusCode.RequestTimeout
-        || statusCode == HttpStatusCode.TooManyRequests
-        || (int)statusCode >= 500;
-
-    private static TimeSpan? RetryAfter(HttpResponseMessage response)
+    private static async Task<HttpResponseMessage> SendAndDisposeRequestAsync(
+        HttpClient client,
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
     {
-        var value = response.Headers.RetryAfter;
-        if (value?.Delta is { } delta && delta > TimeSpan.Zero) return delta;
-        if (value?.Date is { } date)
+        using (request)
         {
-            var deltaFromNow = date - DateTimeOffset.UtcNow;
-            if (deltaFromNow > TimeSpan.Zero) return deltaFromNow;
+            return await client.SendAsync(request, cancellationToken);
         }
-
-        return null;
     }
-
-    private static TimeSpan Clamp(TimeSpan value) =>
-        value < TimeSpan.Zero ? TimeSpan.Zero : value > MaxDelay ? MaxDelay : value;
 }
 
 public sealed class OmdbClient : IOmdbClient

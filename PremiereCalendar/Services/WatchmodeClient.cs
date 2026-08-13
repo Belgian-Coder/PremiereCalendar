@@ -297,69 +297,28 @@ public sealed class WatchmodeClient : IWatchmodeClient
         string apiKey,
         CancellationToken cancellationToken)
     {
-        const int maxAttempts = 3;
-
         if (IsRateLimited())
         {
             return new JsonFetchResult<T>(default, IsSuccess: false);
         }
 
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        try
         {
-            try
+            using var response = await GetAsync(path, apiKey, cancellationToken);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
             {
-                using var response = await GetAsync(path, apiKey, cancellationToken);
-                if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
-                {
-                    var delay = RetryAfterDelay(response) ?? TimeSpan.FromSeconds(Math.Min(4, attempt * 2));
-                    MarkRateLimited(delay);
-                    if (delay > MaxRetryAfterDelay())
-                    {
-                        return new JsonFetchResult<T>(default, IsSuccess: false);
-                    }
-
-                    await Task.Delay(delay, cancellationToken);
-                    continue;
-                }
-
-                if (response.StatusCode == HttpStatusCode.TooManyRequests)
-                {
-                    if (RetryAfterDelay(response) is { } retryAfter)
-                    {
-                        MarkRateLimited(retryAfter);
-                    }
-
-                    return new JsonFetchResult<T>(default, IsSuccess: false);
-                }
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    return new JsonFetchResult<T>(default, IsSuccess: false);
-                }
-
-                return new JsonFetchResult<T>(
-                    await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken),
-                    IsSuccess: true);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
+                if (RetryAfterDelay(response) is { } retryAfter) MarkRateLimited(retryAfter);
                 return new JsonFetchResult<T>(default, IsSuccess: false);
             }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (HttpRequestException)
-            {
-                return new JsonFetchResult<T>(default, IsSuccess: false);
-            }
-            catch (JsonException)
-            {
-                return new JsonFetchResult<T>(default, IsSuccess: false);
-            }
+            if (!response.IsSuccessStatusCode) return new JsonFetchResult<T>(default, IsSuccess: false);
+            return new JsonFetchResult<T>(
+                await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken),
+                IsSuccess: true);
         }
-
-        return new JsonFetchResult<T>(default, IsSuccess: false);
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return new(default, false); }
+        catch (OperationCanceledException) { throw; }
+        catch (HttpRequestException) { return new(default, false); }
+        catch (JsonException) { return new(default, false); }
     }
 
     private readonly record struct JsonFetchResult<T>(T? Value, bool IsSuccess);

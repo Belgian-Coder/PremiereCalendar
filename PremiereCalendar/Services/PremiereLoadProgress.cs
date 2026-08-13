@@ -26,4 +26,5 @@ public sealed record PremiereLoadProgress(
     public IReadOnlyList<PremiereItem> SourceItems { get; init; } = Items;
     public bool HasSourceErrors { get; init; }
     public IReadOnlyList<string> FailedSourceNames { get; init; } = [];
+    public string? CheckpointKey { get; init; }
 }
