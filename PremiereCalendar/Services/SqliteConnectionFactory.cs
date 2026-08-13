@@ -5,28 +5,28 @@ namespace PremiereCalendar.Services;
 /// <summary>Applies consistent SQLite connection defaults for the application's concurrent stores.</summary>
 internal static class SqliteConnectionFactory
 {
-    public const int DefaultCommandTimeoutSeconds = 30;
     public const int DefaultBusyTimeoutMilliseconds = 5_000;
 
     public static SqliteConnection Create(string connectionString)
     {
-        var connection = new SqliteConnection(connectionString)
+        var builder = new SqliteConnectionStringBuilder(connectionString)
         {
-            DefaultTimeout = DefaultCommandTimeoutSeconds
+            // The application opens short-lived store connections and relies on
+            // clean process/file hand-off during signed updates. Native pooled
+            // mappings can outlive the managed connection and block atomic restore.
+            Pooling = false,
+            DefaultTimeout = DefaultBusyTimeoutMilliseconds / 1_000
         };
-        // Apply the busy timeout to every pooled connection. SQLite's busy timeout is
-        // connection-local, so setting it only during startup would leave later store
-        // connections vulnerable to transient SQLITE_BUSY errors.
+        var connection = new SqliteConnection(builder.ToString())
+        {
+            DefaultTimeout = DefaultBusyTimeoutMilliseconds / 1_000
+        };
         connection.StateChange += (_, args) =>
         {
-            if (args.CurrentState != System.Data.ConnectionState.Open)
+            if (args.CurrentState == System.Data.ConnectionState.Open)
             {
-                return;
+                SQLitePCL.raw.sqlite3_busy_timeout(connection.Handle, DefaultBusyTimeoutMilliseconds);
             }
-
-            using var command = connection.CreateCommand();
-            command.CommandText = $"PRAGMA busy_timeout = {DefaultBusyTimeoutMilliseconds};";
-            command.ExecuteNonQuery();
         };
         return connection;
     }

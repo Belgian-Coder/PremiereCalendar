@@ -230,6 +230,43 @@ public sealed class SqliteDatabaseInitializerTests
         }
     }
 
+    [Fact]
+    public async Task CreateVerifiedSnapshotAsync_ProducesStandaloneCopyIncludingWalChanges()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "premiere-calendar-sqlite-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var state = new DatabaseRecoveryState();
+            var initializer = Create(root, "live.db", state);
+            await initializer.InitializeAsync();
+            await using (var connection = new SqliteConnection($"Data Source={initializer.ResolvePath()}"))
+            {
+                await connection.OpenAsync();
+                await using var marker = connection.CreateCommand();
+                marker.CommandText = "INSERT INTO AppParameters(Key, Value, UpdatedUtc) VALUES ('snapshot-marker', 'present', '2026-01-01T00:00:00Z');";
+                await marker.ExecuteNonQueryAsync();
+
+                var snapshot = Path.Combine(root, "snapshots", "live.db");
+                var result = await initializer.CreateVerifiedSnapshotAsync(snapshot, CancellationToken.None);
+
+                Assert.True(result.IsHealthy);
+                Assert.True(File.Exists(snapshot));
+                Assert.False(File.Exists(snapshot + "-wal"));
+                await using var standalone = new SqliteConnection($"Data Source={snapshot};Mode=ReadOnly;Pooling=False");
+                await standalone.OpenAsync();
+                await using var verify = standalone.CreateCommand();
+                verify.CommandText = "SELECT Value FROM AppParameters WHERE Key='snapshot-marker';";
+                Assert.Equal("present", await verify.ExecuteScalarAsync());
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static SqliteDatabaseInitializer Create(string root, string path, DatabaseRecoveryState state) =>
         new(
             Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions

@@ -39,6 +39,20 @@ public static class DatabaseCommandLine
             }
 
             if (args.Length == 4
+                && string.Equals(args[1], "snapshot", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(args[2], "--output", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!Path.IsPathFullyQualified(args[3]))
+                {
+                    throw new ArgumentException("--output must be an absolute path.");
+                }
+
+                var result = await initializer.CreateVerifiedSnapshotAsync(args[3], cancellationToken);
+                Console.WriteLine(JsonSerializer.Serialize(result));
+                return result.IsHealthy ? 0 : 2;
+            }
+
+            if (args.Length == 4
                 && string.Equals(args[1], "restore", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(args[2], "--backup", StringComparison.OrdinalIgnoreCase))
             {
@@ -54,7 +68,7 @@ public static class DatabaseCommandLine
                 return result.IsHealthy ? 0 : 2;
             }
 
-            Console.Error.WriteLine("Usage: PremiereCalendar.exe database verify | database restore --backup <absolute-path>");
+            Console.Error.WriteLine("Usage: PremiereCalendar.exe database verify | database snapshot --output <absolute-path> | database restore --backup <absolute-path>");
             return 64;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or Microsoft.Data.Sqlite.SqliteException)

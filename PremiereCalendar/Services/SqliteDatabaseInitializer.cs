@@ -48,7 +48,7 @@ public sealed class SqliteDatabaseInitializer(
         string? backupPath = null;
         try
         {
-            await using var connection = CreateConnection(path, readOnly: false);
+            await using var connection = CreateConnection(path, readOnly: false, pooling: false);
             await connection.OpenAsync(cancellationToken);
             await ConfigureConnectionAsync(connection, cancellationToken);
             await EnsureIntegrityAsync(connection, cancellationToken);
@@ -89,6 +89,7 @@ public sealed class SqliteDatabaseInitializer(
             }
 
             await EnsureIntegrityAsync(connection, cancellationToken);
+            await CheckpointAsync(connection, cancellationToken);
             recoveryState.Set(new DatabaseStatusSnapshot(
                 currentVersion,
                 DatabaseSchema.CurrentVersion,
@@ -153,6 +154,47 @@ public sealed class SqliteDatabaseInitializer(
             null);
     }
 
+    public async Task<DatabaseStatusSnapshot> CreateVerifiedSnapshotAsync(
+        string outputPath,
+        CancellationToken cancellationToken)
+    {
+        var sourcePath = ResolvePath();
+        var destinationPath = Path.GetFullPath(outputPath);
+        if (string.Equals(sourcePath, destinationPath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("The database snapshot output must differ from the live database path.");
+        }
+
+        var destinationDirectory = Path.GetDirectoryName(destinationPath)
+            ?? throw new ArgumentException("The database snapshot output must have a parent directory.");
+        Directory.CreateDirectory(destinationDirectory);
+        if (File.Exists(destinationPath))
+        {
+            throw new IOException($"The database snapshot already exists: {destinationPath}");
+        }
+
+        await using var source = CreateConnection(sourcePath, readOnly: true);
+        await source.OpenAsync(cancellationToken);
+        await EnsureIntegrityAsync(source, cancellationToken);
+
+        await using (var target = CreateConnection(destinationPath, readOnly: false, pooling: false))
+        {
+            await target.OpenAsync(cancellationToken);
+            source.BackupDatabase(target);
+            await FinalizePortableDatabaseAsync(target, cancellationToken);
+        }
+
+        try
+        {
+            return await VerifyAsync(destinationPath, cancellationToken);
+        }
+        catch
+        {
+            File.Delete(destinationPath);
+            throw;
+        }
+    }
+
     public async Task RestoreAsync(string backupPath, CancellationToken cancellationToken)
     {
         var source = Path.GetFullPath(backupPath);
@@ -202,14 +244,14 @@ public sealed class SqliteDatabaseInitializer(
         if (File.Exists(source)) File.Move(source, destination, overwrite: false);
     }
 
-    private static SqliteConnection CreateConnection(string path, bool readOnly)
+    private static SqliteConnection CreateConnection(string path, bool readOnly, bool? pooling = null)
     {
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = path,
             Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Shared,
-            Pooling = !readOnly
+            Pooling = pooling ?? !readOnly
         };
         return SqliteConnectionFactory.Create(builder.ToString());
     }
@@ -336,10 +378,11 @@ public sealed class SqliteDatabaseInitializer(
         var directory = ResolveBackupDirectory();
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"pre-schema-{currentVersion}-to-{DatabaseSchema.CurrentVersion}-{timeProvider.GetUtcNow():yyyyMMddHHmmss}.db");
-        await using (var target = CreateConnection(path, readOnly: false))
+        await using (var target = CreateConnection(path, readOnly: false, pooling: false))
         {
             await target.OpenAsync(cancellationToken);
             source.BackupDatabase(target);
+            await FinalizePortableDatabaseAsync(target, cancellationToken);
         }
 
         await VerifyAsync(path, cancellationToken);
@@ -358,6 +401,16 @@ public sealed class SqliteDatabaseInitializer(
         await using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA wal_checkpoint(TRUNCATE)";
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task FinalizePortableDatabaseAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await CheckpointAsync(connection, cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA journal_mode = DELETE";
+        await command.ExecuteScalarAsync(cancellationToken);
     }
 
     private static void RestoreSnapshot(string target, string backup)

@@ -127,6 +127,41 @@ function Wait-ForHealthyVersion {
     throw "Release $ExpectedVersion did not become healthy at application version $ExpectedVersion and database schema $ExpectedDatabaseSchemaVersion."
 }
 
+function Wait-ForApplicationProcessExit {
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(45)
+    do {
+        $running = @(Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue)
+        if ($running.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw 'PremiereCalendar process did not exit after the service stopped.'
+}
+
+function Install-DatabaseSnapshot {
+    param(
+        [Parameter(Mandatory)][string] $Snapshot,
+        [Parameter(Mandatory)][string] $Destination
+    )
+    if (-not (Test-Path -LiteralPath $Snapshot -PathType Leaf)) { throw 'The verified database snapshot is missing.' }
+    $stagedDatabase = "$Destination.replace-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        Copy-Item -LiteralPath $Snapshot -Destination $stagedDatabase
+        foreach ($suffix in @('-wal', '-shm')) {
+            $sidecar = $Destination + $suffix
+            if (Test-Path -LiteralPath $sidecar -PathType Leaf) { Remove-Item -LiteralPath $sidecar -Force }
+        }
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+            [IO.File]::Replace($stagedDatabase, $Destination, $null)
+        }
+        else {
+            Move-Item -LiteralPath $stagedDatabase -Destination $Destination
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagedDatabase -PathType Leaf) { Remove-Item -LiteralPath $stagedDatabase -Force }
+    }
+}
+
 $resolvedInstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $resolvedDataRoot = [IO.Path]::GetFullPath($DataRoot)
 foreach ($managedRoot in @($resolvedInstallRoot, $resolvedDataRoot)) {
@@ -177,7 +212,7 @@ $serviceWasCreated = $false
 $hadCurrent = Test-Path -LiteralPath $current
 $databaseDirectory = Join-Path $resolvedDataRoot 'data'
 $databaseBackup = Join-Path (Join-Path $resolvedDataRoot 'backups') "pre-$version-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
-$databaseFiles = @('premiere-calendar.db', 'premiere-calendar.db-wal', 'premiere-calendar.db-shm')
+$databaseSnapshot = Join-Path $databaseBackup 'premiere-calendar.db'
 $databaseStateCaptured = $false
 $updaterReplacementBackups = @{}
 $updaterReplacementFiles = @()
@@ -193,16 +228,18 @@ try {
     if ($releaseDatabaseSchemaVersion -ne [int]$manifest.maximumDatabaseSchemaVersion) { throw 'Build metadata database schema does not match the manifest.' }
     $liveDatabasePath = Join-Path $databaseDirectory 'premiere-calendar.db'
     if (Test-Path -LiteralPath $liveDatabasePath -PathType Leaf) {
+        New-Item -ItemType Directory -Path $databaseBackup -Force | Out-Null
         $previousDatabasePath = $env:AppDatabase__Path
         try {
             $env:AppDatabase__Path = $liveDatabasePath
-            $verificationOutput = @(& (Join-Path $stage 'PremiereCalendar.exe') database verify)
-            if ($LASTEXITCODE -ne 0 -or $verificationOutput.Count -eq 0) { throw 'The live database could not be verified before update.' }
+            $verificationOutput = @(& (Join-Path $stage 'PremiereCalendar.exe') database snapshot --output $databaseSnapshot)
+            if ($LASTEXITCODE -ne 0 -or $verificationOutput.Count -eq 0) { throw 'A verified live database snapshot could not be created before update.' }
             $verification = $verificationOutput[-1] | ConvertFrom-Json
             $liveSchemaVersion = [int]$verification.CurrentVersion
             if ($liveSchemaVersion -lt [int]$manifest.minimumDatabaseSchemaVersion -or $liveSchemaVersion -gt [int]$manifest.maximumDatabaseSchemaVersion) {
                 throw "Live database schema $liveSchemaVersion is incompatible with release range $($manifest.minimumDatabaseSchemaVersion)-$($manifest.maximumDatabaseSchemaVersion)."
             }
+            $databaseStateCaptured = $true
         }
         finally {
             $env:AppDatabase__Path = $previousDatabasePath
@@ -213,20 +250,16 @@ try {
     if ($null -ne $service -and $service.Status -ne 'Stopped') {
         Stop-Service -Name $ServiceName -Force
         $service.WaitForStatus('Stopped', '00:00:45')
+        Wait-ForApplicationProcessExit
     }
     # Take the one-time legacy data snapshot only after the existing service has
     # stopped, so the SQLite database and any WAL files form a consistent set.
     if (Test-Path -LiteralPath $legacyData -PathType Container) {
         Copy-Item -Path (Join-Path $legacyData '*') -Destination $resolvedDataRoot -Recurse -Force -ErrorAction Stop
     }
-    $existingDatabaseFiles = @($databaseFiles | Where-Object { Test-Path -LiteralPath (Join-Path $databaseDirectory $_) -PathType Leaf })
-    if ($existingDatabaseFiles.Count -gt 0) {
-        New-Item -ItemType Directory -Path $databaseBackup -Force | Out-Null
-        foreach ($databaseFile in $existingDatabaseFiles) {
-            Copy-Item -LiteralPath (Join-Path $databaseDirectory $databaseFile) -Destination $databaseBackup -Force
-        }
+    if ($databaseStateCaptured) {
+        Install-DatabaseSnapshot -Snapshot $databaseSnapshot -Destination (Join-Path $databaseDirectory 'premiere-calendar.db')
     }
-    $databaseStateCaptured = $true
     $newCurrent = Join-Path $resolvedInstallRoot ".current-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Junction -Path $newCurrent -Target $releaseRoot | Out-Null
     if ($hadCurrent) { Move-Item -LiteralPath $current -Destination $previous }
@@ -303,20 +336,12 @@ catch {
         if ($null -ne $rollbackService -and $rollbackService.Status -ne 'Stopped') {
             Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
             $rollbackService.WaitForStatus('Stopped', '00:00:30')
+            Wait-ForApplicationProcessExit
         }
         if (Test-Path -LiteralPath $current) { [IO.Directory]::Delete($current) }
         if (Test-Path -LiteralPath $previous) { Move-Item -LiteralPath $previous -Destination $current }
         if ($databaseStateCaptured) {
-            foreach ($databaseFile in $databaseFiles) {
-                $backupFile = Join-Path $databaseBackup $databaseFile
-                $activeFile = Join-Path $databaseDirectory $databaseFile
-                if (Test-Path -LiteralPath $backupFile -PathType Leaf) {
-                    Copy-Item -LiteralPath $backupFile -Destination $activeFile -Force
-                }
-                elseif (Test-Path -LiteralPath $activeFile -PathType Leaf) {
-                    Remove-Item -LiteralPath $activeFile -Force
-                }
-            }
+            Install-DatabaseSnapshot -Snapshot $databaseSnapshot -Destination (Join-Path $databaseDirectory 'premiere-calendar.db')
         }
         if ($hadCurrent -and (Test-Path -LiteralPath (Join-Path $current 'PremiereCalendar.exe'))) {
             $rollbackExe = Join-Path $current 'PremiereCalendar.exe'

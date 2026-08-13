@@ -158,6 +158,10 @@ public sealed class InstallerScriptTests
         Assert.Contains("PremiereCalendarData", script, StringComparison.Ordinal);
         Assert.Contains("$databaseStateCaptured", script, StringComparison.Ordinal);
         Assert.Contains("pre-$version-", script, StringComparison.Ordinal);
+        Assert.Contains("database snapshot --output $databaseSnapshot", script, StringComparison.Ordinal);
+        Assert.Contains("Install-DatabaseSnapshot", script, StringComparison.Ordinal);
+        Assert.Contains("Wait-ForApplicationProcessExit", script, StringComparison.Ordinal);
+        Assert.Contains("[IO.File]::Replace", script, StringComparison.Ordinal);
         Assert.Contains("must not be filesystem roots", script, StringComparison.Ordinal);
         Assert.True(
             script.IndexOf("Stop-Service -Name $ServiceName", StringComparison.Ordinal)
