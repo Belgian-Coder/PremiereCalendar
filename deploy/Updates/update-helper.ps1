@@ -134,7 +134,18 @@ function Wait-ForApplicationProcessExit {
         if ($running.Count -eq 0) { return }
         Start-Sleep -Milliseconds 250
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
-    throw 'PremiereCalendar process did not exit after the service stopped.'
+    $running = @(Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue)
+    if ($running.Count -gt 0) {
+        $running | Stop-Process -Force
+        $killDeadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
+        do {
+            Start-Sleep -Milliseconds 250
+            $running = @(Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue)
+        } while ($running.Count -gt 0 -and [DateTimeOffset]::UtcNow -lt $killDeadline)
+    }
+    if (@(Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue).Count -gt 0) {
+        throw 'PremiereCalendar process did not exit after the service stopped.'
+    }
 }
 
 function Install-DatabaseSnapshot {
@@ -144,6 +155,7 @@ function Install-DatabaseSnapshot {
     )
     if (-not (Test-Path -LiteralPath $Snapshot -PathType Leaf)) { throw 'The verified database snapshot is missing.' }
     $stagedDatabase = "$Destination.replace-$([Guid]::NewGuid().ToString('N'))"
+    $replacementBackup = "$Destination.previous-$([Guid]::NewGuid().ToString('N'))"
     try {
         Copy-Item -LiteralPath $Snapshot -Destination $stagedDatabase
         foreach ($suffix in @('-wal', '-shm')) {
@@ -151,7 +163,8 @@ function Install-DatabaseSnapshot {
             if (Test-Path -LiteralPath $sidecar -PathType Leaf) { Remove-Item -LiteralPath $sidecar -Force }
         }
         if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-            [IO.File]::Replace($stagedDatabase, $Destination, $null)
+            [IO.File]::Replace($stagedDatabase, $Destination, $replacementBackup)
+            Remove-Item -LiteralPath $replacementBackup -Force
         }
         else {
             Move-Item -LiteralPath $stagedDatabase -Destination $Destination
@@ -214,6 +227,8 @@ $databaseDirectory = Join-Path $resolvedDataRoot 'data'
 $databaseBackup = Join-Path (Join-Path $resolvedDataRoot 'backups') "pre-$version-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
 $databaseSnapshot = Join-Path $databaseBackup 'premiere-calendar.db'
 $databaseStateCaptured = $false
+$databaseSnapshotInstalled = $false
+$activationSwitched = $false
 $updaterReplacementBackups = @{}
 $updaterReplacementFiles = @()
 try {
@@ -259,11 +274,13 @@ try {
     }
     if ($databaseStateCaptured) {
         Install-DatabaseSnapshot -Snapshot $databaseSnapshot -Destination (Join-Path $databaseDirectory 'premiere-calendar.db')
+        $databaseSnapshotInstalled = $true
     }
     $newCurrent = Join-Path $resolvedInstallRoot ".current-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Junction -Path $newCurrent -Target $releaseRoot | Out-Null
     if ($hadCurrent) { Move-Item -LiteralPath $current -Destination $previous }
     Move-Item -LiteralPath $newCurrent -Destination $current
+    $activationSwitched = $true
 
     $exePath = Join-Path $current 'PremiereCalendar.exe'
     $quotedExePath = '"' + $exePath + '"'
@@ -338,9 +355,11 @@ catch {
             $rollbackService.WaitForStatus('Stopped', '00:00:30')
             Wait-ForApplicationProcessExit
         }
-        if (Test-Path -LiteralPath $current) { [IO.Directory]::Delete($current) }
-        if (Test-Path -LiteralPath $previous) { Move-Item -LiteralPath $previous -Destination $current }
-        if ($databaseStateCaptured) {
+        if ($activationSwitched) {
+            if (Test-Path -LiteralPath $current) { [IO.Directory]::Delete($current) }
+            if (Test-Path -LiteralPath $previous) { Move-Item -LiteralPath $previous -Destination $current }
+        }
+        if ($databaseSnapshotInstalled) {
             Install-DatabaseSnapshot -Snapshot $databaseSnapshot -Destination (Join-Path $databaseDirectory 'premiere-calendar.db')
         }
         if ($hadCurrent -and (Test-Path -LiteralPath (Join-Path $current 'PremiereCalendar.exe'))) {

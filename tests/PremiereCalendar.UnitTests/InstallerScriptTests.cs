@@ -162,6 +162,10 @@ public sealed class InstallerScriptTests
         Assert.Contains("Install-DatabaseSnapshot", script, StringComparison.Ordinal);
         Assert.Contains("Wait-ForApplicationProcessExit", script, StringComparison.Ordinal);
         Assert.Contains("[IO.File]::Replace", script, StringComparison.Ordinal);
+        Assert.Contains("$activationSwitched", script, StringComparison.Ordinal);
+        Assert.Contains("$databaseSnapshotInstalled", script, StringComparison.Ordinal);
+        Assert.Contains("Stop-Process -Force", script, StringComparison.Ordinal);
+        Assert.Contains("$replacementBackup", script, StringComparison.Ordinal);
         Assert.Contains("must not be filesystem roots", script, StringComparison.Ordinal);
         Assert.True(
             script.IndexOf("Stop-Service -Name $ServiceName", StringComparison.Ordinal)
