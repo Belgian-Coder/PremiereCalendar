@@ -57,6 +57,9 @@ public sealed class PremiereDiagnosticsComponentTests : BunitContext
 
         var component = Render<PremiereCard>(parameters => parameters.Add(x => x.Item, item));
 
+        Assert.Empty(component.FindAll("details.source-details"));
+        component.Find("details.card-details > summary").Click();
+
         var details = component.Find("details.source-details");
         Assert.Equal("Provenance", details.TextContent.Trim());
         Assert.DoesNotContain("Data confidence", details.TextContent);

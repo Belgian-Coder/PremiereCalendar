@@ -50,13 +50,15 @@ public sealed class PremiereCardTests : BunitContext
         Assert.Contains("Netflix", component.Markup);
         Assert.Contains("Apple TV", component.Markup);
         Assert.Contains("102 min", component.Markup);
+        Assert.Contains("RT critics 83%", component.Markup);
+        Assert.DoesNotContain("TMDb 6.9 / 10 (18)", component.Markup);
+        Assert.DoesNotContain("A compact test overview.", component.Markup);
+        component.Find(".card-details summary").Click();
         Assert.Contains("TMDb 6.9 / 10 (18)", component.Markup);
         Assert.Contains("IMDb 7.4 / 10", component.Markup);
-        Assert.Contains("1", component.Markup);
-        Assert.Contains("234", component.Markup);
-        Assert.Contains("RT critics 83%", component.Markup);
         Assert.Contains("RT audience 91%", component.Markup);
         Assert.Contains("Meta 72/100", component.Markup);
+        Assert.Contains("A compact test overview.", component.Markup);
         var provenance = component.Find(".source-details");
         Assert.Equal("false", provenance.GetAttribute("data-provenance-loaded"));
         Assert.DoesNotContain("Trailer via TMDb Videos", component.Markup);
@@ -181,6 +183,10 @@ public sealed class PremiereCardTests : BunitContext
         var component = Render<PremiereCard>(parameters => parameters.Add(x => x.Item, item));
 
         Assert.Empty(component.FindAll(".provenance-section"));
+        Assert.Empty(component.FindAll(".source-details"));
+
+        component.Find(".card-details summary").Click();
+
         Assert.Equal("false", component.Find(".source-details").GetAttribute("data-provenance-loaded"));
 
         component.Find(".source-details summary").Click();
@@ -235,8 +241,12 @@ public sealed class PremiereCardTests : BunitContext
             .Add(x => x.Item, item)
             .Add(x => x.ScoreSource, ScoreSource.Tmdb));
 
-        Assert.Contains("No trailer", component.Markup);
+        Assert.DoesNotContain("No trailer", component.Markup);
         Assert.Empty(component.FindAll("a[href*='watch?v=']"));
+        Assert.Empty(component.FindAll("a[href='https://www.youtube.com/results?search_query=Quiet%20Launch%20trailer']"));
+
+        component.Find(".card-details summary").Click();
+
         Assert.NotEmpty(component.FindAll("a[href='https://www.youtube.com/results?search_query=Quiet%20Launch%20trailer']"));
     }
 

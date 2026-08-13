@@ -783,10 +783,7 @@
         try
         {
             var uri = Navigation.ToAbsoluteUri(location);
-            var candidate = string.IsNullOrWhiteSpace(uri.Query)
-                ? uri.AbsolutePath
-                : $"{uri.AbsolutePath}{uri.Query}";
-            return ViewSyncUrlPolicy.TryNormalize(candidate, out var normalized) ? normalized : null;
+            return CalendarViewSyncNavigationCoordinator.Normalize(uri);
         }
         catch (InvalidOperationException)
         {
@@ -805,7 +802,7 @@
     {
         try
         {
-            return !string.IsNullOrWhiteSpace(Navigation.ToAbsoluteUri(location).Query);
+            return CalendarQueryCodec.HasQuery(Navigation.ToAbsoluteUri(location));
         }
         catch (InvalidOperationException)
         {
@@ -1881,13 +1878,7 @@
 
     private CalendarPageMode ResolvePageMode(string uri)
     {
-        var path = Navigation.ToAbsoluteUri(uri).AbsolutePath.TrimEnd('/');
-        return path.ToLowerInvariant() switch
-        {
-            "/series" => CalendarPageMode.Series,
-            "/movies" => CalendarPageMode.Movies,
-            _ => CalendarPageMode.All
-        };
+        return CalendarQueryCodec.ResolvePageMode(Navigation.ToAbsoluteUri(uri));
     }
 
     private void ApplyPageMode()

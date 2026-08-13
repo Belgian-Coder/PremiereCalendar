@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
@@ -57,6 +58,11 @@ public sealed class WebApplicationFactoryTests
         var version = versionDocument.RootElement.GetProperty("version").GetString();
         Assert.False(string.IsNullOrWhiteSpace(version));
         Assert.Matches(@"^\d+\.\d+\.\d+", version);
+        Assert.Equal(DatabaseSchema.CurrentVersion, versionDocument.RootElement.GetProperty("databaseSchemaVersion").GetInt32());
+        Assert.Equal(
+            DatabaseSchema.CurrentVersion,
+            versionDocument.RootElement.GetProperty("database").GetProperty("currentSchemaVersion").GetInt32());
+        Assert.True(versionDocument.RootElement.GetProperty("database").GetProperty("healthy").GetBoolean());
     }
 
     [Fact]

@@ -1,0 +1,78 @@
+<section class="status-mini-panel update-panel" aria-label="Release updates">
+    <div class="status-mini-heading">
+        <strong>Release/update checker</strong>
+        <button class="tool-button settings-secondary" type="button" title="Check for application updates"
+                @onclick="OnCheck" disabled="@IsChecking">
+            @(IsChecking ? "Checking..." : "Check")
+        </button>
+    </div>
+    @if (ReleaseResult is null)
+    {
+        <p class="settings-help">Checks GitHub releases on demand. Updates are never installed silently.</p>
+    }
+    else
+    {
+        <p class="settings-help" data-testid="release-update-result">
+            @if (!ReleaseResult.HasPublishedRelease)
+            {
+                <span>@ReleaseResult.ReleaseName Current @ReleaseResult.CurrentVersion.</span>
+            }
+            else
+            {
+                <span>Current @ReleaseResult.CurrentVersion · latest @ReleaseResult.LatestVersion.</span>
+                @if (ReleaseResult.IsUpdateAvailable && !string.IsNullOrWhiteSpace(ReleaseResult.ReleaseUrl))
+                {
+                    <a href="@ReleaseResult.ReleaseUrl" target="_blank" rel="noopener">Open release</a>
+                }
+            }
+        </p>
+    }
+    <div class="application-update-block">
+        <div class="status-mini-heading compact">
+            <strong>Signed GitHub release update</strong>
+            <button class="tool-button settings-secondary" type="button" title="Install latest signed GitHub release"
+                    aria-label="Install latest signed GitHub release" @onclick="OnStartUpdate"
+                    disabled="@(IsStartingUpdate || UpdateStatus?.IsConfigured != true)">
+                @(IsStartingUpdate ? "Starting..." : "Update")
+            </button>
+        </div>
+        <p class="settings-help" data-testid="application-update-status">@UpdateStatusText</p>
+        @if (UpdateStatus is { } updateStatus)
+        {
+            <div class="update-evidence" data-testid="application-update-evidence">
+                <span>Active @(updateStatus.ActiveVersion ?? "unknown")</span>
+                <span>@updateStatus.Repository</span>
+                @if (!string.IsNullOrWhiteSpace(updateStatus.LastResult))
+                {
+                    <span>Last result @updateStatus.LastResult</span>
+                }
+            </div>
+            @if (!string.IsNullOrWhiteSpace(updateStatus.LatestLogTail))
+            {
+                <details class="update-log-tail"><summary>Latest update log</summary><pre>@updateStatus.LatestLogTail</pre></details>
+            }
+        }
+        @if (UpdateResult is not null)
+        {
+            <p class="@UpdateResultClass" data-testid="application-update-result">
+                @UpdateResult.Message
+                @if (!string.IsNullOrWhiteSpace(UpdateResult.LogPath))
+                {
+                    <span> Log: @Path.GetFileName(UpdateResult.LogPath)</span>
+                }
+            </p>
+        }
+    </div>
+</section>
+
+@code {
+    [Parameter] public ReleaseUpdateResult? ReleaseResult { get; set; }
+    [Parameter] public bool IsChecking { get; set; }
+    [Parameter] public EventCallback OnCheck { get; set; }
+    [Parameter] public ApplicationUpdateStatus? UpdateStatus { get; set; }
+    [Parameter] public ApplicationUpdateStartResult? UpdateResult { get; set; }
+    [Parameter] public bool IsStartingUpdate { get; set; }
+    [Parameter] public EventCallback OnStartUpdate { get; set; }
+    [Parameter] public string UpdateStatusText { get; set; } = "";
+    [Parameter] public string UpdateResultClass { get; set; } = "settings-help";
+}

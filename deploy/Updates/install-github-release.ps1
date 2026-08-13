@@ -91,6 +91,10 @@ try {
     Save-BoundedReleaseAsset -Uri ([Uri]$assets['stable.manifest.json'].browser_download_url) -Destination $manifestPath -MaxBytes 1MB
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ([string]$manifest.version -notmatch '^\d+\.\d+\.\d+$') { throw 'The manifest version is invalid.' }
+    if ([int]$manifest.minimumDatabaseSchemaVersion -lt 0 -or
+        [int]$manifest.maximumDatabaseSchemaVersion -lt [int]$manifest.minimumDatabaseSchemaVersion) {
+        throw 'The manifest database compatibility range is invalid.'
+    }
     $activeVersionPath = Join-Path $InstallRoot 'updater\active-version.txt'
     if (Test-Path -LiteralPath $activeVersionPath -PathType Leaf) {
         $activeVersion = (Get-Content -LiteralPath $activeVersionPath -Raw).Trim()

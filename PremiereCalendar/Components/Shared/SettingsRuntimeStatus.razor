@@ -1,0 +1,38 @@
+<section class="status-mini-panel" aria-label="Runtime reliability status" data-testid="runtime-status">
+    <div class="status-mini-heading"><strong>Runtime reliability</strong></div>
+    @if (Status is null)
+    {
+        <p class="settings-help">Runtime status is not loaded yet.</p>
+    }
+    else
+    {
+        <div class="cache-inspector-list">
+            <div class="cache-inspector-row">
+                <strong>Application</strong>
+                <span>@Status.Runtime.Version</span>
+                <small>Build @(Status.Runtime.BuildId ?? "local") · schema target @Status.Runtime.DatabaseSchemaVersion</small>
+            </div>
+            <div class="cache-inspector-row">
+                <strong>Database</strong>
+                <span>Schema @Status.Database.CurrentVersion · @(Status.Database.IsHealthy ? "healthy" : "unhealthy")</span>
+                <small>@Status.Database.Message</small>
+                @if (!Status.Database.IsHealthy)
+                {
+                    <small>Stop the Windows Service, run <code>database verify</code>, then restore only from a verified absolute backup path.</small>
+                }
+            </div>
+            <div class="cache-inspector-row">
+                <strong>Provider queue</strong>
+                <span>@JobCount("Queued") queued · @JobCount("Running") running · @JobCount("RetryWaiting") retrying</span>
+                <small>@Status.Providers.Count provider policies active</small>
+            </div>
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter]
+    public SystemStatusSnapshot? Status { get; set; }
+
+    private int JobCount(string state) => Status?.Jobs.TryGetValue(state, out var count) == true ? count : 0;
+}

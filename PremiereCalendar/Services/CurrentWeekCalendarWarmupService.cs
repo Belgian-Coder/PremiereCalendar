@@ -11,6 +11,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<CurrentWeekCalendarWarmupService> _logger;
     private readonly BackgroundJobTimelineService? _timeline;
+    private readonly IProviderWorkScheduler? _workScheduler;
     private DateTimeOffset? _lastMaintenanceUtc;
 
     public CurrentWeekCalendarWarmupService(
@@ -19,7 +20,8 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
         IOptionsMonitor<CacheMaintenanceOptions> maintenanceOptions,
         TimeProvider timeProvider,
         ILogger<CurrentWeekCalendarWarmupService> logger,
-        BackgroundJobTimelineService? timeline = null)
+        BackgroundJobTimelineService? timeline = null,
+        IProviderWorkScheduler? workScheduler = null)
     {
         _scopeFactory = scopeFactory;
         _warmupOptions = warmupOptions;
@@ -27,6 +29,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
         _timeProvider = timeProvider;
         _logger = logger;
         _timeline = timeline;
+        _workScheduler = workScheduler;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -63,6 +66,21 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
 
     private async Task RunWarmupAndMaintenanceAsync(CancellationToken stoppingToken)
     {
+        if (_workScheduler is not null)
+        {
+            await _workScheduler.EnqueueAsync(new ProviderWorkRequest(
+                ProviderWorkKind.CalendarWarmup,
+                "calendar-warmup:current",
+                ProviderWorkPriority.Warmup,
+                "{}"), stoppingToken);
+            if (MaintenanceIsDue())
+            {
+                await using var maintenanceScope = _scopeFactory.CreateAsyncScope();
+                await RunMaintenanceAsync(maintenanceScope.ServiceProvider, stoppingToken);
+            }
+            return;
+        }
+
         var startedUtc = _timeProvider.GetUtcNow();
         var startedTimestamp = _timeProvider.GetTimestamp();
         try

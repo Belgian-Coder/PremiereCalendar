@@ -502,6 +502,7 @@ public sealed class CalendarWeekTests : BunitContext
         component.Find("[data-day-load-more]").Click();
         component.Find("[data-day-load-more]").Click();
         Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+        component.Find(".card-details summary").Click();
 
         var updatedItems = items
             .Select(item => item with { Overview = "Streamed metadata" })
@@ -523,6 +524,7 @@ public sealed class CalendarWeekTests : BunitContext
 
         Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
         Assert.Contains("Streamed metadata", component.Markup);
+        Assert.Equal("true", component.Find(".card-details").GetAttribute("data-details-loaded"));
         Assert.Contains("Showing 1-40 of 81", component.Markup);
     }
 
@@ -819,6 +821,9 @@ public sealed class CalendarWeekTests : BunitContext
             .Add(x => x.DayId, "premiere-day-20260504")
             .Add(x => x.Items, firstItems)
             .Add(x => x.ScoreSource, ScoreSource.Tmdb));
+
+        component.Find(".card-details summary").Click();
+        Assert.Contains("Original description", component.Markup);
 
         component.Render(parameters => parameters
             .Add(x => x.Day, new DateOnly(2026, 5, 4))

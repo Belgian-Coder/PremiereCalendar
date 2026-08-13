@@ -19,18 +19,21 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
     private readonly IApplicationUpdateProcessStarter _processStarter;
     private readonly IWebHostEnvironment _environment;
     private readonly TimeProvider _timeProvider;
+    private readonly PremiereTelemetry _telemetry;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public ApplicationUpdateService(
         IOptions<ApplicationUpdateOptions> options,
         IApplicationUpdateProcessStarter processStarter,
         IWebHostEnvironment environment,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        PremiereTelemetry? telemetry = null)
     {
         _options = options;
         _processStarter = processStarter;
         _environment = environment;
         _timeProvider = timeProvider;
+        _telemetry = telemetry ?? new PremiereTelemetry();
     }
 
     public ApplicationUpdateStatus GetStatus()
@@ -64,11 +67,13 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
             var validation = ValidateOptions(requireScript: true);
             if (!validation.IsValid || validation.Request is null)
             {
+                _telemetry.RecordApplicationUpdate("start", "rejected");
                 return new ApplicationUpdateStartResult(false, validation.Message, null);
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(validation.Request.LogPath)!);
             _processStarter.Start(validation.Request);
+            _telemetry.RecordApplicationUpdate("start", "started");
             return new ApplicationUpdateStartResult(
                 true,
                 "Signed GitHub release update started. The app will reconnect after a verified update, or remain on the current version when already up to date.",
@@ -76,6 +81,7 @@ public sealed class ApplicationUpdateService : IApplicationUpdateService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            _telemetry.RecordApplicationUpdate("start", "failed");
             return new ApplicationUpdateStartResult(false, $"Update could not be started: {ex.Message}", null);
         }
         finally

@@ -193,12 +193,12 @@ html[data-density="compact"] .poster-frame {
     width: 78px;
 }
 
-html[data-density="compact"] .card-description,
-html[data-density="compact"] .genre-tags,
-html[data-density="compact"] .source-details,
-html[data-density="compact"] .series-enrichment,
-html[data-density="compact"] .scores span:not(.selected-score) {
-    display: none;
+html[data-density="compact"] .card-details {
+    margin-top: 0.18rem;
+}
+
+html[data-density="compact"] .card-details-content {
+    gap: 0.38rem;
 }
 
 html[data-density="comfortable"] .premiere-card {
@@ -1365,7 +1365,7 @@ html[data-density="comfortable"] .premiere-card {
     padding: 0.12rem 0.34rem;
     border-radius: 999px;
     background: rgba(20, 125, 115, 0.1);
-    color: var(--muted);
+    color: #48545f;
     font-size: 0.68rem;
     font-weight: 800;
     white-space: nowrap;
@@ -2075,12 +2075,38 @@ html[data-density="comfortable"] .premiere-card {
     margin-top: 0.45rem;
 }
 
+.card-details {
+    margin-top: 0.38rem;
+    border-top: 1px solid rgba(23, 33, 43, 0.1);
+    padding-top: 0.28rem;
+}
+
+.card-details > summary,
 .source-details summary {
     width: fit-content;
     cursor: pointer;
-    color: var(--muted);
+    color: #48545f;
     font-size: 0.76rem;
     font-weight: 800;
+}
+
+.card-details > summary {
+    color: var(--teal);
+    font-size: 0.8rem;
+}
+
+.card-details-content {
+    display: grid;
+    gap: 0.5rem;
+    padding-top: 0.25rem;
+}
+
+.primary-actions:empty {
+    display: none;
+}
+
+.primary-score {
+    margin-top: 0.36rem;
 }
 
 .provenance-section {

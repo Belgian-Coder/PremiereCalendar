@@ -10,6 +10,7 @@
 @inject CacheInspectorService CacheInspector
 @inject BackgroundJobTimelineService BackgroundJobTimeline
 @inject SourceHealthService SourceHealthService
+@inject IServiceProvider ServiceProvider
 @inject CalendarDataMaintenanceService DataMaintenanceService
 @inject ReleaseUpdateService ReleaseUpdateService
 @inject SettingsBackupService SettingsBackupService
@@ -73,6 +74,8 @@
                     </div>
 
                     <div class="local-status-grid">
+                        <SettingsRuntimeStatus Status="_systemStatus" />
+
                         <section class="status-mini-panel" aria-label="Cache inspector">
                             <div class="status-mini-heading">
                                 <strong>Cache inspector</strong>
@@ -173,102 +176,20 @@
                             }
                         </section>
 
-                        <section class="status-mini-panel update-panel" aria-label="Release updates">
-                            <div class="status-mini-heading">
-                                <strong>Release/update checker</strong>
-                                <button class="tool-button settings-secondary"
-                                        type="button"
-                                        title="Check for application updates"
-                                        @onclick="CheckForUpdatesAsync"
-                                        disabled="@_isCheckingRelease">
-                                    @(_isCheckingRelease ? "Checking..." : "Check")
-                                </button>
-                            </div>
-                            @if (_releaseResult is null)
-                            {
-                                <p class="settings-help">Checks GitHub releases on demand. Updates are never installed silently.</p>
-                            }
-                            else
-                            {
-                                <p class="settings-help" data-testid="release-update-result">
-                                    @if (!_releaseResult.HasPublishedRelease)
-                                    {
-                                        <span>@_releaseResult.ReleaseName Current @_releaseResult.CurrentVersion.</span>
-                                    }
-                                    else
-                                    {
-                                        <span>Current @_releaseResult.CurrentVersion · latest @_releaseResult.LatestVersion.</span>
-                                        @if (_releaseResult.IsUpdateAvailable && !string.IsNullOrWhiteSpace(_releaseResult.ReleaseUrl))
-                                        {
-                                            <a href="@_releaseResult.ReleaseUrl" target="_blank" rel="noopener">Open release</a>
-                                        }
-                                    }
-                                </p>
-                            }
-                            <div class="application-update-block">
-                                <div class="status-mini-heading compact">
-                                    <strong>Signed GitHub release update</strong>
-                                    <button class="tool-button settings-secondary"
-                                            type="button"
-                                            title="Install latest signed GitHub release"
-                                            aria-label="Install latest signed GitHub release"
-                                            @onclick="StartApplicationUpdateAsync"
-                                            disabled="@(_isStartingApplicationUpdate || _applicationUpdateStatus?.IsConfigured != true)">
-                                        @(_isStartingApplicationUpdate ? "Starting..." : "Update")
-                                    </button>
-                                </div>
-                                <p class="settings-help" data-testid="application-update-status">
-                                    @ApplicationUpdateStatusText()
-                                </p>
-                                @if (_applicationUpdateStatus is { } updateStatus)
-                                {
-                                    <div class="update-evidence" data-testid="application-update-evidence">
-                                        <span>Active @(updateStatus.ActiveVersion ?? "unknown")</span>
-                                        <span>@updateStatus.Repository</span>
-                                        @if (!string.IsNullOrWhiteSpace(updateStatus.LastResult))
-                                        {
-                                            <span>Last result @updateStatus.LastResult</span>
-                                        }
-                                    </div>
-                                    @if (!string.IsNullOrWhiteSpace(updateStatus.LatestLogTail))
-                                    {
-                                        <details class="update-log-tail">
-                                            <summary>Latest update log</summary>
-                                            <pre>@updateStatus.LatestLogTail</pre>
-                                        </details>
-                                    }
-                                }
-                                @if (_applicationUpdateResult is not null)
-                                {
-                                    <p class="@ApplicationUpdateResultClass" data-testid="application-update-result">
-                                        @_applicationUpdateResult.Message
-                                        @if (!string.IsNullOrWhiteSpace(_applicationUpdateResult.LogPath))
-                                        {
-                                            <span> Log: @Path.GetFileName(_applicationUpdateResult.LogPath)</span>
-                                        }
-                                    </p>
-                                }
-                            </div>
-                        </section>
+                        <SettingsReleaseUpdatePanel ReleaseResult="_releaseResult"
+                                                    IsChecking="_isCheckingRelease"
+                                                    OnCheck="CheckForUpdatesAsync"
+                                                    UpdateStatus="_applicationUpdateStatus"
+                                                    UpdateResult="_applicationUpdateResult"
+                                                    IsStartingUpdate="_isStartingApplicationUpdate"
+                                                    OnStartUpdate="StartApplicationUpdateAsync"
+                                                    UpdateStatusText="@ApplicationUpdateStatusText()"
+                                                    UpdateResultClass="@ApplicationUpdateResultClass" />
 
-                        <section class="status-mini-panel backup-panel" aria-label="Backup and restore settings">
-                            <div class="status-mini-heading">
-                                <strong>Backup</strong>
-                                <div class="settings-action-row compact">
-                                    <button class="tool-button settings-secondary" type="button" @onclick="ExportBackupAsync">Export</button>
-                                    <button class="tool-button settings-secondary" type="button" @onclick="ImportBackupAsync" disabled="@string.IsNullOrWhiteSpace(_backupJson)">Import</button>
-                                </div>
-                            </div>
-                            <label class="switch-row compact">
-                                <input type="checkbox" @bind="_includeBackupSecrets" />
-                                <span>Include API secrets</span>
-                            </label>
-                            <textarea class="settings-input backup-json"
-                                      aria-label="Settings backup JSON"
-                                      @bind="_backupJson"
-                                      @bind:event="onchange"></textarea>
-                            <small class="settings-help">Export includes local settings, saved presets, and visit state. API secrets are redacted unless explicitly included.</small>
-                        </section>
+                        <SettingsBackupRestorePanel @bind-BackupJson="_backupJson"
+                                                    @bind-IncludeSecrets="_includeBackupSecrets"
+                                                    OnExport="ExportBackupAsync"
+                                                    OnImport="ImportBackupAsync" />
                     </div>
                 </article>
 
@@ -932,6 +853,7 @@
     private CacheInspectorSummary? _cacheSummary;
     private IReadOnlyList<BackgroundJobEvent> _jobEvents = [];
     private SourceHealthOverview? _sourceHealth;
+    private SystemStatusSnapshot? _systemStatus;
     private ReleaseUpdateResult? _releaseResult;
     private bool _isCheckingRelease;
     private ApplicationUpdateStatus? _applicationUpdateStatus;
@@ -1180,6 +1102,9 @@
             _cacheSummary = CacheInspector.GetSummary();
             _jobEvents = await BackgroundJobTimeline.GetRecentAsync(_disposeCancellation.Token);
             _sourceHealth = await SourceHealthService.GetOverviewAsync(_disposeCancellation.Token);
+            _systemStatus = ServiceProvider.GetService<SystemStatusService>() is { } systemStatusService
+                ? await systemStatusService.GetAsync(_disposeCancellation.Token)
+                : null;
             _applicationUpdateStatus = ApplicationUpdateService.GetStatus();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -24,8 +26,12 @@ jobs:
         run: .\.dotnet\dotnet.exe restore PremiereCalendar.slnx --nologo
       - name: Build
         run: .\.dotnet\dotnet.exe build PremiereCalendar.slnx -c Release --no-restore --nologo -p:UseSharedCompilation=false
-      - name: Test
-        run: .\.dotnet\dotnet.exe test PremiereCalendar.slnx -c Release --no-build --no-restore --nologo --logger "trx;LogFilePrefix=ci"
+      - name: Install Chromium
+        run: .\tests\PremiereCalendar.BrowserTests\bin\Release\net11.0\playwright.ps1 install chromium
+      - name: Unit, component, and integration tests
+        run: .\.dotnet\dotnet.exe test PremiereCalendar.slnx -c Release --no-build --no-restore --nologo --filter "FullyQualifiedName!~PremiereCalendar.BrowserTests" --logger "trx;LogFilePrefix=ci"
+      - name: Browser, accessibility, and performance tests
+        run: .\.dotnet\dotnet.exe test tests\PremiereCalendar.BrowserTests\PremiereCalendar.BrowserTests.csproj -c Release --no-build --no-restore --nologo --logger "trx;LogFilePrefix=browser"
       - name: Publish test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -33,3 +39,10 @@ jobs:
           name: test-results
           path: '**/TestResults/*.trx'
           if-no-files-found: warn
+      - name: Publish browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-evidence
+          path: 'tests/PremiereCalendar.BrowserTests/bin/Release/net11.0/TestResults/**'
+          if-no-files-found: ignore

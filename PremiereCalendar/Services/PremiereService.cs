@@ -4,13 +4,14 @@ using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class PremiereService : IPremiereService
+public sealed class PremiereService : IPremiereService, IPremiereLoadPipeline
 {
     private static readonly TimeSpan CachedEnrichmentMaxAge = TimeSpan.FromHours(12);
     private const int ConflictingExternalIdsTmdbId = -1;
@@ -19,7 +20,7 @@ public sealed class PremiereService : IPremiereService
     private readonly IOmdbClient _omdbClient;
     private readonly ITvmazeClient _tvmazeClient;
     private readonly IWatchmodeClient _watchmodeClient;
-    private readonly ICalendarCache _calendarCache;
+    private readonly CalendarLoadCacheOrchestrator _cacheOrchestrator;
     private readonly TrailerSelector _trailerSelector;
     private readonly RatingMapper _ratingMapper;
     private readonly IReadOnlyList<IArtworkProvider> _artworkProviders;
@@ -32,6 +33,8 @@ public sealed class PremiereService : IPremiereService
     private readonly WeekDiagnosticsService? _weekDiagnosticsService;
     private readonly ScoreBackfillService? _scoreBackfillService;
     private readonly MissingExternalIdRepairService? _missingExternalIdRepairService;
+    private readonly IProviderWorkScheduler? _workScheduler;
+    private readonly PremiereTelemetry _telemetry;
 
     public PremiereService(
         ITmdbClient tmdbClient,
@@ -50,13 +53,16 @@ public sealed class PremiereService : IPremiereService
         IRottenTomatoesClient? rottenTomatoesClient = null,
         WeekDiagnosticsService? weekDiagnosticsService = null,
         ScoreBackfillService? scoreBackfillService = null,
-        MissingExternalIdRepairService? missingExternalIdRepairService = null)
+        MissingExternalIdRepairService? missingExternalIdRepairService = null,
+        IProviderWorkScheduler? workScheduler = null,
+        PremiereTelemetry? telemetry = null,
+        CalendarLoadCacheOrchestrator? cacheOrchestrator = null)
     {
         _tmdbClient = tmdbClient;
         _omdbClient = omdbClient;
         _tvmazeClient = tvmazeClient;
         _watchmodeClient = watchmodeClient;
-        _calendarCache = calendarCache;
+        _cacheOrchestrator = cacheOrchestrator ?? new CalendarLoadCacheOrchestrator(calendarCache);
         _trailerSelector = trailerSelector;
         _ratingMapper = ratingMapper;
         _artworkProviders = artworkProviders.ToArray();
@@ -69,6 +75,8 @@ public sealed class PremiereService : IPremiereService
         _weekDiagnosticsService = weekDiagnosticsService;
         _scoreBackfillService = scoreBackfillService;
         _missingExternalIdRepairService = missingExternalIdRepairService;
+        _workScheduler = workScheduler;
+        _telemetry = telemetry ?? new PremiereTelemetry();
     }
 
     public async Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
@@ -92,6 +100,60 @@ public sealed class PremiereService : IPremiereService
     }
 
     public async IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(
+        DateOnly start,
+        DateOnly end,
+        bool forceRefresh = false,
+        CalendarFilters? filters = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using var activity = _telemetry.StartActivity("calendar.load");
+        var started = Stopwatch.GetTimestamp();
+        var firstResultRecorded = false;
+        if (_workScheduler is null)
+        {
+            await foreach (var progress in StreamCoreAsync(start, end, forceRefresh, filters, cancellationToken)
+                               .WithCancellation(cancellationToken))
+            {
+                if (!firstResultRecorded)
+                {
+                    _telemetry.RecordCalendarFirstResult(Stopwatch.GetElapsedTime(started), progress.FromCache);
+                    firstResultRecorded = true;
+                }
+                if (progress.IsFinal) _telemetry.RecordCalendarCompletion(Stopwatch.GetElapsedTime(started), progress.Items.Count, progress.FromCache);
+                yield return progress;
+            }
+            yield break;
+        }
+
+        var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
+        var payload = new CalendarProviderWorkPayload(start, end, forceRefresh, filters is null ? null : CalendarFilterState.Clone(filters));
+        var request = new ProviderWorkRequest(
+            ProviderWorkKind.CalendarForeground,
+            $"foreground:{start:yyyyMMdd}:{end:yyyyMMdd}:{forceRefresh}:{criteria.CacheKey()}",
+            ProviderWorkPriority.Foreground,
+            JsonSerializer.Serialize(payload));
+        var handle = await _workScheduler.EnqueueAsync(request, cancellationToken);
+        await foreach (var update in _workScheduler.WatchAsync(handle, cancellationToken)
+                           .WithCancellation(cancellationToken))
+        {
+            if (update.CalendarProgress is { } progress)
+            {
+                if (!firstResultRecorded)
+                {
+                    _telemetry.RecordCalendarFirstResult(Stopwatch.GetElapsedTime(started), progress.FromCache);
+                    firstResultRecorded = true;
+                }
+                if (progress.IsFinal) _telemetry.RecordCalendarCompletion(Stopwatch.GetElapsedTime(started), progress.Items.Count, progress.FromCache);
+                yield return progress;
+            }
+            else if (update.State == ProviderWorkState.Failed)
+            {
+                throw new ExternalApiException(update.Error ?? "Provider work failed.");
+            }
+        }
+    }
+
+    public async IAsyncEnumerable<PremiereLoadProgress> StreamCoreAsync(
         DateOnly start,
         DateOnly end,
         bool forceRefresh = false,
@@ -156,7 +218,7 @@ public sealed class PremiereService : IPremiereService
             }
             else
             {
-                var cached = await _calendarCache.GetWeekAsync(start, end, cacheKey, cancellationToken);
+                var cached = await _cacheOrchestrator.ReadAsync(start, end, cacheKey, cancellationToken);
                 if (cached is not null)
                 {
                     var hydratedItems = await HydrateCachedImdbRatingsAsync(
@@ -168,7 +230,7 @@ public sealed class PremiereService : IPremiereService
                     yield break;
                 }
 
-                cached = await _calendarCache.GetWeekAsync(start, end, cacheKey, cancellationToken, allowExpired: true);
+                cached = await _cacheOrchestrator.ReadAsync(start, end, cacheKey, cancellationToken, allowExpired: true);
                 cachedEnrichment = CreateCachedEnrichmentLookup(cached);
             }
         }
@@ -187,7 +249,7 @@ public sealed class PremiereService : IPremiereService
             }
             else
             {
-                var cached = await _calendarCache.GetWeekAsync(start, end, cacheKey, cancellationToken, allowExpired: true);
+                var cached = await _cacheOrchestrator.ReadAsync(start, end, cacheKey, cancellationToken, allowExpired: true);
                 cachedEnrichment = CreateCachedEnrichmentLookup(cached);
             }
         }
@@ -289,7 +351,7 @@ public sealed class PremiereService : IPremiereService
                 }
                 else
                 {
-                    await _calendarCache.SetWeekAsync(start, end, cacheKey, finalItems, cancellationToken);
+                    await _cacheOrchestrator.WriteAsync(start, end, cacheKey, finalItems, cancellationToken);
                     await RecordWeekCacheStateAsync(start, cacheKey, finalItems.Count, cancellationToken);
                 }
             }
@@ -401,13 +463,13 @@ public sealed class PremiereService : IPremiereService
     {
         var seriesFilters = FiltersForPageMode(filters, CalendarPageMode.Series);
         var movieFilters = FiltersForPageMode(filters, CalendarPageMode.Movies);
-        var seriesItems = await _calendarCache.GetWeekAsync(
+        var seriesItems = await _cacheOrchestrator.ReadAsync(
             start,
             end,
             PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(),
             cancellationToken,
             allowExpired);
-        var movieItems = await _calendarCache.GetWeekAsync(
+        var movieItems = await _cacheOrchestrator.ReadAsync(
             start,
             end,
             PremiereDiscoveryCriteria.FromFilters(movieFilters).CacheKey(),
@@ -468,7 +530,7 @@ public sealed class PremiereService : IPremiereService
             MergePremiereItems(finalItems.Where(item => item.MediaType == PremiereMediaType.Movie)),
             movieFilters);
 
-        await _calendarCache.SetWeekAsync(
+        await _cacheOrchestrator.WriteAsync(
             start,
             end,
             PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(),
@@ -479,7 +541,7 @@ public sealed class PremiereService : IPremiereService
             PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(),
             seriesItems.Count,
             cancellationToken);
-        await _calendarCache.SetWeekAsync(
+        await _cacheOrchestrator.WriteAsync(
             start,
             end,
             PremiereDiscoveryCriteria.FromFilters(movieFilters).CacheKey(),
@@ -546,7 +608,7 @@ public sealed class PremiereService : IPremiereService
         Exception refreshError,
         CancellationToken cancellationToken)
     {
-        var cached = await _calendarCache.GetWeekAsync(
+        var cached = await _cacheOrchestrator.ReadAsync(
             start,
             end,
             cacheKey,

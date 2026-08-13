@@ -5,8 +5,11 @@
     };
     window.premiereCalendarDensity = {
         initialize: (key) => {
-            let compact = false;
-            try { compact = window.localStorage?.getItem(key) === "compact"; } catch { }
+            let compact = true;
+            try {
+                const saved = window.localStorage?.getItem(key);
+                compact = saved !== "comfortable";
+            } catch { }
             return apply(compact);
         },
         toggle: (key) => {

@@ -23,6 +23,8 @@ public static class HostingExtensions
         });
         services.AddOptions<AppDatabaseOptions>().Bind(configuration.GetSection("AppDatabase"))
             .Validate(o => !string.IsNullOrWhiteSpace(o.Path), "AppDatabase:Path is required")
+            .Validate(o => !string.IsNullOrWhiteSpace(o.MigrationBackupDirectory), "AppDatabase:MigrationBackupDirectory is required")
+            .Validate(o => o.MigrationBackupRetentionCount is >= 1 and <= 100, "AppDatabase migration backup retention must be between 1 and 100")
             .ValidateOnStart();
         services.AddOptions<ImageCacheOptions>().Bind(configuration.GetSection("ImageCache"))
             .Validate(o => !o.Enabled || (o.MaxBytes > 0 && o.MaxConcurrentDownloads > 0 && o.MaxConcurrentDecodes > 0 && o.AllowedHosts.Length > 0 && o.AllowedHosts.All(host => !string.IsNullOrWhiteSpace(host))),

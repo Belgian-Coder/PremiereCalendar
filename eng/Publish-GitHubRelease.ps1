@@ -86,6 +86,8 @@ if (-not $certificate.HasPrivateKey) { throw 'The release signing certificate ha
 if (-not $SkipValidation) {
     Invoke-Checked { & $dotnet restore (Join-Path $projectRoot 'PremiereCalendar.slnx') --nologo } 'Restore failed.'
     Invoke-Checked { & $dotnet build (Join-Path $projectRoot 'PremiereCalendar.slnx') -c Release --no-restore --nologo -p:UseSharedCompilation=false } 'Release build failed.'
+    $playwrightInstaller = Join-Path $projectRoot 'tests\PremiereCalendar.BrowserTests\bin\Release\net11.0\playwright.ps1'
+    Invoke-Checked { & $playwrightInstaller install chromium } 'Chromium installation for browser regression tests failed.'
     Invoke-Checked { & $dotnet test (Join-Path $projectRoot 'PremiereCalendar.slnx') -c Release --no-build --no-restore --nologo } 'Tests failed.'
 }
 
@@ -99,11 +101,16 @@ Invoke-Checked {
 New-Item -ItemType Directory -Path $publishPath -Force | Out-Null
 $fingerprintText = $head + [Environment]::NewLine + $Version
 $buildId = ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($fingerprintText)))).ToLowerInvariant()
+$buildTimeUtc = [DateTimeOffset]::UtcNow.ToString('O')
+[xml]$buildProperties = Get-Content -LiteralPath (Join-Path $projectRoot 'Directory.Build.props') -Raw
+$databaseSchemaVersion = [int]$buildProperties.Project.PropertyGroup.DatabaseSchemaVersion
+if ($databaseSchemaVersion -lt 1) { throw 'Directory.Build.props does not define a valid DatabaseSchemaVersion.' }
 $publishArguments = @(
     'publish', (Join-Path $projectRoot 'PremiereCalendar\PremiereCalendar.csproj'),
     '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '--no-restore',
     '-o', $publishPath,
-    "/p:Version=$Version", "/p:FileVersion=$Version.0", "/p:InformationalVersion=$Version+$buildId"
+    "/p:Version=$Version", "/p:FileVersion=$Version.0", "/p:InformationalVersion=$Version+$buildId",
+    "/p:BuildId=$buildId", "/p:SourceRevisionId=$head", "/p:BuildTimeUtc=$buildTimeUtc"
 )
 Invoke-Checked { & $dotnet @publishArguments } 'Self-contained publish failed.'
 $metadata = [ordered]@{
@@ -111,17 +118,25 @@ $metadata = [ordered]@{
     version = $Version
     sourceRevision = $head
     buildId = $buildId
-    builtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+    builtUtc = $buildTimeUtc
+    databaseSchemaVersion = $databaseSchemaVersion
 }
 [IO.File]::WriteAllText((Join-Path $publishPath 'build-metadata.json'), ($metadata | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 foreach ($required in @('PremiereCalendar.exe', 'PremiereCalendar.dll', 'build-metadata.json', 'appsettings.json', 'wwwroot')) {
     if (-not (Test-Path -LiteralPath (Join-Path $publishPath $required))) { throw "Publish output is missing $required." }
 }
+$publishedVersion = (Get-Item -LiteralPath (Join-Path $publishPath 'PremiereCalendar.exe')).VersionInfo
+if ($publishedVersion.FileVersion -ne "$Version.0") { throw "Executable file version $($publishedVersion.FileVersion) does not match $Version.0." }
+if (-not $publishedVersion.ProductVersion.StartsWith($Version, [StringComparison]::Ordinal)) { throw "Executable product version $($publishedVersion.ProductVersion) does not match $Version." }
+$verifiedMetadata = Get-Content -LiteralPath (Join-Path $publishPath 'build-metadata.json') -Raw | ConvertFrom-Json
+if ([string]$verifiedMetadata.version -ne $Version -or [int]$verifiedMetadata.databaseSchemaVersion -ne $databaseSchemaVersion) {
+    throw 'Build metadata does not match the requested application and database versions.'
+}
 
 Compress-Archive -Path (Join-Path $publishPath '*') -DestinationPath $packagePath -CompressionLevel Optimal
 $packageHash = Get-Sha256 $packagePath
 $normalizedNotes = $ReleaseNotes.Replace("`r`n", "`n").Replace("`r", "`n")
-$payload = @('1', $Version, 'stable', (Split-Path $packagePath -Leaf), $packageHash.ToUpperInvariant(), '0', '2147483647', $normalizedNotes) -join [char]10
+$payload = @('1', $Version, 'stable', (Split-Path $packagePath -Leaf), $packageHash.ToUpperInvariant(), '0', [string]$databaseSchemaVersion, $normalizedNotes) -join [char]10
 $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
 try {
     $signature = [Convert]::ToBase64String($rsa.SignData([Text.Encoding]::UTF8.GetBytes($payload), [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
@@ -134,11 +149,14 @@ $manifest = [ordered]@{
     packageFileName = Split-Path $packagePath -Leaf
     packageSha256 = $packageHash
     minimumDatabaseSchemaVersion = 0
-    maximumDatabaseSchemaVersion = 2147483647
+    maximumDatabaseSchemaVersion = $databaseSchemaVersion
     releaseNotes = $normalizedNotes
     signature = $signature
 }
 [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+if ([string]$manifest.version -ne $Version -or [string]$manifest.packageFileName -ne (Split-Path $packagePath -Leaf)) {
+    throw 'Manifest identity does not match the requested version and package.'
+}
 Export-Certificate -Cert $certificate -FilePath $certificatePath -Type CERT | Out-Null
 $installerStage = Join-Path $releaseRoot 'installer'
 New-Item -ItemType Directory -Path (Join-Path $installerStage 'deploy\Updates') -Force | Out-Null

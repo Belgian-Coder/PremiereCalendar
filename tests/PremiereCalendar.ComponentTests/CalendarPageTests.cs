@@ -1927,6 +1927,8 @@ public sealed class CalendarPageTests : BunitContext
 
         Assert.Contains("Unverified", component.Markup);
         Assert.Contains("Provider date", component.Markup);
+        Assert.DoesNotContain("Could not match to TMDb yet", component.Markup);
+        component.Find(".card-details summary").Click();
         Assert.Contains("Could not match to TMDb yet", component.Markup);
         Assert.Contains("External source", component.Markup);
         Assert.Empty(component.FindAll(".arr-add-button"));

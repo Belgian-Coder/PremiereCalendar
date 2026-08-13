@@ -50,7 +50,7 @@ enforces download and expanded-size limits, verifies the pinned certificate,
 RSA signature and SHA-256, rejects unsafe ZIP paths, installs under
 `releases/<semver>`, and atomically switches the `current` junction. The Windows
 service is repointed to `current\PremiereCalendar.exe`; activation succeeds only
-when both liveness and the expected `/health/version` pass. A failed activation
+when liveness and the expected application and database schema values from `/health/version` pass. A failed activation
 restores the previous junction, service binary, and pre-update SQLite files.
 Asset downloads retry transient transport failures up to four times with bounded
 10, 30, and 60-second delays. This window also covers newly published GitHub assets

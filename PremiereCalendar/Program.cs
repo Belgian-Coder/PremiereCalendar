@@ -11,7 +11,14 @@ using PremiereCalendar.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+if (DatabaseCommandLine.IsDatabaseCommand(args))
+{
+    Environment.ExitCode = await DatabaseCommandLine.RunAsync(args, builder.Configuration, builder.Environment);
+    return;
+}
+
 builder.Services.AddHostingHardening(builder.Configuration);
+builder.AddPremiereTelemetry();
 
 builder.Host.UseWindowsService(options =>
 {
@@ -64,6 +71,7 @@ builder.Services.Configure<CacheMaintenanceOptions>(builder.Configuration.GetSec
 builder.Services.Configure<ImdbDatasetOptions>(builder.Configuration.GetSection("ImdbDataset"));
 builder.Services.Configure<ProviderDeltaSyncOptions>(builder.Configuration.GetSection("ProviderDeltaSync"));
 builder.Services.Configure<ApplicationUpdateOptions>(builder.Configuration.GetSection("ApplicationUpdate"));
+builder.Services.Configure<ProviderSchedulerOptions>(builder.Configuration.GetSection("ProviderScheduler"));
 
 builder.Services.AddMemoryCache();
 builder.Services.AddResponseCompression(options =>
@@ -77,6 +85,7 @@ builder.Services.AddResponseCompression(options =>
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddHealthChecks()
     .AddCheck<SqliteHealthCheck>("sqlite", tags: ["ready"]);
+builder.Services.AddSingleton<DatabaseRecoveryState>();
 builder.Services.AddSingleton<SqliteDatabaseInitializer>();
 // Register first so WAL and busy-timeout settings are applied before cache warmers start.
 builder.Services.AddHostedService<SqliteDatabaseInitializerHostedService>();
@@ -94,7 +103,7 @@ builder.Services.AddHttpClient<ITmdbClient, TmdbClient>((sp, client) =>
     {
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", options.BearerToken);
     }
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("tmdb", 4));
 
 builder.Services.AddHttpClient<IOmdbClient, OmdbClient>((sp, client) =>
 {
@@ -103,7 +112,7 @@ builder.Services.AddHttpClient<IOmdbClient, OmdbClient>((sp, client) =>
     client.BaseAddress = new Uri(options.BaseUrl);
     client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("omdb", 2));
 
 builder.Services.AddHttpClient<IImdbDatasetImporter, ImdbDatasetImporter>((sp, client) =>
 {
@@ -112,7 +121,7 @@ builder.Services.AddHttpClient<IImdbDatasetImporter, ImdbDatasetImporter>((sp, c
     client.BaseAddress = new Uri("https://datasets.imdbws.com/");
     client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 30, 600));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/Belgian-Coder/PremiereCalendar)");
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("imdb-dataset", 1));
 
 builder.Services.AddHttpClient<ITvmazeClient, TvmazeClient>((sp, client) =>
 {
@@ -122,7 +131,7 @@ builder.Services.AddHttpClient<ITvmazeClient, TvmazeClient>((sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("tvmaze", 4));
 
 builder.Services.AddHttpClient<IFanartClient, FanartClient>((sp, client) =>
 {
@@ -131,7 +140,7 @@ builder.Services.AddHttpClient<IFanartClient, FanartClient>((sp, client) =>
     client.BaseAddress = new Uri(options.BaseUrl);
     client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("fanart", 2));
 
 builder.Services.AddHttpClient<ITraktClient, TraktClient>((sp, client) =>
 {
@@ -141,7 +150,7 @@ builder.Services.AddHttpClient<ITraktClient, TraktClient>((sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("trakt", 2));
 
 builder.Services.AddHttpClient<ITheTvdbClient, TheTvdbClient>((sp, client) =>
 {
@@ -150,7 +159,7 @@ builder.Services.AddHttpClient<ITheTvdbClient, TheTvdbClient>((sp, client) =>
     client.BaseAddress = new Uri(options.BaseUrl);
     client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("thetvdb", 2));
 
 builder.Services.AddHttpClient<IWikimediaClient, WikimediaClient>((sp, client) =>
 {
@@ -159,7 +168,7 @@ builder.Services.AddHttpClient<IWikimediaClient, WikimediaClient>((sp, client) =
     client.BaseAddress = new Uri(options.WikidataBaseUrl);
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("wikimedia", 2));
 
 builder.Services.AddHttpClient<IRottenTomatoesClient, RottenTomatoesClient>((sp, client) =>
 {
@@ -169,7 +178,7 @@ builder.Services.AddHttpClient<IRottenTomatoesClient, RottenTomatoesClient>((sp,
     client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("rottentomatoes", 2));
 
 builder.Services.AddHttpClient<IWatchmodeClient, WatchmodeClient>((sp, client) =>
 {
@@ -179,7 +188,7 @@ builder.Services.AddHttpClient<IWatchmodeClient, WatchmodeClient>((sp, client) =
     client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("watchmode", 2));
 
 builder.Services.AddHttpClient<ISimklClient, SimklClient>((sp, client) =>
 {
@@ -189,14 +198,14 @@ builder.Services.AddHttpClient<ISimklClient, SimklClient>((sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("simkl", 2));
 
 builder.Services.AddHttpClient<FileImageCache>(client =>
 {
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
     client.Timeout = TimeSpan.FromSeconds(20);
     client.DefaultRequestHeaders.UserAgent.ParseAdd("PremiereCalendar/1.0 (+https://github.com/local/premiere-calendar)");
-});
+}).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("images", 4));
 builder.Services.AddHttpClient<IArrIntegrationService, ArrIntegrationService>(client =>
 {
     client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -209,57 +218,10 @@ builder.Services.AddHttpClient<ReleaseUpdateService>(client =>
     client.Timeout = TimeSpan.FromSeconds(20);
 });
 
-builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddSingleton<FileCalendarCache>();
-builder.Services.AddSingleton<ICalendarCache>(sp => sp.GetRequiredService<FileCalendarCache>());
-builder.Services.AddSingleton<ICalendarCacheMaintenance>(sp => sp.GetRequiredService<FileCalendarCache>());
-builder.Services.AddTransient<IImageCache>(sp => sp.GetRequiredService<FileImageCache>());
-builder.Services.AddTransient<IImageCacheMaintenance>(sp => sp.GetRequiredService<FileImageCache>());
-builder.Services.AddSingleton<IIntegrationSettingsStore, SqliteIntegrationSettingsStore>();
-builder.Services.AddSingleton<IAppStateStore, SqliteAppStateStore>();
-builder.Services.AddSingleton<CacheInspectorService>();
-builder.Services.AddSingleton<BackgroundJobTimelineService>();
-builder.Services.AddSingleton<IWeekDiagnosticsStore, AppStateWeekDiagnosticsStore>();
-builder.Services.AddSingleton<WeekDiagnosticsService>();
-builder.Services.AddSingleton<SourceHealthService>();
-builder.Services.AddSingleton<CalendarPresetService>();
-builder.Services.AddSingleton<CalendarVisitChangeService>();
-builder.Services.AddSingleton<SettingsBackupService>();
-builder.Services.AddSingleton<IApplicationUpdateProcessStarter, DefaultApplicationUpdateProcessStarter>();
-builder.Services.AddSingleton<IApplicationUpdateService, ApplicationUpdateService>();
-builder.Services.AddSingleton<ICalendarFilterUsageStore, SqliteCalendarFilterUsageStore>();
-builder.Services.AddSingleton<ISimklSyncStateStore, SqliteSimklSyncStateStore>();
-builder.Services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();
-builder.Services.AddSingleton<IOmdbCacheStore, SqliteOmdbCacheStore>();
-builder.Services.AddSingleton<IProviderCacheStateStore, SqliteProviderCacheStateStore>();
-builder.Services.AddSingleton<IViewSyncStore, SqliteViewSyncStore>();
-builder.Services.AddSingleton<IViewSyncService, ViewSyncService>();
-builder.Services.AddSingleton<ISingleFlightCoordinator, SingleFlightCoordinator>();
-builder.Services.AddSingleton<ProviderRequestThrottler>();
-builder.Services.AddSingleton<CalendarLoadCoordinator>();
-builder.Services.AddSingleton<AdjacentWeekPrefetcher>();
-builder.Services.AddSingleton<IAdjacentWeekPrefetcher>(sp => sp.GetRequiredService<AdjacentWeekPrefetcher>());
-builder.Services.AddHostedService(sp => sp.GetRequiredService<AdjacentWeekPrefetcher>());
-builder.Services.AddScoped<CurrentWeekCalendarWarmupRunner>();
-builder.Services.AddScoped<CacheMaintenanceRunner>();
-builder.Services.AddHostedService<CurrentWeekCalendarWarmupService>();
-builder.Services.AddHostedService<ImdbDatasetRefreshService>();
-builder.Services.AddHostedService<ProviderDeltaSyncService>();
-builder.Services.AddSingleton<IFilterCatalogService, TmdbFilterCatalogService>();
-builder.Services.AddSingleton<TmdbRequestLimiter>();
-builder.Services.AddSingleton<TrailerSelector>();
-builder.Services.AddSingleton<RatingMapper>();
-builder.Services.AddSingleton<ScoreBackfillService>();
-builder.Services.AddSingleton<MissingExternalIdRepairService>();
-builder.Services.AddSingleton<CalendarDataMaintenanceService>();
-builder.Services.AddSingleton<IArtworkProvider, FanartArtworkProvider>();
-builder.Services.AddSingleton<IArtworkProvider, TvmazeArtworkProvider>();
-builder.Services.AddSingleton<IArtworkProvider, TheTvdbArtworkProvider>();
-builder.Services.AddSingleton<IArtworkProvider, WikimediaArtworkProvider>();
-builder.Services.AddSingleton<IPremiereDiscoveryProvider, TraktDiscoveryProvider>();
-builder.Services.AddSingleton<IPremiereDiscoveryProvider, SimklCalendarDiscoveryProvider>();
-builder.Services.AddSingleton<IPremiereDiscoveryProvider, TvmazeScheduleDiscoveryProvider>();
-builder.Services.AddScoped<IPremiereService, PremiereService>();
+builder.Services
+    .AddPremierePersistence()
+    .AddPremiereScheduling()
+    .AddPremiereCalendarServices(builder.Configuration);
 
 var app = builder.Build();
 
@@ -290,14 +252,23 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
 {
     Predicate = check => check.Tags.Contains("ready")
 });
-app.MapGet("/health/version", () => Results.Json(new
+app.MapGet("/health/version", (DatabaseRecoveryState databaseState) => Results.Json(new
 {
-    version = typeof(Program).Assembly
-        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
-        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
-        .SingleOrDefault()?.InformationalVersion
-        ?? typeof(Program).Assembly.GetName().Version?.ToString()
-        ?? "0.0.0"
+    version = BuildVersionInfo.Current.Version,
+    informationalVersion = BuildVersionInfo.Current.InformationalVersion,
+    sourceRevision = BuildVersionInfo.Current.SourceRevision,
+    buildId = BuildVersionInfo.Current.BuildId,
+    buildTimeUtc = BuildVersionInfo.Current.BuildTimeUtc,
+    databaseSchemaVersion = BuildVersionInfo.Current.DatabaseSchemaVersion,
+    database = new
+    {
+        currentSchemaVersion = databaseState.Snapshot.CurrentVersion,
+        targetSchemaVersion = databaseState.Snapshot.TargetVersion,
+        healthy = databaseState.Snapshot.IsHealthy,
+        integrity = databaseState.Snapshot.Message,
+        lastMigration = databaseState.Snapshot.LastMigration,
+        recovery = "Stop the Windows Service, run 'PremiereCalendar.exe database verify', then use 'database restore --backup <absolute-path>' only with a verified backup."
+    }
 }));
 app.MapGet(
     "/cached-image",

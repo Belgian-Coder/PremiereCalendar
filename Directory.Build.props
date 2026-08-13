@@ -1,7 +1,8 @@
 <Project>
   <PropertyGroup>
-    <Version>1.1.7</Version>
-    <FileVersion>1.1.7.0</FileVersion>
-    <InformationalVersion>1.1.7</InformationalVersion>
+    <Version Condition="'$(Version)' == ''">0.0.0-local</Version>
+    <FileVersion Condition="'$(FileVersion)' == ''">0.0.0.0</FileVersion>
+    <InformationalVersion Condition="'$(InformationalVersion)' == ''">0.0.0-local</InformationalVersion>
+    <DatabaseSchemaVersion>2</DatabaseSchemaVersion>
   </PropertyGroup>
 </Project>

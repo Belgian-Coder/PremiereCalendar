@@ -15,6 +15,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
     private readonly ICalendarCacheMaintenance? _cacheMaintenance;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<CurrentWeekCalendarWarmupRunner> _logger;
+    private readonly IPremiereLoadPipeline? _loadPipeline;
 
     public CurrentWeekCalendarWarmupRunner(
         IPremiereService premiereService,
@@ -24,7 +25,8 @@ public sealed class CurrentWeekCalendarWarmupRunner
         TimeProvider timeProvider,
         ILogger<CurrentWeekCalendarWarmupRunner> logger,
         IOptions<CalendarCacheOptions>? cacheOptions = null,
-        ICalendarCacheMaintenance? cacheMaintenance = null)
+        ICalendarCacheMaintenance? cacheMaintenance = null,
+        IPremiereLoadPipeline? loadPipeline = null)
     {
         _premiereService = premiereService;
         _usageStore = usageStore;
@@ -34,6 +36,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
         _cacheMaintenance = cacheMaintenance;
         _timeProvider = timeProvider;
         _logger = logger;
+        _loadPipeline = loadPipeline;
     }
 
     public async Task RunOnceAsync(CancellationToken cancellationToken)
@@ -152,12 +155,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
                 using var windowCancellation = CancellationTokenSource.CreateLinkedTokenSource(runToken, windowTimeout.Token);
                 try
                 {
-                    var items = await _premiereService.GetPremieresAsync(
-                        window.Start,
-                        window.End,
-                        windowCancellation.Token,
-                        forceRefresh: !_options.StaleOnlyRemoteRefresh,
-                        filters: filters);
+                    var items = await LoadWindowAsync(window, filters, windowCancellation.Token);
                     totalItemCount += items.Count;
                     successfulWindows++;
                 }
@@ -217,6 +215,34 @@ public sealed class CurrentWeekCalendarWarmupRunner
         }
 
         return new CalendarWarmupRunResult(Skipped: false, warmedProfiles, failedProfiles);
+    }
+
+    private async Task<IReadOnlyList<PremiereItem>> LoadWindowAsync(
+        CalendarWarmupWindow window,
+        CalendarFilters filters,
+        CancellationToken cancellationToken)
+    {
+        if (_loadPipeline is null)
+        {
+            return await _premiereService.GetPremieresAsync(
+                window.Start,
+                window.End,
+                cancellationToken,
+                forceRefresh: !_options.StaleOnlyRemoteRefresh,
+                filters: filters);
+        }
+
+        IReadOnlyList<PremiereItem> items = [];
+        await foreach (var progress in _loadPipeline.StreamCoreAsync(
+                           window.Start,
+                           window.End,
+                           !_options.StaleOnlyRemoteRefresh,
+                           filters,
+                           cancellationToken).WithCancellation(cancellationToken))
+        {
+            items = progress.Items;
+        }
+        return items;
     }
 
     private async Task<bool> IsWarmupWindowFreshAsync(

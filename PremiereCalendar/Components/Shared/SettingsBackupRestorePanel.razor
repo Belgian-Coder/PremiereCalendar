@@ -1,0 +1,32 @@
+<section class="status-mini-panel backup-panel" aria-label="Backup and restore settings">
+    <div class="status-mini-heading">
+        <strong>Backup</strong>
+        <div class="settings-action-row compact">
+            <button class="tool-button settings-secondary" type="button" @onclick="OnExport">Export</button>
+            <button class="tool-button settings-secondary" type="button" @onclick="OnImport" disabled="@string.IsNullOrWhiteSpace(BackupJson)">Import</button>
+        </div>
+    </div>
+    <label class="switch-row compact">
+        <input type="checkbox" checked="@IncludeSecrets" @onchange="ToggleSecrets" />
+        <span>Include API secrets</span>
+    </label>
+    <textarea class="settings-input backup-json"
+              aria-label="Settings backup JSON"
+              value="@BackupJson"
+              @onchange="ChangeBackupJson"></textarea>
+    <small class="settings-help">Export includes local settings, saved presets, and visit state. API secrets are redacted unless explicitly included.</small>
+</section>
+
+@code {
+    [Parameter] public string BackupJson { get; set; } = "";
+    [Parameter] public EventCallback<string> BackupJsonChanged { get; set; }
+    [Parameter] public bool IncludeSecrets { get; set; }
+    [Parameter] public EventCallback<bool> IncludeSecretsChanged { get; set; }
+    [Parameter] public EventCallback OnExport { get; set; }
+    [Parameter] public EventCallback OnImport { get; set; }
+
+    private Task ToggleSecrets(ChangeEventArgs args) =>
+        IncludeSecretsChanged.InvokeAsync(args.Value is true || string.Equals(args.Value?.ToString(), "true", StringComparison.OrdinalIgnoreCase));
+
+    private Task ChangeBackupJson(ChangeEventArgs args) => BackupJsonChanged.InvokeAsync(args.Value?.ToString() ?? "");
+}

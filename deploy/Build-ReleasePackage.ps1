@@ -36,7 +36,14 @@ function Get-ProjectVersion {
         return [string]$versionNode
     }
 
-    return Get-Date -Format 'yyyy.MM.dd.HHmm'
+    $repositoryPropertiesPath = Join-Path (Split-Path -Parent (Split-Path -Parent $ResolvedProjectPath)) 'Directory.Build.props'
+    if (Test-Path -LiteralPath $repositoryPropertiesPath -PathType Leaf) {
+        [xml]$repositoryProperties = Get-Content -LiteralPath $repositoryPropertiesPath -Raw
+        $fallbackVersion = [string]$repositoryProperties.Project.PropertyGroup.Version.InnerText
+        if (-not [string]::IsNullOrWhiteSpace($fallbackVersion)) { return $fallbackVersion }
+    }
+
+    return '0.0.0-local'
 }
 
 function Assert-ChildPath {
@@ -127,6 +134,13 @@ if (Test-Path -LiteralPath $stagingDirectory) {
 }
 
 New-Item -ItemType Directory -Force -Path $publishDirectory | Out-Null
+$sourceRevision = (& git -C $repoRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0) { $sourceRevision = 'unknown' }
+$buildTimeUtc = [DateTimeOffset]::UtcNow.ToString('O')
+$buildId = ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$sourceRevision`n$Version")))).ToLowerInvariant()
+$fileVersion = if ($Version -match '^\d+\.\d+\.\d+$') { "$Version.0" } else { '0.0.0.0' }
+[xml]$buildProperties = Get-Content -LiteralPath (Join-Path $repoRoot 'Directory.Build.props') -Raw
+$databaseSchemaVersion = [int]$buildProperties.Project.PropertyGroup.DatabaseSchemaVersion
 
 if (-not $SkipTests) {
     & $dotnetPath test $resolvedSolutionPath --no-restore
@@ -141,10 +155,24 @@ if (-not $SkipTests) {
     --self-contained true `
     -o $publishDirectory `
     /p:Version=$Version `
-    /p:InformationalVersion=$Version
+    /p:FileVersion=$fileVersion `
+    /p:InformationalVersion=$Version+$buildId `
+    /p:BuildId=$buildId `
+    /p:SourceRevisionId=$sourceRevision `
+    /p:BuildTimeUtc=$buildTimeUtc
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE"
 }
+
+$metadata = [ordered]@{
+    schemaVersion = 1
+    version = $Version
+    sourceRevision = $sourceRevision
+    buildId = $buildId
+    builtUtc = $buildTimeUtc
+    databaseSchemaVersion = $databaseSchemaVersion
+}
+[IO.File]::WriteAllText((Join-Path $publishDirectory 'build-metadata.json'), ($metadata | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 
 Get-ChildItem -LiteralPath $publishDirectory -Filter 'appsettings*.json' | ForEach-Object {
     Clear-ReleaseSecrets $_.FullName

@@ -104,19 +104,27 @@ function Expand-SafeArchive {
 }
 
 function Wait-ForHealthyVersion {
-    param([Parameter(Mandatory)][string] $ExpectedVersion)
+    param(
+        [Parameter(Mandatory)][string] $ExpectedVersion,
+        [Parameter(Mandatory)][int] $ExpectedDatabaseSchemaVersion
+    )
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(75)
     do {
         try {
             $health = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 5
             $versionResponse = Invoke-RestMethod -Uri $VersionUrl -TimeoutSec 5
             $actualVersion = ([string]$versionResponse.version).Split('+')[0]
-            if ($health.StatusCode -eq 200 -and $actualVersion -eq $ExpectedVersion) { return }
+            $actualDatabaseSchemaVersion = [int]$versionResponse.database.currentSchemaVersion
+            $reportedTargetSchemaVersion = [int]$versionResponse.databaseSchemaVersion
+            if ($health.StatusCode -eq 200 -and
+                $actualVersion -eq $ExpectedVersion -and
+                $actualDatabaseSchemaVersion -eq $ExpectedDatabaseSchemaVersion -and
+                $reportedTargetSchemaVersion -eq $ExpectedDatabaseSchemaVersion) { return }
         }
         catch { }
         Start-Sleep -Seconds 2
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
-    throw "Release $ExpectedVersion did not become healthy at the expected version."
+    throw "Release $ExpectedVersion did not become healthy at application version $ExpectedVersion and database schema $ExpectedDatabaseSchemaVersion."
 }
 
 $resolvedInstallRoot = [IO.Path]::GetFullPath($InstallRoot)
@@ -181,6 +189,25 @@ try {
     }
     $metadata = Get-Content -LiteralPath (Join-Path $stage 'build-metadata.json') -Raw | ConvertFrom-Json
     if ([string]$metadata.version -ne $version) { throw 'Build metadata version does not match the manifest.' }
+    $releaseDatabaseSchemaVersion = [int]$metadata.databaseSchemaVersion
+    if ($releaseDatabaseSchemaVersion -ne [int]$manifest.maximumDatabaseSchemaVersion) { throw 'Build metadata database schema does not match the manifest.' }
+    $liveDatabasePath = Join-Path $databaseDirectory 'premiere-calendar.db'
+    if (Test-Path -LiteralPath $liveDatabasePath -PathType Leaf) {
+        $previousDatabasePath = $env:AppDatabase__Path
+        try {
+            $env:AppDatabase__Path = $liveDatabasePath
+            $verificationOutput = @(& (Join-Path $stage 'PremiereCalendar.exe') database verify)
+            if ($LASTEXITCODE -ne 0 -or $verificationOutput.Count -eq 0) { throw 'The live database could not be verified before update.' }
+            $verification = $verificationOutput[-1] | ConvertFrom-Json
+            $liveSchemaVersion = [int]$verification.CurrentVersion
+            if ($liveSchemaVersion -lt [int]$manifest.minimumDatabaseSchemaVersion -or $liveSchemaVersion -gt [int]$manifest.maximumDatabaseSchemaVersion) {
+                throw "Live database schema $liveSchemaVersion is incompatible with release range $($manifest.minimumDatabaseSchemaVersion)-$($manifest.maximumDatabaseSchemaVersion)."
+            }
+        }
+        finally {
+            $env:AppDatabase__Path = $previousDatabasePath
+        }
+    }
     New-Item -ItemType Directory -Path (Split-Path -Parent $releaseRoot) -Force | Out-Null
     Move-Item -LiteralPath $stage -Destination $releaseRoot
     if ($null -ne $service -and $service.Status -ne 'Stopped') {
@@ -228,7 +255,7 @@ try {
     New-ItemProperty -Path $serviceRegistryPath -Name Environment -PropertyType MultiString -Value $environment -Force | Out-Null
     Start-Service -Name $ServiceName
     (Get-Service -Name $ServiceName).WaitForStatus('Running', '00:00:45')
-    Wait-ForHealthyVersion -ExpectedVersion $version
+    Wait-ForHealthyVersion -ExpectedVersion $version -ExpectedDatabaseSchemaVersion $releaseDatabaseSchemaVersion
     $updaterPayload = Join-Path $current 'updater-payload'
     if (Test-Path -LiteralPath $updaterPayload -PathType Container) {
         $payloadNames = @('install-github-release.ps1', 'update-helper.ps1')

@@ -70,45 +70,105 @@
             }
         </div>
 
-        <p class="card-description">@(string.IsNullOrWhiteSpace(Item.Overview) ? "No description available." : Item.Overview)</p>
-
-        @if (IsUnverified && !string.IsNullOrWhiteSpace(Item.VerificationNote))
+        @if (HasSelectedScore)
         {
-            <p class="verification-note">@Item.VerificationNote</p>
-        }
-
-        @if (Item.Genres.Length > 0)
-        {
-            <div class="genre-tags" aria-label="Genres">
-                @foreach (var genre in Item.Genres.Take(4))
+            <div class="scores primary-score" aria-label="Selected score">
+                @if (ScoreSource == ScoreSource.Tmdb)
                 {
-                    <span>@genre</span>
+                    <span class="selected-score">TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
+                }
+                else if (ScoreSource == ScoreSource.Imdb)
+                {
+                    <span class="selected-score">IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
+                }
+                else if (ScoreSource == ScoreSource.RottenTomatoes)
+                {
+                    <span class="selected-score">RT critics @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
+                }
+                else if (ScoreSource == ScoreSource.Metacritic)
+                {
+                    <span class="selected-score">Meta @FormatMetacritic(Item.MetacriticScore)</span>
                 }
             </div>
         }
 
-        <div class="scores" aria-label="Scores">
-            <span class="@ScoreClass(ScoreSource.Tmdb)">TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
-            <span class="@ScoreClass(ScoreSource.Imdb)">IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
-            <span class="@ScoreClass(ScoreSource.RottenTomatoes)">RT critics @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
-            @if (Item.RottenTomatoesAudienceScore is not null)
+        <div class="links primary-actions" aria-label="Primary actions">
+            @if (ShowArrButton)
             {
-                <span title="Rotten Tomatoes audience score">RT audience @FormatRottenTomatoes(Item.RottenTomatoesAudienceScore)</span>
+                <button type="button"
+                        class="@ArrButtonClass"
+                        title="@ArrButtonTitle"
+                        disabled="@IsArrActionBusy"
+                        @onclick="AddToArrAsync">
+                    @ArrButtonText
+                </button>
             }
-            <span class="@ScoreClass(ScoreSource.Metacritic)">Meta @FormatMetacritic(Item.MetacriticScore)</span>
+
+            @if (!string.IsNullOrWhiteSpace(Item.TrailerUrl))
+            {
+                <a href="@Item.TrailerUrl" target="_blank" rel="noopener noreferrer">Trailer</a>
+            }
         </div>
 
-        @if (Item.TvmazeRating is not null)
-        {
-            <div class="series-enrichment" aria-label="Series enrichment">
-                <span>TVmaze @FormatScore(Item.TvmazeRating) / 10</span>
-            </div>
-        }
-
-        <details class="source-details" data-provenance-loaded="@_isProvenanceLoaded.ToString().ToLowerInvariant()">
-            <summary @onclick="LoadProvenance">Provenance</summary>
-            @if (_isProvenanceLoaded)
+        <details class="card-details" data-details-loaded="@_isDetailsLoaded.ToString().ToLowerInvariant()">
+            <summary @onclick="LoadDetails">Details</summary>
+            @if (_isDetailsLoaded)
             {
+                <div class="card-details-content">
+                    @if (!string.IsNullOrWhiteSpace(Item.Overview))
+                    {
+                        <p class="card-description">@Item.Overview</p>
+                    }
+
+                    @if (IsUnverified && !string.IsNullOrWhiteSpace(Item.VerificationNote))
+                    {
+                        <p class="verification-note">@Item.VerificationNote</p>
+                    }
+
+                    @if (Item.Genres.Length > 0)
+                    {
+                        <div class="genre-tags" aria-label="Genres">
+                            @foreach (var genre in Item.Genres.Take(4))
+                            {
+                                <span>@genre</span>
+                            }
+                        </div>
+                    }
+
+                    @if (HasSecondaryScores)
+                    {
+                        <div class="scores secondary-scores" aria-label="Other scores">
+                            @if (ScoreSource != ScoreSource.Tmdb && Item.TmdbScore is not null)
+                            {
+                                <span>TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
+                            }
+                            @if (ScoreSource != ScoreSource.Imdb && Item.ImdbScore is not null)
+                            {
+                                <span>IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
+                            }
+                            @if (ScoreSource != ScoreSource.RottenTomatoes && Item.RottenTomatoesScore is not null)
+                            {
+                                <span>RT critics @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
+                            }
+                            @if (Item.RottenTomatoesAudienceScore is not null)
+                            {
+                                <span title="Rotten Tomatoes audience score">RT audience @FormatRottenTomatoes(Item.RottenTomatoesAudienceScore)</span>
+                            }
+                            @if (ScoreSource != ScoreSource.Metacritic && Item.MetacriticScore is not null)
+                            {
+                                <span>Meta @FormatMetacritic(Item.MetacriticScore)</span>
+                            }
+                            @if (Item.TvmazeRating is not null)
+                            {
+                                <span>TVmaze @FormatScore(Item.TvmazeRating) / 10</span>
+                            }
+                        </div>
+                    }
+
+                    <details class="source-details" data-provenance-loaded="@_isProvenanceLoaded.ToString().ToLowerInvariant()">
+                        <summary @onclick="LoadProvenance">Provenance</summary>
+                        @if (_isProvenanceLoaded)
+                        {
                 @if (Item.DateSemantics is not null)
                 {
                     <section class="provenance-section" aria-label="Data confidence">
@@ -153,7 +213,7 @@
                     </section>
                 }
 
-                <div class="source-tags" aria-label="Sources">
+                            <div class="source-tags" aria-label="Sources">
                     @if (!IsUnverified)
                     {
                         <span>TMDb score</span>
@@ -194,58 +254,41 @@
                     {
                         <span>External source</span>
                     }
+                            </div>
+                        }
+                    </details>
+
+                    <div class="links secondary-links" aria-label="External links">
+                        <a href="@BuildYouTubeTrailerSearchUrl(Item.Title)" target="_blank" rel="noopener noreferrer">YouTube search</a>
+
+                        @if (!string.IsNullOrWhiteSpace(Item.TmdbUrl))
+                        {
+                            <a href="@Item.TmdbUrl" target="_blank" rel="noopener noreferrer">TMDb</a>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(Item.ImdbUrl))
+                        {
+                            <a href="@Item.ImdbUrl" target="_blank" rel="noopener noreferrer">IMDb</a>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(Item.TvmazeUrl))
+                        {
+                            <a href="@Item.TvmazeUrl" target="_blank" rel="noopener noreferrer">TVmaze</a>
+                        }
+
+                        @if (IsUnverified && !string.IsNullOrWhiteSpace(Item.ExternalUrl))
+                        {
+                            <a href="@Item.ExternalUrl" target="_blank" rel="noopener noreferrer">External source</a>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(Item.OfficialSiteUrl))
+                        {
+                            <a href="@Item.OfficialSiteUrl" target="_blank" rel="noopener noreferrer">Official site</a>
+                        }
+                    </div>
                 </div>
             }
         </details>
-
-        <div class="links" aria-label="Links">
-            @if (ShowArrButton)
-            {
-                <button type="button"
-                        class="@ArrButtonClass"
-                        title="@ArrButtonTitle"
-                        disabled="@IsArrActionBusy"
-                        @onclick="AddToArrAsync">
-                    @ArrButtonText
-                </button>
-            }
-
-            @if (!string.IsNullOrWhiteSpace(Item.TrailerUrl))
-            {
-                <a href="@Item.TrailerUrl" target="_blank" rel="noopener noreferrer">Trailer</a>
-            }
-            else
-            {
-                <span>No trailer</span>
-            }
-
-            <a href="@BuildYouTubeTrailerSearchUrl(Item.Title)" target="_blank" rel="noopener noreferrer">YouTube search</a>
-
-            @if (!string.IsNullOrWhiteSpace(Item.TmdbUrl))
-            {
-                <a href="@Item.TmdbUrl" target="_blank" rel="noopener noreferrer">TMDb</a>
-            }
-
-            @if (!string.IsNullOrWhiteSpace(Item.ImdbUrl))
-            {
-                <a href="@Item.ImdbUrl" target="_blank" rel="noopener noreferrer">IMDb</a>
-            }
-
-            @if (!string.IsNullOrWhiteSpace(Item.TvmazeUrl))
-            {
-                <a href="@Item.TvmazeUrl" target="_blank" rel="noopener noreferrer">TVmaze</a>
-            }
-
-            @if (IsUnverified && !string.IsNullOrWhiteSpace(Item.ExternalUrl))
-            {
-                <a href="@Item.ExternalUrl" target="_blank" rel="noopener noreferrer">External source</a>
-            }
-
-            @if (!string.IsNullOrWhiteSpace(Item.OfficialSiteUrl))
-            {
-                <a href="@Item.OfficialSiteUrl" target="_blank" rel="noopener noreferrer">Official site</a>
-            }
-        </div>
     </div>
 </article>
 
@@ -284,6 +327,7 @@
     private bool _fingerprintedSonarrEnabled;
     private bool _fingerprintedRadarrEnabled;
     private bool _shouldRender = true;
+    private bool _isDetailsLoaded;
     private bool _isProvenanceLoaded;
 
     protected override void OnParametersSet()
@@ -348,10 +392,22 @@
         ? "arr-add-button radarr"
         : "arr-add-button sonarr";
 
-    private string ScoreClass(ScoreSource source)
+    private bool HasSelectedScore => ScoreSource switch
     {
-        return source == ScoreSource ? "selected-score" : "";
-    }
+        ScoreSource.Tmdb => Item.TmdbScore is not null,
+        ScoreSource.Imdb => Item.ImdbScore is not null,
+        ScoreSource.RottenTomatoes => Item.RottenTomatoesScore is not null,
+        ScoreSource.Metacritic => Item.MetacriticScore is not null,
+        _ => false
+    };
+
+    private bool HasSecondaryScores =>
+        (ScoreSource != ScoreSource.Tmdb && Item.TmdbScore is not null)
+        || (ScoreSource != ScoreSource.Imdb && Item.ImdbScore is not null)
+        || (ScoreSource != ScoreSource.RottenTomatoes && Item.RottenTomatoesScore is not null)
+        || Item.RottenTomatoesAudienceScore is not null
+        || (ScoreSource != ScoreSource.Metacritic && Item.MetacriticScore is not null)
+        || Item.TvmazeRating is not null;
 
     private string MediaClass()
     {
@@ -502,6 +558,17 @@
     private Task AddToArrAsync()
     {
         return OnAddToArr.InvokeAsync(Item);
+    }
+
+    private void LoadDetails()
+    {
+        if (_isDetailsLoaded)
+        {
+            return;
+        }
+
+        _isDetailsLoaded = true;
+        _shouldRender = true;
     }
 
     private void LoadProvenance()

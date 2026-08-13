@@ -13,6 +13,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ProviderDeltaSyncService> _logger;
     private readonly BackgroundJobTimelineService? _timeline;
+    private readonly IProviderWorkScheduler? _workScheduler;
 
     public ProviderDeltaSyncService(
         ITmdbClient tmdbClient,
@@ -21,7 +22,8 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         IOptionsMonitor<ProviderDeltaSyncOptions> options,
         TimeProvider timeProvider,
         ILogger<ProviderDeltaSyncService> logger,
-        BackgroundJobTimelineService? timeline = null)
+        BackgroundJobTimelineService? timeline = null,
+        IProviderWorkScheduler? workScheduler = null)
     {
         _tmdbClient = tmdbClient;
         _tvmazeClient = tvmazeClient;
@@ -30,6 +32,7 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         _timeProvider = timeProvider;
         _logger = logger;
         _timeline = timeline;
+        _workScheduler = workScheduler;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -49,18 +52,33 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                     await Task.Delay(delay, stoppingToken);
                 }
 
-                await RunOnceSafelyAsync(stoppingToken);
+                await QueueOrRunOnceAsync(stoppingToken);
             }
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 await Task.Delay(TimeSpan.FromMinutes(Math.Max(15, _options.CurrentValue.WakeIntervalMinutes)), stoppingToken);
-                await RunOnceSafelyAsync(stoppingToken);
+                await QueueOrRunOnceAsync(stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
         }
+    }
+
+    private async Task QueueOrRunOnceAsync(CancellationToken cancellationToken)
+    {
+        if (_workScheduler is null)
+        {
+            await RunOnceSafelyAsync(cancellationToken);
+            return;
+        }
+
+        await _workScheduler.EnqueueAsync(new ProviderWorkRequest(
+            ProviderWorkKind.ProviderDeltaSync,
+            "provider-delta-sync",
+            ProviderWorkPriority.Maintenance,
+            "{}"), cancellationToken);
     }
 
     internal async Task RunOnceAsync(CancellationToken cancellationToken)

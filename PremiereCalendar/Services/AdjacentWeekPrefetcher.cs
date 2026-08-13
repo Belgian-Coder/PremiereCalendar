@@ -13,6 +13,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
     private readonly ILogger<AdjacentWeekPrefetcher> _logger;
     private readonly CalendarLoadCoordinator? _loadCoordinator;
     private readonly BackgroundJobTimelineService? _timeline;
+    private readonly IProviderWorkScheduler? _workScheduler;
     private readonly ConcurrentDictionary<string, byte> _scheduledWeeks = [];
     private readonly object _queueGate = new();
     private readonly PriorityQueue<PrefetchRequest, PrefetchPriority> _queue = new();
@@ -31,7 +32,8 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         IOptions<CalendarCacheOptions> options,
         ILogger<AdjacentWeekPrefetcher> logger,
         CalendarLoadCoordinator? loadCoordinator = null,
-        BackgroundJobTimelineService? timeline = null)
+        BackgroundJobTimelineService? timeline = null,
+        IProviderWorkScheduler? workScheduler = null)
     {
         _scopeFactory = scopeFactory;
         _applicationLifetime = applicationLifetime;
@@ -39,6 +41,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         _logger = logger;
         _loadCoordinator = loadCoordinator;
         _timeline = timeline;
+        _workScheduler = workScheduler;
     }
 
     public void PrefetchAdjacentWeeks(DateOnly weekStart, CalendarFilters? filters = null)
@@ -51,9 +54,41 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         var filtersSnapshot = filters is null ? null : CloneFilters(filters);
         var generation = Interlocked.Increment(ref _nextGeneration);
         var rank = 0;
+        if (_workScheduler is not null)
+        {
+            foreach (var offset in PrefetchWeekOffsets())
+            {
+                var target = weekStart.AddDays(offset * 7);
+                _ = QueueDurablePrefetchAsync(target, filtersSnapshot, rank++);
+            }
+            return;
+        }
+
         foreach (var offset in PrefetchWeekOffsets())
         {
             QueuePrefetch(weekStart.AddDays(offset * 7), filtersSnapshot, generation, rank++);
+        }
+    }
+
+    private async Task QueueDurablePrefetchAsync(DateOnly weekStart, CalendarFilters? filters, int rank)
+    {
+        try
+        {
+            var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
+            var payload = new CalendarProviderWorkPayload(
+                weekStart,
+                weekStart.AddDays(6),
+                false,
+                filters is null ? null : CloneFilters(filters));
+            await _workScheduler!.EnqueueAsync(new ProviderWorkRequest(
+                ProviderWorkKind.AdjacentWeekPrefetch,
+                $"prefetch:{weekStart:yyyyMMdd}:{criteria.CacheKey()}",
+                (ProviderWorkPriority)Math.Min((int)ProviderWorkPriority.Maintenance - 1, (int)ProviderWorkPriority.Adjacent + rank),
+                System.Text.Json.JsonSerializer.Serialize(payload)));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not persist adjacent week prefetch for {WeekStart}.", weekStart);
         }
     }
 

@@ -21,6 +21,21 @@ Release installs write infrastructure values such as `AppDatabase__Path`, `Calen
 
 Local application settings edited through the Settings page are stored in a SQLite parameter database. The default path is `App_Data/data/premiere-calendar.db`; release installs set `AppDatabase__Path` to `D:\Apps\PremiereCalendarData\data\premiere-calendar.db` by default.
 
+Startup owns the database schema centrally. It runs `PRAGMA quick_check`, checkpoints WAL before a pending migration, creates a verified pre-migration backup, applies migrations transactionally, records their checksums in `SchemaMigrations`, advances `PRAGMA user_version`, and checks integrity again. `/health/ready`, `/health/version`, and Settings > Local status report the active and target schema versions. Migration failure restores only the pre-migration snapshot and leaves readiness unhealthy; unrelated corruption is never restored automatically.
+
+Offline verification and recovery commands are:
+
+```powershell
+PremiereCalendar.exe database verify
+PremiereCalendar.exe database restore --backup "D:\absolute\path\verified-backup.db"
+```
+
+Stop the `PremiereCalendar` Windows Service before restore. Restore rejects relative paths, verifies integrity and supported schema first, requires exclusive access, preserves the previous database and WAL sidecars with a `.damaged-<timestamp>` suffix, and stages the replacement on the same volume before activation.
+
+Durable provider work is stored in SQLite and controlled by `ProviderScheduler`. Foreground jobs retain a reserved worker and can checkpoint/requeue adjacent-week, warmup, delta-sync, and IMDb-maintenance work without charging a retry. Provider concurrency remains below each configured hard ceiling and adapts to throttling, transient failures, latency, `Retry-After`, and persisted circuit state.
+
+Structured operational logs are rolling NDJSON files under `Telemetry:LogDirectory`, limited to 50 MB each with 14 retained files by default. Trace and metric OTLP export remains disabled until `Telemetry:OtlpEndpoint` is an absolute endpoint. Telemetry uses provider/operation names and bounded outcome tags; it does not record query strings, filter contents, media titles or IDs, credentials, or backup payloads.
+
 ## TMDb
 
 Required for live data. Enter the TMDb API read access token on the Settings page. If the token is missing, the calendar redirects to Settings with a setup notice.

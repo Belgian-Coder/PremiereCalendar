@@ -11,6 +11,7 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ImdbDatasetRefreshService> _logger;
     private readonly BackgroundJobTimelineService? _timeline;
+    private readonly IProviderWorkScheduler? _workScheduler;
 
     public ImdbDatasetRefreshService(
         IImdbDatasetImporter importer,
@@ -18,7 +19,8 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
         IOptionsMonitor<ImdbDatasetOptions> options,
         TimeProvider timeProvider,
         ILogger<ImdbDatasetRefreshService> logger,
-        BackgroundJobTimelineService? timeline = null)
+        BackgroundJobTimelineService? timeline = null,
+        IProviderWorkScheduler? workScheduler = null)
     {
         _importer = importer;
         _ratingsStore = ratingsStore;
@@ -26,6 +28,7 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
         _timeProvider = timeProvider;
         _logger = logger;
         _timeline = timeline;
+        _workScheduler = workScheduler;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -45,14 +48,14 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
                     await Task.Delay(delay, stoppingToken);
                 }
 
-                await ImportIfDueAsync(stoppingToken);
+                await QueueOrImportAsync(stoppingToken);
             }
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 var interval = TimeSpan.FromHours(Math.Max(1, _options.CurrentValue.RefreshIntervalHours));
                 await Task.Delay(interval, stoppingToken);
-                await ImportIfDueAsync(stoppingToken);
+                await QueueOrImportAsync(stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -60,7 +63,22 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
         }
     }
 
-    private async Task ImportIfDueAsync(CancellationToken cancellationToken)
+    private async Task QueueOrImportAsync(CancellationToken cancellationToken)
+    {
+        if (_workScheduler is null)
+        {
+            await ImportIfDueAsync(cancellationToken);
+            return;
+        }
+
+        await _workScheduler.EnqueueAsync(new ProviderWorkRequest(
+            ProviderWorkKind.ImdbDatasetRefresh,
+            "imdb-dataset-refresh",
+            ProviderWorkPriority.Maintenance,
+            "{}"), cancellationToken);
+    }
+
+    internal async Task ImportIfDueAsync(CancellationToken cancellationToken)
     {
         var startedUtc = _timeProvider.GetUtcNow();
         var startedTimestamp = _timeProvider.GetTimestamp();
