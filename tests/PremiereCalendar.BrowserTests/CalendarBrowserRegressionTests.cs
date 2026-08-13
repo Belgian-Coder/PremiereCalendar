@@ -38,13 +38,13 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             await Expect(Page.Locator(".card-description").First).ToBeVisibleAsync();
             await Page.GetByRole(AriaRole.Button, new() { Name = "Open tools and actions" }).ClickAsync();
             await Page.GetByRole(AriaRole.Button, new() { Name = "Use comfortable cards" }).ClickAsync();
-            Assert.Equal("comfortable", await Page.Locator("html").GetAttributeAsync("data-density"));
+            await Expect(Page.Locator("html")).ToHaveAttributeAsync("data-density", "comfortable");
 
             foreach (var route in new[] { "series", "movies", "" })
             {
                 await Page.GotoAsync($"{application.BaseUrl}/{route}");
                 await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync(new() { Timeout = 5_000 });
-                Assert.Equal("comfortable", await Page.Locator("html").GetAttributeAsync("data-density"));
+                await Expect(Page.Locator("html")).ToHaveAttributeAsync("data-density", "comfortable");
             }
 
             await Page.Locator(".filter-open-button").ClickAsync();
