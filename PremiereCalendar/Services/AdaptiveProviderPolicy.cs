@@ -422,6 +422,7 @@ public sealed class ProviderAdaptiveStateStore(
                 CooldownUntilUtc = excluded.CooldownUntilUtc,
                 LastThrottledUtc = excluded.LastThrottledUtc,
                 UpdatedUtc = excluded.UpdatedUtc
+            WHERE excluded.UpdatedUtc >= ProviderAdaptiveState.UpdatedUtc
             """;
         command.Parameters.AddWithValue("$provider", state.Provider);
         command.Parameters.AddWithValue("$concurrency", state.CurrentConcurrency);

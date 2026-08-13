@@ -55,7 +55,14 @@ public sealed class WatchmodeClient : IWatchmodeClient
             return [];
         }
 
-        var titleId = await FindTitleIdAsync(mediaType, tmdbId, imdbId, settings, cancellationToken, forceRefresh);
+        using var enrichmentBudget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        enrichmentBudget.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(
+            _options.AvailabilityEnrichmentBudgetSeconds,
+            1,
+            Math.Max(1, _options.RequestTimeoutSeconds))));
+        var enrichmentToken = enrichmentBudget.Token;
+
+        var titleId = await FindTitleIdAsync(mediaType, tmdbId, imdbId, settings, enrichmentToken, forceRefresh);
         if (titleId is not > 0)
         {
             return [];
@@ -94,7 +101,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
                 _cache.Set(cacheKey, mapped, CacheDuration(settings));
                 return mapped;
             },
-            cancellationToken);
+            enrichmentToken);
     }
 
     public async Task<IReadOnlyList<ExternalPremiereCandidate>> GetReleaseCandidatesAsync(

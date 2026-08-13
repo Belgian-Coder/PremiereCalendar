@@ -13,6 +13,7 @@ public sealed class ProviderWorkSchedulerTests : IAsyncLifetime
     private ProviderWorkStore _store = null!;
     private ProviderWorkScheduler _scheduler = null!;
     private AdaptiveProviderPolicy _providerPolicy = null!;
+    private ProviderAdaptiveStateStore _providerStore = null!;
 
     public async Task InitializeAsync()
     {
@@ -25,7 +26,8 @@ public sealed class ProviderWorkSchedulerTests : IAsyncLifetime
             _store,
             TimeProvider.System,
             Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30, MaximumAttempts = 3 }));
-        _providerPolicy = new AdaptiveProviderPolicy(new ProviderAdaptiveStateStore(database, environment), TimeProvider.System, new PremiereTelemetry());
+        _providerStore = new ProviderAdaptiveStateStore(database, environment);
+        _providerPolicy = new AdaptiveProviderPolicy(_providerStore, TimeProvider.System, new PremiereTelemetry());
     }
 
     [Fact]
@@ -167,6 +169,25 @@ public sealed class ProviderWorkSchedulerTests : IAsyncLifetime
         }
         Assert.Equal(ProviderCircuitState.Open, Assert.Single(_providerPolicy.GetSnapshots(), value => value.Provider == "circuit-provider").CircuitState);
         await Assert.ThrowsAsync<ProviderCircuitOpenException>(() => _providerPolicy.AcquireAsync("circuit-provider", 4, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task OlderAdaptiveSnapshotCannotOverwriteNewerCircuitState()
+    {
+        var newer = DateTimeOffset.Parse("2026-08-13T18:00:01Z");
+        var older = newer.AddSeconds(-1);
+        await _providerStore.SaveAsync(new ProviderAdaptiveSnapshot(
+            "watchmode", 1, 0, 0, 5, 5, older, 20_000, ProviderCircuitState.Open,
+            newer.AddMinutes(1), newer, newer), CancellationToken.None);
+        await _providerStore.SaveAsync(new ProviderAdaptiveSnapshot(
+            "watchmode", 2, 0, 0, 1, 1, older, 50, ProviderCircuitState.Closed,
+            null, null, older), CancellationToken.None);
+
+        var persisted = await _providerStore.GetAsync("watchmode", CancellationToken.None);
+        Assert.NotNull(persisted);
+        Assert.Equal(ProviderCircuitState.Open, persisted!.CircuitState);
+        Assert.Equal(5, persisted.ConsecutiveFailures);
+        Assert.Equal(newer, persisted.UpdatedUtc);
     }
 
     public Task DisposeAsync()

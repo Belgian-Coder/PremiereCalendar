@@ -36,6 +36,7 @@ public partial class Calendar
     private string? _sourceProgressFilter;
     private DateOnly? _selectedDay;
     private bool _isLoading = true;
+    private bool _isRefreshingStaleCache;
     private bool _isQueryProgressExpanded;
     private bool _isCommandPaletteOpen;
     private bool _compactDensity;
@@ -671,12 +672,21 @@ public partial class Calendar
         var foregroundLoad = CalendarLoadCoordinator.BeginForegroundLoad();
         var previousCancellation = _loadCancellation;
         var budgetSeconds = Math.Max(1, CalendarLoadOptions.Value.ForegroundLoadBudgetSeconds);
+        var staleCacheBudgetSeconds = Math.Clamp(
+            CalendarLoadOptions.Value.StaleCacheForegroundBudgetSeconds,
+            1,
+            budgetSeconds);
         using var budgetCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(budgetSeconds));
-        var loadCancellation = CancellationTokenSource.CreateLinkedTokenSource(_disposeCancellation.Token, budgetCancellation.Token);
+        using var staleCacheBudgetCancellation = new CancellationTokenSource();
+        var loadCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _disposeCancellation.Token,
+            budgetCancellation.Token,
+            staleCacheBudgetCancellation.Token);
         _loadCancellation = loadCancellation;
         var shouldPrefetchAdjacentWeeks = false;
         var prefetchWeekStart = default(DateOnly);
         CalendarFilters? prefetchFilters = null;
+        var hasAuthoritativeResult = false;
         try
         {
             previousCancellation?.Cancel();
@@ -689,7 +699,9 @@ public partial class Calendar
         var token = loadCancellation.Token;
 
         _isLoading = true;
+        _isRefreshingStaleCache = false;
         _error = null;
+        _visitChangeSummary = null;
         var hasExistingItems = _items.Count > 0;
         _loadProgress.Clear();
         InvalidateLoadProgressCache();
@@ -723,8 +735,18 @@ public partial class Calendar
                     }
 
                     _items = update.Items;
+                    if (update.IsStaleCache)
+                    {
+                        _isRefreshingStaleCache = !update.IsFinal;
+                        if (!update.IsFinal)
+                        {
+                            staleCacheBudgetCancellation.CancelAfter(TimeSpan.FromSeconds(staleCacheBudgetSeconds));
+                        }
+                    }
                     if (update.IsFinal)
                     {
+                        hasAuthoritativeResult = !update.HasSourceErrors && !update.IsStaleCache;
+                        _isRefreshingStaleCache = false;
                         FinalizeOpenProgressEntries();
                     }
 
@@ -781,13 +803,14 @@ public partial class Calendar
                 await RecordFilterUsageAsync(pageMode, loadFilters, _items.Count, token);
                 if (!token.IsCancellationRequested && ReferenceEquals(_loadCancellation, loadCancellation))
                 {
-                    shouldPrefetchAdjacentWeeks = true;
+                    shouldPrefetchAdjacentWeeks = hasAuthoritativeResult;
                     prefetchWeekStart = start;
                     prefetchFilters = CalendarFilterState.Clone(loadFilters);
                 }
             }
         }
-        catch (OperationCanceledException) when (budgetCancellation.IsCancellationRequested
+        catch (OperationCanceledException) when ((budgetCancellation.IsCancellationRequested
+                || staleCacheBudgetCancellation.IsCancellationRequested)
             && !_disposeCancellation.IsCancellationRequested
             && ReferenceEquals(_loadCancellation, loadCancellation))
         {
@@ -799,7 +822,15 @@ public partial class Calendar
                 }
 
                 FinalizeOpenProgressEntries();
-                AddLoadBudgetProgressEntry(budgetSeconds);
+                if (staleCacheBudgetCancellation.IsCancellationRequested)
+                {
+                    AddBackgroundRefreshProgressEntry(staleCacheBudgetSeconds);
+                }
+                else
+                {
+                    AddLoadBudgetProgressEntry(budgetSeconds);
+                }
+                _isRefreshingStaleCache = false;
                 RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
                 _hasLoadedAtLeastOnce = true;
             });
@@ -829,8 +860,16 @@ public partial class Calendar
             if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
             {
                 await RefreshCacheFreshnessAsync(_disposeCancellation.Token);
-                await RefreshVisitChangeSummaryAsync(_disposeCancellation.Token);
+                if (hasAuthoritativeResult)
+                {
+                    await RefreshVisitChangeSummaryAsync(_disposeCancellation.Token);
+                }
+                else
+                {
+                    _visitChangeSummary = null;
+                }
                 _isLoading = false;
+                _isRefreshingStaleCache = false;
                 CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
                 _loadCancellation = null;
                 await InvokeAsync(() =>
@@ -1035,6 +1074,36 @@ public partial class Calendar
             CompletedWork: null,
             TotalWork: null,
             ProgressText: $"Stopped after {budgetSeconds.ToString(CultureInfo.InvariantCulture)} s foreground budget",
+            ElapsedMilliseconds: budgetSeconds * 1000L,
+            Phase: "complete",
+            UnmappedCount: _items.Count(item => item.VerificationState == PremiereVerificationState.Unverified));
+        var existingIndex = _loadProgress.FindIndex(progress =>
+            string.Equals(progress.SourceName, entry.SourceName, StringComparison.Ordinal));
+        if (existingIndex >= 0)
+        {
+            _loadProgress[existingIndex] = entry;
+        }
+        else
+        {
+            _loadProgress.Add(entry);
+        }
+
+        InvalidateLoadProgressCache();
+    }
+
+    private void AddBackgroundRefreshProgressEntry(int budgetSeconds)
+    {
+        var entry = new LoadProgressEntry(
+            "Background refresh",
+            _items.Count,
+            _items.Count,
+            IsFinal: true,
+            FromCache: true,
+            SourceItems: _items,
+            Items: _items,
+            CompletedWork: null,
+            TotalWork: null,
+            ProgressText: $"Cached results shown after {budgetSeconds.ToString(CultureInfo.InvariantCulture)} s; provider refresh continues in background",
             ElapsedMilliseconds: budgetSeconds * 1000L,
             Phase: "complete",
             UnmappedCount: _items.Count(item => item.VerificationState == PremiereVerificationState.Unverified));

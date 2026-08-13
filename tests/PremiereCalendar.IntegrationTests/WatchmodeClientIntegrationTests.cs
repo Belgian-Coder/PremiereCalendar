@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Caching.Memory;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using PremiereCalendar.IntegrationTests.Support;
@@ -382,6 +383,36 @@ public sealed class WatchmodeClientIntegrationTests
         Assert.Equal(2, handler.Requests.Count);
     }
 
+    [Fact]
+    public async Task GetTitleSourcesAsync_CapsOptionalAvailabilityEnrichmentBudget()
+    {
+        var client = new WatchmodeClient(
+            new HttpClient(new DelayedHandler(TimeSpan.FromSeconds(5)))
+            {
+                BaseAddress = new Uri("https://api.watchmode.com/v1/")
+            },
+            new MemoryCache(new MemoryCacheOptions()),
+            Microsoft.Extensions.Options.Options.Create(new WatchmodeOptions
+            {
+                Enabled = true,
+                ApiKey = "test-watchmode-key",
+                Regions = ["BE"],
+                EnableAvailabilityEnrichment = true,
+                RequestTimeoutSeconds = 20,
+                AvailabilityEnrichmentBudgetSeconds = 1
+            }));
+
+        var elapsed = Stopwatch.StartNew();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GetTitleSourcesAsync(
+            PremiereMediaType.Movie,
+            42,
+            null,
+            ["BE"],
+            CancellationToken.None));
+
+        Assert.InRange(elapsed.ElapsedMilliseconds, 500, 2_500);
+    }
+
     private static WatchmodeClient CreateClient(StubHttpMessageHandler handler, string apiKey = "test-watchmode-key")
     {
         return new WatchmodeClient(
@@ -405,5 +436,16 @@ public sealed class WatchmodeClientIntegrationTests
         Assert.DoesNotContain("apiKey", query.Keys);
         Assert.True(request.Headers.TryGetValues("X-API-Key", out var values));
         Assert.Equal("test-watchmode-key", Assert.Single(values));
+    }
+
+    private sealed class DelayedHandler(TimeSpan delay) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(delay, cancellationToken);
+            return StubHttpMessageHandler.Json("{}");
+        }
     }
 }

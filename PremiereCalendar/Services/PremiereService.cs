@@ -171,6 +171,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var fetchCriteria = criteria;
         var cachedEnrichment = new Dictionary<string, PremiereItem>(StringComparer.Ordinal);
         IReadOnlyList<PremiereItem> seededItems = [];
+        IReadOnlyList<PremiereItem> staleSeededItems = [];
 
         if (!forceRefresh)
         {
@@ -215,7 +216,28 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     allowExpired: true,
                     requireBothMediaCaches: false,
                     cancellationToken);
-                cachedEnrichment = CreateCachedEnrichmentLookup(seededItems.Concat(sharedExpiredItems ?? []).ToArray());
+                if (sharedExpiredItems is { Count: > 0 })
+                {
+                    var hydratedExpiredItems = await HydrateCachedImdbRatingsAsync(
+                        MergePremiereItems(sharedExpiredItems),
+                        filters,
+                        cancellationToken);
+                    staleSeededItems = ApplyRequestedFilters(hydratedExpiredItems, filters)
+                        .Where(item => seededItems.All(seed => !string.Equals(seed.CanonicalId, item.CanonicalId, StringComparison.Ordinal)))
+                        .ToArray();
+                    if (staleSeededItems.Count > 0)
+                    {
+                        var visibleCachedItems = MergePremiereItems(seededItems.Concat(staleSeededItems));
+                        yield return CreateProgress(
+                            "Expired week cache",
+                            visibleCachedItems,
+                            visibleCachedItems,
+                            fromCache: true,
+                            isStaleCache: true);
+                    }
+                }
+
+                cachedEnrichment = CreateCachedEnrichmentLookup(seededItems.Concat(staleSeededItems).ToArray());
             }
             else
             {
@@ -232,7 +254,25 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 }
 
                 cached = await _cacheOrchestrator.ReadAsync(start, end, cacheKey, cancellationToken, allowExpired: true);
-                cachedEnrichment = CreateCachedEnrichmentLookup(cached);
+                if (cached is { Count: > 0 })
+                {
+                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
+                        MergePremiereItems(cached),
+                        filters,
+                        cancellationToken);
+                    staleSeededItems = ApplyRequestedFilters(hydratedItems, filters);
+                    if (staleSeededItems.Count > 0)
+                    {
+                        yield return CreateProgress(
+                            "Expired week cache",
+                            staleSeededItems,
+                            staleSeededItems,
+                            fromCache: true,
+                            isStaleCache: true);
+                    }
+                }
+
+                cachedEnrichment = CreateCachedEnrichmentLookup(staleSeededItems);
             }
         }
         else
@@ -281,9 +321,12 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     break;
                 }
 
-                if (seededItems.Count > 0)
+                var progressSeed = update.IsFinal && !update.HasSourceErrors
+                    ? seededItems
+                    : MergePremiereItems(seededItems.Concat(staleSeededItems));
+                if (progressSeed.Count > 0)
                 {
-                    update = MergeProgressWithSeed(update, seededItems);
+                    update = MergeProgressWithSeed(update, progressSeed);
                 }
 
                 progressHistory.Add(update);
@@ -452,7 +495,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             mergedItems,
             mergedItems,
             isFinal: true,
-            fromCache: true);
+            fromCache: true,
+            isStaleCache: allowExpired);
     }
 
     private async Task<SharedMediaCacheSnapshot> GetSharedMediaCacheSnapshotAsync(
@@ -632,7 +676,13 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             start,
             end);
 
-        return CreateProgress("Expired week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
+        return CreateProgress(
+            "Expired week cache",
+            cachedItems,
+            cachedItems,
+            isFinal: true,
+            fromCache: true,
+            isStaleCache: true);
     }
 
     private async IAsyncEnumerable<PremiereLoadProgress> FetchFreshPremiereUpdatesAsync(
@@ -1725,7 +1775,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         IReadOnlyList<string>? failedSourceNames = null,
         int? unmappedCount = null,
         int? filteredCount = null,
-        string? checkpointKey = null)
+        string? checkpointKey = null,
+        bool isStaleCache = false)
     {
         var diagnosticSourceItems = sourceItems
             .Select(EnsureDiagnostics)
@@ -1748,6 +1799,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             ProviderKey = ProviderKeyForSource(sourceName),
             Phase = isFinal || isSourceComplete ? "complete" : fromCache ? "cache" : "loading",
             SourceItems = diagnosticSourceItems,
+            IsStaleCache = isStaleCache,
             HasSourceErrors = hasSourceErrors,
             FailedSourceNames = failedSourceNames ?? [],
             UnmappedCount = unmappedCount ?? CountUnverified(diagnosticSourceItems),

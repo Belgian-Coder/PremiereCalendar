@@ -617,6 +617,71 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_DoesNotRecordRemovedTitlesFromIncompleteRefresh()
+    {
+        var week = new DateOnly(2026, 5, 4);
+        var service = new FakePremiereService
+        {
+            Items =
+            [
+                CreateMovie("movie:1", "First Movie", week),
+                CreateMovie("movie:2", "Second Movie", week)
+            ]
+        };
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count);
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+        });
+
+        service.Items = [CreateMovie("movie:1", "First Movie", week)];
+        service.FinalHasSourceErrors = true;
+        component.Find("button[title='Update visible week']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.True(service.Calls.Count >= 2);
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+            Assert.Empty(component.FindAll("[data-testid='visit-change-summary']"));
+        });
+    }
+
+    [Fact]
+    public void CalendarPage_ShowsStaleCardsImmediatelyAndStopsForegroundWaitingEarly()
+    {
+        Services.Configure<CalendarLoadOptions>(options =>
+        {
+            options.ForegroundLoadBudgetSeconds = 5;
+            options.StaleCacheForegroundBudgetSeconds = 1;
+        });
+        var service = new FakePremiereService
+        {
+            ReportStaleCacheProgress = true,
+            DelayAfterStaleCacheProgress = TimeSpan.FromSeconds(5),
+            SuppressFinalProgress = true
+        };
+        Services.AddSingleton<IPremiereService>(service);
+
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() =>
+        {
+            Assert.NotEmpty(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Contains("Cached results shown", component.Find("[data-testid='refreshing']").TextContent);
+        });
+        component.WaitForAssertion(() =>
+        {
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(3));
+            Assert.Empty(_prefetcher.WeekStarts);
+        }, TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
     public async Task CalendarPage_MediaRouteChangeAppendsStreamedCardsWithoutReorderingExistingCards()
     {
         var service = new RouteTransitionPremiereService();
@@ -2598,13 +2663,28 @@ public sealed class CalendarPageTests : BunitContext
                 .Order(StringComparer.OrdinalIgnoreCase));
     }
 
+    private static PremiereItem CreateMovie(string canonicalId, string title, DateOnly date) => new()
+    {
+        CanonicalId = canonicalId,
+        Type = PremiereItemType.MovieFirstRelease,
+        MediaType = PremiereMediaType.Movie,
+        TmdbId = int.Parse(canonicalId.AsSpan(canonicalId.LastIndexOf(':') + 1), System.Globalization.CultureInfo.InvariantCulture),
+        Title = title,
+        PremiereDate = date,
+        OriginalLanguage = "en"
+    };
+
     private sealed class FakePremiereService : IPremiereService
     {
         public List<(DateOnly Start, DateOnly End, bool ForceRefresh, DateOnly? PriorityDate)> Calls { get; } = [];
 
-        public IReadOnlyList<PremiereItem>? Items { get; init; }
+        public IReadOnlyList<PremiereItem>? Items { get; set; }
+
+        public bool FinalHasSourceErrors { get; set; }
 
         public bool ReportPartialProgress { get; init; }
+
+        public bool ReportStaleCacheProgress { get; init; }
 
         public bool ReportProgressDetails { get; init; }
 
@@ -2617,6 +2697,8 @@ public sealed class CalendarPageTests : BunitContext
         public bool SuppressFinalProgress { get; init; }
 
         public TimeSpan DelayAfterPartialProgress { get; init; }
+
+        public TimeSpan DelayAfterStaleCacheProgress { get; init; }
 
         public TimeSpan DelayBetweenDaySourceProgress { get; init; }
 
@@ -2640,6 +2722,23 @@ public sealed class CalendarPageTests : BunitContext
         {
             Calls.Add((start, end, forceRefresh, filters?.PriorityDate));
             var items = BuildItems(start);
+
+            if (ReportStaleCacheProgress)
+            {
+                yield return new PremiereLoadProgress(
+                    "Expired week cache",
+                    items.Count,
+                    items.Count,
+                    items,
+                    FromCache: true)
+                {
+                    IsStaleCache = true
+                };
+                if (DelayAfterStaleCacheProgress > TimeSpan.Zero)
+                {
+                    await Task.Delay(DelayAfterStaleCacheProgress, cancellationToken);
+                }
+            }
 
             if (ReportPartialProgress)
             {
@@ -2739,7 +2838,11 @@ public sealed class CalendarPageTests : BunitContext
 
             if (!SuppressFinalProgress)
             {
-                yield return new PremiereLoadProgress("Complete", 0, items.Count, items, IsFinal: true);
+                yield return new PremiereLoadProgress("Complete", 0, items.Count, items, IsFinal: true)
+                {
+                    HasSourceErrors = FinalHasSourceErrors,
+                    FailedSourceNames = FinalHasSourceErrors ? ["Timed out provider"] : []
+                };
             }
 
             await Task.CompletedTask;
@@ -2808,6 +2911,7 @@ public sealed class CalendarPageTests : BunitContext
                 }
             ];
         }
+
     }
 
     private sealed class RouteTransitionPremiereService : IPremiereService

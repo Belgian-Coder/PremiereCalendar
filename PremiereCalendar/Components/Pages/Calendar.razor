@@ -47,7 +47,9 @@
             @if (_isLoading && hasVisibleItemsForCurrentWeek)
             {
                 <span class="calendar-refresh-status" data-testid="refreshing" aria-live="polite">
-                    Updating visible premieres…
+                    @(_isRefreshingStaleCache
+                        ? "Cached results shown · checking for updates…"
+                        : "Updating visible premieres…")
                 </span>
             }
 

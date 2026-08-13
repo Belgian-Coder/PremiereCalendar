@@ -514,12 +514,66 @@ public sealed class PremiereServiceTests
             updates.Add(update);
         }
 
+        var staleCache = Assert.IsType<PremiereLoadProgress>(updates.First());
+        Assert.Equal("Expired week cache", staleCache.SourceName);
+        Assert.True(staleCache.FromCache);
+        Assert.True(staleCache.IsStaleCache);
+        Assert.False(staleCache.IsFinal);
+        Assert.Equal("Stale Fast Show", Assert.Single(staleCache.Items).Title);
         Assert.Empty(tmdb.TvDetailCalls);
         var complete = Assert.Single(updates, update => update.IsFinal);
         var item = Assert.Single(complete.Items);
         Assert.Equal("Cached Network", Assert.Single(item.SourceNames));
         Assert.Equal("https://image.tmdb.org/t/p/w185/fresh.jpg", item.PosterUrl);
         Assert.Equal("https://www.youtube.com/watch?v=stale", item.TrailerUrl);
+    }
+
+    [Fact]
+    public async Task StreamPremieresAsync_DoesNotKeepTitlesMissingFromSuccessfulRefresh()
+    {
+        var start = new DateOnly(2026, 5, 4);
+        var staleMovie = new PremiereItem
+        {
+            CanonicalId = "movie:201",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 201,
+            Title = "No Longer Scheduled",
+            PremiereDate = start,
+            OriginalLanguage = "en",
+            LastUpdatedUtc = DateTimeOffset.UtcNow
+        };
+        var tmdb = new FakeTmdbClient
+        {
+            MovieItems =
+            [
+                new TmdbMovieDiscoverItem
+                {
+                    Id = 202,
+                    Title = "Freshly Scheduled",
+                    ReleaseDate = "2026-05-05",
+                    OriginalLanguage = "en"
+                }
+            ]
+        };
+        var cache = new FakeCalendarCache { ExpiredItems = [staleMovie] };
+        var service = CreateService(tmdb, calendarCache: cache);
+
+        var updates = new List<PremiereLoadProgress>();
+        await foreach (var update in service.StreamPremieresAsync(
+            start,
+            start.AddDays(6),
+            filters: new CalendarFilters { ShowSeries = false, ShowMovies = true },
+            cancellationToken: CancellationToken.None))
+        {
+            updates.Add(update);
+        }
+
+        Assert.Equal("No Longer Scheduled", Assert.Single(updates.First().Items).Title);
+        var final = Assert.Single(updates, update => update.IsFinal);
+        Assert.Equal("Freshly Scheduled", Assert.Single(final.Items).Title);
+        Assert.DoesNotContain(final.Items, item => item.CanonicalId == staleMovie.CanonicalId);
+        Assert.DoesNotContain(cache.SetCalls.SelectMany(call => call.Items), item => item.CanonicalId == staleMovie.CanonicalId);
     }
 
     [Fact]
