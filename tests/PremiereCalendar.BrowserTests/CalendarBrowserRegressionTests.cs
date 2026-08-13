@@ -62,10 +62,19 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             for (var movement = 0; movement < 3; movement++)
             {
                 var loadMore = Page.Locator("[data-day-load-more]").First;
-                if (await loadMore.IsVisibleAsync()) await loadMore.ClickAsync(new() { Force = true });
+                if (await loadMore.IsVisibleAsync())
+                {
+                    await loadMore.ClickAsync(new() { Force = true });
+                    await WaitForUsableCardWindowAsync();
+                }
             }
             var loadPrevious = Page.Locator("[data-day-load-previous]").First;
-            if (await loadPrevious.IsVisibleAsync()) await loadPrevious.ClickAsync(new() { Force = true });
+            if (await loadPrevious.IsVisibleAsync())
+            {
+                await loadPrevious.ClickAsync(new() { Force = true });
+                await WaitForUsableCardWindowAsync();
+            }
+            await WaitForUsableCardWindowAsync();
             Assert.InRange(await Page.Locator("[data-testid='premiere-card']").CountAsync(), 1, 40);
             Assert.True(rollingWindow.ElapsedMilliseconds <= 3_000, $"Rolling-window navigation took {rollingWindow.ElapsedMilliseconds} ms.");
 
@@ -115,4 +124,10 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             throw;
         }
     }
+
+    private async Task WaitForUsableCardWindowAsync() =>
+        await Page.WaitForFunctionAsync(
+            "document.querySelectorAll(\"[data-testid='premiere-card']\").length > 0 && document.querySelectorAll(\"[data-testid='premiere-card']\").length <= 40",
+            null,
+            new() { Timeout = 5_000 });
 }
