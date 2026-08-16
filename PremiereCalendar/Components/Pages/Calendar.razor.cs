@@ -57,6 +57,7 @@ public partial class Calendar
     private ViewSyncGroupState? _queuedViewSyncState;
     private string? _lastPublishedViewSyncUrl;
     private readonly Dictionary<string, long> _lastAppliedViewSyncRevisions = new(StringComparer.OrdinalIgnoreCase);
+    private long _locationChangeRevision;
 
     private string PageTitleText()
     {
@@ -543,23 +544,35 @@ public partial class Calendar
 
     private void OnLocationChanged(object? sender, LocationChangedEventArgs args)
     {
-        _ = HandleLocationChangedAsync(args);
+        var revision = Interlocked.Increment(ref _locationChangeRevision);
+        var forceLoad = _forceLoadOnNextLocationChange;
+        var suppressViewSyncPublish = _applyingViewSyncNavigation;
+        _forceLoadOnNextLocationChange = false;
+        _applyingViewSyncNavigation = false;
+        _ = HandleLocationChangedAsync(args, revision, forceLoad, suppressViewSyncPublish);
     }
 
-    private async Task HandleLocationChangedAsync(LocationChangedEventArgs args)
+    private async Task HandleLocationChangedAsync(
+        LocationChangedEventArgs args,
+        long revision,
+        bool forceLoad,
+        bool suppressViewSyncPublish)
     {
         try
         {
             await InvokeAsync(async () =>
             {
-                if (_isDisposed)
+                if (!IsLatestLocationChange(revision))
                 {
                     return;
                 }
 
-                var suppressViewSyncPublish = _applyingViewSyncNavigation;
-                _applyingViewSyncNavigation = false;
                 if (await RestoreSavedFiltersIfNeededAsync(args.Location))
+                {
+                    return;
+                }
+
+                if (!IsLatestLocationChange(revision))
                 {
                     return;
                 }
@@ -570,8 +583,6 @@ public partial class Calendar
                 var previousSortMode = _filters.SortMode;
                 var previousSortDirection = _filters.SortDirection;
                 var previousCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
-                var forceLoad = _forceLoadOnNextLocationChange;
-                _forceLoadOnNextLocationChange = false;
                 _pageMode = ResolvePageMode(args.Location);
                 ApplyQueryParameters(args.Location);
                 ApplyPageMode();
@@ -581,6 +592,11 @@ public partial class Calendar
                     await LoadPresetsAsync();
                 }
 
+                if (!IsLatestLocationChange(revision))
+                {
+                    return;
+                }
+
                 var nextCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
                 var sortChanged = _filters.SortMode != previousSortMode
                     || _filters.SortDirection != previousSortDirection;
@@ -588,6 +604,11 @@ public partial class Calendar
                 if (!suppressViewSyncPublish)
                 {
                     await PublishCurrentViewSyncUrlAsync(args.Location);
+                }
+
+                if (!IsLatestLocationChange(revision))
+                {
+                    return;
                 }
 
                 if (forceLoad
@@ -625,6 +646,11 @@ public partial class Calendar
         {
             Logger.LogError(ex, "Calendar route change failed.");
         }
+    }
+
+    private bool IsLatestLocationChange(long revision)
+    {
+        return !_isDisposed && revision == Volatile.Read(ref _locationChangeRevision);
     }
 
     private async Task LoadFilterCatalogAsync(bool forceRefresh = false, CancellationToken cancellationToken = default)

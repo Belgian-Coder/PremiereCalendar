@@ -278,6 +278,40 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public async Task CalendarPage_OverlappingWeekNavigationOnlyLoadsLatestLocation()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/series?week=2026-05-04&day=2026-05-06");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        _viewSyncService.PublishedUrls.Clear();
+
+        var nextWeekPublish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondNextWeekPublish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _viewSyncService.PublishGates.Enqueue(nextWeekPublish);
+        _viewSyncService.PublishGates.Enqueue(secondNextWeekPublish);
+
+        component.Find("button[title='Next week']").Click();
+        component.WaitForAssertion(() => Assert.Single(_viewSyncService.PublishedUrls));
+        component.Find("button[title='Next week']").Click();
+        component.WaitForAssertion(() => Assert.Equal(2, _viewSyncService.PublishedUrls.Count));
+
+        secondNextWeekPublish.SetResult();
+        nextWeekPublish.SetResult();
+        await Task.WhenAll(secondNextWeekPublish.Task, nextWeekPublish.Task);
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, service.Calls.Count);
+            Assert.Equal(new DateOnly(2026, 5, 18), service.Calls.Last().Start);
+            Assert.Contains("week=2026-05-18", navigation.Uri);
+            Assert.Contains("1 title", component.Find(".calendar-result-count").TextContent);
+        });
+    }
+
+    [Fact]
     public void CalendarPage_RefreshButtonForcesFreshLoad()
     {
         var service = new FakePremiereService();
@@ -3175,6 +3209,8 @@ public sealed class CalendarPageTests : BunitContext
 
         public List<string> PublishedUrls { get; } = [];
 
+        public Queue<TaskCompletionSource> PublishGates { get; } = [];
+
         public ViewSyncGroupState? GroupState { get; set; }
 
         public Exception? GetOverviewException { get; set; }
@@ -3211,9 +3247,14 @@ public sealed class CalendarPageTests : BunitContext
             return Task.FromResult(Overview(deviceId));
         }
 
-        public Task<ViewSyncPublishResult> PublishUrlAsync(string deviceId, string relativeUrl, CancellationToken cancellationToken)
+        public async Task<ViewSyncPublishResult> PublishUrlAsync(string deviceId, string relativeUrl, CancellationToken cancellationToken)
         {
             PublishedUrls.Add(relativeUrl);
+            if (PublishGates.TryDequeue(out var gate))
+            {
+                await gate.Task.WaitAsync(cancellationToken);
+            }
+
             var routeKey = ViewSyncUrlPolicy.RouteKeyFor(relativeUrl) ?? "all";
             GroupState = new ViewSyncGroupState(
                 "group-a",
@@ -3224,7 +3265,7 @@ public sealed class CalendarPageTests : BunitContext
                 deviceId,
                 "Office PC");
             _statesByRoute[routeKey] = GroupState;
-            return Task.FromResult(new ViewSyncPublishResult(true, GroupState));
+            return new ViewSyncPublishResult(true, GroupState);
         }
 
         public Task<ViewSyncGroupState?> GetLatestStateForDeviceAsync(string deviceId, CancellationToken cancellationToken)

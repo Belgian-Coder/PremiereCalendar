@@ -148,36 +148,45 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var broadcast = _broadcasts.GetOrAdd(handle.JobId, static _ => new JobBroadcast());
-        var latestCalendar = broadcast.LatestCalendar;
-        if (latestCalendar is not null)
-        {
-            yield return latestCalendar;
-        }
-        if (broadcast.Latest is { } latest)
-        {
-            if (!ReferenceEquals(latest, latestCalendar)) yield return latest;
-            if (IsTerminal(latest.State)) yield break;
-        }
-
-        var snapshot = await _store.GetAsync(handle.JobId, cancellationToken);
-        if (snapshot is null) yield break;
-        if (broadcast.Latest is null && TryReadPersistedProgress(snapshot, out var persistedProgress))
-        {
-            yield return persistedProgress;
-        }
-        if (IsTerminal(snapshot.State) && broadcast.Latest is null)
-        {
-            yield return new ProviderWorkProgress(
-                snapshot.JobId,
-                snapshot.State,
-                snapshot.State == ProviderWorkState.Completed ? "Provider work completed." : "Provider work stopped.",
-                Error: snapshot.LastError);
-            yield break;
-        }
-
         var reader = broadcast.Subscribe();
         try
         {
+            if (!reader.TryRead(out var firstUpdate))
+            {
+                var snapshot = await _store.GetAsync(handle.JobId, cancellationToken);
+                if (!reader.TryRead(out firstUpdate))
+                {
+                    if (snapshot is null)
+                    {
+                        yield break;
+                    }
+
+                    if (TryReadPersistedProgress(snapshot, out var persistedProgress))
+                    {
+                        yield return persistedProgress;
+                    }
+
+                    if (IsTerminal(snapshot.State))
+                    {
+                        yield return new ProviderWorkProgress(
+                            snapshot.JobId,
+                            snapshot.State,
+                            snapshot.State == ProviderWorkState.Completed ? "Provider work completed." : "Provider work stopped.",
+                            Error: snapshot.LastError);
+                        yield break;
+                    }
+                }
+            }
+
+            if (firstUpdate is not null)
+            {
+                yield return firstUpdate;
+                if (IsTerminal(firstUpdate.State))
+                {
+                    yield break;
+                }
+            }
+
             await foreach (var update in reader.ReadAllAsync(cancellationToken))
             {
                 yield return update;
@@ -380,7 +389,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         _ => string.IsNullOrWhiteSpace(error.Message) ? error.GetType().Name : error.Message
     };
 
-    private sealed class JobBroadcast
+    internal sealed class JobBroadcast
     {
         private readonly object _gate = new();
         private readonly HashSet<ChannelReader<ProviderWorkProgress>> _readers = [];
@@ -400,7 +409,20 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             {
                 _readers.Add(channel.Reader);
                 _writers[channel.Reader] = channel.Writer;
-                if (Latest is { } latest) channel.Writer.TryWrite(latest);
+                if (LatestCalendar is { } latestCalendar)
+                {
+                    channel.Writer.TryWrite(latestCalendar);
+                }
+
+                if (Latest is { } latest && !ReferenceEquals(latest, LatestCalendar))
+                {
+                    channel.Writer.TryWrite(latest);
+                }
+
+                if (Latest is { State: var state } && IsTerminal(state))
+                {
+                    channel.Writer.TryComplete();
+                }
             }
             return channel.Reader;
         }

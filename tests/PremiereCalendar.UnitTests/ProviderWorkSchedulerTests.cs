@@ -91,6 +91,51 @@ public sealed class ProviderWorkSchedulerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task LateBroadcastSubscriberReplaysCalendarResultBeforeCompletion()
+    {
+        var broadcast = new ProviderWorkScheduler.JobBroadcast();
+        var calendar = new PremiereLoadProgress(
+            "Week cache",
+            1,
+            1,
+            [new PremiereCalendar.Models.PremiereItem
+            {
+                MediaType = PremiereCalendar.Models.PremiereMediaType.Series,
+                Type = PremiereCalendar.Models.PremiereItemType.SeriesPremiere,
+                TmdbId = 42,
+                Title = "Cached series",
+                PremiereDate = new DateOnly(2026, 8, 13)
+            }],
+            IsFinal: true,
+            FromCache: true);
+
+        broadcast.Publish(new ProviderWorkProgress(
+            "job-a",
+            ProviderWorkState.Running,
+            "Week cache",
+            CalendarProgress: calendar));
+        broadcast.Publish(new ProviderWorkProgress(
+            "job-a",
+            ProviderWorkState.Completed,
+            "Provider work completed."));
+
+        var updates = new List<ProviderWorkProgress>();
+        await foreach (var update in broadcast.Subscribe().ReadAllAsync())
+        {
+            updates.Add(update);
+        }
+
+        Assert.Collection(
+            updates,
+            update =>
+            {
+                Assert.Same(calendar, update.CalendarProgress);
+                Assert.Equal("Cached series", Assert.Single(update.CalendarProgress!.Items).Title);
+            },
+            update => Assert.Equal(ProviderWorkState.Completed, update.State));
+    }
+
+    [Fact]
     public async Task ForegroundEnqueuePreemptsBackgroundWithoutConsumingRetry()
     {
         var background = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarWarmup, "background", ProviderWorkPriority.Warmup, "{}"));
