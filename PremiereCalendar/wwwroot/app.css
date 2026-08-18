@@ -2213,6 +2213,7 @@ html[data-density="comfortable"] .premiere-card {
 .links a:hover {
     border-color: var(--teal);
     background: var(--teal-soft);
+    color: var(--teal-strong);
 }
 
 html[data-theme="dark"] .app-topbar {

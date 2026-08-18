@@ -92,6 +92,11 @@
             </div>
         }
 
+        @if (!string.IsNullOrWhiteSpace(Item.Overview))
+        {
+            <p class="card-description">@Item.Overview</p>
+        }
+
         <div class="links primary-actions" aria-label="Primary actions">
             @if (ShowArrButton)
             {
@@ -108,6 +113,8 @@
             {
                 <a href="@Item.TrailerUrl" target="_blank" rel="noopener noreferrer">Trailer</a>
             }
+
+            <a href="@BuildYouTubeTrailerSearchUrl(Item.Title)" target="_blank" rel="noopener noreferrer">YouTube search</a>
         </div>
 
         <details class="card-details" data-details-loaded="@_isDetailsLoaded.ToString().ToLowerInvariant()">
@@ -115,11 +122,6 @@
             @if (_isDetailsLoaded)
             {
                 <div class="card-details-content">
-                    @if (!string.IsNullOrWhiteSpace(Item.Overview))
-                    {
-                        <p class="card-description">@Item.Overview</p>
-                    }
-
                     @if (IsUnverified && !string.IsNullOrWhiteSpace(Item.VerificationNote))
                     {
                         <p class="verification-note">@Item.VerificationNote</p>
@@ -259,8 +261,6 @@
                     </details>
 
                     <div class="links secondary-links" aria-label="External links">
-                        <a href="@BuildYouTubeTrailerSearchUrl(Item.Title)" target="_blank" rel="noopener noreferrer">YouTube search</a>
-
                         @if (!string.IsNullOrWhiteSpace(Item.TmdbUrl))
                         {
                             <a href="@Item.TmdbUrl" target="_blank" rel="noopener noreferrer">TMDb</a>

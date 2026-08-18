@@ -34,8 +34,9 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             Assert.True(firstCardTimer.Elapsed <= TimeSpan.FromSeconds(5), $"First usable card took {firstCardTimer.Elapsed}.");
             Assert.Equal("compact", await Page.Locator("html").GetAttributeAsync("data-density"));
 
-            await Page.Locator(".card-details > summary").First.ClickAsync();
             await Expect(Page.Locator(".card-description").First).ToBeVisibleAsync();
+            await Expect(Page.Locator(".primary-actions").First.GetByRole(AriaRole.Link, new() { Name = "Trailer", Exact = true })).ToBeVisibleAsync();
+            await Expect(Page.Locator(".primary-actions").First.GetByRole(AriaRole.Link, new() { Name = "YouTube search", Exact = true })).ToBeVisibleAsync();
             await Page.GetByRole(AriaRole.Button, new() { Name = "Open tools and actions" }).ClickAsync();
             await Page.GetByRole(AriaRole.Button, new() { Name = "Use comfortable cards" }).ClickAsync();
             await Expect(Page.Locator("html")).ToHaveAttributeAsync("data-density", "comfortable");
