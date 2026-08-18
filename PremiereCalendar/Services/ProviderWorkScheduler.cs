@@ -475,36 +475,46 @@ public sealed class ProviderWorkSchedulerHostedService(
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            var job = await scheduler.ClaimNextAsync(foregroundOnly, owner, stoppingToken);
-            if (job is null)
-            {
-                await scheduler.WaitForSignalAsync(stoppingToken);
-                continue;
-            }
-
-            var execution = scheduler.BeginExecution(job, stoppingToken);
             try
             {
-                await ExecuteJobAsync(job, execution.Token);
-                await scheduler.CompleteAsync(job, stoppingToken);
+                var job = await scheduler.ClaimNextAsync(foregroundOnly, owner, stoppingToken);
+                if (job is null)
+                {
+                    await scheduler.WaitForSignalAsync(stoppingToken);
+                    continue;
+                }
+
+                var execution = scheduler.BeginExecution(job, stoppingToken);
+                try
+                {
+                    await ExecuteJobAsync(job, execution.Token);
+                    await scheduler.CompleteAsync(job, stoppingToken);
+                }
+                catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested && execution.IsCancellationRequested)
+                {
+                    await scheduler.PreemptAsync(job, CancellationToken.None);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    await scheduler.PreemptAsync(job, CancellationToken.None);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Provider work {ProviderWorkJobId} failed.", job.JobId);
+                    await scheduler.FailAsync(job, ex, CancellationToken.None);
+                }
+                finally
+                {
+                    scheduler.EndExecution(job, execution);
+                }
             }
-            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested && execution.IsCancellationRequested)
+            catch (Exception ex) when (stoppingToken.IsCancellationRequested)
             {
-                await scheduler.PreemptAsync(job, CancellationToken.None);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                await scheduler.PreemptAsync(job, CancellationToken.None);
+                // SQLite can report a final lock error instead of cancellation while the host is
+                // stopping. Do not turn an otherwise normal Windows Service stop into a crash.
+                logger.LogDebug(ex, "Provider worker {ProviderWorkOwner} stopped during shutdown.", owner);
                 return;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Provider work {ProviderWorkJobId} failed.", job.JobId);
-                await scheduler.FailAsync(job, ex, CancellationToken.None);
-            }
-            finally
-            {
-                scheduler.EndExecution(job, execution);
             }
         }
     }

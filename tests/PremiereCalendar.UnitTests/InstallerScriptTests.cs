@@ -161,6 +161,17 @@ public sealed class InstallerScriptTests
         Assert.Contains("database snapshot --output $databaseSnapshot", script, StringComparison.Ordinal);
         Assert.Contains("Install-DatabaseSnapshot", script, StringComparison.Ordinal);
         Assert.Contains("Wait-ForApplicationProcessExit", script, StringComparison.Ordinal);
+        Assert.Contains("Wait-ForApplicationProcessExit -ProcessId $serviceProcessId", script, StringComparison.Ordinal);
+        Assert.Contains("Get-Process -Id $ProcessId", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-Process -Name 'PremiereCalendar'", script, StringComparison.Ordinal);
+        Assert.Contains("Disable-ServiceRecovery -Name $ServiceName", script, StringComparison.Ordinal);
+        Assert.Contains("Enable-ServiceRecovery -Name $ServiceName", script, StringComparison.Ordinal);
+        Assert.Contains("ProcessStartInfo.Arguments preserves the quoted empty value", script, StringComparison.Ordinal);
+        Assert.Contains("actions= `\"`\"", script, StringComparison.Ordinal);
+        Assert.Contains("if ($serviceRecoverySuspended", script, StringComparison.Ordinal);
+        Assert.True(
+            script.IndexOf("Disable-ServiceRecovery -Name $ServiceName", StringComparison.Ordinal)
+            < script.IndexOf("Stop-Service -Name $ServiceName", StringComparison.Ordinal));
         Assert.Contains("[IO.File]::Replace", script, StringComparison.Ordinal);
         Assert.Contains("$activationSwitched", script, StringComparison.Ordinal);
         Assert.Contains("$databaseSnapshotInstalled", script, StringComparison.Ordinal);

@@ -128,24 +128,49 @@ function Wait-ForHealthyVersion {
 }
 
 function Wait-ForApplicationProcessExit {
+    param([Parameter(Mandatory)][uint32] $ProcessId)
+    if ($ProcessId -eq 0) { return }
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(45)
     do {
-        $running = @(Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue)
-        if ($running.Count -eq 0) { return }
+        $running = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($null -eq $running) { return }
         Start-Sleep -Milliseconds 250
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
-    $running = @(Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue)
-    if ($running.Count -gt 0) {
+    $running = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -ne $running) {
         $running | Stop-Process -Force
         $killDeadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
         do {
             Start-Sleep -Milliseconds 250
-            $running = @(Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue)
-        } while ($running.Count -gt 0 -and [DateTimeOffset]::UtcNow -lt $killDeadline)
+            $running = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        } while ($null -ne $running -and [DateTimeOffset]::UtcNow -lt $killDeadline)
     }
-    if (@(Get-Process -Name 'PremiereCalendar' -ErrorAction SilentlyContinue).Count -gt 0) {
-        throw 'PremiereCalendar process did not exit after the service stopped.'
+    if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        throw "PremiereCalendar service process $ProcessId did not exit after the service stopped."
     }
+}
+
+function Disable-ServiceRecovery {
+    param([Parameter(Mandatory)][string] $Name)
+    if ($Name -notmatch '^[A-Za-z0-9_.-]+$') { throw 'The service name is invalid.' }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $env:SystemRoot 'System32\sc.exe'
+    # ProcessStartInfo.Arguments preserves the quoted empty value that Windows PowerShell 5.1
+    # otherwise drops when invoking native commands.
+    $startInfo.Arguments = "failure `"$Name`" reset= 86400 actions= `"`""
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) { throw "Could not suspend recovery actions for service $Name." }
+}
+
+function Enable-ServiceRecovery {
+    param([Parameter(Mandatory)][string] $Name)
+    & sc.exe failure $Name reset= 86400 actions= restart/60000/restart/60000/restart/300000 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not restore recovery actions for service $Name." }
+    & sc.exe failureflag $Name 1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not restore the recovery flag for service $Name." }
 }
 
 function Install-DatabaseSnapshot {
@@ -222,6 +247,7 @@ $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 $serviceConfiguration = Get-CimInstance Win32_Service -Filter "Name='$($ServiceName.Replace("'", "''"))'" -ErrorAction SilentlyContinue
 $previousServicePath = if ($null -ne $serviceConfiguration) { [string]$serviceConfiguration.PathName } else { $null }
 $serviceWasCreated = $false
+$serviceRecoverySuspended = $false
 $hadCurrent = Test-Path -LiteralPath $current
 $databaseDirectory = Join-Path $resolvedDataRoot 'data'
 $databaseBackup = Join-Path (Join-Path $resolvedDataRoot 'backups') "pre-$version-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
@@ -263,9 +289,12 @@ try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $releaseRoot) -Force | Out-Null
     Move-Item -LiteralPath $stage -Destination $releaseRoot
     if ($null -ne $service -and $service.Status -ne 'Stopped') {
+        $serviceProcessId = [uint32]$serviceConfiguration.ProcessId
+        Disable-ServiceRecovery -Name $ServiceName
+        $serviceRecoverySuspended = $true
         Stop-Service -Name $ServiceName -Force
         $service.WaitForStatus('Stopped', '00:00:45')
-        Wait-ForApplicationProcessExit
+        Wait-ForApplicationProcessExit -ProcessId $serviceProcessId
     }
     # Take the one-time legacy data snapshot only after the existing service has
     # stopped, so the SQLite database and any WAL files form a consistent set.
@@ -292,7 +321,8 @@ try {
         & sc.exe config $ServiceName binPath= $quotedExePath start= auto | Out-Null
     }
     if ($LASTEXITCODE -ne 0) { throw 'Windows service configuration failed.' }
-    & sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/300000 | Out-Null
+    Enable-ServiceRecovery -Name $ServiceName
+    $serviceRecoverySuspended = $false
     $environment = @(
         "Urls=http://0.0.0.0:$Port",
         "ASPNETCORE_URLS=http://0.0.0.0:$Port",
@@ -351,9 +381,15 @@ catch {
         }
         $rollbackService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
         if ($null -ne $rollbackService -and $rollbackService.Status -ne 'Stopped') {
+            $rollbackServiceConfiguration = Get-CimInstance Win32_Service -Filter "Name='$($ServiceName.Replace("'", "''"))'" -ErrorAction SilentlyContinue
+            $rollbackServiceProcessId = if ($null -ne $rollbackServiceConfiguration) { [uint32]$rollbackServiceConfiguration.ProcessId } else { [uint32]0 }
+            if (-not $serviceRecoverySuspended) {
+                Disable-ServiceRecovery -Name $ServiceName
+                $serviceRecoverySuspended = $true
+            }
             Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
             $rollbackService.WaitForStatus('Stopped', '00:00:30')
-            Wait-ForApplicationProcessExit
+            Wait-ForApplicationProcessExit -ProcessId $rollbackServiceProcessId
         }
         if ($activationSwitched) {
             if (Test-Path -LiteralPath $current) { [IO.Directory]::Delete($current) }
@@ -366,10 +402,14 @@ catch {
             $rollbackExe = Join-Path $current 'PremiereCalendar.exe'
             $quotedRollbackExe = '"' + $rollbackExe + '"'
             & sc.exe config $ServiceName binPath= $quotedRollbackExe | Out-Null
+            Enable-ServiceRecovery -Name $ServiceName
+            $serviceRecoverySuspended = $false
             Start-Service -Name $ServiceName
         }
         elseif (-not [string]::IsNullOrWhiteSpace($previousServicePath)) {
             & sc.exe config $ServiceName binPath= $previousServicePath | Out-Null
+            Enable-ServiceRecovery -Name $ServiceName
+            $serviceRecoverySuspended = $false
             Start-Service -Name $ServiceName
         }
         elseif ($serviceWasCreated) {
@@ -381,6 +421,13 @@ catch {
     throw $failure
 }
 finally {
+    if ($serviceRecoverySuspended -and $null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
+        try {
+            Enable-ServiceRecovery -Name $ServiceName
+            $serviceRecoverySuspended = $false
+        }
+        catch { Write-Warning "Service recovery actions could not be restored: $($_.Exception.Message)" }
+    }
     foreach ($replacementFile in $updaterReplacementFiles) {
         if (Test-Path -LiteralPath $replacementFile -PathType Leaf) { Remove-Item -LiteralPath $replacementFile -Force -ErrorAction SilentlyContinue }
     }
