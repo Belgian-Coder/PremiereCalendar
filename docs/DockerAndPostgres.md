@@ -17,7 +17,11 @@ The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed
 
 ## Production container
 
-Release tags build the runtime image once, reject fixable HIGH or CRITICAL vulnerability findings, retain a CycloneDX SBOM and scan report, then publish the scanned image to GitHub Container Registry. Deploy by digest. The runtime:
+Release tags build the runtime image once, launch that exact image to prove
+readiness, non-root identity, root HTML and the Blazor boot asset, reject
+fixable HIGH or CRITICAL vulnerability findings, retain a CycloneDX SBOM and
+scan report, then publish the scanned image to GitHub Container Registry.
+Deploy by digest. The runtime:
 
 - runs as the image's non-root application user;
 - has a read-only root filesystem, no added Linux capabilities, and `no-new-privileges`;
@@ -25,6 +29,12 @@ Release tags build the runtime image once, reject fixable HIGH or CRITICAL vulne
 - reads the PostgreSQL password from a Docker secret file;
 - disables the Windows signed updater;
 - exposes `/health`, `/health/ready`, and `/health/version`.
+
+The project explicitly pins `Microsoft.AspNetCore.App.Internal.Assets` to the
+same .NET 11 preview version as the SDK/runtime. Linux publish otherwise omitted
+`_framework/blazor.web.js` with preview 7 even though health remained green.
+Upgrade that package together with the pinned SDK/runtime images; the Docker
+build assertion and release-image smoke must both pass before publication.
 
 ## SQLite migration
 
