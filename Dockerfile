@@ -17,11 +17,12 @@ ARG BUILD_TIME_UTC=unknown
 RUN dotnet publish PremiereCalendar/PremiereCalendar.csproj -c Release --no-restore -o /out \
     /p:Version="$VERSION" /p:InformationalVersion="$VERSION+$BUILD_ID" \
     /p:SourceRevisionId="$SOURCE_REVISION" /p:BuildId="$BUILD_ID" /p:BuildTimeUtc="$BUILD_TIME_UTC" \
-    /p:UseAppHost=false
+    /p:UseAppHost=false \
+    && test -s /out/wwwroot/_framework/blazor.web.js
 
 FROM mcr.microsoft.com/dotnet/sdk:11.0.100-preview.7-alpine3.24@sha256:186cbf87f5b66f2e4ff937b6a3cd420b005356e940eacd5c420fc30308c49c46 AS development
 WORKDIR /src
-ENV ASPNETCORE_URLS=http://0.0.0.0:8080 DOTNET_USE_POLLING_FILE_WATCHER=1
+ENV Urls=http://0.0.0.0:8080 DOTNET_USE_POLLING_FILE_WATCHER=1
 EXPOSE 8080
 CMD ["dotnet", "watch", "--project", "PremiereCalendar/PremiereCalendar.csproj", "run", "--no-launch-profile"]
 
@@ -35,7 +36,7 @@ LABEL org.opencontainers.image.title="PremiereCalendar" \
       org.opencontainers.image.revision="$SOURCE_REVISION" \
       org.opencontainers.image.created="$BUILD_TIME_UTC"
 WORKDIR /app
-ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
+ENV Urls=http://0.0.0.0:8080 \
     DOTNET_EnableDiagnostics=0 \
     COMPlus_EnableDiagnostics=0
 COPY --from=build --chown=$APP_UID:$APP_UID /out/ ./

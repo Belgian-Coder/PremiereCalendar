@@ -49,6 +49,35 @@ jobs:
             --build-arg "BUILD_ID=${{ steps.metadata.outputs.build_id }}" \
             --build-arg "BUILD_TIME_UTC=${{ steps.metadata.outputs.build_time }}" \
             .
+      - name: Verify container UI assets and runtime identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.metadata.outputs.tag }}"
+          cid="$(docker run --detach --rm --publish 127.0.0.1::8080 \
+            --env CalendarWarmup__Enabled=false \
+            --env ProviderScheduler__Enabled=false \
+            --env ProviderDeltaSync__Enabled=false \
+            --env ImdbDataset__Enabled=false \
+            --env CacheMaintenance__Enabled=false \
+            "$image")"
+          trap 'docker rm --force "$cid" >/dev/null 2>&1 || true' EXIT
+          port="$(docker port "$cid" 8080/tcp | sed 's/.*://')"
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error "http://127.0.0.1:$port/health/ready" >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" == 60 ]]; then
+              docker logs "$cid"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.Config.User}}' "$cid")" = "1654"
+          curl --fail --silent --show-error "http://127.0.0.1:$port/_framework/blazor.web.js" \
+            | grep --quiet 'Blazor'
+          curl --fail --silent --show-error "http://127.0.0.1:$port/" \
+            | grep --quiet '_framework/blazor.web.js'
       - name: Scan image and fail on fixable high or critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
