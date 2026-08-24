@@ -22,8 +22,13 @@ public sealed class PostgresPersistenceTests
         var environment = new TestEnvironment(root);
         var passwordFile = Environment.GetEnvironmentVariable("PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE");
         var password = string.IsNullOrWhiteSpace(passwordFile) ? null : File.ReadAllText(passwordFile).TrimEnd('\r', '\n');
-        var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = "postgres", Password = password };
-        var appBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = databaseName, Password = password };
+        var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = "postgres" };
+        var appBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = databaseName };
+        if (password is not null)
+        {
+            adminBuilder.Password = password;
+            appBuilder.Password = password;
+        }
 
         await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
         {
