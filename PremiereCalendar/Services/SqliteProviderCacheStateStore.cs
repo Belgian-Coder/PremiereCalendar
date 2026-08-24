@@ -1,5 +1,6 @@
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -41,13 +42,13 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             command.CommandText = """
                 SELECT Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark, ItemCount, MetadataJson
                 FROM ProviderCacheState
-                WHERE Provider = $provider
-                  AND Scope = $scope
-                  AND CacheKey = $cacheKey
+                WHERE Provider = @provider
+                  AND Scope = @scope
+                  AND CacheKey = @cacheKey
                 """;
-            command.Parameters.AddWithValue("$provider", Normalize(provider));
-            command.Parameters.AddWithValue("$scope", scope.ToString());
-            command.Parameters.AddWithValue("$cacheKey", key);
+            DatabaseParameters.Add(command, "@provider", Normalize(provider));
+            DatabaseParameters.Add(command, "@scope", scope.ToString());
+            DatabaseParameters.Add(command, "@cacheKey", key);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return await reader.ReadAsync(cancellationToken)
@@ -86,14 +87,14 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
                     MetadataJson
                 )
                 VALUES (
-                    $provider,
-                    $scope,
-                    $cacheKey,
-                    $lastCheckedUtc,
-                    $lastChangedUtc,
-                    $watermark,
-                    $itemCount,
-                    $metadataJson
+                    @provider,
+                    @scope,
+                    @cacheKey,
+                    @lastCheckedUtc,
+                    @lastChangedUtc,
+                    @watermark,
+                    @itemCount,
+                    @metadataJson
                 )
                 ON CONFLICT(Provider, Scope, CacheKey) DO UPDATE SET
                     LastCheckedUtc = excluded.LastCheckedUtc,
@@ -102,14 +103,14 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
                     ItemCount = excluded.ItemCount,
                     MetadataJson = excluded.MetadataJson
                 """;
-            command.Parameters.AddWithValue("$provider", Normalize(state.Provider));
-            command.Parameters.AddWithValue("$scope", state.Scope.ToString());
-            command.Parameters.AddWithValue("$cacheKey", state.Key);
-            command.Parameters.AddWithValue("$lastCheckedUtc", state.LastCheckedUtc.ToString("O", CultureInfo.InvariantCulture));
-            command.Parameters.AddWithValue("$lastChangedUtc", state.LastChangedUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "");
-            command.Parameters.AddWithValue("$watermark", state.Watermark ?? "");
-            command.Parameters.AddWithValue("$itemCount", state.ItemCount is { } count ? count : DBNull.Value);
-            command.Parameters.AddWithValue("$metadataJson", state.MetadataJson ?? "");
+            DatabaseParameters.Add(command, "@provider", Normalize(state.Provider));
+            DatabaseParameters.Add(command, "@scope", state.Scope.ToString());
+            DatabaseParameters.Add(command, "@cacheKey", state.Key);
+            DatabaseParameters.Add(command, "@lastCheckedUtc", state.LastCheckedUtc.ToString("O", CultureInfo.InvariantCulture));
+            DatabaseParameters.Add(command, "@lastChangedUtc", state.LastChangedUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "");
+            DatabaseParameters.Add(command, "@watermark", state.Watermark ?? "");
+            DatabaseParameters.Add(command, "@itemCount", state.ItemCount is { } count ? count : DBNull.Value);
+            DatabaseParameters.Add(command, "@metadataJson", state.MetadataJson ?? "");
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -131,9 +132,9 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
                 SELECT Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark, ItemCount, MetadataJson
                 FROM ProviderCacheState
                 ORDER BY LastCheckedUtc DESC
-                LIMIT $take
+                LIMIT @take
                 """;
-            command.Parameters.AddWithValue("$take", Math.Clamp(take, 1, 500));
+            DatabaseParameters.Add(command, "@take", Math.Clamp(take, 1, 500));
             return await ReadStatesAsync(command, cancellationToken);
         }
         finally
@@ -162,12 +163,12 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             command.CommandText = """
                 SELECT Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark, ItemCount, MetadataJson
                 FROM ProviderCacheState
-                WHERE Provider = $provider
+                WHERE Provider = @provider
                 ORDER BY LastCheckedUtc DESC
-                LIMIT $take
+                LIMIT @take
                 """;
-            command.Parameters.AddWithValue("$provider", Normalize(provider));
-            command.Parameters.AddWithValue("$take", Math.Clamp(take, 1, 500));
+            DatabaseParameters.Add(command, "@provider", Normalize(provider));
+            DatabaseParameters.Add(command, "@take", Math.Clamp(take, 1, 500));
             return await ReadStatesAsync(command, cancellationToken);
         }
         finally
@@ -192,18 +193,18 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = UpsertCommandText;
-            var providerParameter = command.Parameters.Add("$provider", SqliteType.Text);
-            var scopeParameter = command.Parameters.Add("$scope", SqliteType.Text);
-            var cacheKeyParameter = command.Parameters.Add("$cacheKey", SqliteType.Text);
-            var lastCheckedUtcParameter = command.Parameters.Add("$lastCheckedUtc", SqliteType.Text);
-            var lastChangedUtcParameter = command.Parameters.Add("$lastChangedUtc", SqliteType.Text);
-            var watermarkParameter = command.Parameters.Add("$watermark", SqliteType.Text);
-            var itemCountParameter = command.Parameters.Add("$itemCount", SqliteType.Integer);
-            var metadataJsonParameter = command.Parameters.Add("$metadataJson", SqliteType.Text);
+            var providerParameter = DatabaseParameters.Add(command, "@provider", DbType.String);
+            var scopeParameter = DatabaseParameters.Add(command, "@scope", DbType.String);
+            var cacheKeyParameter = DatabaseParameters.Add(command, "@cacheKey", DbType.String);
+            var lastCheckedUtcParameter = DatabaseParameters.Add(command, "@lastCheckedUtc", DbType.String);
+            var lastChangedUtcParameter = DatabaseParameters.Add(command, "@lastChangedUtc", DbType.String);
+            var watermarkParameter = DatabaseParameters.Add(command, "@watermark", DbType.String);
+            var itemCountParameter = DatabaseParameters.Add(command, "@itemCount", DbType.Int64);
+            var metadataJsonParameter = DatabaseParameters.Add(command, "@metadataJson", DbType.String);
 
             foreach (var state in validStates)
             {
@@ -252,14 +253,14 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             MetadataJson
         )
         VALUES (
-            $provider,
-            $scope,
-            $cacheKey,
-            $lastCheckedUtc,
-            $lastChangedUtc,
-            $watermark,
-            $itemCount,
-            $metadataJson
+            @provider,
+            @scope,
+            @cacheKey,
+            @lastCheckedUtc,
+            @lastChangedUtc,
+            @watermark,
+            @itemCount,
+            @metadataJson
         )
         ON CONFLICT(Provider, Scope, CacheKey) DO UPDATE SET
             LastCheckedUtc = excluded.LastCheckedUtc,
@@ -269,16 +270,9 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             MetadataJson = excluded.MetadataJson
         """;
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        };
-
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
     }
 
     private string ResolveDatabasePath()
@@ -292,7 +286,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             : Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configuredPath));
     }
 
-    private static ProviderCacheState ReadState(SqliteDataReader reader)
+    private static ProviderCacheState ReadState(DbDataReader reader)
     {
         return new ProviderCacheState(
             reader.GetString(0),
@@ -306,7 +300,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
     }
 
     private static async Task<IReadOnlyList<ProviderCacheState>> ReadStatesAsync(
-        SqliteCommand command,
+        DbCommand command,
         CancellationToken cancellationToken)
     {
         var states = new List<ProviderCacheState>();

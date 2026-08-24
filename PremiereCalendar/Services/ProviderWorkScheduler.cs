@@ -1,9 +1,9 @@
+using System.Data.Common;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.Channels;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -372,7 +372,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             var queued = GetCount(counts, ProviderWorkState.Queued) + GetCount(counts, ProviderWorkState.RetryWaiting);
             _telemetry.SetSchedulerCounts(queued, GetCount(counts, ProviderWorkState.Running));
         }
-        catch (Exception exception) when (exception is SqliteException or OperationCanceledException)
+        catch (Exception exception) when (exception is DbException or OperationCanceledException)
         {
             _telemetry.RecordDatabaseException(exception);
         }
@@ -385,7 +385,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     {
         OperationCanceledException => "Provider work was canceled.",
         HttpRequestException => "A provider request failed.",
-        SqliteException => "Provider work persistence failed.",
+        DbException => "Provider work persistence failed.",
         _ => string.IsNullOrWhiteSpace(error.Message) ? error.GetType().Name : error.Message
     };
 
@@ -516,7 +516,7 @@ public sealed class ProviderWorkSchedulerHostedService(
                 logger.LogDebug(ex, "Provider worker {ProviderWorkOwner} stopped during shutdown.", owner);
                 return;
             }
-            catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
+            catch (Exception ex) when (DatabaseConnectionFactory.IsTransient(ex))
             {
                 // A competing short write must delay this worker, not stop the
                 // host through BackgroundServiceExceptionBehavior.StopHost.
@@ -609,17 +609,17 @@ public sealed class ProviderWorkStore(
     {
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
         await using (var existing = connection.CreateCommand())
         {
             existing.Transaction = transaction;
             existing.CommandText = """
                 SELECT JobId FROM ProviderWorkJobs
-                WHERE DedupeKey = $dedupeKey AND State IN ('Queued', 'Running', 'RetryWaiting')
+                WHERE DedupeKey = @dedupeKey AND State IN ('Queued', 'Running', 'RetryWaiting')
                 LIMIT 1
                 """;
-            existing.Parameters.AddWithValue("$dedupeKey", request.DedupeKey);
+            DatabaseParameters.Add(existing, "@dedupeKey", request.DedupeKey);
             var existingId = Convert.ToString(await existing.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
             if (!string.IsNullOrWhiteSpace(existingId))
             {
@@ -635,14 +635,14 @@ public sealed class ProviderWorkStore(
             insert.CommandText = """
                 INSERT INTO ProviderWorkJobs (
                     JobId, Kind, DedupeKey, Priority, PayloadJson, State, AttemptCount, EnqueuedUtc)
-                VALUES ($id, $kind, $dedupeKey, $priority, $payload, 'Queued', 0, $now)
+                VALUES (@id, @kind, @dedupeKey, @priority, @payload, 'Queued', 0, @now)
                 """;
-            insert.Parameters.AddWithValue("$id", id);
-            insert.Parameters.AddWithValue("$kind", request.Kind.ToString());
-            insert.Parameters.AddWithValue("$dedupeKey", request.DedupeKey);
-            insert.Parameters.AddWithValue("$priority", (int)request.Priority);
-            insert.Parameters.AddWithValue("$payload", request.PayloadJson);
-            insert.Parameters.AddWithValue("$now", Format(now));
+            DatabaseParameters.Add(insert, "@id", id);
+            DatabaseParameters.Add(insert, "@kind", request.Kind.ToString());
+            DatabaseParameters.Add(insert, "@dedupeKey", request.DedupeKey);
+            DatabaseParameters.Add(insert, "@priority", (int)request.Priority);
+            DatabaseParameters.Add(insert, "@payload", request.PayloadJson);
+            DatabaseParameters.Add(insert, "@now", Format(now));
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -659,7 +659,7 @@ public sealed class ProviderWorkStore(
     {
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
         await using var select = connection.CreateCommand();
         select.Transaction = transaction;
         select.CommandText = $"""
@@ -667,12 +667,13 @@ public sealed class ProviderWorkStore(
                    AttemptCount, EnqueuedUtc, StartedUtc, CompletedUtc, NextAttemptUtc, LastError
             FROM ProviderWorkJobs
             WHERE State IN ('Queued', 'RetryWaiting')
-              AND (NextAttemptUtc IS NULL OR NextAttemptUtc <= $now)
+              AND (NextAttemptUtc IS NULL OR NextAttemptUtc <= @now)
               {(foregroundOnly ? "AND Priority <= 100" : string.Empty)}
             ORDER BY Priority, EnqueuedUtc
             LIMIT 1
+            {(DatabaseConnectionFactory.IsPostgreSql(connection) ? "FOR UPDATE SKIP LOCKED" : string.Empty)}
             """;
-        select.Parameters.AddWithValue("$now", Format(now));
+        DatabaseParameters.Add(select, "@now", Format(now));
         ProviderWorkSnapshot? snapshot = null;
         await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
         {
@@ -688,14 +689,14 @@ public sealed class ProviderWorkStore(
         update.Transaction = transaction;
         update.CommandText = """
             UPDATE ProviderWorkJobs
-            SET State = 'Running', StartedUtc = COALESCE(StartedUtc, $now),
-                LeaseOwner = $owner, LeaseExpiresUtc = $leaseExpires
-            WHERE JobId = $id AND State IN ('Queued', 'RetryWaiting')
+            SET State = 'Running', StartedUtc = COALESCE(StartedUtc, @now),
+                LeaseOwner = @owner, LeaseExpiresUtc = @leaseExpires
+            WHERE JobId = @id AND State IN ('Queued', 'RetryWaiting')
             """;
-        update.Parameters.AddWithValue("$now", Format(now));
-        update.Parameters.AddWithValue("$owner", owner);
-        update.Parameters.AddWithValue("$leaseExpires", Format(now.Add(lease)));
-        update.Parameters.AddWithValue("$id", snapshot.JobId);
+        DatabaseParameters.Add(update, "@now", Format(now));
+        DatabaseParameters.Add(update, "@owner", owner);
+        DatabaseParameters.Add(update, "@leaseExpires", Format(now.Add(lease)));
+        DatabaseParameters.Add(update, "@id", snapshot.JobId);
         if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
         {
             await transaction.RollbackAsync(cancellationToken);
@@ -706,14 +707,14 @@ public sealed class ProviderWorkStore(
             leaseCommand.Transaction = transaction;
             leaseCommand.CommandText = """
                 INSERT INTO ProviderWorkLeases (JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc)
-                VALUES ($id, $owner, $expires, $now)
+                VALUES (@id, @owner, @expires, @now)
                 ON CONFLICT(JobId) DO UPDATE SET LeaseOwner = excluded.LeaseOwner,
                     LeaseExpiresUtc = excluded.LeaseExpiresUtc, UpdatedUtc = excluded.UpdatedUtc
                 """;
-            leaseCommand.Parameters.AddWithValue("$id", snapshot.JobId);
-            leaseCommand.Parameters.AddWithValue("$owner", owner);
-            leaseCommand.Parameters.AddWithValue("$expires", Format(now.Add(lease)));
-            leaseCommand.Parameters.AddWithValue("$now", Format(now));
+            DatabaseParameters.Add(leaseCommand, "@id", snapshot.JobId);
+            DatabaseParameters.Add(leaseCommand, "@owner", owner);
+            DatabaseParameters.Add(leaseCommand, "@expires", Format(now.Add(lease)));
+            DatabaseParameters.Add(leaseCommand, "@now", Format(now));
             await leaseCommand.ExecuteNonQueryAsync(cancellationToken);
         }
         await transaction.CommitAsync(cancellationToken);
@@ -728,9 +729,9 @@ public sealed class ProviderWorkStore(
         command.CommandText = """
             SELECT JobId, Kind, DedupeKey, Priority, PayloadJson, CheckpointJson, State,
                    AttemptCount, EnqueuedUtc, StartedUtc, CompletedUtc, NextAttemptUtc, LastError
-            FROM ProviderWorkJobs WHERE JobId = $id
+            FROM ProviderWorkJobs WHERE JobId = @id
             """;
-        command.Parameters.AddWithValue("$id", jobId);
+        DatabaseParameters.Add(command, "@id", jobId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? Read(reader) : null;
     }
@@ -738,25 +739,25 @@ public sealed class ProviderWorkStore(
     public Task UpdateProgressAsync(string jobId, string checkpointJson, DateTimeOffset now, CancellationToken cancellationToken)
         => ExecuteAsync("""
             UPDATE ProviderWorkJobs
-            SET CheckpointJson = $value, ProgressJson = $value, LeaseExpiresUtc = $now
-            WHERE JobId = $id AND State = 'Running';
-            UPDATE ProviderWorkLeases SET LeaseExpiresUtc = $now, UpdatedUtc = $now WHERE JobId = $id;
+            SET CheckpointJson = @value, ProgressJson = @value, LeaseExpiresUtc = @now
+            WHERE JobId = @id AND State = 'Running';
+            UPDATE ProviderWorkLeases SET LeaseExpiresUtc = @now, UpdatedUtc = @now WHERE JobId = @id;
             """, jobId, checkpointJson, now, cancellationToken);
 
     public Task CompleteAsync(string jobId, DateTimeOffset now, CancellationToken cancellationToken)
         => ExecuteAsync("""
-            UPDATE ProviderWorkJobs SET State = 'Completed', CompletedUtc = $now,
+            UPDATE ProviderWorkJobs SET State = 'Completed', CompletedUtc = @now,
                 LeaseOwner = NULL, LeaseExpiresUtc = NULL, NextAttemptUtc = NULL, LastError = NULL
-            WHERE JobId = $id;
-            DELETE FROM ProviderWorkLeases WHERE JobId = $id;
+            WHERE JobId = @id;
+            DELETE FROM ProviderWorkLeases WHERE JobId = @id;
             """, jobId, null, now, cancellationToken);
 
     public Task FailAsync(string jobId, string error, DateTimeOffset now, CancellationToken cancellationToken)
         => ExecuteAsync("""
-            UPDATE ProviderWorkJobs SET State = 'Failed', CompletedUtc = $now, LastError = $value,
+            UPDATE ProviderWorkJobs SET State = 'Failed', CompletedUtc = @now, LastError = @value,
                 AttemptCount = AttemptCount + 1, LeaseOwner = NULL, LeaseExpiresUtc = NULL
-            WHERE JobId = $id;
-            DELETE FROM ProviderWorkLeases WHERE JobId = $id;
+            WHERE JobId = @id;
+            DELETE FROM ProviderWorkLeases WHERE JobId = @id;
             """, jobId, error, now, cancellationToken);
 
     public Task RequeueAsync(
@@ -767,11 +768,11 @@ public sealed class ProviderWorkStore(
         CancellationToken cancellationToken)
         => ExecuteAsync($"""
             UPDATE ProviderWorkJobs SET State = '{(incrementAttempt ? "RetryWaiting" : "Queued")}',
-                NextAttemptUtc = $now, LastError = $value,
+                NextAttemptUtc = @now, LastError = @value,
                 AttemptCount = AttemptCount + {(incrementAttempt ? "1" : "0")},
                 LeaseOwner = NULL, LeaseExpiresUtc = NULL
-            WHERE JobId = $id;
-            DELETE FROM ProviderWorkLeases WHERE JobId = $id;
+            WHERE JobId = @id;
+            DELETE FROM ProviderWorkLeases WHERE JobId = @id;
             """, jobId, error, nextAttempt, cancellationToken);
 
     public async Task RecoverExpiredLeasesAsync(DateTimeOffset now, CancellationToken cancellationToken)
@@ -781,13 +782,13 @@ public sealed class ProviderWorkStore(
         await using var command = connection.CreateCommand();
         command.CommandText = """
             UPDATE ProviderWorkJobs SET State = 'Queued', LeaseOwner = NULL, LeaseExpiresUtc = NULL,
-                NextAttemptUtc = $now
+                NextAttemptUtc = @now
             WHERE State = 'Running' AND (
                 NOT EXISTS (SELECT 1 FROM ProviderWorkLeases lease WHERE lease.JobId = ProviderWorkJobs.JobId)
-                OR EXISTS (SELECT 1 FROM ProviderWorkLeases lease WHERE lease.JobId = ProviderWorkJobs.JobId AND lease.LeaseExpiresUtc < $now));
-            DELETE FROM ProviderWorkLeases WHERE LeaseExpiresUtc < $now;
+                OR EXISTS (SELECT 1 FROM ProviderWorkLeases lease WHERE lease.JobId = ProviderWorkJobs.JobId AND lease.LeaseExpiresUtc < @now));
+            DELETE FROM ProviderWorkLeases WHERE LeaseExpiresUtc < @now;
             """;
-        command.Parameters.AddWithValue("$now", Format(now));
+        DatabaseParameters.Add(command, "@now", Format(now));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -798,9 +799,9 @@ public sealed class ProviderWorkStore(
         await using var command = connection.CreateCommand();
         command.CommandText = """
             DELETE FROM ProviderWorkJobs
-            WHERE State IN ('Completed', 'Failed', 'Cancelled') AND CompletedUtc < $cutoff
+            WHERE State IN ('Completed', 'Failed', 'Cancelled') AND CompletedUtc < @cutoff
             """;
-        command.Parameters.AddWithValue("$cutoff", Format(cutoff));
+        DatabaseParameters.Add(command, "@cutoff", Format(cutoff));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -815,26 +816,18 @@ public sealed class ProviderWorkStore(
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = commandText;
-        command.Parameters.AddWithValue("$id", jobId);
-        command.Parameters.AddWithValue("$now", Format(now));
-        command.Parameters.AddWithValue("$value", (object?)value ?? DBNull.Value);
+        DatabaseParameters.Add(command, "@id", jobId);
+        DatabaseParameters.Add(command, "@now", Format(now));
+        DatabaseParameters.Add(command, "@value", (object?)value ?? DBNull.Value);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var path = SqliteDatabasePath.Resolve(_options.Path, environment.ContentRootPath);
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = path,
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared,
-            Pooling = true
-        };
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, environment.ContentRootPath);
     }
 
-    private static ProviderWorkSnapshot Read(SqliteDataReader reader) => new(
+    private static ProviderWorkSnapshot Read(DbDataReader reader) => new(
         reader.GetString(0),
         Enum.Parse<ProviderWorkKind>(reader.GetString(1), ignoreCase: true),
         reader.GetString(2),

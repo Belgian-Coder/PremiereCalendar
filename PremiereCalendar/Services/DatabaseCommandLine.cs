@@ -31,9 +31,39 @@ public static class DatabaseCommandLine
 
         try
         {
+            if (args.Length == 4
+                && string.Equals(args[1], "migrate-postgres", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(args[2], "--source", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!Path.IsPathFullyQualified(args[3])) throw new ArgumentException("--source must be an absolute path.");
+                var recoveryState = new DatabaseRecoveryState();
+                var telemetry = new PremiereTelemetry();
+                var postgres = new PostgresDatabaseInitializer(
+                    Microsoft.Extensions.Options.Options.Create(databaseOptions), environment, recoveryState,
+                    TimeProvider.System, loggerFactory.CreateLogger<PostgresDatabaseInitializer>(), telemetry);
+                await postgres.InitializeAsync(cancellationToken);
+                if (!recoveryState.Snapshot.IsHealthy) throw new InvalidOperationException(recoveryState.Snapshot.Message);
+                var migrator = new SqliteToPostgresMigrator(
+                    Microsoft.Extensions.Options.Options.Create(databaseOptions), environment);
+                var report = await migrator.MigrateAsync(args[3], cancellationToken);
+                Console.WriteLine(JsonSerializer.Serialize(report));
+                return 0;
+            }
+
             if (args.Length == 2 && string.Equals(args[1], "verify", StringComparison.OrdinalIgnoreCase))
             {
-                var result = await initializer.VerifyAsync(null, cancellationToken);
+                DatabaseStatusSnapshot result;
+                if (DatabaseConnectionFactory.IsPostgreSql(databaseOptions))
+                {
+                    var postgres = new PostgresDatabaseInitializer(
+                        Microsoft.Extensions.Options.Options.Create(databaseOptions), environment, new DatabaseRecoveryState(),
+                        TimeProvider.System, loggerFactory.CreateLogger<PostgresDatabaseInitializer>(), new PremiereTelemetry());
+                    result = await postgres.VerifyAsync(cancellationToken);
+                }
+                else
+                {
+                    result = await initializer.VerifyAsync(null, cancellationToken);
+                }
                 Console.WriteLine(JsonSerializer.Serialize(result));
                 return result.IsHealthy ? 0 : 2;
             }
@@ -68,7 +98,7 @@ public static class DatabaseCommandLine
                 return result.IsHealthy ? 0 : 2;
             }
 
-            Console.Error.WriteLine("Usage: PremiereCalendar.exe database verify | database snapshot --output <absolute-path> | database restore --backup <absolute-path>");
+            Console.Error.WriteLine("Usage: PremiereCalendar.exe database verify | database snapshot --output <absolute-path> | database restore --backup <absolute-path> | database migrate-postgres --source <absolute-sqlite-snapshot>");
             return 64;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or Microsoft.Data.Sqlite.SqliteException)

@@ -1,5 +1,6 @@
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -76,17 +77,17 @@ public sealed class SqliteIntegrationSettingsStore : IIntegrationSettingsStore
             foreach (var parameter in parameters)
             {
                 await using var command = connection.CreateCommand();
-                command.Transaction = (SqliteTransaction)transaction;
+                command.Transaction = (DbTransaction)transaction;
                 command.CommandText = """
                     INSERT INTO AppParameters (Key, Value, UpdatedUtc)
-                    VALUES ($key, $value, $updatedUtc)
+                    VALUES (@key, @value, @updatedUtc)
                     ON CONFLICT(Key) DO UPDATE SET
                         Value = excluded.Value,
                         UpdatedUtc = excluded.UpdatedUtc
                     """;
-                command.Parameters.AddWithValue("$key", parameter.Key);
-                command.Parameters.AddWithValue("$value", parameter.Value);
-                command.Parameters.AddWithValue("$updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                DatabaseParameters.Add(command, "@key", parameter.Key);
+                DatabaseParameters.Add(command, "@value", parameter.Value);
+                DatabaseParameters.Add(command, "@updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -115,16 +116,9 @@ public sealed class SqliteIntegrationSettingsStore : IIntegrationSettingsStore
         _initialized = true;
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        };
-
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
     }
 
     private string ResolveDatabasePath()

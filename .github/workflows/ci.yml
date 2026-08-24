@@ -46,3 +46,39 @@ jobs:
           name: browser-failure-evidence
           path: 'tests/PremiereCalendar.BrowserTests/bin/Release/net11.0/TestResults/**'
           if-no-files-found: ignore
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.6-alpine3.24
+        env:
+          POSTGRES_USER: premierecalendar
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U premierecalendar -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      PREMIERECALENDAR_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=postgres;Username=premierecalendar;Password=ci-only-password
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned .NET SDK
+        shell: bash
+        run: |
+          curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$RUNNER_TEMP/dotnet-install.sh"
+          bash "$RUNNER_TEMP/dotnet-install.sh" --version 11.0.100-preview.7.26381.103 --install-dir "$GITHUB_WORKSPACE/.dotnet" --no-path
+      - name: PostgreSQL migration and persistence integration test
+        run: ./.dotnet/dotnet test tests/PremiereCalendar.IntegrationTests/PremiereCalendar.IntegrationTests.csproj -c Release --filter FullyQualifiedName~PostgresPersistenceTests --logger "trx;LogFilePrefix=postgres"
+      - name: Publish PostgreSQL test result
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-test-result
+          path: '**/TestResults/*.trx'
+          if-no-files-found: warn

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Data.Common;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
@@ -28,15 +29,17 @@ public static class DatabaseSchema
             : Migrations.Count;
     }
 
-    internal static async Task AssertCurrentAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    internal static async Task AssertCurrentAsync(DbConnection connection, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA user_version";
+        command.CommandText = DatabaseConnectionFactory.IsPostgreSql(connection)
+            ? "SELECT COALESCE(MAX(Version), 0) FROM SchemaMigrations"
+            : "PRAGMA user_version";
         var version = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         if (version != CurrentVersion)
         {
             throw new InvalidOperationException(
-                $"SQLite schema {version} is not ready; startup migration must complete schema {CurrentVersion} before stores are used.");
+                $"Database schema {version} is not ready; startup migration must complete schema {CurrentVersion} before stores are used.");
         }
     }
 

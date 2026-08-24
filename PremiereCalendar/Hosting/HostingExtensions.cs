@@ -22,7 +22,13 @@ public static class HostingExtensions
             }
         });
         services.AddOptions<AppDatabaseOptions>().Bind(configuration.GetSection("AppDatabase"))
-            .Validate(o => !string.IsNullOrWhiteSpace(o.Path), "AppDatabase:Path is required")
+            .Validate(o => string.Equals(o.Provider, "Sqlite", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(o.Provider, "PostgreSql", StringComparison.OrdinalIgnoreCase),
+                "AppDatabase:Provider must be Sqlite or PostgreSql")
+            .Validate(o => !string.Equals(o.Provider, "Sqlite", StringComparison.OrdinalIgnoreCase)
+                || !string.IsNullOrWhiteSpace(o.Path), "AppDatabase:Path is required for SQLite")
+            .Validate(o => !string.Equals(o.Provider, "PostgreSql", StringComparison.OrdinalIgnoreCase)
+                || !string.IsNullOrWhiteSpace(o.ConnectionString), "AppDatabase:ConnectionString is required for PostgreSQL")
             .Validate(o => !string.IsNullOrWhiteSpace(o.MigrationBackupDirectory), "AppDatabase:MigrationBackupDirectory is required")
             .Validate(o => o.MigrationBackupRetentionCount is >= 1 and <= 100, "AppDatabase migration backup retention must be between 1 and 100")
             .ValidateOnStart();

@@ -1,5 +1,6 @@
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -41,9 +42,9 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             command.CommandText = """
                 SELECT ImdbId, AverageRating, VoteCount, ImportedAtUtc
                 FROM ImdbRatings
-                WHERE ImdbId = $imdbId
+                WHERE ImdbId = @imdbId
                 """;
-            command.Parameters.AddWithValue("$imdbId", NormalizeImdbId(imdbId));
+            DatabaseParameters.Add(command, "@imdbId", NormalizeImdbId(imdbId));
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
@@ -91,8 +92,8 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
                 var parameterNames = new string[batch.Length];
                 for (var index = 0; index < batch.Length; index++)
                 {
-                    parameterNames[index] = $"$id{index}";
-                    command.Parameters.AddWithValue(parameterNames[index], batch[index]);
+                    parameterNames[index] = $"@id{index}";
+                    DatabaseParameters.Add(command, parameterNames[index], batch[index]);
                 }
 
                 command.CommandText = $"""
@@ -135,7 +136,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
             await using (var command = connection.CreateCommand())
             {
@@ -149,13 +150,17 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             {
                 insert.Transaction = transaction;
                 insert.CommandText = """
-                    INSERT OR REPLACE INTO ImdbRatings (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
-                    VALUES ($imdbId, $averageRating, $voteCount, $importedAtUtc)
+                    INSERT INTO ImdbRatings (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
+                    VALUES (@imdbId, @averageRating, @voteCount, @importedAtUtc)
+                    ON CONFLICT(ImdbId) DO UPDATE SET
+                        AverageRating = excluded.AverageRating,
+                        VoteCount = excluded.VoteCount,
+                        ImportedAtUtc = excluded.ImportedAtUtc
                     """;
-                var imdbIdParameter = insert.Parameters.Add("$imdbId", SqliteType.Text);
-                var ratingParameter = insert.Parameters.Add("$averageRating", SqliteType.Real);
-                var voteCountParameter = insert.Parameters.Add("$voteCount", SqliteType.Integer);
-                var importedAtParameter = insert.Parameters.Add("$importedAtUtc", SqliteType.Text);
+                var imdbIdParameter = DatabaseParameters.Add(insert, "@imdbId", DbType.String);
+                var ratingParameter = DatabaseParameters.Add(insert, "@averageRating", DbType.Double);
+                var voteCountParameter = DatabaseParameters.Add(insert, "@voteCount", DbType.Int64);
+                var importedAtParameter = DatabaseParameters.Add(insert, "@importedAtUtc", DbType.String);
                 var importedAt = importedAtUtc.ToString("O", CultureInfo.InvariantCulture);
 
                 await foreach (var rating in ratings.WithCancellation(cancellationToken))
@@ -187,7 +192,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         }
     }
 
-    private static ImdbRatingRecord ReadRating(SqliteDataReader reader)
+    private static ImdbRatingRecord ReadRating(DbDataReader reader)
     {
         return new ImdbRatingRecord(
             reader.GetString(0),
@@ -246,7 +251,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
             await UpsertStateAsync(
                 connection,
                 transaction,
@@ -282,8 +287,8 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
     }
 
     private static async Task UpsertStateAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+        DbConnection connection,
+        DbTransaction transaction,
         string key,
         string value,
         CancellationToken cancellationToken)
@@ -292,27 +297,20 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO ImdbDatasetState (Key, Value, UpdatedUtc)
-            VALUES ($key, $value, $updatedUtc)
+            VALUES (@key, @value, @updatedUtc)
             ON CONFLICT(Key) DO UPDATE SET
                 Value = excluded.Value,
                 UpdatedUtc = excluded.UpdatedUtc
             """;
-        command.Parameters.AddWithValue("$key", key);
-        command.Parameters.AddWithValue("$value", value);
-        command.Parameters.AddWithValue("$updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        DatabaseParameters.Add(command, "@key", key);
+        DatabaseParameters.Add(command, "@value", value);
+        DatabaseParameters.Add(command, "@updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        };
-
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
     }
 
     private string ResolveDatabasePath()

@@ -1,6 +1,7 @@
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -47,9 +48,9 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
             command.CommandText = """
                 SELECT ImdbId, Json, CachedAtUtc
                 FROM OmdbCache
-                WHERE ImdbId = $imdbId
+                WHERE ImdbId = @imdbId
                 """;
-            command.Parameters.AddWithValue("$imdbId", NormalizeImdbId(imdbId));
+            DatabaseParameters.Add(command, "@imdbId", NormalizeImdbId(imdbId));
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
@@ -90,14 +91,14 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 INSERT INTO OmdbCache (ImdbId, Json, CachedAtUtc)
-                VALUES ($imdbId, $json, $cachedAtUtc)
+                VALUES (@imdbId, @json, @cachedAtUtc)
                 ON CONFLICT(ImdbId) DO UPDATE SET
                     Json = excluded.Json,
                     CachedAtUtc = excluded.CachedAtUtc
                 """;
-            command.Parameters.AddWithValue("$imdbId", NormalizeImdbId(imdbId));
-            command.Parameters.AddWithValue("$json", JsonSerializer.Serialize(item, JsonOptions));
-            command.Parameters.AddWithValue("$cachedAtUtc", cachedAtUtc.ToString("O", CultureInfo.InvariantCulture));
+            DatabaseParameters.Add(command, "@imdbId", NormalizeImdbId(imdbId));
+            DatabaseParameters.Add(command, "@json", JsonSerializer.Serialize(item, JsonOptions));
+            DatabaseParameters.Add(command, "@cachedAtUtc", cachedAtUtc.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -157,7 +158,7 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
             await UpsertStateAsync(connection, transaction, RateLimitedUntilUtcKey, state.RateLimitedUntilUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "", cancellationToken);
             await UpsertStateAsync(connection, transaction, LastErrorKey, state.LastError ?? "", cancellationToken);
             await UpsertStateAsync(connection, transaction, LastFailureUtcKey, state.LastFailureUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "", cancellationToken);
@@ -183,8 +184,8 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
     }
 
     private static async Task UpsertStateAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+        DbConnection connection,
+        DbTransaction transaction,
         string key,
         string value,
         CancellationToken cancellationToken)
@@ -193,27 +194,20 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO OmdbProviderState (Key, Value, UpdatedUtc)
-            VALUES ($key, $value, $updatedUtc)
+            VALUES (@key, @value, @updatedUtc)
             ON CONFLICT(Key) DO UPDATE SET
                 Value = excluded.Value,
                 UpdatedUtc = excluded.UpdatedUtc
             """;
-        command.Parameters.AddWithValue("$key", key);
-        command.Parameters.AddWithValue("$value", value);
-        command.Parameters.AddWithValue("$updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        DatabaseParameters.Add(command, "@key", key);
+        DatabaseParameters.Add(command, "@value", value);
+        DatabaseParameters.Add(command, "@updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        };
-
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
     }
 
     private string ResolveDatabasePath()

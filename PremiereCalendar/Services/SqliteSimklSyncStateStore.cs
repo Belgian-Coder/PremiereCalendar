@@ -1,5 +1,6 @@
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -66,7 +67,7 @@ public sealed class SqliteSimklSyncStateStore : ISimklSyncStateStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
             await UpsertAsync(connection, transaction, LastActivitiesAllKey, state.LastActivitiesAllUtc ?? "", cancellationToken);
             await UpsertAsync(connection, transaction, LastActivitiesJsonKey, state.LastActivitiesJson ?? "", cancellationToken);
@@ -95,8 +96,8 @@ public sealed class SqliteSimklSyncStateStore : ISimklSyncStateStore
     }
 
     private static async Task UpsertAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+        DbConnection connection,
+        DbTransaction transaction,
         string key,
         string value,
         CancellationToken cancellationToken)
@@ -105,27 +106,20 @@ public sealed class SqliteSimklSyncStateStore : ISimklSyncStateStore
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO SimklSyncState (Key, Value, UpdatedUtc)
-            VALUES ($key, $value, $updatedUtc)
+            VALUES (@key, @value, @updatedUtc)
             ON CONFLICT(Key) DO UPDATE SET
                 Value = excluded.Value,
                 UpdatedUtc = excluded.UpdatedUtc
             """;
-        command.Parameters.AddWithValue("$key", key);
-        command.Parameters.AddWithValue("$value", value);
-        command.Parameters.AddWithValue("$updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        DatabaseParameters.Add(command, "@key", key);
+        DatabaseParameters.Add(command, "@value", value);
+        DatabaseParameters.Add(command, "@updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        };
-
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
     }
 
     private string ResolveDatabasePath()

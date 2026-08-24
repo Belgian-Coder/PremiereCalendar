@@ -19,9 +19,7 @@ tests, makes a self-contained Windows x64 package, emits deterministic build
 metadata, signs `stable.manifest.json`, writes `SHA256SUMS.txt`, creates a draft,
 uploads all assets, and only then publishes it.
 
-Publishing is always an explicit operator action; no GitHub Actions workflow creates
-releases. CI runs for pull requests targeting `main` and can also be started manually
-with `workflow_dispatch`. A push to `main` does not start CI.
+Publishing the signed Windows release is always an explicit operator action; no GitHub Actions workflow creates it. CI runs for pushes and pull requests targeting `main`, and can also be started manually. A release tag builds and scans the Linux container, retains scan/SBOM evidence, and publishes the scanned image to GHCR.
 
 The first administrator-reviewed installation uses the local release directory:
 

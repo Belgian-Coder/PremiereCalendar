@@ -2,10 +2,10 @@
 
 Configuration is handled with two layers:
 
-- Runtime app settings edited on the Settings page are stored in the local SQLite parameter database.
+- Runtime app settings edited on the Settings page are stored in the configured application database: SQLite for the signed Windows service or PostgreSQL for containers.
 - Infrastructure values still use standard ASP.NET Core providers. Non-secret defaults live in `PremiereCalendar/appsettings.json`; API credentials must not be committed.
 
-Startup validates the application database path and enabled image-cache limits. Invalid startup-critical values fail before the service begins accepting requests.
+Startup validates the database provider and its path or connection string, plus enabled image-cache limits. Invalid startup-critical values fail before the service begins accepting requests.
 
 When a reverse proxy terminates HTTPS, add each trusted proxy IP under `Hosting:ForwardedProxies`. Loopback proxies are trusted by default. The household deployment pins `192.168.68.22`; update it if the proxy moves. Forwarded headers are processed before HTTPS redirection and HSTS; browser responses also receive content-type, referrer-policy, and content-security-policy headers. This hosting hardening does not add application authentication or change access to Settings and integration actions.
 
@@ -91,15 +91,18 @@ The app exposes a basic health endpoint:
 GET /health
 ```
 
-## Local Settings Database
+## Application Database
 
-The Settings page persists local app parameters in a SQLite database:
+The Windows service defaults to SQLite:
 
 ```json
 "AppDatabase": {
+  "Provider": "Sqlite",
   "Path": "App_Data/data/premiere-calendar.db"
 }
 ```
+
+Containers set `Provider=PostgreSql`, a password-free Npgsql connection string, and `PasswordFile` pointing to the Docker secret. See [Docker and PostgreSQL](DockerAndPostgres.md). Never put the database password in committed configuration.
 
 Stored parameters currently include Sonarr and Radarr enable flags, URLs, API keys, root folder paths, quality profile IDs, tag-on-add values, add behavior, and source API settings for TMDb, TVmaze, Trakt, Watchmode, SIMKL, OMDb, Fanart.tv, TheTVDB, and Wikimedia. The same parameter table stores local app state such as saved filter presets, visit-change snapshots, and the background job timeline. In release installs this path is overridden to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db` so updates can replace binaries without touching local settings.
 

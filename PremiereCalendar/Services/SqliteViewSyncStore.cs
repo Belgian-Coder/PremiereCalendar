@@ -1,5 +1,6 @@
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -39,11 +40,11 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 INSERT INTO ViewSyncGroups (GroupId, Name, CreatedUtc)
-                VALUES ($groupId, $name, $createdUtc)
+                VALUES (@groupId, @name, @createdUtc)
                 """;
-            command.Parameters.AddWithValue("$groupId", group.GroupId);
-            command.Parameters.AddWithValue("$name", group.Name);
-            command.Parameters.AddWithValue("$createdUtc", FormatDate(group.CreatedUtc));
+            DatabaseParameters.Add(command, "@groupId", group.GroupId);
+            DatabaseParameters.Add(command, "@name", group.Name);
+            DatabaseParameters.Add(command, "@createdUtc", FormatDate(group.CreatedUtc));
             await command.ExecuteNonQueryAsync(cancellationToken);
             return group;
         }
@@ -65,7 +66,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             command.CommandText = """
                 SELECT GroupId, Name, CreatedUtc
                 FROM ViewSyncGroups
-                ORDER BY Name COLLATE NOCASE, CreatedUtc
+                ORDER BY LOWER(Name), CreatedUtc
                 """;
 
             var groups = new List<ViewSyncGroup>();
@@ -102,7 +103,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
             if (!string.IsNullOrWhiteSpace(normalizedGroupId))
             {
@@ -113,18 +114,18 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             command.Transaction = transaction;
             command.CommandText = """
                 INSERT INTO ViewSyncDevices (DeviceId, DisplayName, SyncEnabled, GroupId, LastSeenUtc)
-                VALUES ($deviceId, $displayName, $syncEnabled, $groupId, $lastSeenUtc)
+                VALUES (@deviceId, @displayName, @syncEnabled, @groupId, @lastSeenUtc)
                 ON CONFLICT(DeviceId) DO UPDATE SET
                     DisplayName = excluded.DisplayName,
                     SyncEnabled = excluded.SyncEnabled,
                     GroupId = excluded.GroupId,
                     LastSeenUtc = excluded.LastSeenUtc
                 """;
-            command.Parameters.AddWithValue("$deviceId", normalizedDeviceId);
-            command.Parameters.AddWithValue("$displayName", normalizedName);
-            command.Parameters.AddWithValue("$syncEnabled", effectiveSyncEnabled ? 1 : 0);
-            command.Parameters.AddWithValue("$groupId", (object?)normalizedGroupId ?? DBNull.Value);
-            command.Parameters.AddWithValue("$lastSeenUtc", FormatDate(nowUtc));
+            DatabaseParameters.Add(command, "@deviceId", normalizedDeviceId);
+            DatabaseParameters.Add(command, "@displayName", normalizedName);
+            DatabaseParameters.Add(command, "@syncEnabled", effectiveSyncEnabled ? 1 : 0);
+            DatabaseParameters.Add(command, "@groupId", (object?)normalizedGroupId ?? DBNull.Value);
+            DatabaseParameters.Add(command, "@lastSeenUtc", FormatDate(nowUtc));
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await transaction.CommitAsync(cancellationToken);
@@ -152,9 +153,9 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             command.CommandText = """
                 SELECT DeviceId, DisplayName, SyncEnabled, GroupId, LastSeenUtc
                 FROM ViewSyncDevices
-                WHERE DeviceId = $deviceId
+                WHERE DeviceId = @deviceId
                 """;
-            command.Parameters.AddWithValue("$deviceId", normalizedDeviceId);
+            DatabaseParameters.Add(command, "@deviceId", normalizedDeviceId);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return await reader.ReadAsync(cancellationToken) ? ReadDevice(reader) : null;
@@ -184,10 +185,10 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             command.CommandText = """
                 SELECT DeviceId, DisplayName, SyncEnabled, GroupId, LastSeenUtc
                 FROM ViewSyncDevices
-                WHERE GroupId = $groupId
-                ORDER BY DisplayName COLLATE NOCASE, LastSeenUtc DESC
+                WHERE GroupId = @groupId
+                ORDER BY LOWER(DisplayName), LastSeenUtc DESC
                 """;
-            command.Parameters.AddWithValue("$groupId", groupId.Trim());
+            DatabaseParameters.Add(command, "@groupId", groupId.Trim());
 
             var devices = new List<ViewSyncDevice>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -222,11 +223,11 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
                 UPDATE ViewSyncDevices
                 SET SyncEnabled = 0,
                     GroupId = NULL,
-                    LastSeenUtc = $lastSeenUtc
-                WHERE DeviceId = $deviceId
+                    LastSeenUtc = @lastSeenUtc
+                WHERE DeviceId = @deviceId
                 """;
-            command.Parameters.AddWithValue("$deviceId", normalizedDeviceId);
-            command.Parameters.AddWithValue("$lastSeenUtc", FormatDate(nowUtc));
+            DatabaseParameters.Add(command, "@deviceId", normalizedDeviceId);
+            DatabaseParameters.Add(command, "@lastSeenUtc", FormatDate(nowUtc));
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -255,7 +256,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
             var device = await GetDeviceAsync(connection, transaction, normalizedDeviceId, cancellationToken);
             if (device is null)
             {
@@ -318,7 +319,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
             var device = await GetDeviceAsync(connection, transaction, normalizedDeviceId, cancellationToken);
             if (device is null || !device.SyncEnabled || string.IsNullOrWhiteSpace(device.GroupId))
             {
@@ -360,7 +361,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
             var state = await GetGroupStateAsync(connection, transaction, groupId.Trim(), normalizedRouteKey, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return state;
@@ -390,7 +391,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             command.CommandText = """
                 SELECT GroupId, RouteKey, RelativeUrl, Revision, UpdatedUtc, UpdatedByDeviceId, UpdatedByDeviceName
                 FROM ViewSyncGroupState
-                WHERE GroupId = $groupId
+                WHERE GroupId = @groupId
                 ORDER BY
                     CASE RouteKey
                         WHEN 'all' THEN 0
@@ -399,7 +400,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
                         ELSE 3
                     END
                 """;
-            command.Parameters.AddWithValue("$groupId", groupId.Trim());
+            DatabaseParameters.Add(command, "@groupId", groupId.Trim());
 
             var states = new List<ViewSyncGroupState>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -429,16 +430,9 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
         _initialized = true;
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        };
-
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
     }
 
     private string ResolveDatabasePath()
@@ -453,8 +447,8 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
     }
 
     private static async Task EnsureGroupExistsAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+        DbConnection connection,
+        DbTransaction transaction,
         string groupId,
         DateTimeOffset nowUtc,
         CancellationToken cancellationToken)
@@ -463,18 +457,18 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO ViewSyncGroups (GroupId, Name, CreatedUtc)
-            VALUES ($groupId, $name, $createdUtc)
+            VALUES (@groupId, @name, @createdUtc)
             ON CONFLICT(GroupId) DO NOTHING
             """;
-        command.Parameters.AddWithValue("$groupId", groupId);
-        command.Parameters.AddWithValue("$name", "My devices");
-        command.Parameters.AddWithValue("$createdUtc", FormatDate(nowUtc));
+        DatabaseParameters.Add(command, "@groupId", groupId);
+        DatabaseParameters.Add(command, "@name", "My devices");
+        DatabaseParameters.Add(command, "@createdUtc", FormatDate(nowUtc));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task<ViewSyncDevice?> GetDeviceAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+        DbConnection connection,
+        DbTransaction transaction,
         string deviceId,
         CancellationToken cancellationToken)
     {
@@ -483,17 +477,17 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
         command.CommandText = """
             SELECT DeviceId, DisplayName, SyncEnabled, GroupId, LastSeenUtc
             FROM ViewSyncDevices
-            WHERE DeviceId = $deviceId
+            WHERE DeviceId = @deviceId
             """;
-        command.Parameters.AddWithValue("$deviceId", deviceId);
+        DatabaseParameters.Add(command, "@deviceId", deviceId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadDevice(reader) : null;
     }
 
     private static async Task<ViewSyncGroupState?> GetGroupStateAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+        DbConnection connection,
+        DbTransaction transaction,
         string groupId,
         string? routeKey,
         CancellationToken cancellationToken)
@@ -505,22 +499,22 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             command.CommandText = """
                 SELECT GroupId, RouteKey, RelativeUrl, Revision, UpdatedUtc, UpdatedByDeviceId, UpdatedByDeviceName
                 FROM ViewSyncGroupState
-                WHERE GroupId = $groupId
+                WHERE GroupId = @groupId
                 ORDER BY UpdatedUtc DESC, Revision DESC
                 LIMIT 1
                 """;
-            command.Parameters.AddWithValue("$groupId", groupId);
+            DatabaseParameters.Add(command, "@groupId", groupId);
         }
         else
         {
             command.CommandText = """
                 SELECT GroupId, RouteKey, RelativeUrl, Revision, UpdatedUtc, UpdatedByDeviceId, UpdatedByDeviceName
                 FROM ViewSyncGroupState
-                WHERE GroupId = $groupId
-                  AND RouteKey = $routeKey
+                WHERE GroupId = @groupId
+                  AND RouteKey = @routeKey
                 """;
-            command.Parameters.AddWithValue("$groupId", groupId);
-            command.Parameters.AddWithValue("$routeKey", routeKey);
+            DatabaseParameters.Add(command, "@groupId", groupId);
+            DatabaseParameters.Add(command, "@routeKey", routeKey);
         }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -528,8 +522,8 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
     }
 
     private static async Task SaveGroupStateAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+        DbConnection connection,
+        DbTransaction transaction,
         ViewSyncGroupState state,
         CancellationToken cancellationToken)
     {
@@ -546,13 +540,13 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
                 UpdatedByDeviceName
             )
             VALUES (
-                $groupId,
-                $routeKey,
-                $relativeUrl,
-                $revision,
-                $updatedUtc,
-                $updatedByDeviceId,
-                $updatedByDeviceName
+                @groupId,
+                @routeKey,
+                @relativeUrl,
+                @revision,
+                @updatedUtc,
+                @updatedByDeviceId,
+                @updatedByDeviceName
             )
             ON CONFLICT(GroupId, RouteKey) DO UPDATE SET
                 RelativeUrl = excluded.RelativeUrl,
@@ -561,19 +555,19 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
                 UpdatedByDeviceId = excluded.UpdatedByDeviceId,
                 UpdatedByDeviceName = excluded.UpdatedByDeviceName
             """;
-        command.Parameters.AddWithValue("$groupId", state.GroupId);
-        command.Parameters.AddWithValue("$routeKey", state.RouteKey);
-        command.Parameters.AddWithValue("$relativeUrl", state.RelativeUrl);
-        command.Parameters.AddWithValue("$revision", state.Revision);
-        command.Parameters.AddWithValue("$updatedUtc", FormatDate(state.UpdatedUtc));
-        command.Parameters.AddWithValue("$updatedByDeviceId", state.UpdatedByDeviceId);
-        command.Parameters.AddWithValue("$updatedByDeviceName", state.UpdatedByDeviceName);
+        DatabaseParameters.Add(command, "@groupId", state.GroupId);
+        DatabaseParameters.Add(command, "@routeKey", state.RouteKey);
+        DatabaseParameters.Add(command, "@relativeUrl", state.RelativeUrl);
+        DatabaseParameters.Add(command, "@revision", state.Revision);
+        DatabaseParameters.Add(command, "@updatedUtc", FormatDate(state.UpdatedUtc));
+        DatabaseParameters.Add(command, "@updatedByDeviceId", state.UpdatedByDeviceId);
+        DatabaseParameters.Add(command, "@updatedByDeviceName", state.UpdatedByDeviceName);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task TouchDeviceAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+        DbConnection connection,
+        DbTransaction transaction,
         string deviceId,
         DateTimeOffset nowUtc,
         CancellationToken cancellationToken)
@@ -582,15 +576,15 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
         command.Transaction = transaction;
         command.CommandText = """
             UPDATE ViewSyncDevices
-            SET LastSeenUtc = $lastSeenUtc
-            WHERE DeviceId = $deviceId
+            SET LastSeenUtc = @lastSeenUtc
+            WHERE DeviceId = @deviceId
             """;
-        command.Parameters.AddWithValue("$deviceId", deviceId);
-        command.Parameters.AddWithValue("$lastSeenUtc", FormatDate(nowUtc));
+        DatabaseParameters.Add(command, "@deviceId", deviceId);
+        DatabaseParameters.Add(command, "@lastSeenUtc", FormatDate(nowUtc));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static ViewSyncGroup ReadGroup(SqliteDataReader reader)
+    private static ViewSyncGroup ReadGroup(DbDataReader reader)
     {
         return new ViewSyncGroup(
             reader.GetString(0),
@@ -598,7 +592,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             ParseDate(reader.GetString(2)));
     }
 
-    private static ViewSyncDevice ReadDevice(SqliteDataReader reader)
+    private static ViewSyncDevice ReadDevice(DbDataReader reader)
     {
         return new ViewSyncDevice(
             reader.GetString(0),
@@ -608,7 +602,7 @@ public sealed class SqliteViewSyncStore : IViewSyncStore
             ParseDate(reader.GetString(4)));
     }
 
-    private static ViewSyncGroupState ReadState(SqliteDataReader reader)
+    private static ViewSyncGroupState ReadState(DbDataReader reader)
     {
         return new ViewSyncGroupState(
             reader.GetString(0),

@@ -1,6 +1,7 @@
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -60,14 +61,14 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
                     IsDefault
                 )
                 VALUES (
-                    $profileKey,
-                    $pageMode,
-                    $cacheKey,
-                    $filterJson,
+                    @profileKey,
+                    @pageMode,
+                    @cacheKey,
+                    @filterJson,
                     1,
-                    $lastUsedUtc,
+                    @lastUsedUtc,
                     NULL,
-                    $lastItemCount,
+                    @lastItemCount,
                     NULL,
                     0
                 )
@@ -82,8 +83,8 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
                     IsDefault = 0
                 """;
             AddProfileParameters(command, profileKey, pageMode, cacheKey, filterJson);
-            command.Parameters.AddWithValue("$lastUsedUtc", FormatTimestamp(usedAtUtc));
-            command.Parameters.AddWithValue("$lastItemCount", itemCount);
+            DatabaseParameters.Add(command, "@lastUsedUtc", FormatTimestamp(usedAtUtc));
+            DatabaseParameters.Add(command, "@lastItemCount", itemCount);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -106,9 +107,9 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
             command.CommandText = """
                 SELECT ProfileKey, PageMode, CacheKey, FilterJson, UseCount, LastUsedUtc, LastWarmedUtc, LastItemCount, LastFailure, IsDefault
                 FROM CalendarFilterUsage
-                WHERE ProfileKey = $profileKey
+                WHERE ProfileKey = @profileKey
                 """;
-            command.Parameters.AddWithValue("$profileKey", profileKey);
+            DatabaseParameters.Add(command, "@profileKey", profileKey);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return await reader.ReadAsync(cancellationToken) ? ReadProfile(reader) : null;
         }
@@ -144,9 +145,9 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
                 FROM CalendarFilterUsage
                 WHERE IsDefault = 0
                   AND UseCount > 0
-                  AND LastUsedUtc >= $cutoffUtc
+                  AND LastUsedUtc >= @cutoffUtc
                 """;
-            command.Parameters.AddWithValue("$cutoffUtc", FormatTimestamp(cutoffUtc));
+            DatabaseParameters.Add(command, "@cutoffUtc", FormatTimestamp(cutoffUtc));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -203,16 +204,16 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
                     IsDefault
                 )
                 VALUES (
-                    $profileKey,
-                    $pageMode,
-                    $cacheKey,
-                    $filterJson,
+                    @profileKey,
+                    @pageMode,
+                    @cacheKey,
+                    @filterJson,
                     0,
-                    $lastUsedUtc,
-                    $lastWarmedUtc,
-                    $lastItemCount,
+                    @lastUsedUtc,
+                    @lastWarmedUtc,
+                    @lastItemCount,
                     NULL,
-                    $isDefault
+                    @isDefault
                 )
                 ON CONFLICT(ProfileKey) DO UPDATE SET
                     PageMode = excluded.PageMode,
@@ -224,10 +225,10 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
                     IsDefault = excluded.IsDefault
                 """;
             AddProfileParameters(command, profileKey, pageMode, cacheKey, filterJson);
-            command.Parameters.AddWithValue("$lastUsedUtc", FormatTimestamp(warmedAtUtc));
-            command.Parameters.AddWithValue("$lastWarmedUtc", FormatTimestamp(warmedAtUtc));
-            command.Parameters.AddWithValue("$lastItemCount", itemCount);
-            command.Parameters.AddWithValue("$isDefault", isDefault ? 1 : 0);
+            DatabaseParameters.Add(command, "@lastUsedUtc", FormatTimestamp(warmedAtUtc));
+            DatabaseParameters.Add(command, "@lastWarmedUtc", FormatTimestamp(warmedAtUtc));
+            DatabaseParameters.Add(command, "@lastItemCount", itemCount);
+            DatabaseParameters.Add(command, "@isDefault", isDefault ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -270,16 +271,16 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
                     IsDefault
                 )
                 VALUES (
-                    $profileKey,
-                    $pageMode,
-                    $cacheKey,
-                    $filterJson,
+                    @profileKey,
+                    @pageMode,
+                    @cacheKey,
+                    @filterJson,
                     0,
-                    $lastUsedUtc,
+                    @lastUsedUtc,
                     NULL,
                     NULL,
-                    $lastFailure,
-                    $isDefault
+                    @lastFailure,
+                    @isDefault
                 )
                 ON CONFLICT(ProfileKey) DO UPDATE SET
                     PageMode = excluded.PageMode,
@@ -289,9 +290,9 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
                     IsDefault = excluded.IsDefault
                 """;
             AddProfileParameters(command, profileKey, pageMode, cacheKey, filterJson);
-            command.Parameters.AddWithValue("$lastUsedUtc", FormatTimestamp(failedAtUtc));
-            command.Parameters.AddWithValue("$lastFailure", failure.Length > 500 ? failure[..500] : failure);
-            command.Parameters.AddWithValue("$isDefault", isDefault ? 1 : 0);
+            DatabaseParameters.Add(command, "@lastUsedUtc", FormatTimestamp(failedAtUtc));
+            DatabaseParameters.Add(command, "@lastFailure", failure.Length > 500 ? failure[..500] : failure);
+            DatabaseParameters.Add(command, "@isDefault", isDefault ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -322,28 +323,28 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
                 command.CommandText = """
                     DELETE FROM CalendarFilterUsage
                     WHERE IsDefault = 0
-                      AND LastUsedUtc < $cutoffUtc
+                      AND LastUsedUtc < @cutoffUtc
                     """;
             }
             else
             {
                 var parameterNames = retainedKeys
-                    .Select((_, index) => $"$retained{index}")
+                    .Select((_, index) => $"@retained{index}")
                     .ToArray();
                 command.CommandText = $"""
                     DELETE FROM CalendarFilterUsage
                     WHERE IsDefault = 0
-                      AND LastUsedUtc < $cutoffUtc
+                      AND LastUsedUtc < @cutoffUtc
                       AND ProfileKey NOT IN ({string.Join(", ", parameterNames)})
                     """;
 
                 for (var index = 0; index < retainedKeys.Length; index++)
                 {
-                    command.Parameters.AddWithValue(parameterNames[index], retainedKeys[index]);
+                    DatabaseParameters.Add(command, parameterNames[index], retainedKeys[index]);
                 }
             }
 
-            command.Parameters.AddWithValue("$cutoffUtc", FormatTimestamp(cutoffUtc));
+            DatabaseParameters.Add(command, "@cutoffUtc", FormatTimestamp(cutoffUtc));
             return await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -365,16 +366,9 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
         _initialized = true;
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        };
-
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
     }
 
     private string ResolveDatabasePath()
@@ -389,19 +383,19 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
     }
 
     private static void AddProfileParameters(
-        SqliteCommand command,
+        DbCommand command,
         string profileKey,
         CalendarPageMode pageMode,
         string cacheKey,
         string filterJson)
     {
-        command.Parameters.AddWithValue("$profileKey", profileKey);
-        command.Parameters.AddWithValue("$pageMode", pageMode.ToString());
-        command.Parameters.AddWithValue("$cacheKey", cacheKey);
-        command.Parameters.AddWithValue("$filterJson", filterJson);
+        DatabaseParameters.Add(command, "@profileKey", profileKey);
+        DatabaseParameters.Add(command, "@pageMode", pageMode.ToString());
+        DatabaseParameters.Add(command, "@cacheKey", cacheKey);
+        DatabaseParameters.Add(command, "@filterJson", filterJson);
     }
 
-    private static CalendarFilterUsageProfile? ReadProfile(SqliteDataReader reader)
+    private static CalendarFilterUsageProfile? ReadProfile(DbDataReader reader)
     {
         try
         {

@@ -1,0 +1,63 @@
+name: premierecalendar-dev
+
+services:
+  database:
+    image: postgres:18.6-alpine3.24@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    environment:
+      POSTGRES_DB: premierecalendar
+      POSTGRES_USER: premierecalendar
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/18/docker
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U premierecalendar -d premierecalendar"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "127.0.0.1:55432:5432"
+    networks: [backend]
+
+  app:
+    build:
+      context: .
+      target: development
+    command: ["dotnet", "watch", "--project", "PremiereCalendar/PremiereCalendar.csproj", "run", "--no-launch-profile"]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      AppDatabase__Provider: PostgreSql
+      AppDatabase__ConnectionString: Host=database;Port=5432;Database=premierecalendar;Username=premierecalendar
+      AppDatabase__PasswordFile: /run/secrets/postgres_password
+      PREMIERECALENDAR_TEST_POSTGRES: Host=database;Port=5432;Database=postgres;Username=premierecalendar
+      PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      ApplicationUpdate__Enabled: "false"
+      CalendarWarmup__Enabled: "false"
+      Urls: http://0.0.0.0:8080
+    secrets:
+      - postgres_password
+    volumes:
+      - ./:/src
+      - nuget-cache:/root/.nuget/packages
+      - app-data:/src/PremiereCalendar/App_Data
+    ports:
+      - "127.0.0.1:5299:8080"
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [backend]
+
+secrets:
+  postgres_password:
+    file: ./.secrets/dev-postgres-password
+
+volumes:
+  postgres-data:
+  nuget-cache:
+  app-data:
+
+networks:
+  backend:
+    driver: bridge

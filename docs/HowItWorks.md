@@ -10,7 +10,7 @@ The application has one source of truth for calendar rows:
 flowchart LR
     Browser["Browser UI"] --> Page["Calendar.razor"]
     Browser --> Settings["Settings.razor"]
-    Settings --> SettingsDb["SQLite settings database"]
+    Settings --> SettingsDb["SQLite or PostgreSQL state database"]
     Page --> SettingsDb
     Page --> Service["PremiereService"]
     Service --> WeekCache["FileCalendarCache"]
@@ -47,7 +47,7 @@ TMDb is the canonical identity source. TMDb Discover creates the primary verifie
 
 TMDb is required. It provides discovery, core metadata, TMDb scores, posters/backdrops, videos, genres, keywords, external IDs, TV networks, and watch providers. The TMDb API read access token is stored from the Settings page in the local database.
 
-IMDb datasets are included. The app imports IMDb's non-commercial ratings dataset into SQLite and uses it for IMDb scores and vote counts when a card has an IMDb ID.
+IMDb datasets are included. The app imports IMDb's non-commercial ratings dataset into the configured database and uses it for IMDb scores and vote counts when a card has an IMDb ID.
 
 OMDb is optional. When enabled in Settings with an API key, it enriches exact IMDb ID matches with Rotten Tomatoes, Metacritic, plot, and poster fallback data. OMDb responses are persisted and rate-limit cooldowns are remembered.
 
@@ -106,13 +106,13 @@ There are five cache layers:
 
 - `TmdbClient` memory cache: TMDb discover responses for six hours, TMDb details for twelve hours, and external-ID lookup responses for seven days.
 - Source-client memory caches: TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, Wikimedia, and OMDb cache source responses or negative lookups according to their expected volatility.
-- SQLite provider caches: IMDb dataset ratings, OMDb responses/cooldowns, most-used filters, and provider change markers.
+- Database provider caches: IMDb dataset ratings, OMDb responses/cooldowns, most-used filters, and provider change markers.
 - `FileCalendarCache`: normalized filtered results by week plus criteria hash under `App_Data/cache/calendar`.
 - `FileImageCache`: remote poster/backdrop bytes and width-specific poster variants under `App_Data/cache/images`.
 
 TMDb, TVmaze, Watchmode, OMDb, and image-cache misses use keyed single-flight coalescing so several concurrent requests for the same key share one upstream request while the cache entry is being filled.
 
-The SQLite database stores small mutable state: settings, IMDb ratings, OMDb cache rows, filter usage, and provider sync markers. Week result JSON and image bytes stay in file caches so they can be streamed efficiently and cleaned independently.
+The configured database stores small mutable state: settings, IMDb ratings, OMDb cache rows, filter usage, and provider sync markers. Week result JSON and image bytes stay in file caches so they can be streamed efficiently and cleaned independently.
 
 The week cache filename includes the selected server-discovery criteria hash. If no request filters are saved, the key is `default`. Criteria that change source requests, such as media type, language, origin, genres, provider IDs, availability, runtime, keywords, release types, certification, TV networks, TV status/type, TMDb score range, and minimum votes, produce different cache files. View-only choices such as local title search, local source text, and final UI sort do not create duplicate source cache files; the UI applies those in memory after the week loads.
 

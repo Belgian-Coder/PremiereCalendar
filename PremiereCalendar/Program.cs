@@ -69,8 +69,9 @@ builder.Services.AddHealthChecks()
     .AddCheck<SqliteHealthCheck>("sqlite", tags: ["ready"]);
 builder.Services.AddSingleton<DatabaseRecoveryState>();
 builder.Services.AddSingleton<SqliteDatabaseInitializer>();
+builder.Services.AddSingleton<PostgresDatabaseInitializer>();
 // Register first so WAL and busy-timeout settings are applied before cache warmers start.
-builder.Services.AddHostedService<SqliteDatabaseInitializerHostedService>();
+builder.Services.AddHostedService<DatabaseInitializerHostedService>();
 builder.Services.AddSingleton<CircuitHandler, CalendarCircuitDiagnostics>();
 
 builder.Services
@@ -111,7 +112,7 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
 {
     Predicate = check => check.Tags.Contains("ready")
 });
-app.MapGet("/health/version", (DatabaseRecoveryState databaseState) => Results.Json(new
+app.MapGet("/health/version", (DatabaseRecoveryState databaseState, IOptions<AppDatabaseOptions> databaseOptions) => Results.Json(new
 {
     version = BuildVersionInfo.Current.Version,
     informationalVersion = BuildVersionInfo.Current.InformationalVersion,
@@ -126,7 +127,9 @@ app.MapGet("/health/version", (DatabaseRecoveryState databaseState) => Results.J
         healthy = databaseState.Snapshot.IsHealthy,
         integrity = databaseState.Snapshot.Message,
         lastMigration = databaseState.Snapshot.LastMigration,
-        recovery = "Stop the Windows Service, run 'PremiereCalendar.exe database verify', then use 'database restore --backup <absolute-path>' only with a verified backup."
+        recovery = DatabaseConnectionFactory.IsPostgreSql(databaseOptions.Value)
+            ? "Run 'dotnet PremiereCalendar.dll database verify'. Restore only a checksum-verified pg_dump into an isolated PostgreSQL instance before production recovery."
+            : "Stop the Windows Service, run 'PremiereCalendar.exe database verify', then use 'database restore --backup <absolute-path>' only with a verified backup."
     }
 }));
 app.MapGet(

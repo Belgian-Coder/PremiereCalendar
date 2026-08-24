@@ -1,5 +1,6 @@
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -27,8 +28,8 @@ public sealed class SqliteAppStateStore : IAppStateStore
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
             await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT Value FROM AppParameters WHERE Key = $key";
-            command.Parameters.AddWithValue("$key", key);
+            command.CommandText = "SELECT Value FROM AppParameters WHERE Key = @key";
+            DatabaseParameters.Add(command, "@key", key);
             var value = await command.ExecuteScalarAsync(cancellationToken);
             return value as string;
         }
@@ -49,14 +50,14 @@ public sealed class SqliteAppStateStore : IAppStateStore
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 INSERT INTO AppParameters (Key, Value, UpdatedUtc)
-                VALUES ($key, $value, $updatedUtc)
+                VALUES (@key, @value, @updatedUtc)
                 ON CONFLICT(Key) DO UPDATE SET
                     Value = excluded.Value,
                     UpdatedUtc = excluded.UpdatedUtc
                 """;
-            command.Parameters.AddWithValue("$key", key);
-            command.Parameters.AddWithValue("$value", value);
-            command.Parameters.AddWithValue("$updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            DatabaseParameters.Add(command, "@key", key);
+            DatabaseParameters.Add(command, "@value", value);
+            DatabaseParameters.Add(command, "@updatedUtc", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -74,8 +75,8 @@ public sealed class SqliteAppStateStore : IAppStateStore
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
             await using var command = connection.CreateCommand();
-            command.CommandText = "DELETE FROM AppParameters WHERE Key = $key";
-            command.Parameters.AddWithValue("$key", key);
+            command.CommandText = "DELETE FROM AppParameters WHERE Key = @key";
+            DatabaseParameters.Add(command, "@key", key);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
@@ -96,10 +97,10 @@ public sealed class SqliteAppStateStore : IAppStateStore
             command.CommandText = """
                 SELECT Key, Value
                 FROM AppParameters
-                WHERE substr(Key, 1, length($prefix)) = $prefix
+                WHERE substr(Key, 1, length(@prefix)) = @prefix
                 ORDER BY Key
                 """;
-            command.Parameters.AddWithValue("$prefix", prefix);
+            DatabaseParameters.Add(command, "@prefix", prefix);
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -126,7 +127,7 @@ public sealed class SqliteAppStateStore : IAppStateStore
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
             foreach (var prefix in prefixes)
             {
@@ -134,9 +135,9 @@ public sealed class SqliteAppStateStore : IAppStateStore
                 delete.Transaction = transaction;
                 delete.CommandText = """
                     DELETE FROM AppParameters
-                    WHERE substr(Key, 1, length($prefix)) = $prefix
+                    WHERE substr(Key, 1, length(@prefix)) = @prefix
                     """;
-                delete.Parameters.AddWithValue("$prefix", prefix);
+                DatabaseParameters.Add(delete, "@prefix", prefix);
                 await delete.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -144,14 +145,14 @@ public sealed class SqliteAppStateStore : IAppStateStore
             insert.Transaction = transaction;
             insert.CommandText = """
                 INSERT INTO AppParameters (Key, Value, UpdatedUtc)
-                VALUES ($key, $value, $updatedUtc)
+                VALUES (@key, @value, @updatedUtc)
                 ON CONFLICT(Key) DO UPDATE SET
                     Value = excluded.Value,
                     UpdatedUtc = excluded.UpdatedUtc
                 """;
-            var keyParameter = insert.Parameters.Add("$key", SqliteType.Text);
-            var valueParameter = insert.Parameters.Add("$value", SqliteType.Text);
-            var updatedUtcParameter = insert.Parameters.Add("$updatedUtc", SqliteType.Text);
+            var keyParameter = DatabaseParameters.Add(insert, "@key", DbType.String);
+            var valueParameter = DatabaseParameters.Add(insert, "@value", DbType.String);
+            var updatedUtcParameter = DatabaseParameters.Add(insert, "@updatedUtc", DbType.String);
             updatedUtcParameter.Value = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
 
             foreach (var entry in values.OrderBy(entry => entry.Key, StringComparer.Ordinal))
@@ -183,16 +184,9 @@ public sealed class SqliteAppStateStore : IAppStateStore
         _initialized = true;
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = ResolveDatabasePath(),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        };
-
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
     }
 
     private string ResolveDatabasePath()

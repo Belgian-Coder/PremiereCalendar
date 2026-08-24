@@ -24,12 +24,9 @@ public static class ViewSyncUrlPolicy
         var trimmed = value.Trim();
         if (trimmed.Length > MaximumUrlLength
             || trimmed.StartsWith("//", StringComparison.Ordinal)
-            || Uri.TryCreate(trimmed, UriKind.Absolute, out _))
-        {
-            return false;
-        }
-
-        if (!Uri.TryCreate(trimmed, UriKind.Relative, out var uri))
+            || !trimmed.StartsWith('/', StringComparison.Ordinal)
+            || trimmed.Contains('\\', StringComparison.Ordinal)
+            || trimmed.Any(char.IsControl))
         {
             return false;
         }

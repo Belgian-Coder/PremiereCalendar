@@ -1,0 +1,64 @@
+name: premierecalendar
+
+services:
+  database:
+    image: postgres:18.6-alpine3.24@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: premierecalendar
+      POSTGRES_USER: premierecalendar
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/18/docker
+    secrets: [postgres_password]
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U premierecalendar -d premierecalendar"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [backend]
+
+  app:
+    image: ${PREMIERECALENDAR_IMAGE:?Set PREMIERECALENDAR_IMAGE to an immutable tag or digest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      AppDatabase__Provider: PostgreSql
+      AppDatabase__ConnectionString: Host=database;Port=5432;Database=premierecalendar;Username=premierecalendar
+      AppDatabase__PasswordFile: /run/secrets/postgres_password
+      ApplicationUpdate__Enabled: "false"
+      Urls: http://0.0.0.0:8080
+    secrets: [postgres_password]
+    volumes:
+      - app-data:/app/App_Data
+    ports:
+      - "127.0.0.1:${PREMIERECALENDAR_PORT:-18084}:8080"
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    networks: [backend, edge]
+
+secrets:
+  postgres_password:
+    file: ${PREMIERECALENDAR_POSTGRES_PASSWORD_FILE:?Set PREMIERECALENDAR_POSTGRES_PASSWORD_FILE}
+
+volumes:
+  postgres-data:
+  app-data:
+
+networks:
+  backend:
+    internal: true
+  edge:

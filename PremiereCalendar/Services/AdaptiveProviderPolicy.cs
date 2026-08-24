@@ -1,8 +1,8 @@
+using System.Data.Common;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -140,7 +140,7 @@ public sealed class AdaptiveProviderPolicy(
             telemetry.RecordProviderCircuitEvent(state.Provider, snapshot.CircuitState.ToString());
         }
         try { await store.SaveAsync(snapshot, cancellationToken); }
-        catch (Exception ex) when (ex is SqliteException or IOException) { }
+        catch (Exception ex) when (ex is DbException or IOException) { }
     }
 
     public IReadOnlyList<ProviderAdaptiveSnapshot> GetSnapshots()
@@ -379,9 +379,9 @@ public sealed class ProviderAdaptiveStateStore(
             SELECT CurrentConcurrency, ConsecutiveSuccesses, ConsecutiveFailures,
                    WindowFailureCount, FailureWindowStartedUtc, EwmaLatencyMilliseconds,
                    CircuitState, CooldownUntilUtc, LastThrottledUtc, UpdatedUtc
-            FROM ProviderAdaptiveState WHERE Provider = $provider
+            FROM ProviderAdaptiveState WHERE Provider = @provider
             """;
-        command.Parameters.AddWithValue("$provider", provider);
+        DatabaseParameters.Add(command, "@provider", provider);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
         return new ProviderAdaptiveSnapshot(
@@ -409,8 +409,8 @@ public sealed class ProviderAdaptiveStateStore(
                 Provider, CurrentConcurrency, ConsecutiveSuccesses, ConsecutiveFailures,
                 WindowFailureCount, FailureWindowStartedUtc, EwmaLatencyMilliseconds,
                 CircuitState, CooldownUntilUtc, LastThrottledUtc, UpdatedUtc)
-            VALUES ($provider, $concurrency, $successes, $failures, $windowFailures,
-                $windowStarted, $latency, $circuit, $cooldown, $throttled, $updated)
+            VALUES (@provider, @concurrency, @successes, @failures, @windowFailures,
+                @windowStarted, @latency, @circuit, @cooldown, @throttled, @updated)
             ON CONFLICT(Provider) DO UPDATE SET
                 CurrentConcurrency = excluded.CurrentConcurrency,
                 ConsecutiveSuccesses = excluded.ConsecutiveSuccesses,
@@ -424,37 +424,29 @@ public sealed class ProviderAdaptiveStateStore(
                 UpdatedUtc = excluded.UpdatedUtc
             WHERE excluded.UpdatedUtc >= ProviderAdaptiveState.UpdatedUtc
             """;
-        command.Parameters.AddWithValue("$provider", state.Provider);
-        command.Parameters.AddWithValue("$concurrency", state.CurrentConcurrency);
-        command.Parameters.AddWithValue("$successes", state.ConsecutiveSuccesses);
-        command.Parameters.AddWithValue("$failures", state.ConsecutiveFailures);
-        command.Parameters.AddWithValue("$windowFailures", state.WindowFailureCount);
-        command.Parameters.AddWithValue("$windowStarted", DbDate(state.FailureWindowStartedUtc));
-        command.Parameters.AddWithValue("$latency", (object?)state.EwmaLatencyMilliseconds ?? DBNull.Value);
-        command.Parameters.AddWithValue("$circuit", state.CircuitState.ToString());
-        command.Parameters.AddWithValue("$cooldown", DbDate(state.CooldownUntilUtc));
-        command.Parameters.AddWithValue("$throttled", DbDate(state.LastThrottledUtc));
-        command.Parameters.AddWithValue("$updated", state.UpdatedUtc.ToString("O", CultureInfo.InvariantCulture));
+        DatabaseParameters.Add(command, "@provider", state.Provider);
+        DatabaseParameters.Add(command, "@concurrency", state.CurrentConcurrency);
+        DatabaseParameters.Add(command, "@successes", state.ConsecutiveSuccesses);
+        DatabaseParameters.Add(command, "@failures", state.ConsecutiveFailures);
+        DatabaseParameters.Add(command, "@windowFailures", state.WindowFailureCount);
+        DatabaseParameters.Add(command, "@windowStarted", DbDate(state.FailureWindowStartedUtc));
+        DatabaseParameters.Add(command, "@latency", (object?)state.EwmaLatencyMilliseconds ?? DBNull.Value);
+        DatabaseParameters.Add(command, "@circuit", state.CircuitState.ToString());
+        DatabaseParameters.Add(command, "@cooldown", DbDate(state.CooldownUntilUtc));
+        DatabaseParameters.Add(command, "@throttled", DbDate(state.LastThrottledUtc));
+        DatabaseParameters.Add(command, "@updated", state.UpdatedUtc.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private SqliteConnection CreateConnection()
+    private DbConnection CreateConnection()
     {
-        var path = SqliteDatabasePath.Resolve(_options.Path, environment.ContentRootPath);
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = path,
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared,
-            Pooling = true
-        };
-        return SqliteConnectionFactory.Create(builder.ToString());
+        return DatabaseConnectionFactory.Create(_options, environment.ContentRootPath);
     }
 
     private static object DbDate(DateTimeOffset? value)
         => value is null ? DBNull.Value : value.Value.ToString("O", CultureInfo.InvariantCulture);
 
-    private static DateTimeOffset? ReadDate(SqliteDataReader reader, int ordinal)
+    private static DateTimeOffset? ReadDate(DbDataReader reader, int ordinal)
         => reader.IsDBNull(ordinal)
             ? null
             : DateTimeOffset.Parse(reader.GetString(ordinal), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);

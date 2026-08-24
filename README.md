@@ -72,19 +72,17 @@ If it does not open, check that both computers are on the same network and that 
 
 Premiere Calendar has no built-in user login. Keep the service on a trusted LAN or VPN, and avoid exposing it directly to the public internet.
 
-## Run From Source
+## Develop From Source
 
-Use this only when you cloned the repository instead of downloading a release zip.
-
-```powershell
-.\Run-PremiereCalendar.cmd
-```
-
-To build and install the service from the source tree:
+Local development is container-only: Docker Engine runs inside Ubuntu 24.04 on WSL, and Compose supplies both the app SDK and a dedicated PostgreSQL database. No host .NET or PostgreSQL installation is required for the development workflow.
 
 ```powershell
-.\Install-PremiereCalendar.cmd
+.\eng\wsl-docker.ps1 up
 ```
+
+Open `http://localhost:5299`. Use `test`, `logs`, `down`, or `reset` as the action when needed. `reset` removes only the PremiereCalendar development containers and named development volumes.
+
+See [Docker and PostgreSQL](docs/DockerAndPostgres.md) for production Compose, migration, health, security, and rollback details. The Windows installer remains supported as a rollback path.
 
 ## Navigation And Shortcuts
 
@@ -133,7 +131,7 @@ All, Series, and Movies keep separate synced views. A browser on Series follows 
 - Normal cards are verified through TMDb.
 - Unverified cards are shown below normal cards when an outside source found something that does not match TMDb yet.
 - `Source` chips show provider, channel, or streaming source names when known.
-- Scores can be `n/a` when the score provider has no data or is not configured.
+- Scores are ordered IMDb, TMDb, Rotten Tomatoes audience, then Rotten Tomatoes critics. Missing and zero scores are omitted from the render tree.
 - Open the provenance details on a card to see date confidence, source merge contributions, matched IDs, and missing-data reasons.
 
 ## Providers
@@ -156,7 +154,7 @@ The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync grou
 
 Use Update when you want to reuse fresh local cache where possible. Use Refresh sources when you want the visible week checked against providers again. Refresh sources keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 
-Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker and installer, settings backup/restore box, score backfill, and missing-ID repair. The Settings Update button consumes the signed GitHub asset feed with certificate pinning, immutable version directories, expected-version health checks, persistent transcripts, and automatic activation rollback. Releases are published manually; GitHub CI runs on pull requests or manual dispatch, not on pushes to `main`.
+Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker and installer, settings backup/restore box, score backfill, and missing-ID repair. The Settings Update button consumes the signed GitHub asset feed with certificate pinning, immutable version directories, expected-version health checks, persistent transcripts, and automatic activation rollback. The updater is disabled in container mode. GitHub CI runs on pushes and pull requests; release tags also build, scan, and publish the GHCR container.
 
 ## Common Problems
 
@@ -194,3 +192,4 @@ Technical references:
 - [Architecture](docs/Architecture.md)
 - [Performance Notes](docs/PerformanceReview.md)
 - [Testing](docs/Testing.md)
+- [Docker and PostgreSQL](docs/DockerAndPostgres.md)
