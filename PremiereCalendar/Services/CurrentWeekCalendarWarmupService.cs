@@ -68,15 +68,26 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
     {
         if (_workScheduler is not null)
         {
-            await _workScheduler.EnqueueAsync(new ProviderWorkRequest(
-                ProviderWorkKind.CalendarWarmup,
-                "calendar-warmup:current",
-                ProviderWorkPriority.Warmup,
-                "{}"), stoppingToken);
-            if (MaintenanceIsDue())
+            try
             {
-                await using var maintenanceScope = _scopeFactory.CreateAsyncScope();
-                await RunMaintenanceAsync(maintenanceScope.ServiceProvider, stoppingToken);
+                await _workScheduler.EnqueueAsync(new ProviderWorkRequest(
+                    ProviderWorkKind.CalendarWarmup,
+                    "calendar-warmup:current",
+                    ProviderWorkPriority.Warmup,
+                    "{}"), stoppingToken);
+                if (MaintenanceIsDue())
+                {
+                    await using var maintenanceScope = _scopeFactory.CreateAsyncScope();
+                    await RunMaintenanceAsync(maintenanceScope.ServiceProvider, stoppingToken);
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Current-week calendar warmup scheduling cycle failed.");
             }
             return;
         }

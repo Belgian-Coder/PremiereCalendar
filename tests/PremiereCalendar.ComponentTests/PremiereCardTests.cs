@@ -50,15 +50,17 @@ public sealed class PremiereCardTests : BunitContext
         Assert.Contains("Netflix", component.Markup);
         Assert.Contains("Apple TV", component.Markup);
         Assert.Contains("102 min", component.Markup);
-        Assert.Contains("RT critics 83%", component.Markup);
-        Assert.DoesNotContain("TMDb 6.9 / 10 (18)", component.Markup);
+        var visibleScores = component.FindAll(".primary-score > span");
+        Assert.Collection(
+            visibleScores,
+            score => Assert.Contains("IMDb 7.4 / 10", score.TextContent),
+            score => Assert.Contains("TMDb 6.9 / 10 (18)", score.TextContent),
+            score => Assert.Contains("RT audience 91%", score.TextContent),
+            score => Assert.Contains("RT critics 83%", score.TextContent));
         Assert.Contains("A compact test overview.", component.Markup);
         Assert.NotEmpty(component.FindAll(".primary-actions a[href='https://www.youtube.com/watch?v=feature']"));
         Assert.NotEmpty(component.FindAll(".primary-actions a[href='https://www.youtube.com/results?search_query=Independent%20Feature%20trailer']"));
         component.Find(".card-details summary").Click();
-        Assert.Contains("TMDb 6.9 / 10 (18)", component.Markup);
-        Assert.Contains("IMDb 7.4 / 10", component.Markup);
-        Assert.Contains("RT audience 91%", component.Markup);
         Assert.Contains("Meta 72/100", component.Markup);
         var provenance = component.Find(".source-details");
         Assert.Equal("false", provenance.GetAttribute("data-provenance-loaded"));
@@ -152,6 +154,33 @@ public sealed class PremiereCardTests : BunitContext
             .Add(x => x.ScoreSource, ScoreSource.Tmdb));
 
         Assert.Equal(renderCount, component.RenderCount);
+    }
+
+    [Fact]
+    public void PremiereCard_DoesNotRenderMissingOrZeroScores()
+    {
+        var item = new PremiereItem
+        {
+            CanonicalId = "movie:zero-scores",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 202,
+            Title = "No Score Placeholders",
+            PremiereDate = new DateOnly(2026, 5, 6),
+            TmdbScore = 0,
+            ImdbScore = null,
+            RottenTomatoesAudienceScore = 0,
+            RottenTomatoesScore = null,
+            MetacriticScore = 0,
+            TvmazeRating = 0
+        };
+
+        var component = Render<PremiereCard>(parameters => parameters.Add(x => x.Item, item));
+
+        Assert.Empty(component.FindAll(".primary-score"));
+        component.Find(".card-details summary").Click();
+        Assert.Empty(component.FindAll(".secondary-scores"));
+        Assert.Empty(component.FindAll(".scores span"));
     }
 
     [Fact]

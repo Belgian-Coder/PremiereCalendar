@@ -32,6 +32,9 @@ public sealed class SqliteDatabaseInitializerTests
             }.ToString()))
             {
                 await connection.OpenAsync();
+                Assert.Equal(
+                    SqliteCacheMode.Private,
+                    new SqliteConnectionStringBuilder(connection.ConnectionString).Cache);
                 await using var command = connection.CreateCommand();
                 command.CommandText = "PRAGMA journal_mode;";
                 Assert.Equal("wal", (await command.ExecuteScalarAsync())?.ToString(), ignoreCase: true);

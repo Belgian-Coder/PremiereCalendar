@@ -70,24 +70,24 @@
             }
         </div>
 
-        @if (HasSelectedScore)
+        @if (HasVisibleScores)
         {
-            <div class="scores primary-score" aria-label="Selected score">
-                @if (ScoreSource == ScoreSource.Tmdb)
+            <div class="scores primary-score" aria-label="Scores">
+                @if (Item.ImdbScore is > 0)
                 {
-                    <span class="selected-score">TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
+                    <span class="@(ScoreSource == ScoreSource.Imdb ? "selected-score" : null)">IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
                 }
-                else if (ScoreSource == ScoreSource.Imdb)
+                @if (Item.TmdbScore is > 0)
                 {
-                    <span class="selected-score">IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
+                    <span class="@(ScoreSource == ScoreSource.Tmdb ? "selected-score" : null)">TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
                 }
-                else if (ScoreSource == ScoreSource.RottenTomatoes)
+                @if (Item.RottenTomatoesAudienceScore is > 0)
                 {
-                    <span class="selected-score">RT critics @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
+                    <span title="Rotten Tomatoes audience score">RT audience @FormatRottenTomatoes(Item.RottenTomatoesAudienceScore)</span>
                 }
-                else if (ScoreSource == ScoreSource.Metacritic)
+                @if (Item.RottenTomatoesScore is > 0)
                 {
-                    <span class="selected-score">Meta @FormatMetacritic(Item.MetacriticScore)</span>
+                    <span class="@(ScoreSource == ScoreSource.RottenTomatoes ? "selected-score" : null)">RT critics @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
                 }
             </div>
         }
@@ -140,27 +140,11 @@
                     @if (HasSecondaryScores)
                     {
                         <div class="scores secondary-scores" aria-label="Other scores">
-                            @if (ScoreSource != ScoreSource.Tmdb && Item.TmdbScore is not null)
+                            @if (Item.MetacriticScore is > 0)
                             {
-                                <span>TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
+                                <span class="@(ScoreSource == ScoreSource.Metacritic ? "selected-score" : null)">Meta @FormatMetacritic(Item.MetacriticScore)</span>
                             }
-                            @if (ScoreSource != ScoreSource.Imdb && Item.ImdbScore is not null)
-                            {
-                                <span>IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
-                            }
-                            @if (ScoreSource != ScoreSource.RottenTomatoes && Item.RottenTomatoesScore is not null)
-                            {
-                                <span>RT critics @FormatRottenTomatoes(Item.RottenTomatoesScore)</span>
-                            }
-                            @if (Item.RottenTomatoesAudienceScore is not null)
-                            {
-                                <span title="Rotten Tomatoes audience score">RT audience @FormatRottenTomatoes(Item.RottenTomatoesAudienceScore)</span>
-                            }
-                            @if (ScoreSource != ScoreSource.Metacritic && Item.MetacriticScore is not null)
-                            {
-                                <span>Meta @FormatMetacritic(Item.MetacriticScore)</span>
-                            }
-                            @if (Item.TvmazeRating is not null)
+                            @if (Item.TvmazeRating is > 0)
                             {
                                 <span>TVmaze @FormatScore(Item.TvmazeRating) / 10</span>
                             }
@@ -392,22 +376,15 @@
         ? "arr-add-button radarr"
         : "arr-add-button sonarr";
 
-    private bool HasSelectedScore => ScoreSource switch
-    {
-        ScoreSource.Tmdb => Item.TmdbScore is not null,
-        ScoreSource.Imdb => Item.ImdbScore is not null,
-        ScoreSource.RottenTomatoes => Item.RottenTomatoesScore is not null,
-        ScoreSource.Metacritic => Item.MetacriticScore is not null,
-        _ => false
-    };
+    private bool HasVisibleScores =>
+        Item.ImdbScore is > 0
+        || Item.TmdbScore is > 0
+        || Item.RottenTomatoesAudienceScore is > 0
+        || Item.RottenTomatoesScore is > 0;
 
     private bool HasSecondaryScores =>
-        (ScoreSource != ScoreSource.Tmdb && Item.TmdbScore is not null)
-        || (ScoreSource != ScoreSource.Imdb && Item.ImdbScore is not null)
-        || (ScoreSource != ScoreSource.RottenTomatoes && Item.RottenTomatoesScore is not null)
-        || Item.RottenTomatoesAudienceScore is not null
-        || (ScoreSource != ScoreSource.Metacritic && Item.MetacriticScore is not null)
-        || Item.TvmazeRating is not null;
+        Item.MetacriticScore is > 0
+        || Item.TvmazeRating is > 0;
 
     private string MediaClass()
     {

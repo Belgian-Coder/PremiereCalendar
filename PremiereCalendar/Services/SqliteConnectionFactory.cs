@@ -11,6 +11,10 @@ internal static class SqliteConnectionFactory
     {
         var builder = new SqliteConnectionStringBuilder(connectionString)
         {
+            // WAL already provides concurrent readers without shared-cache's
+            // process-local table locks. Shared cache can return SQLITE_LOCKED
+            // immediately, bypassing the busy handler used for SQLITE_BUSY.
+            Cache = SqliteCacheMode.Private,
             // The application opens short-lived store connections and relies on
             // clean process/file hand-off during signed updates. Native pooled
             // mappings can outlive the managed connection and block atomic restore.

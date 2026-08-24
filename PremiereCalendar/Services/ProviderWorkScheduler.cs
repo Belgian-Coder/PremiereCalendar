@@ -516,6 +516,13 @@ public sealed class ProviderWorkSchedulerHostedService(
                 logger.LogDebug(ex, "Provider worker {ProviderWorkOwner} stopped during shutdown.", owner);
                 return;
             }
+            catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
+            {
+                // A competing short write must delay this worker, not stop the
+                // host through BackgroundServiceExceptionBehavior.StopHost.
+                logger.LogWarning(ex, "Provider worker {ProviderWorkOwner} encountered transient SQLite contention.", owner);
+                await Task.Delay(TimeSpan.FromMilliseconds(250), stoppingToken);
+            }
         }
     }
 
