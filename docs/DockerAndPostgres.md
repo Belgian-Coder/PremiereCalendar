@@ -17,10 +17,13 @@ The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed
 
 ## Production container
 
-Release tags build the runtime image once, launch that exact image to prove
-readiness, non-root identity, root HTML and the Blazor boot asset, reject
-fixable HIGH or CRITICAL vulnerability findings, retain a CycloneDX SBOM and
-scan report, then publish the scanned image to GitHub Container Registry.
+An operator explicitly starts the manual container workflow for an intended
+version. A push, pull request, tag, schedule, or GitHub release does not start
+it. The manual workflow builds the runtime image once, launches that exact
+image to prove readiness, non-root identity, root HTML and the Blazor boot
+asset, rejects fixable HIGH or CRITICAL vulnerability findings, retains a
+CycloneDX SBOM and scan report, then publishes the scanned image to GitHub
+Container Registry.
 Deploy by digest. The runtime:
 
 - runs as the image's non-root application user;
@@ -51,4 +54,8 @@ The importer requires a schema-current SQLite source and an empty PostgreSQL tar
 
 SQLite snapshots are migration inputs, not ongoing PostgreSQL backups. Production PostgreSQL requires scheduled `pg_dump` output with SHA-256 and completion manifests, retention, an isolated restore test, and off-host backup coverage. The canonical NAS deployment and operational instructions live under `\\NAS\Data\Backups\Infrastructure\NAS\services\premierecalendar`.
 
-The retained Windows release and its untouched SQLite data are the rollback boundary. Do not restore a PostgreSQL dump over SQLite or point the Windows service at the PostgreSQL container.
+The Windows installation has been retired. Roll back by deploying a previously
+accepted digest-pinned container image while preserving the PostgreSQL volume.
+Recover data only from a checksum-verified PostgreSQL dump that first passes an
+isolated restore. The final SQLite migration input is retained as restricted
+historical evidence on the NAS, not as an executable fallback.

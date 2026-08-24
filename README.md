@@ -26,19 +26,14 @@ TMDb is required for live data. Everything else is optional.
 | --- |
 | ![Settings local status center](docs/images/readme/settings-local-status-light.png) |
 
-## Install On Windows
+## Deploy With Docker
 
-For a normal Windows install, use the release zip.
-
-1. Download the `PremiereCalendar-...-win-x64.zip` release.
-2. Right-click the zip and choose Extract All.
-3. Open the extracted folder.
-4. Double-click `Install-PremiereCalendar.cmd`.
-5. Click Yes when Windows asks for administrator permission.
-6. Open `http://localhost:5298`.
-7. Add the TMDb token in Settings when the app redirects you there.
-
-The app starts automatically after the computer reboots.
+The supported runtime is the Docker/PostgreSQL stack. Pin
+`PREMIERECALENDAR_IMAGE` to an accepted immutable GHCR digest, provide the
+PostgreSQL password through the configured Docker secret file, and start
+`compose.yaml` with Docker Compose. The app binds to loopback port `18084`
+by default; publish it to the trusted private network through the documented
+reverse proxy.
 
 If TMDb settings are missing, the calendar automatically opens Settings and shows a setup notice until the required token is saved.
 
@@ -55,20 +50,17 @@ TMDb is required. Without it, the app opens but cannot load real calendar data.
 
 | Check | Good result |
 | --- | --- |
-| Installer window | Ends with a success message |
-| App page | `http://localhost:5298` opens |
-| Health page | `http://localhost:5298/health` says Healthy |
+| Containers | App and PostgreSQL report healthy |
+| App page | `http://localhost:18084` opens on the Docker host |
+| Readiness | `http://localhost:18084/health/ready` says Healthy |
+| Version | `http://localhost:18084/health/version` reports PostgreSQL healthy |
 | Calendar | All, Series, or Movies loads cards after the TMDb token is saved |
 
 ## Open From Another Computer
 
-1. Leave the computer running Premiere Calendar turned on.
-2. Find that computer's local network IP address.
-3. On another computer, open `http://IP-ADDRESS:5298`.
-
-For a friendly LAN name, add a DNS record on your router or local DNS server that points to the host computer's LAN IP, then open `http://NAME:5298`.
-
-If it does not open, check that both computers are on the same network and that Windows allowed the Premiere Calendar firewall prompt.
+Use the private HTTPS hostname exposed by the reverse proxy. Keep the app and
+PostgreSQL ports off the public internet; only the proxy should cross the
+container-host boundary.
 
 Premiere Calendar has no built-in user login. Keep the service on a trusted LAN or VPN, and avoid exposing it directly to the public internet.
 
@@ -82,7 +74,7 @@ Local development is container-only: Docker Engine runs inside Ubuntu 24.04 on W
 
 Open `http://localhost:5299`. Use `test`, `logs`, `down`, or `reset` as the action when needed. `reset` removes only the PremiereCalendar development containers and named development volumes.
 
-See [Docker and PostgreSQL](docs/DockerAndPostgres.md) for production Compose, migration, health, security, and rollback details. The Windows installer remains supported as a rollback path.
+See [Docker and PostgreSQL](docs/DockerAndPostgres.md) for production Compose, migration, health, security, backup, and recovery details. The supported operational deployment is the Docker/PostgreSQL stack.
 
 ## Navigation And Shortcuts
 
@@ -154,7 +146,7 @@ The app keeps calendar data, images, IMDb scores, OMDb responses, view-sync grou
 
 Use Update when you want to reuse fresh local cache where possible. Use Refresh sources when you want the visible week checked against providers again. Refresh sources keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 
-Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker and installer, settings backup/restore box, score backfill, and missing-ID repair. The Settings Update button consumes the signed GitHub asset feed with certificate pinning, immutable version directories, expected-version health checks, persistent transcripts, and automatic activation rollback. The updater is disabled in container mode. GitHub CI runs on pushes and pull requests; release tags also build, scan, and publish the GHCR container.
+Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, release/update checker and installer, settings backup/restore box, score backfill, and missing-ID repair. The Settings Update button consumes the signed GitHub asset feed with certificate pinning, immutable version directories, expected-version health checks, persistent transcripts, and automatic activation rollback. The updater is disabled in container mode. GitHub does not automatically build, test, publish, or release PremiereCalendar. The CI and container workflows are manual-only safety tools and run solely when an operator explicitly selects **Run workflow**.
 
 ## Common Problems
 

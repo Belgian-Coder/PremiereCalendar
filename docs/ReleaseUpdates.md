@@ -19,7 +19,7 @@ tests, makes a self-contained Windows x64 package, emits deterministic build
 metadata, signs `stable.manifest.json`, writes `SHA256SUMS.txt`, creates a draft,
 uploads all assets, and only then publishes it.
 
-Publishing the signed Windows release is always an explicit operator action; no GitHub Actions workflow creates it. CI runs for pushes and pull requests targeting `main`, and can also be started manually. A release tag builds and scans the Linux container, retains scan/SBOM evidence, and publishes the scanned image to GHCR.
+Publishing the signed Windows release is always an explicit operator action; no GitHub Actions workflow creates it. GitHub does not automatically build, test, publish, or release PremiereCalendar on pushes, pull requests, tags, schedules, or releases. The CI and container workflows are manual-only safety tools: an operator must explicitly select **Run workflow**, and the container workflow requires the intended version input. Creating or pushing a release tag does not start either workflow.
 
 The first administrator-reviewed installation uses the local release directory:
 
