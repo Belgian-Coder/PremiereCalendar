@@ -81,8 +81,8 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
 
             var initialWeek = await Page.Locator("[data-testid='week-range']").InnerTextAsync();
             await Page.GetByRole(AriaRole.Button, new() { Name = "Next week" }).ClickAsync();
+            await Expect(Page.Locator("[data-testid='week-range']")).Not.ToHaveTextAsync(initialWeek);
             await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync(new() { Timeout = 5_000 });
-            Assert.NotEqual(initialWeek, await Page.Locator("[data-testid='week-range']").InnerTextAsync());
             await Page.GetByRole(AriaRole.Button, new() { Name = "Previous week" }).ClickAsync();
             await Expect(Page.Locator("[data-testid='week-range']")).ToHaveTextAsync(initialWeek);
 
