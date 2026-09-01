@@ -166,10 +166,21 @@ More help: [Troubleshooting](docs/Troubleshooting.md).
 ## Test It
 
 ```powershell
-.\.dotnet\dotnet.exe test .\PremiereCalendar.slnx
+.\eng\Invoke-ProjectWorkflow.ps1 -Mode Fast
 ```
 
 Tests use fake providers. They must not call live external services.
+
+Before a release, run the resumable complete local gate once:
+
+```powershell
+.\eng\Invoke-ProjectWorkflow.ps1 -Mode Qualify
+```
+
+See [Local workflow harness](docs/agents/Harness.md) for qualification,
+focused unit/component/integration/browser/PostgreSQL modes, package reuse,
+confirmation-gated publish/deploy/rollback actions, generated evidence, and
+installed read-only acceptance.
 
 ## More Documentation
 

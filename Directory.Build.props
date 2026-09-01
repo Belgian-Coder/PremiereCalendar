@@ -4,5 +4,7 @@
     <FileVersion Condition="'$(FileVersion)' == ''">0.0.0.0</FileVersion>
     <InformationalVersion Condition="'$(InformationalVersion)' == ''">0.0.0-local</InformationalVersion>
     <DatabaseSchemaVersion>3</DatabaseSchemaVersion>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
   </PropertyGroup>
 </Project>

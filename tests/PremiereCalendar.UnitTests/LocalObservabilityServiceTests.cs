@@ -11,6 +11,7 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
+[Collection(SqliteTestCollection.Name)]
 public sealed class LocalObservabilityServiceTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-local-observability-{Guid.NewGuid():N}");
@@ -35,7 +36,9 @@ public sealed class LocalObservabilityServiceTests : IDisposable
     [Fact]
     public async Task BackgroundJobTimeline_TrimsOldEventsAndKeepsNewestFirst()
     {
-        var store = CreateAppStateStore();
+        // Timeline trimming is an in-memory policy concern. SQLite durability is
+        // covered independently by the AppStateStore tests in this class.
+        var store = new InMemoryAppStateStore();
         var timeline = new BackgroundJobTimelineService(store, TimeProvider.System);
 
         for (var index = 0; index < 105; index++)

@@ -24,6 +24,24 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             window.__pcCls = 0;
             new PerformanceObserver(list => { for (const e of list.getEntries()) window.__pcLongTasks.push(e.duration); }).observe({type:'longtask', buffered:true});
             new PerformanceObserver(list => { for (const e of list.getEntries()) if (!e.hadRecentInput) window.__pcCls += e.value; }).observe({type:'layout-shift', buffered:true});
+            window.__pcObserveDaySwitch = () => {
+                const started = Number(sessionStorage.getItem('pc-day-switch-started'));
+                const target = sessionStorage.getItem('pc-day-switch-target');
+                if (!Number.isFinite(started) || !target) return;
+                const recordWhenUsable = () => {
+                    const selected = [...document.querySelectorAll('[data-day-button][aria-selected="true"]')]
+                        .some(candidate => candidate.getAttribute('data-day-target') === target);
+                    if (!selected || !document.querySelector('[data-testid="premiere-card"]')) return false;
+                    sessionStorage.setItem('pc-day-switch-duration', (Date.now() - started).toString());
+                    return true;
+                };
+                if (recordWhenUsable()) return;
+                const observer = new MutationObserver(() => {
+                    if (recordWhenUsable()) observer.disconnect();
+                });
+                observer.observe(document.documentElement, { attributes: true, childList: true, subtree: true });
+            };
+            addEventListener('DOMContentLoaded', window.__pcObserveDaySwitch);
             """);
 
         try
@@ -54,10 +72,28 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             await Page.GetByRole(AriaRole.Button, new() { Name = "Save" }).ClickAsync();
             await Page.WaitForURLAsync(url => url.Contains("sort=title", StringComparison.OrdinalIgnoreCase));
 
-            var daySwitch = Stopwatch.StartNew();
-            await Page.Locator("[data-day-button]").Nth(1).ClickAsync();
+            var targetDay = Page.Locator("[data-day-button]").Nth(1);
+            await targetDay.WaitForAsync();
+            var targetDayId = await targetDay.GetAttributeAsync("data-day-target");
+            Assert.NotNull(targetDayId);
+            await Page.EvaluateAsync("""
+                target => {
+                    const button = [...document.querySelectorAll('[data-day-button]')]
+                        .find(candidate => candidate.getAttribute('data-day-target') === target);
+                    if (!button) throw new Error(`Day button ${target} was not found.`);
+                    sessionStorage.removeItem('pc-day-switch-duration');
+                    sessionStorage.setItem('pc-day-switch-target', target);
+                    sessionStorage.setItem('pc-day-switch-started', Date.now().toString());
+                    window.__pcObserveDaySwitch();
+                    button.click();
+                }
+                """, targetDayId);
+            await Expect(Page.Locator("[data-day-button][aria-selected='true']")).ToHaveAttributeAsync(
+                "data-day-target", targetDayId);
             await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync();
-            Assert.True(daySwitch.ElapsedMilliseconds <= 750, $"Day switch took {daySwitch.ElapsedMilliseconds} ms.");
+            await Page.WaitForFunctionAsync("Number.isFinite(Number(sessionStorage.getItem('pc-day-switch-duration')))");
+            var daySwitchMilliseconds = await Page.EvaluateAsync<double>("Number(sessionStorage.getItem('pc-day-switch-duration'))");
+            Assert.True(daySwitchMilliseconds <= 750, $"Day switch took {daySwitchMilliseconds:0} ms.");
 
             var rollingWindow = Stopwatch.StartNew();
             for (var movement = 0; movement < 3; movement++)

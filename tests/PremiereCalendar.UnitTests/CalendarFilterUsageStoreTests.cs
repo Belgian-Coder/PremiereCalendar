@@ -7,6 +7,7 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
+[Collection(SqliteTestCollection.Name)]
 public sealed class CalendarFilterUsageStoreTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-usage-store-{Guid.NewGuid():N}");

@@ -8,6 +8,7 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
+[Collection(SqliteTestCollection.Name)]
 public sealed class TelemetryContractTests
 {
     [Fact]

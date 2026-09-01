@@ -219,6 +219,8 @@ public sealed class SqliteDatabaseInitializer(
         {
             await VerifyAsync(stagedPath, cancellationToken);
             DeleteSidecarFiles(stagedPath);
+            // Offline restore must release every pooled connection string that
+            // may have addressed this file before replacing it.
             SqliteConnection.ClearAllPools();
             if (File.Exists(target)) File.Move(target, damagedPath, overwrite: false);
             PreserveSidecar(target + "-wal", damagedPath + "-wal");
