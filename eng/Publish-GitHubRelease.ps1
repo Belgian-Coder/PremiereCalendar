@@ -84,18 +84,21 @@ $certificate = Get-Item "Cert:\CurrentUser\My\$SigningCertificateThumbprint" -Er
 if (-not $certificate.HasPrivateKey) { throw 'The release signing certificate has no private key.' }
 
 if (-not $SkipValidation) {
-    Invoke-Checked { & $dotnet restore (Join-Path $projectRoot 'PremiereCalendar.slnx') --nologo } 'Restore failed.'
-    Invoke-Checked { & $dotnet build (Join-Path $projectRoot 'PremiereCalendar.slnx') -c Release --no-restore --nologo -p:UseSharedCompilation=false } 'Release build failed.'
+    # This retired Windows release path still consumes Playwright's generated
+    # installer from the conventional bin directory. Keep that layout scoped to
+    # this script; normal local work uses the external artifacts directory.
+    Invoke-Checked { & $dotnet restore (Join-Path $projectRoot 'PremiereCalendar.slnx') --nologo -p:UseArtifactsOutput=false } 'Restore failed.'
+    Invoke-Checked { & $dotnet build (Join-Path $projectRoot 'PremiereCalendar.slnx') -c Release --no-restore --nologo -p:UseSharedCompilation=false -p:UseArtifactsOutput=false } 'Release build failed.'
     $playwrightInstaller = Join-Path $projectRoot 'tests\PremiereCalendar.BrowserTests\bin\Release\net11.0\playwright.ps1'
     Invoke-Checked { & $playwrightInstaller install chromium } 'Chromium installation for browser regression tests failed.'
-    Invoke-Checked { & $dotnet test (Join-Path $projectRoot 'PremiereCalendar.slnx') -c Release --no-build --no-restore --nologo } 'Tests failed.'
+    Invoke-Checked { & $dotnet test (Join-Path $projectRoot 'PremiereCalendar.slnx') -c Release --no-build --no-restore --nologo -p:UseArtifactsOutput=false } 'Tests failed.'
 }
 
 # A solution restore does not create the runtime-specific assets graph required
 # by a self-contained publish. Always restore this exact release target, including
 # for -SkipValidation packaging runs.
 Invoke-Checked {
-    & $dotnet restore (Join-Path $projectRoot 'PremiereCalendar\PremiereCalendar.csproj') -r win-x64 --nologo
+    & $dotnet restore (Join-Path $projectRoot 'PremiereCalendar\PremiereCalendar.csproj') -r win-x64 --nologo -p:UseArtifactsOutput=false
 } 'win-x64 release restore failed.'
 
 New-Item -ItemType Directory -Path $publishPath -Force | Out-Null
@@ -109,6 +112,7 @@ $publishArguments = @(
     'publish', (Join-Path $projectRoot 'PremiereCalendar\PremiereCalendar.csproj'),
     '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '--no-restore',
     '-o', $publishPath,
+    '-p:UseArtifactsOutput=false',
     "/p:Version=$Version", "/p:FileVersion=$Version.0", "/p:InformationalVersion=$Version+$buildId",
     "/p:BuildId=$buildId", "/p:SourceRevisionId=$head", "/p:BuildTimeUtc=$buildTimeUtc"
 )

@@ -13,15 +13,24 @@ public sealed class UiCssRegressionTests
 
     private static string FindRepositoryRoot()
     {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null)
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
         {
-            if (File.Exists(Path.Combine(directory.FullName, "PremiereCalendar.slnx")))
+            var directory = new DirectoryInfo(start);
+            while (directory is not null)
             {
-                return directory.FullName;
-            }
+                if (File.Exists(Path.Combine(directory.FullName, "PremiereCalendar.slnx")))
+                {
+                    return directory.FullName;
+                }
 
-            directory = directory.Parent;
+                var siblingCheckout = Path.Combine(directory.FullName, "PremiereCalendar");
+                if (File.Exists(Path.Combine(siblingCheckout, "PremiereCalendar.slnx")))
+                {
+                    return siblingCheckout;
+                }
+
+                directory = directory.Parent;
+            }
         }
 
         throw new InvalidOperationException("Could not locate repository root.");

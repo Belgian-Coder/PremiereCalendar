@@ -20,8 +20,8 @@ public sealed class BrowserAppFixture : IAsyncLifetime
         Directory.CreateDirectory(_temporaryRoot);
         var dotnet = Path.Combine(repositoryRoot, ".dotnet", "dotnet.exe");
         if (!File.Exists(dotnet)) dotnet = "dotnet";
-        var application = Path.Combine(repositoryRoot, "PremiereCalendar", "bin", "Release", "net11.0", "PremiereCalendar.dll");
-        if (!File.Exists(application)) throw new FileNotFoundException("Build the Release application before browser tests.", application);
+        var application = typeof(Program).Assembly.Location;
+        if (!File.Exists(application)) throw new FileNotFoundException("PremiereCalendar application assembly was not found.", application);
 
         var startInfo = new ProcessStartInfo(dotnet, $"\"{application}\"")
         {
@@ -95,9 +95,27 @@ public sealed class BrowserAppFixture : IAsyncLifetime
 
     private static string FindRepositoryRoot()
     {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PremiereCalendar.slnx"))) directory = directory.Parent;
-        return directory?.FullName ?? throw new DirectoryNotFoundException("PremiereCalendar repository root was not found.");
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        {
+            var directory = new DirectoryInfo(start);
+            while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PremiereCalendar.slnx")))
+            {
+                var siblingCheckout = Path.Combine(directory.FullName, "PremiereCalendar");
+                if (File.Exists(Path.Combine(siblingCheckout, "PremiereCalendar.slnx")))
+                {
+                    return siblingCheckout;
+                }
+
+                directory = directory.Parent;
+            }
+
+            if (directory is not null)
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new DirectoryNotFoundException("PremiereCalendar repository root was not found.");
     }
 }
 

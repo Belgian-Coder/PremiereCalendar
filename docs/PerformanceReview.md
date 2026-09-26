@@ -4,7 +4,7 @@ Last reviewed: 2026-08-12.
 
 ## .NET 11 Notes
 
-The app now targets `net11.0` and uses the locally installed .NET 11 preview SDK under `.dotnet`. The deployed build is published self-contained for `win-x64`, so the hosted app does not require a machine-wide .NET 11 runtime install.
+The app targets `net11.0` and `global.json` pins the required .NET 11 preview SDK. Local builds use the machine-wide SDK and write their outputs to the sibling `PremiereCalendar.Build` directory, keeping SDK and build copies out of the checkout. The deployed Windows compatibility build is self-contained.
 
 The .NET 11 release notes drove the current dense-list change:
 

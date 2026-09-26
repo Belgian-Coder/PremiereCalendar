@@ -19,7 +19,7 @@ When a reverse proxy terminates HTTPS, add each trusted proxy IP under `Hosting:
 
 Release installs write infrastructure values such as `AppDatabase__Path`, `CalendarCache__Directory`, and `ImageCache__Directory` to the Windows Service `Environment` registry value. Source API credentials are configured only in the app Settings page and are stored in the SQLite settings database. The release package builder clears API credentials from packaged `appsettings.json`.
 
-Local application settings edited through the Settings page are stored in a SQLite parameter database. The default path is `App_Data/data/premiere-calendar.db`; release installs set `AppDatabase__Path` to `D:\Apps\PremiereCalendarData\data\premiere-calendar.db` by default.
+Local application settings edited through the Settings page are stored in a SQLite parameter database. Development launches store this database and other mutable files in the sibling `PremiereCalendar.LocalData` directory so the source checkout stays clean. Release installs set `AppDatabase__Path` to `D:\Apps\PremiereCalendarData\data\premiere-calendar.db` by default.
 
 Startup owns the database schema centrally. It runs `PRAGMA quick_check`, checkpoints WAL before a pending migration, creates a verified pre-migration backup, applies migrations transactionally, records their checksums in `SchemaMigrations`, advances `PRAGMA user_version`, and checks integrity again. `/health/ready`, `/health/version`, and Settings > Local status report the active and target schema versions. Migration failure restores only the pre-migration snapshot and leaves readiness unhealthy; unrelated corruption is never restored automatically.
 

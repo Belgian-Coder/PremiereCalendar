@@ -166,21 +166,28 @@ More help: [Troubleshooting](docs/Troubleshooting.md).
 ## Test It
 
 ```powershell
-.\eng\Invoke-ProjectWorkflow.ps1 -Mode Fast
+dotnet test .\PremiereCalendar.slnx
 ```
 
 Tests use fake providers. They must not call live external services.
 
-Before a release, run the resumable complete local gate once:
+Local builds write to the sibling `PremiereCalendar.Build` directory and a
+Development launch writes its database, caches, backups, and logs to the
+sibling `PremiereCalendar.LocalData` directory. This keeps generated and
+mutable files out of the checkout. Hosted CI and production containers keep
+their explicitly configured storage layouts.
+
+Check workspace hygiene after local work, or remove all known generated files
+and the shared local build output:
 
 ```powershell
-.\eng\Invoke-ProjectWorkflow.ps1 -Mode Qualify
+.\eng\Workspace-Maintenance.ps1 -Mode Check
+.\eng\Workspace-Maintenance.ps1 -Mode Clean
 ```
 
-See [Local workflow harness](docs/agents/Harness.md) for qualification,
-focused unit/component/integration/browser/PostgreSQL modes, package reuse,
-confirmation-gated publish/deploy/rollback actions, generated evidence, and
-installed read-only acceptance.
+The check fails if generated files return inside the checkout, the shared build
+directory exceeds 1.5 GB, or Development data exceeds 512 MB. A deliberate
+local-data reset is available with `-Mode Clean -RemoveDevelopmentData`.
 
 ## More Documentation
 
