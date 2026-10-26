@@ -32,32 +32,58 @@ public sealed class AdaptiveProviderPolicy(
                 var now = timeProvider.GetUtcNow();
                 if (state.CircuitState == ProviderCircuitState.Closed && state.CooldownUntilUtc is { } retryAfter && retryAfter > now)
                 {
-                    throw new ProviderRetryAfterException(provider, retryAfter);
-                }
-                if (state.CircuitState == ProviderCircuitState.Closed && state.CooldownUntilUtc <= now)
-                {
-                    state.CooldownUntilUtc = null;
-                }
-                if (state.CircuitState == ProviderCircuitState.Open)
-                {
-                    if (state.CooldownUntilUtc is { } cooldown && cooldown > now)
+                    var remaining = retryAfter - now;
+                    if (ExceedsInlineWaitLimit(state, retryAfter, remaining))
                     {
-                        throw new ProviderCircuitOpenException(provider, cooldown);
+                        throw new ProviderRetryAfterException(provider, retryAfter);
+                    }
+                    waitTask = state.GetOrStartCooldownWait(retryAfter, remaining, timeProvider);
+                }
+                else
+                {
+                    if (state.CircuitState == ProviderCircuitState.Closed && state.CooldownUntilUtc is { } closedCooldown && closedCooldown <= now)
+                    {
+                        state.CooldownUntilUtc = null;
+                        state.ClearCooldownWait();
                     }
 
-                    state.CircuitState = ProviderCircuitState.HalfOpen;
-                    state.CurrentConcurrency = 1;
-                }
+                    if (state.CircuitState == ProviderCircuitState.Open)
+                    {
+                        if (state.CooldownUntilUtc is { } cooldown && cooldown > now)
+                        {
+                            var remaining = cooldown - now;
+                            if (remaining > MaximumInlineWait())
+                            {
+                                throw new ProviderCircuitOpenException(provider, cooldown);
+                            }
+                            waitTask = state.GetOrStartCooldownWait(cooldown, remaining, timeProvider);
+                        }
+                        else
+                        {
+                            state.CircuitState = ProviderCircuitState.HalfOpen;
+                            state.CurrentConcurrency = 1;
+                            state.ClearCooldownWait();
+                            waitTask = Task.CompletedTask;
+                        }
+                    }
+                    else
+                    {
+                        waitTask = Task.CompletedTask;
+                    }
 
-                var allowed = state.CircuitState == ProviderCircuitState.HalfOpen ? 1 : state.CurrentConcurrency;
-                if (state.ActiveRequests < allowed)
-                {
-                    state.ActiveRequests++;
-                    telemetry.SetProviderConcurrency(provider, state.CurrentConcurrency, state.ActiveRequests, state.CircuitState.ToString());
-                    return new ProviderExecutionLease(this, state, timeProvider.GetTimestamp());
-                }
+                    if (waitTask.IsCompleted)
+                    {
+                        var allowed = state.CircuitState == ProviderCircuitState.HalfOpen ? 1 : state.CurrentConcurrency;
+                        if (state.ActiveRequests < allowed)
+                        {
+                            state.ActiveRequests++;
+                            telemetry.SetProviderConcurrency(provider, state.CurrentConcurrency, state.ActiveRequests, state.CircuitState.ToString());
+                            return new ProviderExecutionLease(this, state, timeProvider.GetTimestamp());
+                        }
 
-                waitTask = state.Signal.Task;
+                        waitTask = state.Signal.Task;
+                    }
+                }
             }
             await waitTask.WaitAsync(cancellationToken);
         }
@@ -77,13 +103,17 @@ public sealed class AdaptiveProviderPolicy(
         {
             previousCircuitState = state.CircuitState;
             state.ActiveRequests = Math.Max(0, state.ActiveRequests - 1);
-            state.EwmaLatencyMilliseconds = state.EwmaLatencyMilliseconds is null
-                ? elapsed.TotalMilliseconds
-                : (state.EwmaLatencyMilliseconds.Value * 0.8) + (elapsed.TotalMilliseconds * 0.2);
             var now = timeProvider.GetUtcNow();
 
-            if (result == ProviderExecutionResult.Success)
+            if (result == ProviderExecutionResult.Cancelled)
             {
+                // Caller cancellation says nothing about provider health or latency.
+            }
+            else if (result == ProviderExecutionResult.Success)
+            {
+                state.EwmaLatencyMilliseconds = state.EwmaLatencyMilliseconds is null
+                    ? elapsed.TotalMilliseconds
+                    : (state.EwmaLatencyMilliseconds.Value * 0.8) + (elapsed.TotalMilliseconds * 0.2);
                 state.ConsecutiveFailures = 0;
                 state.WindowFailureCount = 0;
                 state.FailureWindowStartedUtc = null;
@@ -92,6 +122,7 @@ public sealed class AdaptiveProviderPolicy(
                 {
                     state.CircuitState = ProviderCircuitState.Closed;
                     state.CooldownUntilUtc = null;
+                    state.ClearCooldownWait();
                 }
                 if (state.ConsecutiveSuccesses >= 20
                     && state.CurrentConcurrency < state.MaximumConcurrency
@@ -103,6 +134,9 @@ public sealed class AdaptiveProviderPolicy(
             }
             else
             {
+                state.EwmaLatencyMilliseconds = state.EwmaLatencyMilliseconds is null
+                    ? elapsed.TotalMilliseconds
+                    : (state.EwmaLatencyMilliseconds.Value * 0.8) + (elapsed.TotalMilliseconds * 0.2);
                 state.ConsecutiveSuccesses = 0;
                 state.ConsecutiveFailures++;
                 if (state.FailureWindowStartedUtc is null || now - state.FailureWindowStartedUtc > TimeSpan.FromMinutes(2))
@@ -115,7 +149,8 @@ public sealed class AdaptiveProviderPolicy(
                 {
                     state.CurrentConcurrency = Math.Max(1, state.CurrentConcurrency / 2);
                     state.LastThrottledUtc = now;
-                    state.CooldownUntilUtc = now.Add(ClampRetryAfter(retryAfter));
+                    state.CooldownUntilUtc = AddDelay(now, GetThrottleDelay(retryAfter));
+                    state.ClearCooldownWait();
                 }
                 else if (state.ConsecutiveFailures >= 2)
                 {
@@ -125,7 +160,11 @@ public sealed class AdaptiveProviderPolicy(
                 {
                     state.CurrentConcurrency = Math.Max(1, state.CurrentConcurrency / 2);
                     state.CircuitState = ProviderCircuitState.Open;
-                    state.CooldownUntilUtc = now.AddSeconds(60);
+                    var circuitCooldown = AddDelay(now, TimeSpan.FromSeconds(60));
+                    state.CooldownUntilUtc = state.CooldownUntilUtc is { } existingCooldown && existingCooldown > circuitCooldown
+                        ? existingCooldown
+                        : circuitCooldown;
+                    state.ClearCooldownWait();
                 }
             }
 
@@ -146,28 +185,66 @@ public sealed class AdaptiveProviderPolicy(
     public IReadOnlyList<ProviderAdaptiveSnapshot> GetSnapshots()
         => _states.Values.Select(state => state.ToSnapshot(timeProvider.GetUtcNow())).OrderBy(state => state.Provider).ToArray();
 
+    internal DateTimeOffset GetUtcNow() => timeProvider.GetUtcNow();
+
+    internal CancellationTokenSource? CreateRequestTimeoutSource(TimeSpan? requestTimeout)
+    {
+        if (requestTimeout is null || requestTimeout == Timeout.InfiniteTimeSpan) return null;
+        if (requestTimeout < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(requestTimeout));
+        return new CancellationTokenSource(requestTimeout.Value, timeProvider);
+    }
+
     internal async Task DelayBeforeRetryAsync(string provider, int attempt, TimeSpan? retryAfter, CancellationToken cancellationToken)
     {
         telemetry.RecordProviderRetry(provider, retryAfter is null ? "transient" : "retry_after");
-        var maximum = TimeSpan.FromSeconds(Math.Clamp(_schedulerOptions.RetryMaximumSeconds, 1, 300));
+        var maximum = MaximumInlineWait();
         var delay = retryAfter is { } declared
-            ? declared
+            ? NormalizeRetryAfter(declared)
             : TimeSpan.FromMilliseconds(
                 Math.Clamp(_schedulerOptions.RetryBaseMilliseconds, 50, 30_000)
                 * Math.Pow(2, Math.Max(0, attempt - 1))
                 * (0.75 + (Random.Shared.NextDouble() * 0.5)));
-        await Task.Delay(delay > maximum ? maximum : delay, timeProvider, cancellationToken);
+        if (delay >= maximum)
+        {
+            if (retryAfter is not null)
+            {
+                throw new ProviderRetryAfterException(provider, AddDelay(timeProvider.GetUtcNow(), delay));
+            }
+            delay = maximum;
+        }
+        await Task.Delay(delay, timeProvider, cancellationToken);
     }
 
-    private TimeSpan ClampRetryAfter(TimeSpan? retryAfter)
+    private TimeSpan MaximumInlineWait()
+        => TimeSpan.FromSeconds(Math.Clamp(_schedulerOptions.RetryMaximumSeconds, 1, 300));
+
+    private bool ExceedsInlineWaitLimit(ProviderRuntimeState state, DateTimeOffset deadlineUtc, TimeSpan remaining)
     {
-        var seconds = retryAfter?.TotalSeconds ?? Math.Clamp(_schedulerOptions.RetryBaseMilliseconds, 50, 30_000) / 1000d;
-        return TimeSpan.FromSeconds(Math.Clamp(seconds, 0.05, Math.Clamp(_schedulerOptions.RetryMaximumSeconds, 1, 300)));
+        var maximum = MaximumInlineWait();
+        if (remaining > maximum) return true;
+        return state.LastThrottledUtc is { } throttledUtc
+            && deadlineUtc >= throttledUtc
+            && deadlineUtc - throttledUtc >= maximum;
     }
+
+    private TimeSpan GetThrottleDelay(TimeSpan? retryAfter)
+    {
+        if (retryAfter is { } declared) return NormalizeRetryAfter(declared);
+        var baseMilliseconds = Math.Clamp(_schedulerOptions.RetryBaseMilliseconds, 50, 30_000);
+        return TimeSpan.FromMilliseconds(baseMilliseconds * (0.75 + (Random.Shared.NextDouble() * 0.5)));
+    }
+
+    private static TimeSpan NormalizeRetryAfter(TimeSpan retryAfter)
+        => retryAfter < TimeSpan.FromMilliseconds(50) ? TimeSpan.FromMilliseconds(50) : retryAfter;
+
+    private static DateTimeOffset AddDelay(DateTimeOffset now, TimeSpan delay)
+        => delay > DateTimeOffset.MaxValue - now ? DateTimeOffset.MaxValue : now + delay;
 
     internal sealed class ProviderRuntimeState(string provider, int maximumConcurrency)
     {
-        private int _loaded;
+        private Task? _loadTask;
+        private DateTimeOffset? _cooldownWaitUntilUtc;
+        private Task? _cooldownWaitTask;
         public object Gate { get; } = new();
         public string Provider { get; } = provider;
         public int MaximumConcurrency { get; } = maximumConcurrency;
@@ -185,21 +262,70 @@ public sealed class AdaptiveProviderPolicy(
 
         public async Task EnsureLoadedAsync(ProviderAdaptiveStateStore store, CancellationToken cancellationToken)
         {
-            if (Interlocked.Exchange(ref _loaded, 1) != 0) return;
-            var persisted = await store.GetAsync(Provider, cancellationToken);
-            if (persisted is null) return;
+            Task loadTask;
+            TaskCompletionSource? startLoad = null;
             lock (Gate)
             {
-                CurrentConcurrency = Math.Clamp(persisted.CurrentConcurrency, 1, MaximumConcurrency);
-                ConsecutiveSuccesses = persisted.ConsecutiveSuccesses;
-                ConsecutiveFailures = persisted.ConsecutiveFailures;
-                WindowFailureCount = persisted.WindowFailureCount;
-                FailureWindowStartedUtc = persisted.FailureWindowStartedUtc;
-                EwmaLatencyMilliseconds = persisted.EwmaLatencyMilliseconds;
-                CircuitState = persisted.CircuitState;
-                CooldownUntilUtc = persisted.CooldownUntilUtc;
-                LastThrottledUtc = persisted.LastThrottledUtc;
+                if (_loadTask is null)
+                {
+                    startLoad = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _loadTask = startLoad.Task;
+                }
+                loadTask = _loadTask;
             }
+
+            if (startLoad is not null) _ = LoadAsync(store, startLoad);
+            await loadTask.WaitAsync(cancellationToken);
+        }
+
+        private async Task LoadAsync(ProviderAdaptiveStateStore store, TaskCompletionSource completion)
+        {
+            try
+            {
+                var persisted = await store.GetAsync(Provider, CancellationToken.None);
+                if (persisted is not null)
+                {
+                    lock (Gate)
+                    {
+                        CurrentConcurrency = Math.Clamp(persisted.CurrentConcurrency, 1, MaximumConcurrency);
+                        ConsecutiveSuccesses = persisted.ConsecutiveSuccesses;
+                        ConsecutiveFailures = persisted.ConsecutiveFailures;
+                        WindowFailureCount = persisted.WindowFailureCount;
+                        FailureWindowStartedUtc = persisted.FailureWindowStartedUtc;
+                        EwmaLatencyMilliseconds = persisted.EwmaLatencyMilliseconds;
+                        CircuitState = persisted.CircuitState;
+                        CooldownUntilUtc = persisted.CooldownUntilUtc;
+                        LastThrottledUtc = persisted.LastThrottledUtc;
+                    }
+                }
+                completion.TrySetResult();
+            }
+            catch (Exception exception)
+            {
+                lock (Gate)
+                {
+                    if (ReferenceEquals(_loadTask, completion.Task)) _loadTask = null;
+                }
+                completion.TrySetException(exception);
+            }
+        }
+
+        public Task GetOrStartCooldownWait(DateTimeOffset untilUtc, TimeSpan remaining, TimeProvider timeProvider)
+        {
+            if (_cooldownWaitTask is { IsCompleted: false } existing && _cooldownWaitUntilUtc == untilUtc)
+            {
+                return existing;
+            }
+
+            _cooldownWaitUntilUtc = untilUtc;
+            _cooldownWaitTask = Task.Delay(remaining, timeProvider, CancellationToken.None);
+            return _cooldownWaitTask;
+        }
+
+        public void ClearCooldownWait()
+        {
+            _cooldownWaitUntilUtc = null;
+            _cooldownWaitTask = null;
         }
 
         public void Pulse()
@@ -266,7 +392,7 @@ public sealed class ProviderExecutionLease : IAsyncDisposable
     }
 }
 
-public enum ProviderExecutionResult { Success, Failed, Throttled }
+public enum ProviderExecutionResult { Success, Failed, Throttled, Cancelled }
 public enum ProviderCircuitState { Closed, Open, HalfOpen }
 
 public sealed record ProviderAdaptiveSnapshot(
@@ -284,57 +410,135 @@ public sealed record ProviderAdaptiveSnapshot(
     DateTimeOffset UpdatedUtc);
 
 public sealed class ProviderCircuitOpenException(string provider, DateTimeOffset retryUtc)
-    : HttpRequestException($"{provider} provider circuit is open until {retryUtc:O}.");
+    : HttpRequestException($"{provider} provider circuit is open until {retryUtc:O}.")
+{
+    public DateTimeOffset RetryAtUtc { get; } = retryUtc;
+}
 
 public sealed class ProviderRetryAfterException(string provider, DateTimeOffset retryUtc)
-    : HttpRequestException($"{provider} provider is throttled until {retryUtc:O}.");
+    : HttpRequestException($"{provider} provider is throttled until {retryUtc:O}.")
+{
+    public DateTimeOffset RetryAtUtc { get; } = retryUtc;
+}
 
 public sealed class AdaptiveProviderHandler(
     string provider,
     int maximumConcurrency,
-    AdaptiveProviderPolicy policy) : DelegatingHandler
+    AdaptiveProviderPolicy policy,
+    TimeSpan? requestTimeout = null) : DelegatingHandler
 {
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        var timeoutSource = policy.CreateRequestTimeoutSource(requestTimeout);
+        var timeoutLink = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource?.Token ?? default);
+        var requestToken = timeoutLink.Token;
+        var responseOwnsDeadline = false;
         using var activity = PremiereTelemetry.ActivitySource.StartActivity("provider.request", ActivityKind.Client);
         activity?.SetTag("provider", provider);
         activity?.SetTag("operation", request.Method.Method);
         var canRetry = request.Method == HttpMethod.Get || request.Method == HttpMethod.Head;
         var maximumAttempts = canRetry ? 3 : 1;
-        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        try
         {
-            await using var lease = await policy.AcquireAsync(provider, maximumConcurrency, cancellationToken);
-            try
+            for (var attempt = 1; attempt <= maximumAttempts; attempt++)
             {
-                using var retryRequest = attempt == 1 ? null : await CloneAsync(request, cancellationToken);
-                var response = await base.SendAsync(retryRequest ?? request, cancellationToken);
-                var result = response.StatusCode == HttpStatusCode.TooManyRequests
-                    ? ProviderExecutionResult.Throttled
-                    : (int)response.StatusCode >= 500
-                        ? ProviderExecutionResult.Failed
-                        : ProviderExecutionResult.Success;
-                var retryAfter = RetryAfter(response);
-                await lease.CompleteAsync(result, retryAfter, CancellationToken.None);
-                if (attempt == maximumAttempts || result == ProviderExecutionResult.Success) return response;
-                response.Dispose();
-                await policy.DelayBeforeRetryAsync(provider, attempt, retryAfter, cancellationToken);
+                var lease = await policy.AcquireAsync(provider, maximumConcurrency, requestToken);
+                var responseOwnsLease = false;
+                try
+                {
+                    HttpResponseMessage response;
+                    var requestSent = false;
+                    try
+                    {
+                        using var retryRequest = attempt == 1 ? null : await CloneAsync(request, requestToken);
+                        requestToken.ThrowIfCancellationRequested();
+                        requestSent = true;
+                        response = await base.SendAsync(retryRequest ?? request, requestToken);
+                    }
+                    catch (Exception) when (cancellationToken.IsCancellationRequested)
+                    {
+                        await lease.CompleteAsync(ProviderExecutionResult.Cancelled, null, CancellationToken.None);
+                        throw;
+                    }
+                    catch (Exception exception) when (timeoutSource?.IsCancellationRequested == true)
+                    {
+                        await lease.CompleteAsync(
+                            requestSent ? ProviderExecutionResult.Failed : ProviderExecutionResult.Cancelled,
+                            null,
+                            CancellationToken.None);
+                        if (requestSent)
+                        {
+                            throw DeadlineProviderContent.TimeoutException(provider, requestTimeout, exception, requestToken);
+                        }
+                        throw;
+                    }
+                    catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or TimeoutException)
+                    {
+                        await lease.CompleteAsync(ProviderExecutionResult.Failed, null, CancellationToken.None);
+                        if (attempt == maximumAttempts) throw;
+                        await policy.DelayBeforeRetryAsync(provider, attempt, null, requestToken);
+                        continue;
+                    }
+
+                    var result = response.StatusCode == HttpStatusCode.TooManyRequests
+                        ? ProviderExecutionResult.Throttled
+                        : (int)response.StatusCode >= 500
+                            ? ProviderExecutionResult.Failed
+                            : ProviderExecutionResult.Success;
+                    var retryAfter = RetryAfter(response, policy.GetUtcNow());
+                    // Retryable HTTP failures are known at headers; a successful transport
+                    // remains active until its body has been consumed or abandoned.
+                    if (result != ProviderExecutionResult.Success)
+                    {
+                        await lease.CompleteAsync(result, retryAfter, CancellationToken.None);
+                    }
+                    if (attempt == maximumAttempts || result == ProviderExecutionResult.Success)
+                    {
+                        if (request.Method == HttpMethod.Head
+                            || response.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotModified
+                            || response.Content.Headers.ContentLength == 0)
+                        {
+                            await lease.CompleteAsync(result, retryAfter, CancellationToken.None);
+                        }
+                        else
+                        {
+                            response.Content = new DeadlineProviderContent(
+                                response.Content, provider, requestTimeout, timeoutSource, timeoutLink,
+                                cancellationToken, result == ProviderExecutionResult.Success ? lease : null);
+                            responseOwnsDeadline = true;
+                            responseOwnsLease = result == ProviderExecutionResult.Success;
+                        }
+                        return response;
+                    }
+                    response.Dispose();
+                    if (result != ProviderExecutionResult.Throttled)
+                    {
+                        await policy.DelayBeforeRetryAsync(provider, attempt, retryAfter, requestToken);
+                    }
+                }
+                finally
+                {
+                    if (!responseOwnsLease) await lease.DisposeAsync();
+                }
             }
-            catch (Exception ex) when ((ex is HttpRequestException or TaskCanceledException) && !cancellationToken.IsCancellationRequested)
+            throw new UnreachableException();
+        }
+        finally
+        {
+            if (!responseOwnsDeadline)
             {
-                await lease.CompleteAsync(ProviderExecutionResult.Failed, null, CancellationToken.None);
-                if (attempt == maximumAttempts) throw;
-                await policy.DelayBeforeRetryAsync(provider, attempt, null, cancellationToken);
+                timeoutLink.Dispose();
+                timeoutSource?.Dispose();
             }
         }
-        throw new UnreachableException();
     }
 
-    private static TimeSpan? RetryAfter(HttpResponseMessage response)
+    private static TimeSpan? RetryAfter(HttpResponseMessage response, DateTimeOffset now)
     {
         if (response.Headers.RetryAfter?.Delta is { } delta) return delta;
         if (response.Headers.RetryAfter?.Date is { } date)
         {
-            var remaining = date - DateTimeOffset.UtcNow;
+            var remaining = date - now;
             return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
         }
         return null;
@@ -360,8 +564,8 @@ public sealed class AdaptiveProviderHandler(
 
 public sealed class AdaptiveProviderHandlerFactory(AdaptiveProviderPolicy policy)
 {
-    public DelegatingHandler Create(string provider, int maximumConcurrency)
-        => new AdaptiveProviderHandler(provider, Math.Max(1, maximumConcurrency), policy);
+    public DelegatingHandler Create(string provider, int maximumConcurrency, TimeSpan? requestTimeout = null)
+        => new AdaptiveProviderHandler(provider, Math.Max(1, maximumConcurrency), policy, requestTimeout);
 }
 
 public sealed class ProviderAdaptiveStateStore(

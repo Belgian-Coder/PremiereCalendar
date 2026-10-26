@@ -77,11 +77,15 @@ IMDb scores and vote counts come from the official non-commercial `title.ratings
 "ImdbDataset": {
   "Enabled": true,
   "RatingsUrl": "https://datasets.imdbws.com/title.ratings.tsv.gz",
-  "RefreshIntervalHours": 24
+  "RefreshIntervalHours": 24,
+  "DownloadDirectory": "App_Data/tmp/imdb",
+  "MaxDownloadBytes": 536870912
 }
 ```
 
-The app downloads it on startup when due, decompresses and imports it into SQLite as a line-by-line async stream, and reuses it for exact IMDb ID matches. The importer does not retain the full dataset in managed memory. Calendar enrichment resolves the needed IDs in bounded SQLite batches. IMDb does not provide a per-item change endpoint for this dataset.
+The app downloads it on startup when due, then decompresses and imports it into the database as a line-by-line async stream. The compressed download is staged on disk, limited to 512 MiB by default, and deleted when the import finishes or fails. On later imports, a best-effort sweep removes owned scratch files older than 24 hours, including Linux hard-termination leftovers. Fresh and unrelated files are preserved. The HTTP timeout ends after downloading; database import time uses only the caller's cancellation token. Relative download paths resolve beneath the application content root. Keep this directory on a writable volume with enough free space; container `/tmp` can be too small for the full dataset.
+
+The importer does not retain the full dataset in managed memory. Calendar enrichment resolves exact IMDb IDs in bounded database batches. IMDb does not provide a per-item change endpoint for this dataset.
 
 ## Health Check
 
@@ -313,6 +317,14 @@ Foreground UI loads have their own budget:
 If the budget expires, the UI renders the best cached or partial result and marks the source progress as stopped. Partial foreground diagnostics are not treated as a fresh complete week cache.
 
 ## Image Cache
+
+`ImageCache:MaxConcurrentDecodes` defaults to 2 and is shared across requests. Staged resize work is bounded by the decode limit plus `MaxConcurrentDownloads`. `MaxDecodedPixels` defaults to 40,000,000 across all frames; oversized animations are rejected before full decoding. `RequestTimeoutSeconds` defaults to 20 and bounds cache-miss fetch, response-body reads, decoding, hashing, and metadata publication. A timed-out miss returns a short-lived stale image when available, otherwise a transient response. Caller cancellation propagates.
+
+Magick.NET handles raster conversion on Windows and Linux without a license key or fee. Its shipped policy restricts codecs to raster formats and disables delegates, filters, and indirect reads. Native pixel caches have a shared 512 MiB ceiling, with disk spill disabled, one native processing thread per operation, and a 1,000-frame sequence limit. The configured image-pixel limit still applies. Cancellation is checked around native operations and between frames; an individual synchronous native call may finish before cancellation is observed. Generated configuration lives in writable `App_Data/cache/ImageMagick`; the application atomically refreshes its policy from the published copy on initialization.
+
+Image bodies use immutable content-hash generations selected by an atomic metadata file. Existing URL/width/format keys and legacy cache files remain readable; orphaned generations are removed by normal retention cleanup.
+
+Animated PNG is served as its original `image/png` bytes, including for width-specific WebP requests. Structural checks validate checksums, frame sequences, canvas bounds and the configured pixel/frame limits; the native decoder also validates the default PNG image. This preserves animation without another decoder or external process. CSS still sizes the image, while server resizing is skipped for APNG. Native memory-capacity failures use stale fallback or a retryable 503 response with `no-store`.
 
 Poster and backdrop image bytes are cached through a local endpoint by default:
 

@@ -9,62 +9,102 @@ public static class ProviderClientServiceExtensions
 {
     public static IServiceCollection AddPremiereProviderClients(this IServiceCollection services)
     {
-        services.AddHttpClient<ITmdbClient, TmdbClient>((sp, client) => ConfigureJson(client, sp.GetRequiredService<IOptions<TmdbOptions>>().Value.BaseUrl, 30))
-            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("tmdb", sp.GetRequiredService<IOptions<TmdbOptions>>().Value.MaxConcurrentRequests));
-        services.AddHttpClient<IOmdbClient, OmdbClient>((sp, client) => ConfigureJson(client, sp.GetRequiredService<IOptions<OmdbOptions>>().Value.BaseUrl, 30))
-            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("omdb", 2));
+        services.AddHttpClient<ITmdbClient, TmdbClient>((sp, client) =>
+            ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<TmdbOptions>>().Value.BaseUrl))
+            .AddHttpMessageHandler(sp =>
+            {
+                var options = sp.GetRequiredService<IOptions<TmdbOptions>>().Value;
+                return sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+                    .Create("tmdb", options.MaxConcurrentRequests, TimeSpan.FromSeconds(30));
+            });
+        services.AddHttpClient<IOmdbClient, OmdbClient>((sp, client) =>
+            ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<OmdbOptions>>().Value.BaseUrl))
+            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+                .Create("omdb", 2, TimeSpan.FromSeconds(30)));
         services.AddHttpClient<IImdbDatasetImporter, ImdbDatasetImporter>((sp, client) =>
         {
             client.BaseAddress = new Uri("https://datasets.imdbws.com/");
-            client.Timeout = TimeSpan.FromSeconds(Math.Clamp(sp.GetRequiredService<IOptions<ImdbDatasetOptions>>().Value.RequestTimeoutSeconds, 30, 600));
+            client.Timeout = Timeout.InfiniteTimeSpan;
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("imdb-dataset", 1));
+        }).AddHttpMessageHandler(sp =>
+        {
+            var timeout = TimeSpan.FromSeconds(Math.Clamp(
+                sp.GetRequiredService<IOptions<ImdbDatasetOptions>>().Value.RequestTimeoutSeconds, 30, 600));
+            return sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("imdb-dataset", 1, timeout);
+        });
         services.AddHttpClient<ITvmazeClient, TvmazeClient>((sp, client) =>
         {
             var options = sp.GetRequiredService<IOptions<TvmazeOptions>>().Value;
-            ConfigureJson(client, options.BaseUrl, 30);
+            ConfigureAdaptiveJson(client, options.BaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("tvmaze", sp.GetRequiredService<IOptions<TvmazeOptions>>().Value.MaxConcurrentRequests));
-        services.AddHttpClient<IFanartClient, FanartClient>((sp, client) => ConfigureJson(client, sp.GetRequiredService<IOptions<FanartOptions>>().Value.BaseUrl, 30))
-            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("fanart", 2));
+        }).AddHttpMessageHandler(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<TvmazeOptions>>().Value;
+            return sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+                .Create("tvmaze", options.MaxConcurrentRequests, TimeSpan.FromSeconds(30));
+        });
+        services.AddHttpClient<IFanartClient, FanartClient>((sp, client) =>
+            ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<FanartOptions>>().Value.BaseUrl))
+            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+                .Create("fanart", 2, TimeSpan.FromSeconds(30)));
         services.AddHttpClient<ITraktClient, TraktClient>((sp, client) =>
         {
-            ConfigureJson(client, sp.GetRequiredService<IOptions<TraktOptions>>().Value.BaseUrl, 30);
+            ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<TraktOptions>>().Value.BaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("trakt", 2));
-        services.AddHttpClient<ITheTvdbClient, TheTvdbClient>((sp, client) => ConfigureJson(client, sp.GetRequiredService<IOptions<TheTvdbOptions>>().Value.BaseUrl, 30))
-            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("thetvdb", 2));
+        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+            .Create("trakt", 2, TimeSpan.FromSeconds(30)));
+        services.AddHttpClient<ITheTvdbClient, TheTvdbClient>((sp, client) =>
+            ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<TheTvdbOptions>>().Value.BaseUrl))
+            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+                .Create("thetvdb", 2, TimeSpan.FromSeconds(30)));
         services.AddHttpClient<IWikimediaClient, WikimediaClient>((sp, client) =>
         {
-            ConfigureJson(client, sp.GetRequiredService<IOptions<WikimediaOptions>>().Value.WikidataBaseUrl, 100);
+            ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<WikimediaOptions>>().Value.WikidataBaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("wikimedia", 2));
+        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+            .Create("wikimedia", 2, TimeSpan.FromSeconds(100)));
         services.AddHttpClient<IRottenTomatoesClient, RottenTomatoesClient>((sp, client) =>
         {
             var options = sp.GetRequiredService<IOptions<RottenTomatoesOptions>>().Value;
             client.BaseAddress = new Uri(options.BaseUrl);
-            client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 120));
+            client.Timeout = Timeout.InfiniteTimeSpan;
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("rottentomatoes", 2));
+        }).AddHttpMessageHandler(sp =>
+        {
+            var timeout = TimeSpan.FromSeconds(Math.Clamp(
+                sp.GetRequiredService<IOptions<RottenTomatoesOptions>>().Value.RequestTimeoutSeconds, 5, 120));
+            return sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("rottentomatoes", 2, timeout);
+        });
         services.AddHttpClient<IWatchmodeClient, WatchmodeClient>((sp, client) =>
         {
             var options = sp.GetRequiredService<IOptions<WatchmodeOptions>>().Value;
-            ConfigureJson(client, options.BaseUrl, options.RequestTimeoutSeconds);
+            ConfigureAdaptiveJson(client, options.BaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("watchmode", 2));
+        }).AddHttpMessageHandler(sp =>
+        {
+            var timeout = TimeSpan.FromSeconds(Math.Clamp(
+                sp.GetRequiredService<IOptions<WatchmodeOptions>>().Value.RequestTimeoutSeconds, 5, 120));
+            return sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("watchmode", 2, timeout);
+        });
         services.AddHttpClient<ISimklClient, SimklClient>((sp, client) =>
         {
             var options = sp.GetRequiredService<IOptions<SimklOptions>>().Value;
-            ConfigureJson(client, options.BaseUrl, options.RequestTimeoutSeconds);
+            ConfigureAdaptiveJson(client, options.BaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("simkl", 2));
+        }).AddHttpMessageHandler(sp =>
+        {
+            var timeout = TimeSpan.FromSeconds(Math.Clamp(
+                sp.GetRequiredService<IOptions<SimklOptions>>().Value.RequestTimeoutSeconds, 5, 120));
+            return sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("simkl", 2, timeout);
+        });
         services.AddHttpClient<FileImageCache>(client =>
         {
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
-            client.Timeout = TimeSpan.FromSeconds(20);
+            client.Timeout = Timeout.InfiniteTimeSpan;
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("images", 4));
+        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+            .Create("images", 4, TimeSpan.FromSeconds(20)));
         services.AddHttpClient<IArrIntegrationService, ArrIntegrationService>(client =>
         {
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -79,10 +119,10 @@ public static class ProviderClientServiceExtensions
         return services;
     }
 
-    private static void ConfigureJson(HttpClient client, string baseUrl, int timeoutSeconds)
+    private static void ConfigureAdaptiveJson(HttpClient client, string baseUrl)
     {
         client.BaseAddress = new Uri(baseUrl);
-        client.Timeout = TimeSpan.FromSeconds(Math.Clamp(timeoutSeconds, 5, 120));
+        client.Timeout = Timeout.InfiniteTimeSpan;
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
 

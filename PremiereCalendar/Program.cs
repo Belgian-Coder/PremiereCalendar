@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.Components.Server;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 using PremiereCalendar.Components;
 using PremiereCalendar.Hosting;
 using PremiereCalendar.Options;
@@ -159,7 +160,7 @@ app.MapGet(
                     : ImageCacheFormat.Original;
             var image = await imageCache.GetOrAddAsync(url, refresh == true, cancellationToken, w, format);
             var maxAgeSeconds = Math.Max(60, Convert.ToInt32(image.BrowserMaxAge.TotalSeconds));
-            var entityTag = $"\"{image.CacheKey}\"";
+            var entityTag = $"\"{image.ContentHash ?? image.CacheKey}\"";
 
             httpContext.Response.Headers.CacheControl = $"public, max-age={maxAgeSeconds}";
             httpContext.Response.Headers.Vary = "Accept";
@@ -172,7 +173,13 @@ app.MapGet(
             }
 
             return Results.File(
-                File.OpenRead(image.FilePath),
+                new FileStream(
+                    image.FilePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read | FileShare.Delete,
+                    81920,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan),
                 image.ContentType,
                 lastModified: image.LastModifiedUtc,
                 entityTag: new Microsoft.Net.Http.Headers.EntityTagHeaderValue(entityTag),
@@ -185,6 +192,12 @@ app.MapGet(
         catch (ExternalApiException)
         {
             return Results.NotFound();
+        }
+          catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or UnauthorizedAccessException
+            || ex is OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            httpContext.Response.Headers.CacheControl = "no-store";
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
     });
 

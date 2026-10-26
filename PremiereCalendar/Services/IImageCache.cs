@@ -29,4 +29,6 @@ public sealed record CachedImage(
     string ContentType,
     DateTimeOffset LastModifiedUtc,
     string CacheKey,
-    TimeSpan BrowserMaxAge);
+    TimeSpan BrowserMaxAge,
+    string? ContentHash = null,
+    bool IsStale = false);

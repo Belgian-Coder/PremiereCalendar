@@ -8,3 +8,6 @@
 *.gif binary
 *.webp binary
 *.ico binary
+
+# Preserve upstream license text, including its original whitespace.
+PremiereCalendar/ThirdPartyNotices/Magick.NET-ImageMagick-Notice.txt -whitespace

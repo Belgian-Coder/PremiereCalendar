@@ -8,7 +8,7 @@ using PremiereCalendar.Services;
 namespace PremiereCalendar.UnitTests;
 
 [Collection(SqliteTestCollection.Name)]
-public sealed class ProviderWorkSchedulerTests : IAsyncLifetime
+public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-scheduler-tests", Guid.NewGuid().ToString("N"));
     private ProviderWorkStore _store = null!;

@@ -2,6 +2,8 @@
 
 Normal automated tests must not call live external providers. TMDb, OMDb, TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, Wikimedia, Sonarr, and Radarr behavior must be covered with fake HTTP handlers, test doubles, and JSON fixtures.
 
+Use `dotnet test PremiereCalendar.slnx -c Release -m:1` for acceptance that includes browser timing budgets. Running the memory/CPU-intensive service fixtures concurrently with Playwright can distort those timings. Keep all existing assertions unchanged. See [speed and reliability validation](SpeedReliabilityValidation.md) for the measured workload, PostgreSQL and container evidence, and review results.
+
 ## Layers
 
 Unit tests cover pure behavior:
@@ -81,6 +83,12 @@ Component tests cover Blazor rendering:
 ```powershell
 dotnet test
 ```
+
+PostgreSQL acceptance requires `PREMIERECALENDAR_TEST_POSTGRES` and, when needed, `PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE`. Use a dedicated test server: the tests create and drop randomly named isolated databases. Missing configuration is reported as skipped, not as a passing persistence test.
+
+`ProviderWorkSchedulerDurabilityTests` covers checkpoint accumulation, failure exclusion, deferred work, independent lease renewal, stale-owner fencing, watcher priority, and bounded progress replay. `CalendarLoadPerformanceTests` uses the real scheduler with both workers occupied for 300 ms and 2,000 deterministic rows split across seven days. It covers cold, fresh, and stale caches. Its `PERFORMANCE` output is retained in TRX results or shown with `--logger 'console;verbosity=detailed'`.
+
+The browser fixture deliberately replaces live providers and disables background scheduling. Its desktop/mobile rendering checks complement scheduler-enabled service tests; they do not establish PostgreSQL or live-provider acceptance. See [speed and reliability validation](SpeedReliabilityValidation.md).
 
 ## Fixtures
 

@@ -1,6 +1,24 @@
 # Performance Review
 
-Last reviewed: 2026-08-12.
+Last reviewed: 2026-10-26.
+
+## Calendar loading and recovery
+
+The supported runtime is Docker with PostgreSQL. Historical Windows hosting measurements below describe the compatibility deployment, not current container acceptance.
+
+Fresh complete calendar caches are read before provider scheduling, using the same shared series/movie keys and filter rules as background loads. Local IMDb and cached Rotten Tomatoes hydration remain available. Stale rows and rows needing remote score hydration are provisional; their durable job supplies subsequent progress. A complete cache hit creates no provider job or provider HTTP request.
+
+Provider cancellation caused by navigation, background preemption, or shutdown releases capacity without lowering concurrency or opening a circuit. Acquisitions share persisted-state initialization and cooldown waits. Long provider deadlines survive restart and defer durable work through `NextAttemptUtc` rather than retrying early.
+
+Scheduler checkpoints retain the union of successfully completed sources and their completion times. Failed sources remain retryable, and legacy checkpoints conservatively rerun uncertain source states. Successful sources older than `WeekCacheHours` are fetched again after long deferrals. Source completion means iterator exhaustion: processing counters reaching their current total do not establish completion. Source completion and final snapshots persist immediately; other progress persists at most once every two seconds. Dense source snapshots coalesce at 250 ms, retaining every row and always flushing errors and completion. Diagnostics retain the latest update per source instead of every growing snapshot.
+
+Claims use unique ownership tokens, independently renewed leases, transactional lease/job updates, and fenced persistence. Calendar file publication holds the owned job lock, so an expired worker cannot overwrite a reclaimed job's cache. Recovery checks run every five seconds and terminal retention cleanup runs daily. Queued jobs without watchers yield priority; running foreground jobs finish and warm caches. Progress subscriptions retain bounded source summaries and the latest canonical snapshot, and late subscribers replay durable state.
+
+Calendar metadata reads use an optional item-count header; older envelopes retain their full-parse fallback. All-view warmup checks both media keys. Images share decode and staging limits across cache instances, reject oversized decoded images, use content-based ETags, and retain short-lived stale fallback. Cache readers allow atomic replacement while an existing reader finishes its original file.
+
+Backfill batches IMDb lookups, deduplicates detail and rating requests by their provider keys, and uses bounded workers while preserving input order and known values.
+
+See [speed and reliability validation](SpeedReliabilityValidation.md) for the controlled workload, results, and container acceptance evidence.
 
 ## .NET 11 Notes
 
@@ -63,19 +81,19 @@ Image optimization status:
 - Remote image URLs are allow-listed.
 - Posters go through `/cached-image`.
 - Card posters request width-specific variants using `w=185`.
-- Browsers advertise image formats through `Accept`; width-specific poster requests are stored as WebP when supported and JPEG/original bytes remain the fallback.
+- Browsers advertise image formats through `Accept`; width-specific poster requests are stored as WebP when supported and JPEG/original bytes remain the fallback. APNG retains its bounded original PNG bytes to preserve animation; CSS controls its displayed size.
 - Format is part of the cache key and `/cached-image` returns `Vary: Accept`, so WebP and fallback representations cannot collide.
 - Browser responses include cache headers, ETags, Last-Modified, range support, and stale fallback.
 - Resized image fetches now use a bounded temporary source file instead of a `MemoryStream`, reducing managed byte-array pressure for large remote posters.
 - Deployment updates should use `deploy/Publish-PremiereCalendar.ps1` so the hosted `App_Data` folder is preserved. The local calendar and image caches are runtime data, not publish artifacts.
 
-Remaining practical limit: ImageSharp still has to decode the image into image memory to resize it. The app limits source bytes before decode with `ImageCache:MaxBytes`.
+Resizing still requires decoded image memory. The app limits source bytes before decode with `ImageCache:MaxBytes`, checks the total decoded frame pixels, and shares the decode limiter across cache instances. Magick.NET replaces ImageSharp and retains JPEG, WebP, animation, and TIFF conversion without a license key.
 
 ## Streaming
 
 `PremiereService.StreamPremieresAsync` is real streaming at the source, provider, and enrichment-batch level. Trakt, TVmaze schedules, and TMDb day batches run as separate bounded source work instead of one combined external-calendar bucket. TMDb fetches page 1 first, then later page chunks; raw TMDb metadata is emitted before detail enrichment, and enriched chunks follow in smaller batches so the page receives `PremiereLoadProgress` after about 10 newly enriched cards instead of waiting for an entire large page batch.
 
-IMDb's daily gzip import is also streamed line-by-line into one SQLite transaction. It no longer retains roughly 1.7 million `ImdbRatingRecord` objects before writing. Calendar enrichment gathers the visible IMDb IDs and resolves them in bounded SQLite `IN` batches instead of opening one query per card. SIMKL calendar JSON is deserialized as an async stream, filtered to the requested date range before retention, and stored in an eight-entry range-scoped LRU rather than the shared unbounded memory cache.
+IMDb's daily gzip import stages the bounded compressed download on disk, releases the HTTP response and provider slot, and then streams rows into one database transaction. A slow database import no longer consumes the network timeout. It does not retain roughly 1.7 million `ImdbRatingRecord` objects before writing. Calendar enrichment gathers the visible IMDb IDs and resolves them in bounded database `IN` batches instead of opening one query per card. SIMKL calendar JSON is deserialized as an async stream, filtered to the requested date range before retention, and stored in an eight-entry range-scoped LRU rather than the shared unbounded memory cache.
 
 Benefit today:
 

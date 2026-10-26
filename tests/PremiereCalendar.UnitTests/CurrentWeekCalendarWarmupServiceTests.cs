@@ -156,6 +156,49 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
     }
 
     [Fact]
+    public async Task RunOnceAsync_PassesOwnedCachePublicationGuardToEachWindowPipeline()
+    {
+        var pipeline = new CapturingLoadPipeline();
+        var runner = new CurrentWeekCalendarWarmupRunner(
+            new RecordingPremiereService(),
+            new RecordingFilterUsageStore(),
+            new CalendarLoadCoordinator(),
+            Microsoft.Extensions.Options.Options.Create(new CalendarWarmupOptions
+            {
+                MaximumProfilesPerWake = 1,
+                TopFilterProfileCount = 0,
+                MaximumRemoteWindowsPerWake = 2
+            }),
+            new TestTimeProvider(new DateTimeOffset(2026, 5, 8, 12, 0, 0, TimeSpan.Zero)),
+            NullLogger<CurrentWeekCalendarWarmupRunner>.Instance,
+            loadPipeline: pipeline);
+        var callbackInvoked = false;
+        var resumeState = new ProviderWorkResumeState(
+            new Dictionary<string, IReadOnlyList<PremiereItem>>(StringComparer.Ordinal),
+            LatestProgress: null)
+        {
+            PublishCacheAsync = async (publish, token) =>
+            {
+                callbackInvoked = true;
+                await publish(token);
+            }
+        };
+
+        await runner.RunOnceAsync(CancellationToken.None, resumeState);
+
+        Assert.Equal(2, pipeline.ResumeStates.Count);
+        var passedState = pipeline.ResumeStates[0];
+        Assert.NotNull(passedState);
+        Assert.NotSame(resumeState, passedState);
+        Assert.Contains("first-window", passedState.CompletedSources.Keys);
+        var nextWindowState = Assert.IsType<ProviderWorkResumeState>(pipeline.ResumeStates[1]);
+        Assert.NotSame(passedState, nextWindowState);
+        Assert.Empty(nextWindowState.CompletedSources);
+        await passedState.PublishCacheAsync!(token => Task.CompletedTask, CancellationToken.None);
+        Assert.True(callbackInvoked);
+    }
+
+    [Fact]
     public async Task RunOnceWithResultAsync_ReportsProfileFailures()
     {
         var runner = new CurrentWeekCalendarWarmupRunner(
@@ -178,12 +221,53 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
         Assert.Equal(1, result.FailedProfiles);
     }
 
+    [Fact]
+    public async Task RunOnceAsync_AllPageTreatsWarmupFreshOnlyWhenBothSharedMediaCachesAreFresh()
+    {
+        var now = new DateTimeOffset(2026, 5, 8, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new TestTimeProvider(now);
+        var premiereService = new RecordingPremiereService();
+        var filters = new CalendarFilters { ShowSeries = true, ShowMovies = true };
+        var keys = SharedMediaCacheKeys(filters);
+        var maintenance = new RecordingCalendarCacheMaintenance(key => key == keys.Series || key == keys.Movies
+            ? new CalendarCacheMetadata(now, 1, 8, CalendarCacheCompleteness.Complete)
+            : null);
+        var runner = CreateAllPageRunner(premiereService, timeProvider, maintenance, filters);
+
+        await runner.RunOnceAsync(CancellationToken.None);
+
+        Assert.Empty(premiereService.Calls);
+        Assert.Equal(keys.Series, maintenance.RequestedKeys[0]);
+        Assert.Equal(keys.Movies, maintenance.RequestedKeys[1]);
+    }
+
+    [Fact]
+    public async Task RunOnceAsync_AllPageRefreshesWhenOneSharedMediaCacheIsMissing()
+    {
+        var now = new DateTimeOffset(2026, 5, 8, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new TestTimeProvider(now);
+        var premiereService = new RecordingPremiereService();
+        var filters = new CalendarFilters { ShowSeries = true, ShowMovies = true };
+        var keys = SharedMediaCacheKeys(filters);
+        var maintenance = new RecordingCalendarCacheMaintenance(key => key == keys.Series
+            ? new CalendarCacheMetadata(now, 1, 8, CalendarCacheCompleteness.Complete)
+            : null);
+        var runner = CreateAllPageRunner(premiereService, timeProvider, maintenance, filters);
+
+        await runner.RunOnceAsync(CancellationToken.None);
+
+        Assert.Single(premiereService.Calls);
+        Assert.Contains(keys.Series, maintenance.RequestedKeys);
+        Assert.Contains(keys.Movies, maintenance.RequestedKeys);
+    }
+
     private static CurrentWeekCalendarWarmupRunner CreateRunner(
         RecordingPremiereService premiereService,
         RecordingFilterUsageStore usageStore,
         TimeProvider timeProvider,
         CalendarWarmupOptions? options = null,
-        CalendarLoadCoordinator? coordinator = null)
+        CalendarLoadCoordinator? coordinator = null,
+        ICalendarCacheMaintenance? cacheMaintenance = null)
     {
         return new CurrentWeekCalendarWarmupRunner(
             premiereService,
@@ -196,7 +280,64 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
                 TopFilterProfileCount = 0
             }),
             timeProvider,
-            NullLogger<CurrentWeekCalendarWarmupRunner>.Instance);
+            NullLogger<CurrentWeekCalendarWarmupRunner>.Instance,
+            cacheMaintenance: cacheMaintenance);
+    }
+
+    private static CurrentWeekCalendarWarmupRunner CreateAllPageRunner(
+        RecordingPremiereService premiereService,
+        TestTimeProvider timeProvider,
+        ICalendarCacheMaintenance cacheMaintenance,
+        CalendarFilters filters)
+    {
+        var usageStore = new RecordingFilterUsageStore
+        {
+            TopProfiles =
+            [
+                new CalendarFilterUsageProfile(
+                    "used:all",
+                    CalendarPageMode.All,
+                    "",
+                    filters,
+                    UseCount: 1,
+                    LastUsedUtc: timeProvider.GetUtcNow(),
+                    LastWarmedUtc: null,
+                    LastItemCount: 0,
+                    LastFailure: null,
+                    IsDefault: false)
+            ],
+            InitialProfiles = new Dictionary<string, CalendarFilterUsageProfile>(StringComparer.Ordinal)
+            {
+                ["default:series"] = new CalendarFilterUsageProfile("default:series", CalendarPageMode.Series, "", new CalendarFilters(), 0, timeProvider.GetUtcNow(), timeProvider.GetUtcNow(), 0, null, true),
+                ["default:movies"] = new CalendarFilterUsageProfile("default:movies", CalendarPageMode.Movies, "", new CalendarFilters(), 0, timeProvider.GetUtcNow(), timeProvider.GetUtcNow(), 0, null, true)
+            }
+        };
+
+        return CreateRunner(
+            premiereService,
+            usageStore,
+            timeProvider,
+            new CalendarWarmupOptions
+            {
+                MinimumRemoteRefreshMinutes = 60,
+                MaximumProfilesPerWake = 3,
+                TopFilterProfileCount = 1,
+                MaximumRemoteWindowsPerWake = 1
+            },
+            cacheMaintenance: cacheMaintenance);
+    }
+
+    private static (string Series, string Movies) SharedMediaCacheKeys(CalendarFilters filters)
+    {
+        var seriesFilters = CalendarFilterState.Clone(filters);
+        CalendarFilterState.ApplyPageMode(seriesFilters, CalendarPageMode.Series);
+        CalendarFilterState.Normalize(seriesFilters);
+        var movieFilters = CalendarFilterState.Clone(filters);
+        CalendarFilterState.ApplyPageMode(movieFilters, CalendarPageMode.Movies);
+        CalendarFilterState.Normalize(movieFilters);
+        return (
+            PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(),
+            PremiereDiscoveryCriteria.FromFilters(movieFilters).CacheKey());
     }
 
     private static (DateOnly Start, DateOnly End)[] ExpectedWindowsForMay8()
@@ -306,11 +447,35 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
         }
     }
 
+    private sealed class CapturingLoadPipeline : IPremiereLoadPipeline
+    {
+        public List<ProviderWorkResumeState?> ResumeStates { get; } = [];
+
+        public async IAsyncEnumerable<PremiereLoadProgress> StreamCoreAsync(
+            DateOnly start,
+            DateOnly end,
+            bool forceRefresh,
+            CalendarFilters? filters,
+            ProviderWorkResumeState? resumeState,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            ResumeStates.Add(resumeState);
+            if (ResumeStates.Count == 1 && resumeState?.CompletedSources is IDictionary<string, IReadOnlyList<PremiereItem>> completedSources)
+            {
+                completedSources["first-window"] = [];
+            }
+            await Task.CompletedTask;
+            yield return new PremiereLoadProgress("Complete", 0, 0, [], IsFinal: true);
+        }
+    }
+
     private sealed class RecordingFilterUsageStore : ICalendarFilterUsageStore
     {
         private readonly Dictionary<string, CalendarFilterUsageProfile> _profiles = new(StringComparer.Ordinal);
 
         public IReadOnlyList<CalendarFilterUsageProfile> TopProfiles { get; init; } = [];
+        public IReadOnlyDictionary<string, CalendarFilterUsageProfile> InitialProfiles { get; init; }
+            = new Dictionary<string, CalendarFilterUsageProfile>(StringComparer.Ordinal);
 
         public Task RecordUseAsync(
             CalendarPageMode pageMode,
@@ -325,6 +490,10 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
         public Task<CalendarFilterUsageProfile?> GetProfileAsync(string profileKey, CancellationToken cancellationToken)
         {
             _profiles.TryGetValue(profileKey, out var profile);
+            if (profile is null)
+            {
+                InitialProfiles.TryGetValue(profileKey, out profile);
+            }
             return Task.FromResult(profile);
         }
 
@@ -376,6 +545,27 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
             DateTimeOffset cutoffUtc,
             IReadOnlySet<string> retainedProfileKeys,
             CancellationToken cancellationToken)
+        {
+            return Task.FromResult(0);
+        }
+    }
+
+    private sealed class RecordingCalendarCacheMaintenance(Func<string, CalendarCacheMetadata?> getMetadata)
+        : ICalendarCacheMaintenance
+    {
+        public List<string> RequestedKeys { get; } = [];
+
+        public Task<CalendarCacheMetadata?> GetWeekMetadataAsync(
+            DateOnly start,
+            DateOnly end,
+            string cacheKey,
+            CancellationToken cancellationToken)
+        {
+            RequestedKeys.Add(cacheKey);
+            return Task.FromResult(getMetadata(cacheKey));
+        }
+
+        public Task<int> CleanupAsync(DateTimeOffset nowUtc, TimeSpan retention, CancellationToken cancellationToken)
         {
             return Task.FromResult(0);
         }

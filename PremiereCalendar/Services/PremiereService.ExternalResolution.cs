@@ -177,7 +177,9 @@ public sealed partial class PremiereService
             yield break;
         }
 
-        yield return await GetCandidatesFromProviderAsync(provider, start, end, cancellationToken, forceRefresh);
+        // The source stream owns failure isolation and must retain the failure
+        // outcome so an unavailable provider is not cached as an empty success.
+        yield return await provider.GetCandidatesAsync(start, end, cancellationToken, forceRefresh);
     }
 
     private async IAsyncEnumerable<PremiereItemBatch> MapExternalCandidatesInProgressAsync(

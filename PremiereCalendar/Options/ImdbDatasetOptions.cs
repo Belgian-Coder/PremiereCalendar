@@ -8,4 +8,6 @@ public sealed class ImdbDatasetOptions
     public bool RefreshOnStartup { get; set; } = true;
     public int StartupDelaySeconds { get; set; } = 30;
     public int RequestTimeoutSeconds { get; set; } = 120;
+    public string DownloadDirectory { get; set; } = "App_Data/tmp/imdb";
+    public long MaxDownloadBytes { get; set; } = 512L * 1024 * 1024;
 }

@@ -71,6 +71,39 @@ public sealed class FileCalendarCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task SetWeekAsync_ReplacesFileWhileAnotherReaderKeepsOldSnapshotOpen()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = new DateOnly(2026, 5, 10);
+        var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
+        await cache.SetWeekAsync(start, end, "default", [new PremiereItem
+        {
+            CanonicalId = "movie:1",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 1,
+            Title = "First",
+            PremiereDate = start
+        }], CancellationToken.None);
+        await using var oldReader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+
+        await cache.SetWeekAsync(start, end, "default", [new PremiereItem
+        {
+            CanonicalId = "movie:2",
+            Type = PremiereItemType.MovieFirstRelease,
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 2,
+            Title = "Second",
+            PremiereDate = start
+        }], CancellationToken.None);
+
+        Assert.Equal("Second", Assert.Single((await cache.GetWeekAsync(start, end, "default", CancellationToken.None))!).Title);
+        using var oldDocument = await JsonDocument.ParseAsync(oldReader, cancellationToken: CancellationToken.None);
+        Assert.Equal("First", oldDocument.RootElement.GetProperty("items")[0].GetProperty("title").GetString());
+    }
+
+    [Fact]
     public async Task GetWeekAsync_IgnoresLegacyUnversionedCacheFiles()
     {
         var cache = CreateCache();
@@ -201,6 +234,162 @@ public sealed class FileCalendarCacheTests : IDisposable
         Assert.True(metadata.SchemaVersion > 0);
         Assert.Equal(CalendarCacheCompleteness.Complete, metadata.Completeness);
         Assert.True(DateTimeOffset.UtcNow - metadata.CachedAtUtc < TimeSpan.FromMinutes(1));
+    }
+
+    [Fact]
+    public async Task GetWeekMetadataAsync_UsesBoundedHeaderBeforeLargeItemsPayload()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = new DateOnly(2026, 5, 10);
+        await cache.SetWeekAsync(
+            start,
+            end,
+            "default",
+            [new PremiereItem
+            {
+                CanonicalId = "movie:large",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                Title = new string('x', 2 * 1024 * 1024),
+                PremiereDate = start
+            }],
+            CancellationToken.None);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var metadata = await ((ICalendarCacheMaintenance)cache).GetWeekMetadataAsync(
+            start,
+            end,
+            "default",
+            CancellationToken.None);
+        var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.NotNull(metadata);
+        Assert.Equal(1, metadata.ItemCount);
+        Assert.True(allocatedBytes < 1024 * 1024, $"Header read allocated {allocatedBytes} bytes.");
+    }
+
+    [Fact]
+    public async Task GetWeekMetadataAsync_FallsBackToFullParseWhenItemCountIsAbsent()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = new DateOnly(2026, 5, 10);
+        await cache.SetWeekAsync(
+            start,
+            end,
+            "default",
+            [new PremiereItem
+            {
+                CanonicalId = "movie:legacy-header",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                Title = "Legacy header",
+                PremiereDate = start
+            }],
+            CancellationToken.None);
+
+        var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
+        var envelope = JsonNode.Parse(await File.ReadAllTextAsync(path, CancellationToken.None))!;
+        envelope.AsObject().Remove("itemCount");
+        await File.WriteAllTextAsync(path, envelope.ToJsonString(), CancellationToken.None);
+
+        var metadata = await ((ICalendarCacheMaintenance)cache).GetWeekMetadataAsync(
+            start,
+            end,
+            "default",
+            CancellationToken.None);
+
+        Assert.NotNull(metadata);
+        Assert.Equal(1, metadata.ItemCount);
+    }
+
+    [Fact]
+    public async Task GetWeekMetadataAsync_SkipsUnknownNestedMetadataAcrossReadChunks()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = new DateOnly(2026, 5, 10);
+        var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var largeUnknown = new string('x', 5000);
+        var json = JsonSerializer.Serialize(new
+        {
+            schemaVersion = 8,
+            cachedAtUtc = new DateTimeOffset(2026, 5, 8, 10, 0, 0, TimeSpan.Zero),
+            itemCount = 1,
+            future = new { nested = new { padding = largeUnknown } },
+            items = Array.Empty<PremiereItem>()
+        });
+        await File.WriteAllTextAsync(path, json);
+
+        var metadata = await ((ICalendarCacheMaintenance)cache).GetWeekMetadataAsync(
+            start,
+            end,
+            "default",
+            CancellationToken.None);
+
+        Assert.NotNull(metadata);
+        Assert.Equal(1, metadata.ItemCount);
+    }
+
+    [Fact]
+    public async Task GetWeekMetadataAsync_MalformedNestedCompletenessFallsBackToCacheMiss()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = new DateOnly(2026, 5, 10);
+        var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllTextAsync(path,
+            """{"schemaVersion":8,"cachedAtUtc":"2026-05-08T10:00:00+00:00","itemCount":1,"completeness":{"unexpected":true},"items":[]}""");
+
+        var metadata = await ((ICalendarCacheMaintenance)cache).GetWeekMetadataAsync(
+            start,
+            end,
+            "default",
+            CancellationToken.None);
+        var items = await cache.GetWeekAsync(start, end, "default", CancellationToken.None, allowExpired: true);
+
+        Assert.Null(metadata);
+        Assert.Null(items);
+    }
+
+    [Fact]
+    public async Task GetWeekAsync_FreshReadRejectsPartialCacheButAllowExpiredCanReadIt()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = new DateOnly(2026, 5, 10);
+        await cache.SetWeekAsync(
+            start,
+            end,
+            "default",
+            [new PremiereItem
+            {
+                CanonicalId = "movie:partial",
+                Type = PremiereItemType.MovieFirstRelease,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                Title = "Partial",
+                PremiereDate = start
+            }],
+            CancellationToken.None);
+
+        var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
+        var envelope = JsonNode.Parse(await File.ReadAllTextAsync(path, CancellationToken.None))!;
+        envelope["completeness"] = (int)CalendarCacheCompleteness.Partial;
+        await File.WriteAllTextAsync(path, envelope.ToJsonString(), CancellationToken.None);
+
+        Assert.Null(await cache.GetWeekAsync(start, end, "default", CancellationToken.None));
+        Assert.Equal("Partial", Assert.Single((await cache.GetWeekAsync(
+            start,
+            end,
+            "default",
+            CancellationToken.None,
+            allowExpired: true))!).Title);
     }
 
     [Fact]

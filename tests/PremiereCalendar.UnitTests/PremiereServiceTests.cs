@@ -7,7 +7,7 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-public sealed class PremiereServiceTests
+public sealed partial class PremiereServiceTests
 {
     [Fact]
     public async Task GetPremieresAsync_DeduplicatesSameMediaTypeAndTmdbIdAcrossQueries()
@@ -178,10 +178,12 @@ public sealed class PremiereServiceTests
         var tmdbSeriesUpdates = reports
             .Where(report => report.SourceName == "TMDb series"
                 && !report.IsFinal
+                && report.Phase != "complete"
                 && report.ProgressText?.Contains("processed", StringComparison.OrdinalIgnoreCase) == true)
             .Select(report => report.CompletedWork ?? 0)
             .ToArray();
         Assert.Equal([10, 20, 30, 40, 45], tmdbSeriesUpdates);
+        Assert.Single(reports, report => report.SourceName == "TMDb series" && report.Phase == "complete");
     }
 
     [Fact]
@@ -4239,7 +4241,8 @@ public sealed class PremiereServiceTests
         string[]? sourceRegions = null,
         int sourceTimeoutSeconds = 120,
         int sourceFetchConcurrency = 4,
-        int enrichmentProgressBatchSize = 10)
+        int enrichmentProgressBatchSize = 10,
+        IProviderWorkScheduler? workScheduler = null)
     {
         return new PremiereService(
             tmdb,
@@ -4261,7 +4264,8 @@ public sealed class PremiereServiceTests
             NullLogger<PremiereService>.Instance,
             imdbRatingsStore,
             providerCacheStateStore: null,
-            rottenTomatoesClient: rottenTomatoes);
+            rottenTomatoesClient: rottenTomatoes,
+            workScheduler: workScheduler);
     }
 
     private static string CacheKeyForPageMode(CalendarFilters filters, CalendarPageMode pageMode)
@@ -4288,6 +4292,7 @@ public sealed class PremiereServiceTests
         public IReadOnlyList<TmdbTvDiscoverItem> TvItems { get; init; } = [];
         public Dictionary<string, IReadOnlyList<TmdbTvDiscoverItem>> TvItemsByOriginalLanguage { get; init; } = [];
         public IReadOnlyList<TmdbMovieDiscoverItem> MovieItems { get; init; } = [];
+        public bool FilterMovieItemsByDate { get; init; }
         public IReadOnlyList<TmdbDiscoverBatch<TmdbTvDiscoverItem>>? TvStreamBatches { get; init; }
         public TimeSpan? TvDetailDelay { get; init; }
         public TimeSpan? MovieDelay { get; init; }
@@ -4402,7 +4407,9 @@ public sealed class PremiereServiceTests
                 Interlocked.Decrement(ref _activeMovieDiscoveries);
             }
 
-            return MovieItems;
+            return FilterMovieItemsByDate
+                ? MovieItems.Where(item => DateOnly.TryParse(item.ReleaseDate, out var date) && date >= start && date <= end).ToArray()
+                : MovieItems;
         }
 
         public async IAsyncEnumerable<TmdbDiscoverBatch<TmdbMovieDiscoverItem>> StreamDiscoverMoviesAsync(

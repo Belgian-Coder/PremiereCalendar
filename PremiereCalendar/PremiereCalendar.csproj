@@ -20,12 +20,15 @@
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
     <PackageReference Include="Serilog.Formatting.Compact" Version="3.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+    <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="[15.0.0]" />
   </ItemGroup>
 
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>PremiereCalendar.UnitTests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>PremiereCalendar.IntegrationTests</_Parameter1>
     </AssemblyAttribute>
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>DatabaseSchemaVersion</_Parameter1>
@@ -46,6 +49,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="Configuration\ImageMagick\policy.xml"
+             Link="ImageMagick\policy.xml"
+             CopyToOutputDirectory="Always"
+             CopyToPublishDirectory="Always" />
+    <Content Include="ThirdPartyNotices\*.txt"
+             Link="ThirdPartyNotices\%(Filename)%(Extension)"
+             CopyToOutputDirectory="Always"
+             CopyToPublishDirectory="Always" />
     <Content Include="..\deploy\Updates\install-github-release.ps1"
              Link="updater-payload\install-github-release.ps1"
              CopyToPublishDirectory="Always" />

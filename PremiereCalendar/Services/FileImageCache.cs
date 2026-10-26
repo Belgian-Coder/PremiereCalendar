@@ -7,10 +7,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Jpeg;
-using SixLabors.ImageSharp.Formats.Webp;
-using SixLabors.ImageSharp.Processing;
+using ImageMagick;
 
 namespace PremiereCalendar.Services;
 
@@ -29,21 +26,22 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<FileImageCache> _logger;
     private readonly ProviderRequestThrottler _requestThrottler;
-    private readonly SemaphoreSlim _decodeGate;
+    private readonly ImageDecodeLimiter _decodeLimiter;
 
     public FileImageCache(
         HttpClient httpClient,
         IOptions<ImageCacheOptions> options,
         IWebHostEnvironment environment,
         ILogger<FileImageCache> logger,
-        ProviderRequestThrottler? requestThrottler = null)
+        ProviderRequestThrottler? requestThrottler = null,
+        ImageDecodeLimiter? decodeLimiter = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _environment = environment;
         _logger = logger;
         _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
-        _decodeGate = new SemaphoreSlim(Math.Clamp(_options.MaxConcurrentDecodes, 1, 64));
+        _decodeLimiter = decodeLimiter ?? new ImageDecodeLimiter(options);
     }
 
     public async Task<CachedImage> GetOrAddAsync(
@@ -57,7 +55,6 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         var targetWidth = NormalizeWidth(width);
         format = targetWidth is > 0 ? format : ImageCacheFormat.Original;
         var cacheKey = CacheKey(sourceUri, targetWidth, format);
-        var filePath = ImagePath(cacheKey);
         var metadataPath = MetadataPath(cacheKey);
         var browserMaxAge = TimeSpan.FromDays(Math.Max(1, _options.CacheDays));
         var cacheKeyLock = AcquireCacheKeyGate(cacheKey);
@@ -73,31 +70,61 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         }
         try
         {
-            if (!forceRefresh && TryReadFreshMetadata(metadataPath, out var metadata) && File.Exists(filePath))
-            {
-                return await ReadCachedImageAsync(filePath, metadata, cacheKey, browserMaxAge, cancellationToken);
-            }
+            using var operationTimeout = new CancellationTokenSource(
+                TimeSpan.FromSeconds(Math.Clamp(_options.RequestTimeoutSeconds, 1, 300)));
+            using var operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                operationTimeout.Token);
+            var operationToken = operationCancellation.Token;
 
             try
             {
+                if (!forceRefresh && TryReadFreshMetadata(metadataPath, out var metadata)
+                    && TryGetBodyPath(cacheKey, metadata, out var cachedPath))
+                {
+                    return await ReadCachedImageAsync(cachedPath, metadata, metadataPath, cacheKey, browserMaxAge, operationToken);
+                }
+
                 var fetched = await FetchImageAsync(
                     sourceUri,
                     cacheKey,
-                    filePath,
                     targetWidth,
                     format,
                     browserMaxAge,
-                    cancellationToken);
-                await WriteCachedMetadataAsync(metadataPath, sourceUrl, fetched, cancellationToken);
+                    operationToken);
+                // Retention starts when a generation is retired, not when its
+                // unchanged bytes were first downloaded. A lookup may still be
+                // about to open the old path after this metadata pointer moves.
+                if (TryReadAnyMetadata(metadataPath, out var previousMetadata)
+                    && TryGetBodyPath(cacheKey, previousMetadata, out var previousPath)
+                    && !string.Equals(previousPath, fetched.FilePath, StringComparison.Ordinal))
+                {
+                    try { File.SetLastWriteTimeUtc(previousPath, DateTime.UtcNow); }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        _logger.LogDebug(ex, "Could not extend retired image retention for {ImagePath}.", previousPath);
+                    }
+                }
+                await WriteCachedMetadataAsync(metadataPath, sourceUrl, fetched, operationToken);
                 return fetched;
             }
             catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or ExternalApiException
+                or UnauthorizedAccessException
                 || ex is OperationCanceledException && !cancellationToken.IsCancellationRequested)
             {
-                if (TryReadAnyMetadata(metadataPath, out var staleMetadata) && File.Exists(filePath))
+                if (TryReadAnyMetadata(metadataPath, out var staleMetadata)
+                    && TryGetBodyPath(cacheKey, staleMetadata, out var stalePath))
                 {
                     _logger.LogWarning(ex, "Using stale cached image for {ImageUrl}.", sourceUrl);
-                    return await ReadCachedImageAsync(filePath, staleMetadata, cacheKey, browserMaxAge, cancellationToken);
+                    var staleImage = await ReadCachedImageAsync(
+                        stalePath,
+                        staleMetadata,
+                        metadataPath,
+                        cacheKey,
+                        browserMaxAge,
+                        cancellationToken,
+                        isStale: true);
+                    return staleImage with { BrowserMaxAge = TimeSpan.FromMinutes(1) };
                 }
 
                 throw;
@@ -109,7 +136,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         }
     }
 
-    public Task<int> CleanupAsync(
+    public async Task<int> CleanupAsync(
         DateTimeOffset nowUtc,
         TimeSpan retention,
         CancellationToken cancellationToken)
@@ -117,42 +144,57 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         var directory = CacheDirectory();
         if (!Directory.Exists(directory))
         {
-            return Task.FromResult(0);
+            return 0;
         }
 
         var cutoffUtc = nowUtc - retention;
         var removed = 0;
-        var removedImageKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var liveBodies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var expiredMetadataKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var metadataPath in Directory.EnumerateFiles(directory, "*.json"))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             var cacheKey = Path.GetFileNameWithoutExtension(metadataPath);
-            var imagePath = ImagePath(cacheKey);
-            if (!TryReadAnyMetadata(metadataPath, out var metadata))
+            if (!IsValidCacheKey(cacheKey))
             {
-                if (File.GetLastWriteTimeUtc(metadataPath) >= cutoffUtc.UtcDateTime)
+                continue;
+            }
+
+            var gate = AcquireCacheKeyGate(cacheKey);
+            await WaitForGateAsync(gate, cancellationToken);
+            try
+            {
+                if (!TryReadAnyMetadata(metadataPath, out var metadata))
                 {
+                    if (File.GetLastWriteTimeUtc(metadataPath) < cutoffUtc.UtcDateTime)
+                    {
+                        TryDeleteFile(metadataPath);
+                        expiredMetadataKeys.Add(cacheKey);
+                        removed++;
+                    }
+
                     continue;
                 }
 
-                TryDeleteFile(metadataPath);
-                TryDeleteFile(imagePath);
-                removedImageKeys.Add(cacheKey);
-                removed++;
-                continue;
-            }
+                if (metadata.FetchedUtc < cutoffUtc)
+                {
+                    TryDeleteFile(metadataPath);
+                    expiredMetadataKeys.Add(cacheKey);
+                    removed++;
+                    continue;
+                }
 
-            if (metadata.FetchedUtc >= cutoffUtc)
+                if (TryGetBodyPath(cacheKey, metadata, out var bodyPath))
+                {
+                    liveBodies.Add(Path.GetFullPath(bodyPath));
+                }
+            }
+            finally
             {
-                continue;
+                gate.Release(entered: true);
             }
-
-            TryDeleteFile(metadataPath);
-            TryDeleteFile(imagePath);
-            removedImageKeys.Add(cacheKey);
-            removed++;
         }
 
         foreach (var tempPath in Directory.EnumerateFiles(directory, "*.tmp"))
@@ -172,22 +214,43 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var cacheKey = Path.GetFileNameWithoutExtension(imagePath);
-            if (removedImageKeys.Contains(cacheKey))
+            if (!TryGetCacheKeyFromBodyPath(imagePath, out var cacheKey))
             {
                 continue;
             }
 
-            var lastWriteUtc = File.GetLastWriteTimeUtc(imagePath);
-            if (lastWriteUtc < cutoffUtc.UtcDateTime
-                && !File.Exists(MetadataPath(cacheKey)))
+            var gate = AcquireCacheKeyGate(cacheKey);
+            await WaitForGateAsync(gate, cancellationToken);
+            try
             {
-                TryDeleteFile(imagePath);
-                removed++;
+                if (liveBodies.Contains(Path.GetFullPath(imagePath)))
+                {
+                    continue;
+                }
+
+                if (TryReadAnyMetadata(MetadataPath(cacheKey), out var currentMetadata)
+                    && TryGetBodyPath(cacheKey, currentMetadata, out var currentBody)
+                    && string.Equals(Path.GetFullPath(currentBody), Path.GetFullPath(imagePath), StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (File.GetLastWriteTimeUtc(imagePath) < cutoffUtc.UtcDateTime)
+                {
+                    TryDeleteFile(imagePath);
+                    if (!expiredMetadataKeys.Contains(cacheKey))
+                    {
+                        removed++;
+                    }
+                }
+            }
+            finally
+            {
+                gate.Release(entered: true);
             }
         }
 
-        return Task.FromResult(removed);
+        return removed;
     }
 
     private Uri ValidateSourceUrl(string sourceUrl)
@@ -227,9 +290,23 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 
         try
         {
-            var json = File.ReadAllText(metadataPath);
-            var value = JsonSerializer.Deserialize<ImageCacheMetadata>(json, JsonOptions);
-            if (value is null || string.IsNullOrWhiteSpace(value.ContentType))
+            using var stream = new FileStream(
+                metadataPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete,
+                4096,
+                FileOptions.SequentialScan);
+            if (stream.Length > 64 * 1024)
+            {
+                return false;
+            }
+
+            var value = JsonSerializer.Deserialize<ImageCacheMetadata>(stream, JsonOptions);
+            if (value is null
+                || string.IsNullOrWhiteSpace(value.ContentType)
+                || !value.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                || value.FetchedUtc == default)
             {
                 return false;
             }
@@ -254,63 +331,101 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
     private async Task<CachedImage> FetchImageAsync(
         Uri sourceUri,
         string cacheKey,
-        string filePath,
         int? targetWidth,
         ImageCacheFormat format,
         TimeSpan browserMaxAge,
         CancellationToken cancellationToken)
     {
-        using var lease = await _requestThrottler.AcquireAsync(
-            "images",
-            _options.MaxConcurrentDownloads,
-            cancellationToken);
-        using var request = new HttpRequestMessage(HttpMethod.Get, sourceUri);
-        if (format == ImageCacheFormat.Webp)
+        var needsResize = targetWidth is > 0
+            && !(format == ImageCacheFormat.Original && CanUseRemoteImageAsRequestedWidth(sourceUri, targetWidth.Value));
+        var stagedBodyPath = StagedImagePath(cacheKey);
+        IDisposable? stagingLease = needsResize
+            ? await _decodeLimiter.AcquireStagingSlotAsync(cancellationToken)
+            : null;
+        try
         {
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/webp"));
+            using (stagingLease)
+            {
+                var lease = await _requestThrottler.AcquireAsync(
+                    "images",
+                    _options.MaxConcurrentDownloads,
+                    cancellationToken);
+                using (lease)
+                using (var request = new HttpRequestMessage(HttpMethod.Get, sourceUri))
+                {
+                    if (format == ImageCacheFormat.Webp)
+                    {
+                        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/webp"));
+                    }
+                    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
+
+                    using var response = await _httpClient.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        cancellationToken);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        var message = $"Image fetch failed with HTTP {(int)response.StatusCode} {response.ReasonPhrase}.";
+                        if ((int)response.StatusCode >= 500 || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                        {
+                            throw new HttpRequestException(message, inner: null, response.StatusCode);
+                        }
+                        throw new ExternalApiException(message);
+                    }
+
+                    var maxBytes = Math.Max(1024, _options.MaxBytes);
+                    var contentLength = response.Content.Headers.ContentLength;
+                    if (contentLength is > 0 && contentLength > maxBytes)
+                    {
+                        throw new ExternalApiException(
+                            string.Create(CultureInfo.InvariantCulture, $"Image exceeds cache size limit of {maxBytes} bytes."));
+                    }
+
+                    var contentType = response.Content.Headers.ContentType?.MediaType;
+                    if (string.IsNullOrWhiteSpace(contentType) || !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new ExternalApiException("Image fetch did not return an image content type.");
+                    }
+
+                    string cachedContentType;
+                    if (needsResize)
+                    {
+                        cachedContentType = await WriteResizedContentAsync(
+                            response.Content,
+                            response,
+                            stagedBodyPath,
+                            targetWidth!.Value,
+                            format,
+                            contentType,
+                            sourceUri.AbsolutePath,
+                            lease,
+                            cancellationToken);
+                    }
+                    else
+                    {
+                        cachedContentType = await WriteLimitedContentAsync(response.Content, response, stagedBodyPath, cancellationToken) ?? contentType;
+                        lease.Dispose();
+                    }
+
+                    var fetchedUtc = DateTimeOffset.UtcNow;
+                    var contentHash = await ComputeContentHashAsync(stagedBodyPath, cancellationToken);
+                    var generationPath = GenerationImagePath(cacheKey, contentHash);
+                    PublishImmutableBody(stagedBodyPath, generationPath);
+                    return new CachedImage(generationPath, cachedContentType, fetchedUtc, cacheKey, browserMaxAge, contentHash);
+                }
+            }
         }
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
-
-        using var response = await _httpClient.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken);
-
-        if (!response.IsSuccessStatusCode)
+        catch
         {
-            throw new ExternalApiException($"Image fetch failed with HTTP {(int)response.StatusCode} {response.ReasonPhrase}.");
+            TryDeleteFile(stagedBodyPath);
+            throw;
         }
-
-        var maxBytes = Math.Max(1024, _options.MaxBytes);
-        var contentLength = response.Content.Headers.ContentLength;
-        if (contentLength is > 0 && contentLength > maxBytes)
-        {
-            throw new ExternalApiException(
-                string.Create(CultureInfo.InvariantCulture, $"Image exceeds cache size limit of {maxBytes} bytes."));
-        }
-
-        var contentType = response.Content.Headers.ContentType?.MediaType;
-        if (string.IsNullOrWhiteSpace(contentType) || !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ExternalApiException("Image fetch did not return an image content type.");
-        }
-
-        var cachedContentType = targetWidth is > 0
-            ? format == ImageCacheFormat.Original && CanUseRemoteImageAsRequestedWidth(sourceUri, targetWidth.Value)
-                ? await WriteLimitedContentAsync(response.Content, filePath, cancellationToken) ?? contentType
-                : await WriteResizedContentAsync(response.Content, filePath, targetWidth.Value, format, cancellationToken)
-            : await WriteLimitedContentAsync(response.Content, filePath, cancellationToken);
-
-        return new CachedImage(
-            filePath,
-            cachedContentType ?? contentType,
-            DateTimeOffset.UtcNow,
-            cacheKey,
-            browserMaxAge);
     }
 
     private async Task<string?> WriteLimitedContentAsync(
         HttpContent content,
+        HttpResponseMessage response,
         string filePath,
         CancellationToken cancellationToken)
     {
@@ -326,7 +441,8 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         try
         {
             await WriteLimitedResponseContentToFileAsync(content, tempImagePath, maxBytes, cancellationToken);
-            File.Move(tempImagePath, filePath, overwrite: true);
+            response.Dispose();
+            ReplaceAtomically(tempImagePath, filePath);
             return null;
         }
         catch
@@ -338,9 +454,13 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 
     private async Task<string> WriteResizedContentAsync(
         HttpContent content,
+        HttpResponseMessage response,
         string filePath,
         int targetWidth,
         ImageCacheFormat format,
+        string? sourceContentType,
+        string sourcePath,
+        IDisposable downloadLease,
         CancellationToken cancellationToken)
     {
         var maxBytes = Math.Max(1024, _options.MaxBytes);
@@ -352,43 +472,159 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 
         var tempSourcePath = $"{filePath}.{Guid.NewGuid():N}.source.tmp";
         var tempImagePath = $"{filePath}.{Guid.NewGuid():N}.tmp";
+        var outputContentType = format == ImageCacheFormat.Webp ? "image/webp" : "image/jpeg";
         try
         {
             await WriteLimitedResponseContentToFileAsync(content, tempSourcePath, maxBytes, cancellationToken);
+            response.Dispose();
+            downloadLease.Dispose();
 
-            await _decodeGate.WaitAsync(cancellationToken);
-            try
+            using (await _decodeLimiter.AcquireDecodeAsync(cancellationToken))
             {
-                await using var sourceFile = File.OpenRead(tempSourcePath);
-                using var image = await Image.LoadAsync(sourceFile, cancellationToken);
-                if (image.Width > targetWidth)
+                try
                 {
-                    image.Mutate(operation => operation.Resize(new ResizeOptions
-                    {
-                        Size = new Size(targetWidth, 0),
-                        Mode = ResizeMode.Max
-                    }));
-                }
+                    ImageMagickRuntime.EnsureInitialized(_environment.ContentRootPath);
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                await using (var target = File.Create(tempImagePath))
+                    var maxDecodedPixels = Math.Max(1, _options.MaxDecodedPixels);
+                    var isApng = ApngValidator.ValidateIfAnimated(tempSourcePath, maxDecodedPixels, cancellationToken);
+                    var sourceFormatHint = GetSourceFormatHint(sourceContentType, sourcePath, tempSourcePath);
+                    var (metadataFrames, usedFormatHint) = PingImageMetadata(tempSourcePath, sourceFormatHint);
+                    using (metadataFrames)
+                    {
+
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (metadataFrames.Count == 0)
+                        {
+                            throw new ExternalApiException("Image response could not be identified as a supported raster image.");
+                        }
+                        if (metadataFrames.Count > ImageMagickRuntime.MaxFrameCount)
+                        {
+                            throw new ExternalApiException(
+                                $"Image exceeds the decoded frame limit of {ImageMagickRuntime.MaxFrameCount}.");
+                        }
+
+                        var sourceFormat = metadataFrames[0].Format;
+                        if (!IsAllowedRasterFormat(sourceFormat)
+                            || metadataFrames.Any(frame => frame.Format != sourceFormat))
+                        {
+                            throw new ExternalApiException("Image response uses an unsupported image format.");
+                        }
+
+                        ValidateDecodedPixelBudget(metadataFrames, maxDecodedPixels);
+                        var frameCount = metadataFrames.Count;
+
+                        using var images = new MagickImageCollection();
+                        await using (var sourceStream = OpenImageReader(tempSourcePath))
+                        {
+                            if (usedFormatHint && sourceFormatHint is { } formatHint)
+                            {
+                                images.Read(sourceStream, new MagickReadSettings
+                                {
+                                    Format = formatHint
+                                });
+                            }
+                            else
+                            {
+                                images.Read(sourceStream);
+                            }
+                        }
+
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (images.Count != frameCount
+                            || images.Count > ImageMagickRuntime.MaxFrameCount
+                            || images.Any(frame => !IsAllowedRasterFormat(frame.Format) || frame.Format != sourceFormat))
+                        {
+                            throw new ExternalApiException("Image response frame metadata changed during decoding.");
+                        }
+
+                        ValidateDecodedPixelBudget(images, maxDecodedPixels);
+                        if (isApng)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            await using var source = OpenImageReader(tempSourcePath);
+                            await using var target = new FileStream(
+                                tempImagePath,
+                                FileMode.Create,
+                                FileAccess.Write,
+                                FileShare.None,
+                                StreamBufferSize,
+                                FileOptions.Asynchronous | FileOptions.SequentialScan);
+                            await source.CopyToAsync(target, StreamBufferSize, cancellationToken);
+                            await target.FlushAsync(cancellationToken);
+                            outputContentType = "image/png";
+                        }
+                        else
+                        {
+                            if (images.Count > 1 && sourceFormat is MagickFormat.Gif or MagickFormat.WebP)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                images.Coalesce();
+                                cancellationToken.ThrowIfCancellationRequested();
+                                ValidateDecodedPixelBudget(images, maxDecodedPixels);
+                            }
+
+                            foreach (var image in images)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                if (image.Width > targetWidth)
+                                {
+                                    image.Resize(new MagickGeometry((uint)targetWidth, 0)
+                                    {
+                                        IgnoreAspectRatio = false
+                                    });
+                                }
+
+                                image.Quality = format == ImageCacheFormat.Webp ? 80u : 82u;
+                            }
+
+                            cancellationToken.ThrowIfCancellationRequested();
+                            await using var target = new FileStream(
+                                tempImagePath,
+                                FileMode.Create,
+                                FileAccess.Write,
+                                FileShare.None,
+                                StreamBufferSize,
+                                FileOptions.Asynchronous | FileOptions.SequentialScan);
+                            if (format == ImageCacheFormat.Webp)
+                            {
+                                images.Write(target, MagickFormat.WebP);
+                            }
+                            else
+                            {
+                                images[0].Write(target, MagickFormat.Jpeg);
+                            }
+
+                            cancellationToken.ThrowIfCancellationRequested();
+                            await target.FlushAsync(cancellationToken);
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is MagickResourceLimitErrorException or MagickCacheErrorException)
                 {
-                    if (format == ImageCacheFormat.Webp)
+                    // A frame-list limit is a deterministic property of the
+                    // input. Other native capacity failures can be transient
+                    // and must remain on the IOException stale/503 path.
+                    if (ex.Message.Contains("list length", StringComparison.OrdinalIgnoreCase))
                     {
-                        await image.SaveAsWebpAsync(target, new WebpEncoder { Quality = 80 }, cancellationToken);
+                        throw new ExternalApiException(
+                            $"Image exceeds the decoded frame limit of {ImageMagickRuntime.MaxFrameCount}.",
+                            ex);
                     }
-                    else
-                    {
-                        await image.SaveAsJpegAsync(target, new JpegEncoder { Quality = 82 }, cancellationToken);
-                    }
+
+                    throw new IOException("Image decoder could not allocate within configured resource limits.", ex);
+                }
+                catch (Exception ex) when (ex is MagickException
+                    or ArgumentException
+                    or InvalidOperationException
+                    or OverflowException)
+                {
+                    throw new ExternalApiException("Image response could not be decoded.", ex);
                 }
             }
-            finally
-            {
-                _decodeGate.Release();
-            }
 
-            File.Move(tempImagePath, filePath, overwrite: true);
-            return format == ImageCacheFormat.Webp ? "image/webp" : "image/jpeg";
+            ReplaceAtomically(tempImagePath, filePath);
+            return outputContentType;
         }
         catch
         {
@@ -399,6 +635,169 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         {
             TryDeleteFile(tempSourcePath);
         }
+    }
+
+    private static bool IsAllowedRasterFormat(MagickFormat format)
+    {
+        return format is MagickFormat.Bmp
+            or MagickFormat.Gif
+            or MagickFormat.Ico
+            or MagickFormat.Jpeg
+            or MagickFormat.Pbm
+            or MagickFormat.Pgm
+            or MagickFormat.Pnm
+            or MagickFormat.Png
+            or MagickFormat.Ppm
+            or MagickFormat.Qoi
+            or MagickFormat.Tga
+            or MagickFormat.Tif
+            or MagickFormat.Tiff
+            or MagickFormat.WebP;
+    }
+
+    private static MagickFormat? GetSourceFormatHint(string? contentType, string sourcePath, string stagedSourcePath)
+    {
+        var mediaType = contentType?.Trim().ToLowerInvariant();
+        var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
+        if (mediaType is "image/x-tga" or "image/tga" || extension == ".tga")
+        {
+            return MagickFormat.Tga;
+        }
+
+        if (mediaType is "image/x-icon" or "image/vnd.microsoft.icon" or "image/ico" || extension is ".ico" or ".cur")
+        {
+            Span<byte> header = stackalloc byte[4];
+            using var stream = new FileStream(stagedSourcePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            if (stream.Read(header) == header.Length
+                && header[0] == 0
+                && header[1] == 0
+                && header[2] is 1 or 2
+                && header[3] == 0)
+            {
+                return MagickFormat.Ico;
+            }
+        }
+
+        return null;
+    }
+
+    private static (MagickImageCollection Frames, bool UsedFormatHint) PingImageMetadata(
+        string path,
+        MagickFormat? fallbackFormatHint)
+    {
+        var frames = new MagickImageCollection();
+        try
+        {
+            using var stream = OpenImageReader(path);
+            frames.Ping(stream);
+            return (frames, false);
+        }
+        catch (MagickException) when (fallbackFormatHint is not null)
+        {
+            frames.Dispose();
+            frames = new MagickImageCollection();
+            try
+            {
+                using var stream = OpenImageReader(path);
+                frames.Ping(stream, new MagickReadSettings
+                {
+                    Format = fallbackFormatHint.Value
+                });
+                return (frames, true);
+            }
+            catch
+            {
+                frames.Dispose();
+                throw;
+            }
+        }
+        catch
+        {
+            frames.Dispose();
+            throw;
+        }
+    }
+
+    private static FileStream OpenImageReader(string path)
+    {
+        return new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+    }
+
+    private static void ValidateDecodedPixelBudget(IEnumerable<IMagickImage<byte>> frames, long maxDecodedPixels)
+    {
+        long totalPixels = 0;
+        var frameCount = 0;
+        foreach (var frame in frames)
+        {
+            frameCount++;
+            var page = frame.Page;
+            var canvasWidth = Math.Max((long)frame.Width, page.Width);
+            var canvasHeight = Math.Max((long)frame.Height, page.Height);
+            canvasWidth = Math.Max(canvasWidth, (long)frame.Width + Math.Abs((long)page.X));
+            canvasHeight = Math.Max(canvasHeight, (long)frame.Height + Math.Abs((long)page.Y));
+
+            if (canvasWidth <= 0
+                || canvasHeight <= 0
+                || canvasWidth > maxDecodedPixels / canvasHeight)
+            {
+                throw PixelBudgetExceeded(maxDecodedPixels, frameCount);
+            }
+
+            var framePixels = canvasWidth * canvasHeight;
+            if (totalPixels > maxDecodedPixels - framePixels)
+            {
+                throw PixelBudgetExceeded(maxDecodedPixels, frameCount);
+            }
+
+            totalPixels += framePixels;
+        }
+
+        if (frameCount == 0)
+        {
+            throw new ExternalApiException("Image response contains no frames.");
+        }
+    }
+
+    private static ExternalApiException PixelBudgetExceeded(long maxDecodedPixels, int frameCount)
+    {
+        return new ExternalApiException(
+            string.Create(CultureInfo.InvariantCulture, $"Image exceeds the decoded pixel limit of {maxDecodedPixels} across {frameCount} frame(s)."));
+    }
+    private static void ReplaceAtomically(string temporaryPath, string destinationPath)
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (!File.Exists(destinationPath))
+            {
+                try
+                {
+                    File.Move(temporaryPath, destinationPath);
+                    return;
+                }
+                catch (IOException) when (File.Exists(destinationPath))
+                {
+                    continue;
+                }
+            }
+
+            try
+            {
+                File.Replace(temporaryPath, destinationPath, destinationBackupFileName: null);
+                return;
+            }
+            catch (FileNotFoundException) when (attempt < 2)
+            {
+                // Another writer removed the old entry between the existence check and replace.
+            }
+        }
+
+        throw new IOException($"Could not atomically replace cache file '{destinationPath}'.");
     }
 
     private static async Task WriteLimitedResponseContentToFileAsync(
@@ -450,29 +849,91 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             Directory.CreateDirectory(directory);
         }
 
-        var metadata = new ImageCacheMetadata(sourceUrl, image.ContentType, image.LastModifiedUtc);
+        if (!IsValidContentHash(image.ContentHash))
+        {
+            throw new InvalidDataException("Image cache metadata requires a valid content hash.");
+        }
+
+        var metadata = new ImageCacheMetadata(sourceUrl, image.ContentType, image.LastModifiedUtc, image.ContentHash, BodyGenerationVersion);
         var tempMetadataPath = $"{metadataPath}.{Guid.NewGuid():N}.tmp";
-        await File.WriteAllTextAsync(
-            tempMetadataPath,
-            JsonSerializer.Serialize(metadata, JsonOptions),
-            cancellationToken);
-        File.Move(tempMetadataPath, metadataPath, overwrite: true);
+        try
+        {
+            await File.WriteAllTextAsync(
+                tempMetadataPath,
+                JsonSerializer.Serialize(metadata, JsonOptions),
+                cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            ReplaceAtomically(tempMetadataPath, metadataPath);
+        }
+        catch
+        {
+            TryDeleteFile(tempMetadataPath);
+            throw;
+        }
     }
 
-    private static async Task<CachedImage> ReadCachedImageAsync(
+    private async Task<CachedImage> ReadCachedImageAsync(
         string filePath,
         ImageCacheMetadata metadata,
+        string metadataPath,
         string cacheKey,
         TimeSpan browserMaxAge,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool isStale = false)
     {
-        await Task.CompletedTask;
+        var contentHash = metadata.BodyGenerationVersion == BodyGenerationVersion
+            ? metadata.ContentHash!
+            : await ComputeContentHashAsync(filePath, cancellationToken);
+
+        if (metadata.BodyGenerationVersion != BodyGenerationVersion)
+        {
+            var generationPath = GenerationImagePath(cacheKey, contentHash);
+            await PublishLegacyBodyAsync(filePath, generationPath, cancellationToken);
+            filePath = generationPath;
+        }
+
+        if (metadata.BodyGenerationVersion != BodyGenerationVersion
+            || !IsValidContentHash(metadata.ContentHash))
+        {
+            var updated = new CachedImage(
+                filePath,
+                metadata.ContentType,
+                metadata.FetchedUtc,
+                cacheKey,
+                browserMaxAge,
+                contentHash,
+                isStale);
+            try
+            {
+                await WriteCachedMetadataAsync(metadataPath, metadata.SourceUrl, updated, cancellationToken);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(ex, "Could not persist the content hash for cached image {ImagePath}.", filePath);
+            }
+        }
+
         return new CachedImage(
             filePath,
             metadata.ContentType,
             metadata.FetchedUtc,
             cacheKey,
-            browserMaxAge);
+            browserMaxAge,
+            contentHash,
+            isStale);
+    }
+
+    private static async Task<string> ComputeContentHashAsync(string filePath, CancellationToken cancellationToken)
+    {
+        await using var stream = OpenImageReader(filePath);
+        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static bool IsValidContentHash(string? contentHash)
+    {
+        return contentHash is { Length: 64 }
+            && contentHash.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     }
 
     private static void TryDeleteFile(string path)
@@ -495,6 +956,106 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
     private string ImagePath(string cacheKey)
     {
         return Path.Combine(CacheDirectory(), $"{cacheKey}.bin");
+    }
+
+    private string GenerationImagePath(string cacheKey, string contentHash)
+    {
+        if (!IsValidCacheKey(cacheKey) || !IsValidContentHash(contentHash))
+        {
+            throw new InvalidDataException("Image cache body generation identity is invalid.");
+        }
+
+        return Path.Combine(CacheDirectory(), $"{cacheKey}.{contentHash}.bin");
+    }
+
+    private string StagedImagePath(string cacheKey)
+    {
+        return Path.Combine(CacheDirectory(), $"{cacheKey}.{Guid.NewGuid():N}.stage.tmp");
+    }
+
+    private bool TryGetBodyPath(string cacheKey, ImageCacheMetadata metadata, out string bodyPath)
+    {
+        if (metadata.BodyGenerationVersion == BodyGenerationVersion)
+        {
+            if (IsValidContentHash(metadata.ContentHash))
+            {
+                bodyPath = GenerationImagePath(cacheKey, metadata.ContentHash!);
+                return File.Exists(bodyPath);
+            }
+
+            bodyPath = string.Empty;
+            return false;
+        }
+
+        bodyPath = ImagePath(cacheKey);
+        return File.Exists(bodyPath);
+    }
+
+    private static bool TryGetCacheKeyFromBodyPath(string path, out string cacheKey)
+    {
+        var name = Path.GetFileNameWithoutExtension(path);
+        var separator = name.IndexOf('.', StringComparison.Ordinal);
+        cacheKey = separator < 0 ? name : name[..separator];
+        return IsValidCacheKey(cacheKey)
+            && (separator < 0 || IsValidContentHash(name[(separator + 1)..]));
+    }
+
+    private static bool IsValidCacheKey(string? cacheKey)
+    {
+        return cacheKey is { Length: 64 }
+            && cacheKey.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+    }
+
+    private static void PublishImmutableBody(string stagedPath, string generationPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(generationPath)!);
+        if (File.Exists(generationPath))
+        {
+            TryDeleteFile(stagedPath);
+            return;
+        }
+
+        try
+        {
+            File.Move(stagedPath, generationPath);
+        }
+        catch (IOException) when (File.Exists(generationPath))
+        {
+            TryDeleteFile(stagedPath);
+        }
+    }
+
+    private static async Task PublishLegacyBodyAsync(string legacyPath, string generationPath, CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(generationPath)!);
+        if (File.Exists(generationPath))
+        {
+            return;
+        }
+
+        var tempPath = $"{generationPath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await using (var source = OpenImageReader(legacyPath))
+            await using (var destination = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, StreamBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                await source.CopyToAsync(destination, StreamBufferSize, cancellationToken);
+                await destination.FlushAsync(cancellationToken);
+            }
+
+            try
+            {
+                File.Move(tempPath, generationPath);
+            }
+            catch (IOException) when (File.Exists(generationPath))
+            {
+                // Another process published identical bytes under their verified SHA-256 name.
+            }
+        }
+        finally
+        {
+            TryDeleteFile(tempPath);
+        }
     }
 
     private string MetadataPath(string cacheKey)
@@ -555,6 +1116,19 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             }
 
             CacheKeyLocks.TryRemove(new KeyValuePair<string, CacheKeyGate>(cacheKey, gate));
+        }
+    }
+
+    private static async Task WaitForGateAsync(CacheKeyGateLease gate, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await gate.WaitAsync(cancellationToken);
+        }
+        catch
+        {
+            gate.Release(entered: false);
+            throw;
         }
     }
 
@@ -625,5 +1199,9 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
     private sealed record ImageCacheMetadata(
         string SourceUrl,
         string ContentType,
-        DateTimeOffset FetchedUtc);
+        DateTimeOffset FetchedUtc,
+        string? ContentHash = null,
+        int? BodyGenerationVersion = null);
+
+    private const int BodyGenerationVersion = 2;
 }

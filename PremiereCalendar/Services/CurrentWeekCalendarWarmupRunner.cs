@@ -39,12 +39,16 @@ public sealed class CurrentWeekCalendarWarmupRunner
         _loadPipeline = loadPipeline;
     }
 
-    public async Task RunOnceAsync(CancellationToken cancellationToken)
+    public async Task RunOnceAsync(
+        CancellationToken cancellationToken,
+        ProviderWorkResumeState? resumeState = null)
     {
-        await RunOnceWithResultAsync(cancellationToken);
+        await RunOnceWithResultAsync(cancellationToken, resumeState);
     }
 
-    public async Task<CalendarWarmupRunResult> RunOnceWithResultAsync(CancellationToken cancellationToken)
+    public async Task<CalendarWarmupRunResult> RunOnceWithResultAsync(
+        CancellationToken cancellationToken,
+        ProviderWorkResumeState? resumeState = null)
     {
         if (!_options.Enabled)
         {
@@ -155,7 +159,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
                 using var windowCancellation = CancellationTokenSource.CreateLinkedTokenSource(runToken, windowTimeout.Token);
                 try
                 {
-                    var items = await LoadWindowAsync(window, filters, windowCancellation.Token);
+                    var items = await LoadWindowAsync(window, filters, windowCancellation.Token, resumeState);
                     totalItemCount += items.Count;
                     successfulWindows++;
                 }
@@ -220,7 +224,8 @@ public sealed class CurrentWeekCalendarWarmupRunner
     private async Task<IReadOnlyList<PremiereItem>> LoadWindowAsync(
         CalendarWarmupWindow window,
         CalendarFilters filters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ProviderWorkResumeState? resumeState)
     {
         if (_loadPipeline is null)
         {
@@ -233,12 +238,22 @@ public sealed class CurrentWeekCalendarWarmupRunner
         }
 
         IReadOnlyList<PremiereItem> items = [];
+        // Warmup windows have independent cache keys. Preserve only the scheduler's
+        // cache publication guard; source checkpoints from one window cannot resume another.
+        var windowResumeState = resumeState is null
+            ? null
+            : new ProviderWorkResumeState(
+                new Dictionary<string, IReadOnlyList<PremiereItem>>(StringComparer.Ordinal),
+                LatestProgress: null)
+            {
+                PublishCacheAsync = resumeState.PublishCacheAsync
+            };
         await foreach (var progress in _loadPipeline.StreamCoreAsync(
                            window.Start,
                            window.End,
                            !_options.StaleOnlyRemoteRefresh,
                            filters,
-                           null,
+                           windowResumeState,
                            cancellationToken).WithCancellation(cancellationToken))
         {
             items = progress.Items;
@@ -257,18 +272,31 @@ public sealed class CurrentWeekCalendarWarmupRunner
             return false;
         }
 
-        var metadata = await _cacheMaintenance.GetWeekMetadataAsync(
-            window.Start,
-            window.End,
-            PremiereDiscoveryCriteria.FromFilters(filters).CacheKey(),
-            cancellationToken);
-        if (metadata is null || metadata.Completeness != CalendarCacheCompleteness.Complete)
+        var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
+        var cacheKeys = ShouldUseSharedMediaCache(criteria)
+            ? new[]
+            {
+                PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Series)).CacheKey(),
+                PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Movies)).CacheKey()
+            }
+            : [criteria.CacheKey()];
+
+        foreach (var cacheKey in cacheKeys)
         {
-            return false;
+            var metadata = await _cacheMaintenance.GetWeekMetadataAsync(
+                window.Start,
+                window.End,
+                cacheKey,
+                cancellationToken);
+            if (metadata is null
+                || metadata.Completeness != CalendarCacheCompleteness.Complete
+                || nowUtc - metadata.CachedAtUtc > TimeSpan.FromHours(Math.Max(1, _cacheOptions.WeekCacheHours)))
+            {
+                return false;
+            }
         }
 
-        var maxAge = TimeSpan.FromHours(Math.Max(1, _cacheOptions.WeekCacheHours));
-        return nowUtc - metadata.CachedAtUtc <= maxAge;
+        return true;
     }
 
     public static IReadOnlyList<CalendarWarmupWindow> BuildWarmupWindows(DateOnly today)
@@ -377,6 +405,22 @@ public sealed class CurrentWeekCalendarWarmupRunner
         }
 
         return today > end ? end : today;
+    }
+
+    private static bool ShouldUseSharedMediaCache(PremiereDiscoveryCriteria criteria)
+    {
+        return criteria.IncludeSeries && criteria.IncludeMovies;
+    }
+
+    private static CalendarFilters FiltersForPageMode(CalendarFilters? filters, CalendarPageMode pageMode)
+    {
+        var pageFilters = filters is null
+            ? new CalendarFilters()
+            : CalendarFilterState.Clone(filters);
+        pageFilters.WeekStart = filters?.WeekStart ?? pageFilters.WeekStart;
+        CalendarFilterState.ApplyPageMode(pageFilters, pageMode);
+        CalendarFilterState.Normalize(pageFilters);
+        return pageFilters;
     }
 
     private static IReadOnlyList<WarmupProfile> DefaultProfiles()

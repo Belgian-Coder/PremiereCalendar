@@ -28,4 +28,5 @@ public sealed record PremiereLoadProgress(
     public bool HasSourceErrors { get; init; }
     public IReadOnlyList<string> FailedSourceNames { get; init; } = [];
     public string? CheckpointKey { get; init; }
+    public DateTimeOffset? RetryAfterUtc { get; init; }
 }

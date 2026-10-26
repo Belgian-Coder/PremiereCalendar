@@ -109,6 +109,10 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         using var activity = _telemetry.StartActivity("calendar.load");
         var started = Stopwatch.GetTimestamp();
         var firstResultRecorded = false;
+        if (end < start)
+        {
+            throw new ArgumentException("The premiere end date must be on or after the start date.", nameof(end));
+        }
         if (_workScheduler is null)
         {
             await foreach (var progress in StreamCoreAsync(start, end, forceRefresh, filters, null, cancellationToken)
@@ -121,8 +125,30 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 }
                 if (progress.IsFinal) _telemetry.RecordCalendarCompletion(Stopwatch.GetElapsedTime(started), progress.Items.Count, progress.FromCache);
                 yield return progress;
+                if (progress.IsFinal && progress.RetryAfterUtc > DateTimeOffset.UtcNow) yield break;
             }
             yield break;
+        }
+
+        if (!forceRefresh)
+        {
+            var snapshot = await ReadCalendarCacheAsync(start, end, filters, cancellationToken);
+            if (snapshot.Items is { } cached)
+            {
+                var hydrated = await HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken, allowRemote: false);
+                var items = ApplyRequestedFilters(hydrated, filters);
+                var isFinal = snapshot.IsComplete && !NeedsRemoteCachedHydration(hydrated, filters);
+                var progress = CreateProgress(snapshot.IsComplete ? "Week cache" : "Expired week cache",
+                    items, items, isFinal: isFinal, fromCache: true, isStaleCache: !snapshot.IsComplete);
+                if (isFinal || items.Count > 0)
+                {
+                    _telemetry.RecordCalendarFirstResult(Stopwatch.GetElapsedTime(started), true);
+                    firstResultRecorded = true;
+                    if (isFinal) _telemetry.RecordCalendarCompletion(Stopwatch.GetElapsedTime(started), items.Count, true);
+                    yield return progress;
+                }
+                if (isFinal) yield break;
+            }
         }
 
         var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
@@ -145,6 +171,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 }
                 if (progress.IsFinal) _telemetry.RecordCalendarCompletion(Stopwatch.GetElapsedTime(started), progress.Items.Count, progress.FromCache);
                 yield return progress;
+                if (progress.IsFinal && progress.RetryAfterUtc > DateTimeOffset.UtcNow) yield break;
             }
             else if (update.State == ProviderWorkState.Failed)
             {
@@ -175,104 +202,38 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
         if (!forceRefresh)
         {
-            if (ShouldUseSharedMediaCache(criteria))
+            var snapshot = await ReadCalendarCacheAsync(start, end, filters, cancellationToken);
+            if (snapshot.Items is { } cached)
             {
-                var sharedCacheSnapshot = await GetSharedMediaCacheSnapshotAsync(
-                    start,
-                    end,
-                    filters,
-                    allowExpired: false,
-                    cancellationToken);
-                if (sharedCacheSnapshot.HasSeries && sharedCacheSnapshot.HasMovies)
+                var hydrated = await HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken);
+                var cachedItems = ApplyRequestedFilters(hydrated, filters);
+                if (snapshot.IsComplete)
                 {
-                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
-                        MergePremiereItems(sharedCacheSnapshot.Items),
-                        filters,
-                        cancellationToken);
-                    var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
                     yield break;
                 }
 
-                if (sharedCacheSnapshot.HasAny)
+                var freshIds = snapshot.FreshItems.Select(item => item.CanonicalId).ToHashSet(StringComparer.Ordinal);
+                seededItems = cachedItems.Where(item => freshIds.Contains(item.CanonicalId)).ToArray();
+                staleSeededItems = cachedItems.Where(item => !freshIds.Contains(item.CanonicalId)).ToArray();
+                if (snapshot.HasFreshSeries || snapshot.HasFreshMovies)
                 {
-                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
-                        MergePremiereItems(sharedCacheSnapshot.Items),
-                        filters,
-                        cancellationToken);
-                    seededItems = ApplyRequestedFilters(hydratedItems, filters);
                     yield return CreateProgress("Week cache", seededItems, seededItems, fromCache: true);
-                    fetchCriteria = criteria with
+                    if (ShouldUseSharedMediaCache(criteria))
                     {
-                        IncludeSeries = criteria.IncludeSeries && !sharedCacheSnapshot.HasSeries,
-                        IncludeMovies = criteria.IncludeMovies && !sharedCacheSnapshot.HasMovies
-                    };
-                }
-
-                var sharedExpiredItems = await GetSharedMediaCachedItemsAsync(
-                    start,
-                    end,
-                    filters,
-                    allowExpired: true,
-                    requireBothMediaCaches: false,
-                    cancellationToken);
-                if (sharedExpiredItems is { Count: > 0 })
-                {
-                    var hydratedExpiredItems = await HydrateCachedImdbRatingsAsync(
-                        MergePremiereItems(sharedExpiredItems),
-                        filters,
-                        cancellationToken);
-                    staleSeededItems = ApplyRequestedFilters(hydratedExpiredItems, filters)
-                        .Where(item => seededItems.All(seed => !string.Equals(seed.CanonicalId, item.CanonicalId, StringComparison.Ordinal)))
-                        .ToArray();
-                    if (staleSeededItems.Count > 0)
-                    {
-                        var visibleCachedItems = MergePremiereItems(seededItems.Concat(staleSeededItems));
-                        yield return CreateProgress(
-                            "Expired week cache",
-                            visibleCachedItems,
-                            visibleCachedItems,
-                            fromCache: true,
-                            isStaleCache: true);
+                        fetchCriteria = criteria with
+                        {
+                            IncludeSeries = criteria.IncludeSeries && !snapshot.HasFreshSeries,
+                            IncludeMovies = criteria.IncludeMovies && !snapshot.HasFreshMovies
+                        };
                     }
                 }
-
-                cachedEnrichment = CreateCachedEnrichmentLookup(seededItems.Concat(staleSeededItems).ToArray());
-            }
-            else
-            {
-                var cached = await _cacheOrchestrator.ReadAsync(start, end, cacheKey, cancellationToken);
-                if (cached is not null)
+                if (staleSeededItems.Count > 0)
                 {
-                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
-                        MergePremiereItems(cached),
-                        filters,
-                        cancellationToken);
-                    var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
-                    yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
-                    yield break;
+                    yield return CreateProgress("Expired week cache", cachedItems, cachedItems,
+                        fromCache: true, isStaleCache: true);
                 }
-
-                cached = await _cacheOrchestrator.ReadAsync(start, end, cacheKey, cancellationToken, allowExpired: true);
-                if (cached is { Count: > 0 })
-                {
-                    var hydratedItems = await HydrateCachedImdbRatingsAsync(
-                        MergePremiereItems(cached),
-                        filters,
-                        cancellationToken);
-                    staleSeededItems = ApplyRequestedFilters(hydratedItems, filters);
-                    if (staleSeededItems.Count > 0)
-                    {
-                        yield return CreateProgress(
-                            "Expired week cache",
-                            staleSeededItems,
-                            staleSeededItems,
-                            fromCache: true,
-                            isStaleCache: true);
-                    }
-                }
-
-                cachedEnrichment = CreateCachedEnrichmentLookup(staleSeededItems);
+                cachedEnrichment = CreateCachedEnrichmentLookup(cachedItems);
             }
         }
         else
@@ -297,7 +258,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
         IReadOnlyList<PremiereItem> finalItems = [];
         PremiereLoadProgress? finalUpdate = null;
-        var progressHistory = new List<PremiereLoadProgress>();
+        var progressHistory = new Dictionary<string, PremiereLoadProgress>(StringComparer.Ordinal);
         Exception? refreshError = null;
 
         await using (var enumerator = FetchFreshPremiereUpdatesAsync(start, end, forceRefresh, fetchCriteria, filters, cachedEnrichment, resumeState, cancellationToken)
@@ -329,7 +290,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     update = MergeProgressWithSeed(update, progressSeed);
                 }
 
-                progressHistory.Add(update);
+                progressHistory[update.CheckpointKey ?? update.SourceName] = update;
                 if (update.IsFinal)
                 {
                     finalItems = update.Items;
@@ -369,6 +330,24 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             ExceptionDispatchInfo.Capture(refreshError).Throw();
         }
 
+        if (finalUpdate is { HasSourceErrors: true, RetryAfterUtc: not null } && finalItems.Count == 0)
+        {
+            var fallback = ShouldUseSharedMediaCache(criteria)
+                ? await TryCreateSharedMediaCacheUpdateAsync(start, end, filters, allowExpired: true, cancellationToken)
+                : await TryCreateExpiredCacheUpdateAsync(start, end, cacheKey, filters,
+                    new ExternalApiException("Provider refresh is deferred until its recovery deadline."), cancellationToken);
+            if (fallback is not null)
+            {
+                finalItems = fallback.Items;
+                finalUpdate = fallback with
+                {
+                    HasSourceErrors = true,
+                    FailedSourceNames = finalUpdate.FailedSourceNames,
+                    RetryAfterUtc = finalUpdate.RetryAfterUtc
+                };
+            }
+        }
+
         if (finalUpdate is not null && forceRefresh && !finalUpdate.HasSourceErrors)
         {
             finalItems = await RepairAndBackfillAsync(finalItems, cancellationToken, forceRefresh);
@@ -382,7 +361,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
         if (finalUpdate is not null)
         {
-            await RecordWeekDiagnosticsAsync(start, end, cacheKey, finalItems, progressHistory, cancellationToken);
+            await RecordWeekDiagnosticsAsync(start, end, cacheKey, finalItems, progressHistory.Values.ToArray(), cancellationToken);
         }
 
         if (finalUpdate is not null && !finalUpdate.HasSourceErrors)
@@ -391,11 +370,12 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             {
                 if (ShouldUseSharedMediaCache(criteria))
                 {
-                    await SetSharedMediaCachesAsync(start, end, finalItems, filters, cancellationToken);
+                    await SetSharedMediaCachesAsync(start, end, finalItems, filters, resumeState, cancellationToken);
                 }
                 else
                 {
-                    await _cacheOrchestrator.WriteAsync(start, end, cacheKey, finalItems, cancellationToken);
+                    await PublishCalendarCacheAsync(resumeState,
+                        token => _cacheOrchestrator.WriteAsync(start, end, cacheKey, finalItems, token), cancellationToken);
                     await RecordWeekCacheStateAsync(start, cacheKey, finalItems.Count, cancellationToken);
                 }
             }
@@ -466,6 +446,47 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
     }
 
+    private sealed record CalendarCacheSnapshot(
+        IReadOnlyList<PremiereItem>? Items,
+        IReadOnlyList<PremiereItem> FreshItems,
+        bool IsComplete,
+        bool HasFreshSeries,
+        bool HasFreshMovies);
+
+    private async Task<CalendarCacheSnapshot> ReadCalendarCacheAsync(
+        DateOnly start, DateOnly end, CalendarFilters? filters, CancellationToken cancellationToken)
+    {
+        var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
+        if (!ShouldUseSharedMediaCache(criteria))
+        {
+            var fresh = await _cacheOrchestrator.ReadAsync(start, end, criteria.CacheKey(), cancellationToken);
+            var items = fresh ?? await _cacheOrchestrator.ReadAsync(start, end, criteria.CacheKey(), cancellationToken, allowExpired: true);
+            return new CalendarCacheSnapshot(items is null ? null : MergePremiereItems(items), fresh ?? [],
+                fresh is not null, criteria.IncludeSeries && fresh is not null, criteria.IncludeMovies && fresh is not null);
+        }
+
+        var snapshot = await GetSharedMediaCacheSnapshotAsync(start, end, filters, allowExpired: false, cancellationToken);
+        var series = snapshot.SeriesItems;
+        var movies = snapshot.MovieItems;
+        if (series is null)
+        {
+            var seriesKey = PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Series)).CacheKey();
+            series = await _cacheOrchestrator.ReadAsync(start, end, seriesKey, cancellationToken, allowExpired: true);
+        }
+        if (movies is null)
+        {
+            var movieKey = PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Movies)).CacheKey();
+            movies = await _cacheOrchestrator.ReadAsync(start, end, movieKey, cancellationToken, allowExpired: true);
+        }
+        return new CalendarCacheSnapshot(series is null && movies is null ? null : MergePremiereItems((series ?? []).Concat(movies ?? [])),
+            snapshot.Items, snapshot.HasSeries && snapshot.HasMovies, snapshot.HasSeries, snapshot.HasMovies);
+    }
+
+    private bool NeedsRemoteCachedHydration(IReadOnlyList<PremiereItem> items, CalendarFilters? filters)
+        => filters?.ScoreSource == ScoreSource.RottenTomatoes && _rottenTomatoesClient is not null
+            && items.Any(item => (item.RottenTomatoesScore is null || item.RottenTomatoesAudienceScore is null)
+                && !_rottenTomatoesClient.TryGetCachedScores(item.MediaType, item.Title, item.PremiereDate.Year, item.WikidataId, out _));
+
     private async Task<PremiereLoadProgress?> TryCreateSharedMediaCacheUpdateAsync(
         DateOnly start,
         DateOnly end,
@@ -488,7 +509,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var hydratedItems = await HydrateCachedImdbRatingsAsync(
             MergePremiereItems(cachedItems),
             filters,
-            cancellationToken);
+            cancellationToken,
+            allowRemote: false);
         var mergedItems = ApplyRequestedFilters(hydratedItems, filters);
         return CreateProgress(
             allowExpired ? "Expired week cache" : "Week cache",
@@ -564,6 +586,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         DateOnly end,
         IReadOnlyList<PremiereItem> finalItems,
         CalendarFilters? filters,
+        ProviderWorkResumeState? resumeState,
         CancellationToken cancellationToken)
     {
         var seriesFilters = FiltersForPageMode(filters, CalendarPageMode.Series);
@@ -575,22 +598,17 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             MergePremiereItems(finalItems.Where(item => item.MediaType == PremiereMediaType.Movie)),
             movieFilters);
 
-        await _cacheOrchestrator.WriteAsync(
-            start,
-            end,
-            PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(),
-            seriesItems,
-            cancellationToken);
+        await PublishCalendarCacheAsync(resumeState, async token =>
+        {
+            await _cacheOrchestrator.WriteAsync(start, end,
+                PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(), seriesItems, token);
+            await _cacheOrchestrator.WriteAsync(start, end,
+                PremiereDiscoveryCriteria.FromFilters(movieFilters).CacheKey(), movieItems, token);
+        }, cancellationToken);
         await RecordWeekCacheStateAsync(
             start,
             PremiereDiscoveryCriteria.FromFilters(seriesFilters).CacheKey(),
             seriesItems.Count,
-            cancellationToken);
-        await _cacheOrchestrator.WriteAsync(
-            start,
-            end,
-            PremiereDiscoveryCriteria.FromFilters(movieFilters).CacheKey(),
-            movieItems,
             cancellationToken);
         await RecordWeekCacheStateAsync(
             start,
@@ -598,6 +616,12 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             movieItems.Count,
             cancellationToken);
     }
+
+    private static Task PublishCalendarCacheAsync(ProviderWorkResumeState? resumeState,
+        Func<CancellationToken, Task> publishFiles, CancellationToken cancellationToken)
+        => resumeState?.PublishCacheAsync is { } publishOwned
+            ? publishOwned(publishFiles, cancellationToken)
+            : publishFiles(cancellationToken);
 
     private async Task RecordWeekCacheStateAsync(
         DateOnly weekStart,
@@ -668,7 +692,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var hydratedItems = await HydrateCachedImdbRatingsAsync(
             MergePremiereItems(cached),
             filters,
-            cancellationToken);
+            cancellationToken,
+            allowRemote: false);
         var cachedItems = ApplyRequestedFilters(hydratedItems, filters);
         _logger.LogWarning(
             refreshError,
@@ -695,6 +720,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         ProviderWorkResumeState? resumeState,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        using var sourceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var sourceToken = sourceCancellation.Token;
         var sources = new List<PremiereSourceFactory>();
 
         void AddStreamingSource(
@@ -716,7 +743,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     sourceStart,
                     sourceEnd,
                     filters,
-                    cancellationToken)));
+                    sourceToken)));
         }
 
         foreach (var discoveryProvider in _discoveryProviders.Where(provider => ProviderMatchesRequestedMedia(provider, criteria)))
@@ -824,7 +851,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
                 var factory = pendingSources[sourceIndex];
                 pendingSources.RemoveAt(sourceIndex);
-                var enumerator = factory.Open().GetAsyncEnumerator(cancellationToken);
+                var enumerator = factory.Open().GetAsyncEnumerator(sourceToken);
                 active.Add(new ActivePremiereSource(
                     factory.Key,
                     ProviderKeyForSource(factory.Name),
@@ -864,9 +891,12 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                         progressText: batch.ProgressText,
                         elapsedMilliseconds: batch.ElapsedMilliseconds,
                         isSourceComplete: batch.IsComplete,
+                        hasSourceErrors: batch.Error is not null,
+                        failedSourceNames: batch.Error is null ? [] : [batch.Name],
                         unmappedCount: batch.UnmappedCount,
                         filteredCount: batch.FilteredCount,
-                        checkpointKey: source.Key);
+                        checkpointKey: source.Key,
+                        retryAfterUtc: RetryDeadline(batch.Error));
 
                     source.MoveNextTask = source.Enumerator.MoveNextAsync().AsTask();
                     continue;
@@ -879,15 +909,19 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
         finally
         {
-            foreach (var source in active)
+            try { await sourceCancellation.CancelAsync(); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Source cancellation callback failed during cleanup."); }
+            await Task.WhenAll(active.Select(async source =>
             {
-                await DisposeActiveSourceAsync(source, cancellationToken);
-            }
+                try { await DisposeActiveSourceAsync(source, CancellationToken.None); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Source {SourceKey} cleanup failed.", source.Key); }
+            }));
         }
 
 
         var items = currentItemsAccumulator.ToMergedItems();
-        if (items.Count == 0 && errors.Count > 0)
+        var retryDeadline = errors.Select(RetryDeadline).Where(deadline => deadline is not null).Min();
+        if (items.Count == 0 && errors.Count > 0 && retryDeadline is null)
         {
             throw new AggregateException("Premiere discovery failed before any source returned items.", errors);
         }
@@ -898,7 +932,17 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             items,
             isFinal: true,
             hasSourceErrors: errors.Count > 0,
-            failedSourceNames: failedSourceNames.ToArray());
+            failedSourceNames: failedSourceNames.ToArray(),
+            retryAfterUtc: retryDeadline);
+    }
+
+    private static DateTimeOffset? RetryDeadline(Exception? error)
+    {
+        if (error is ProviderRetryAfterException throttled) return throttled.RetryAtUtc;
+        if (error is ProviderCircuitOpenException circuit) return circuit.RetryAtUtc;
+        if (error is AggregateException aggregate)
+            return aggregate.InnerExceptions.Select(RetryDeadline).Where(value => value is not null).Min();
+        return error?.InnerException is { } inner ? RetryDeadline(inner) : null;
     }
 
     private async Task<PremiereSourceBatch> GetSourceBatchAsync(
@@ -999,8 +1043,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var accumulated = new PremiereMergeAccumulator();
         var emitted = false;
         var startedAt = Stopwatch.GetTimestamp();
+        var lastEmissionAt = startedAt;
         PremiereItemBatch? lastItemBatch = null;
-        var lastYieldWasComplete = false;
 
         long ElapsedMilliseconds()
         {
@@ -1076,59 +1120,43 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
             if (!hasNext)
             {
-                if (!emitted)
-                {
-                    yield return new PremiereSourceBatch(
-                        name,
-                        [],
-                        CompletedWork: 0,
-                        TotalWork: 0,
-                        ProgressText: SourceCompletionProgressText(0, null),
-                        ElapsedMilliseconds: ElapsedMilliseconds(),
-                        IsComplete: true);
-                }
-                else if (!lastYieldWasComplete)
-                {
-                    var unfilteredCompletionItems = accumulated.ToMergedItems();
-                    var completionItems = ApplyRequestedFilters(unfilteredCompletionItems, filters);
-                    var completionFilteredCount = CountFilteredOut(unfilteredCompletionItems, completionItems);
-                    yield return new PremiereSourceBatch(
-                        name,
-                        completionItems,
-                        CompletedWork: lastItemBatch?.TotalWork is > 0 ? lastItemBatch.TotalWork : lastItemBatch?.CompletedWork,
-                        TotalWork: lastItemBatch?.TotalWork,
-                        ProgressText: SourceCompletionProgressText(completionItems.Count, lastItemBatch?.ProgressText, completionFilteredCount),
-                        ElapsedMilliseconds: ElapsedMilliseconds(),
-                        IsComplete: true,
-                        UnmappedCount: CountUnverified(completionItems),
-                        FilteredCount: completionFilteredCount);
-                }
+                var unfilteredCompletionItems = accumulated.ToMergedItems();
+                var completionItems = ApplyRequestedFilters(unfilteredCompletionItems, filters);
+                var completionFilteredCount = CountFilteredOut(unfilteredCompletionItems, completionItems);
+                yield return new PremiereSourceBatch(
+                    name,
+                    completionItems,
+                    CompletedWork: lastItemBatch?.TotalWork is > 0 ? lastItemBatch.TotalWork : lastItemBatch?.CompletedWork ?? 0,
+                    TotalWork: lastItemBatch?.TotalWork ?? 0,
+                    ProgressText: SourceCompletionProgressText(completionItems.Count, lastItemBatch?.ProgressText, completionFilteredCount),
+                    ElapsedMilliseconds: ElapsedMilliseconds(),
+                    IsComplete: true,
+                    UnmappedCount: CountUnverified(completionItems),
+                    FilteredCount: completionFilteredCount);
 
                 yield break;
             }
 
             lastItemBatch = itemBatch;
             accumulated.AddRange(itemBatch?.Items ?? []);
+            // Dense sources can emit hundreds of tiny enrichment batches. Keep
+            // their rows, but avoid rebuilding and serializing a full snapshot
+            // faster than the page can render it. Completion/errors always flush.
+            if (accumulated.Count == 0 || emitted && accumulated.Count >= 200
+                && Stopwatch.GetElapsedTime(lastEmissionAt) < TimeSpan.FromMilliseconds(250)) continue;
+            lastEmissionAt = Stopwatch.GetTimestamp();
             var unfilteredItems = accumulated.ToMergedItems();
             var filteredItems = ApplyRequestedFilters(unfilteredItems, filters);
             var filteredCount = CountFilteredOut(unfilteredItems, filteredItems);
-            var isKnownWorkComplete = itemBatch is
-            {
-                CompletedWork: { } completedWork,
-                TotalWork: { } totalWork
-            } && completedWork >= totalWork;
-            lastYieldWasComplete = isKnownWorkComplete;
             emitted = true;
             yield return new PremiereSourceBatch(
                 name,
                 filteredItems,
                 CompletedWork: itemBatch?.CompletedWork,
                 TotalWork: itemBatch?.TotalWork,
-                ProgressText: isKnownWorkComplete
-                    ? SourceCompletionProgressText(filteredItems.Count, itemBatch?.ProgressText, filteredCount)
-                    : ProgressTextWithFilteredCount(itemBatch?.ProgressText, filteredCount),
+                ProgressText: ProgressTextWithFilteredCount(itemBatch?.ProgressText, filteredCount),
                 ElapsedMilliseconds: ElapsedMilliseconds(),
-                IsComplete: isKnownWorkComplete,
+                IsComplete: false,
                 UnmappedCount: CountUnverified(filteredItems),
                 FilteredCount: filteredCount);
         }
@@ -1144,7 +1172,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
     private async Task<IReadOnlyList<PremiereItem>> HydrateCachedImdbRatingsAsync(
         IReadOnlyList<PremiereItem> items,
         CalendarFilters? filters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowRemote = true)
     {
         if (items.Count == 0 || (_imdbRatingsStore is null && _rottenTomatoesClient is null))
         {
@@ -1206,7 +1235,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     {
                         rottenTomatoesScores = cachedScores;
                     }
-                    else if (filters?.ScoreSource == ScoreSource.RottenTomatoes)
+                    else if (allowRemote && filters?.ScoreSource == ScoreSource.RottenTomatoes)
                     {
                         rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
                             hydratedItem.MediaType,
@@ -1706,6 +1735,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         private readonly Dictionary<string, PremiereItem> _mergedByCanonicalId = new(StringComparer.Ordinal);
         private readonly HashSet<string> _dirtyCanonicalIds = new(StringComparer.Ordinal);
 
+        public int Count => _itemsByCanonicalId.Count;
+
         public void AddRange(IEnumerable<PremiereItem> items)
         {
             foreach (var item in items)
@@ -1776,7 +1807,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         int? unmappedCount = null,
         int? filteredCount = null,
         string? checkpointKey = null,
-        bool isStaleCache = false)
+        bool isStaleCache = false,
+        DateTimeOffset? retryAfterUtc = null)
     {
         var diagnosticSourceItems = sourceItems
             .Select(EnsureDiagnostics)
@@ -1804,7 +1836,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             FailedSourceNames = failedSourceNames ?? [],
             UnmappedCount = unmappedCount ?? CountUnverified(diagnosticSourceItems),
             FilteredCount = filteredCount,
-            CheckpointKey = checkpointKey
+            CheckpointKey = checkpointKey,
+            RetryAfterUtc = retryAfterUtc
         };
     }
 

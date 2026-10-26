@@ -8,6 +8,8 @@ public sealed class ImageCacheOptions
     public int MaxBytes { get; init; } = 5 * 1024 * 1024;
     public int MaxConcurrentDownloads { get; init; } = 4;
     public int MaxConcurrentDecodes { get; init; } = 2;
+    public long MaxDecodedPixels { get; init; } = 40_000_000;
+    public int RequestTimeoutSeconds { get; init; } = 20;
     public string[] AllowedHosts { get; init; } =
     [
         "image.tmdb.org",

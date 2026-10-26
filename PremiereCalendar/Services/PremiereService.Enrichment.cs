@@ -1149,21 +1149,42 @@ public sealed partial class PremiereService
             }
             catch (Exception ex) when (IsExpectedSourceShutdownException(ex))
             {
+                if (!source.MoveNextTask.IsCompleted)
+                {
+                    _ = FinishSourceShutdownAsync(source);
+                    return;
+                }
             }
         }
 
         try
         {
-            await source.Enumerator.DisposeAsync();
+            var disposal = source.Enumerator.DisposeAsync().AsTask();
+            try { await disposal.WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None); }
+            catch (TimeoutException) { _ = ObserveSourceShutdownAsync(disposal); }
         }
         catch (Exception ex) when (IsExpectedSourceShutdownException(ex))
         {
         }
     }
 
+    private static async Task FinishSourceShutdownAsync(ActivePremiereSource source)
+    {
+        await ObserveSourceShutdownAsync(source.MoveNextTask);
+        try { await source.Enumerator.DisposeAsync(); }
+        catch (Exception) { /* Cleanup must not replace the load's original failure. */ }
+    }
+
+    private static async Task ObserveSourceShutdownAsync(Task task)
+    {
+        try { await task; }
+        catch (Exception) { /* Observe detached shutdown work after the cleanup budget. */ }
+    }
+
     private static bool IsExpectedSourceShutdownException(Exception ex)
     {
         return ex is OperationCanceledException
+            or TimeoutException
             or ObjectDisposedException
             or NotSupportedException;
     }
