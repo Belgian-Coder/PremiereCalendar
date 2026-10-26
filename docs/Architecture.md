@@ -4,7 +4,7 @@ For an end-to-end operational walkthrough, see [How It Works](HowItWorks.md).
 
 ## App Model
 
-Premiere Calendar is a .NET 11 preview Blazor Web App using interactive server rendering. This keeps TMDb and OMDb credentials on the server and avoids a separate backend project for the first version.
+Premiere Calendar is a .NET 11 Blazor Web App using interactive server rendering. This keeps TMDb and OMDb credentials on the server and avoids a separate backend project for the first version.
 
 ## Data Flow
 

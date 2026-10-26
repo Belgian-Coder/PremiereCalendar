@@ -17,7 +17,7 @@ jobs:
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'dotnet-install.ps1'
           Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile $installer
-          & $installer -Version 11.0.100-preview.7.26381.103 -InstallDir (Join-Path $env:GITHUB_WORKSPACE '.dotnet') -NoPath
+          & $installer -Version 11.0.100-rc.3.26522.148 -InstallDir (Join-Path $env:GITHUB_WORKSPACE '.dotnet') -NoPath
       - name: Restore
         run: .\.dotnet\dotnet.exe restore PremiereCalendar.slnx --nologo
       - name: Build
@@ -68,7 +68,7 @@ jobs:
         shell: bash
         run: |
           curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$RUNNER_TEMP/dotnet-install.sh"
-          bash "$RUNNER_TEMP/dotnet-install.sh" --version 11.0.100-preview.7.26381.103 --install-dir "$GITHUB_WORKSPACE/.dotnet" --no-path
+          bash "$RUNNER_TEMP/dotnet-install.sh" --version 11.0.100-rc.3.26522.148 --install-dir "$GITHUB_WORKSPACE/.dotnet" --no-path
       - name: PostgreSQL migration and persistence integration test
         run: ./.dotnet/dotnet test tests/PremiereCalendar.IntegrationTests/PremiereCalendar.IntegrationTests.csproj -c Release --filter FullyQualifiedName~PostgresPersistenceTests --logger "trx;LogFilePrefix=postgres"
       - name: Publish PostgreSQL test result

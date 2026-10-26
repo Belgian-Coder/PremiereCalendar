@@ -2317,7 +2317,7 @@ public partial class Calendar
         if (!string.Equals(Navigation.Uri, url, StringComparison.Ordinal))
         {
             _forceLoadOnNextLocationChange = forceLoadOnChange;
-            Navigation.NavigateTo(url, replace);
+            Navigation.NavigateTo(url, replace: replace);
             return true;
         }
 

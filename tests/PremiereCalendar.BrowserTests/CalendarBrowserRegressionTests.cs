@@ -1,12 +1,14 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Deque.AxeCore.Playwright;
 using Microsoft.Playwright;
 using Microsoft.Playwright.Xunit;
+using Xunit.Abstractions;
 
 namespace PremiereCalendar.BrowserTests;
 
 [Collection(BrowserAppCollection.Name)]
-public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application) : PageTest
+public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application, ITestOutputHelper output) : PageTest
 {
     [Theory]
     [InlineData(1440, 1000)]
@@ -50,6 +52,7 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             await Page.GotoAsync(application.BaseUrl, new() { WaitUntil = WaitUntilState.DOMContentLoaded });
             await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync(new() { Timeout = 5_000 });
             Assert.True(firstCardTimer.Elapsed <= TimeSpan.FromSeconds(5), $"First usable card took {firstCardTimer.Elapsed}.");
+            output.WriteLine($"First usable card: {firstCardTimer.ElapsedMilliseconds} ms ({width}x{height}).");
             Assert.Equal("compact", await Page.Locator("html").GetAttributeAsync("data-density"));
 
             await Expect(Page.Locator(".card-description").First).ToBeVisibleAsync();
@@ -70,12 +73,13 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             await Expect(Page.Locator("[data-testid='filter-pane']")).ToBeVisibleAsync();
             await Page.GetByRole(AriaRole.Combobox, new() { Name = "Sort results by" }).SelectOptionAsync("Title");
             await Page.GetByRole(AriaRole.Button, new() { Name = "Save" }).ClickAsync();
-            await Page.WaitForURLAsync(url => url.Contains("sort=title", StringComparison.OrdinalIgnoreCase));
+            await Expect(Page).ToHaveURLAsync(new Regex(@"[?&]sort=title(?:&|$)"));
 
             var targetDay = Page.Locator("[data-day-button]").Nth(1);
             await targetDay.WaitForAsync();
             var targetDayId = await targetDay.GetAttributeAsync("data-day-target");
             Assert.NotNull(targetDayId);
+            var documentTimeOrigin = await Page.EvaluateAsync<double>("performance.timeOrigin");
             await Page.EvaluateAsync("""
                 target => {
                     const button = [...document.querySelectorAll('[data-day-button]')]
@@ -93,6 +97,8 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync();
             await Page.WaitForFunctionAsync("Number.isFinite(Number(sessionStorage.getItem('pc-day-switch-duration')))");
             var daySwitchMilliseconds = await Page.EvaluateAsync<double>("Number(sessionStorage.getItem('pc-day-switch-duration'))");
+            Assert.Equal(documentTimeOrigin, await Page.EvaluateAsync<double>("performance.timeOrigin"));
+            output.WriteLine($"Day switch: {daySwitchMilliseconds:0} ms ({width}x{height}); document preserved.");
             Assert.True(daySwitchMilliseconds <= 750, $"Day switch took {daySwitchMilliseconds:0} ms.");
 
             var rollingWindow = Stopwatch.StartNew();

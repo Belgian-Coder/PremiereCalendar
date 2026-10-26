@@ -61,3 +61,9 @@ Local raw evidence is retained under `PremiereCalendar.Build.RootValidation` bes
 Temporary task containers, volumes, network, intermediate images and the PostgreSQL password file were removed after acceptance. The final Release image, logs and source snapshots remain available. Unrelated resources were unchanged.
 
 This is container and automated-fixture acceptance on Windows/Linux x64. Production latency, load and provider outage behavior have not been measured in production. Production deployment is outside this change.
+
+## Installation follow-up: patched runtime and navigation
+
+The subsequent authorized installation exposed fixable vulnerabilities in the old preview-7 runtime and OpenSSL base during the hosted image scan. The release candidate now pins .NET 11 RC3 SDK/runtime and matching Microsoft packages, with immutable Alpine 3.24.3 base images containing OpenSSL 3.5.9. The scan gate remains unchanged.
+
+RC3 compatibility validation passed 392 unit, 158 component and 185 integration tests, including all four PostgreSQL cases. Browser comparison exposed an existing overload error: `Navigation.NavigateTo(url, replace)` interpreted the boolean as `forceLoad`, reloading the document on day/filter changes. The named `replace:` argument fixes the behavior, with component coverage proving the old failure and browser coverage checking document preservation. Both RC3 browser cases passed unchanged budgets: mobile first card 1,061 ms/day switch 62 ms; desktop 542 ms/55 ms. An endpoint assertion now checks the required `NoStore` directive rather than rejecting RC3's additional `no-cache` directive.

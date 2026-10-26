@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM mcr.microsoft.com/dotnet/sdk:11.0.100-preview.7-alpine3.24@sha256:186cbf87f5b66f2e4ff937b6a3cd420b005356e940eacd5c420fc30308c49c46 AS build
+FROM mcr.microsoft.com/dotnet/sdk:11.0.100-rc.3-alpine3.24@sha256:f2542b156e7c9eda7783e4a5745efa6c133a162a1940fd4175849aa80fccfd23 AS build
 WORKDIR /src
 COPY global.json Directory.Build.props PremiereCalendar.slnx ./
 COPY PremiereCalendar/PremiereCalendar.csproj PremiereCalendar/
@@ -20,13 +20,13 @@ RUN dotnet publish PremiereCalendar/PremiereCalendar.csproj -c Release --no-rest
     /p:UseAppHost=false \
     && test -s /out/wwwroot/_framework/blazor.web.js
 
-FROM mcr.microsoft.com/dotnet/sdk:11.0.100-preview.7-alpine3.24@sha256:186cbf87f5b66f2e4ff937b6a3cd420b005356e940eacd5c420fc30308c49c46 AS development
+FROM mcr.microsoft.com/dotnet/sdk:11.0.100-rc.3-alpine3.24@sha256:f2542b156e7c9eda7783e4a5745efa6c133a162a1940fd4175849aa80fccfd23 AS development
 WORKDIR /src
 ENV Urls=http://0.0.0.0:8080 DOTNET_USE_POLLING_FILE_WATCHER=1
 EXPOSE 8080
 CMD ["dotnet", "watch", "--project", "PremiereCalendar/PremiereCalendar.csproj", "run", "--no-launch-profile"]
 
-FROM mcr.microsoft.com/dotnet/aspnet:11.0.0-preview.7-alpine3.24@sha256:994a3d79e5e49277adb008b6272a3b90dd2b7c2e9709e62c9d70738df3bbcc06 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:11.0.0-rc.3-alpine3.24@sha256:77256017a4f675e1cf66a4e910e115608a73a044b50ee07c3d042c8a71132da5 AS runtime
 ARG VERSION=0.0.0-container
 ARG SOURCE_REVISION=unknown
 ARG BUILD_TIME_UTC=unknown

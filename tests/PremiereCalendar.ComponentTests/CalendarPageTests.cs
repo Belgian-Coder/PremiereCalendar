@@ -1,5 +1,6 @@
 using AngleSharp.Dom;
 using Bunit;
+using Bunit.TestDoubles;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.DependencyInjection;
@@ -2344,6 +2345,9 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Equal("2026-05-04", query["week"].ToString());
             Assert.Equal("2026-05-05", query["day"].ToString());
             Assert.Single(service.Calls);
+            var options = Assert.IsType<BunitNavigationManager>(navigation).History.First().Options;
+            Assert.False(options.ForceLoad);
+            Assert.True(options.ReplaceHistoryEntry);
         });
     }
 

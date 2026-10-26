@@ -60,7 +60,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg");
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.True(response.Headers.CacheControl?.NoStore);
     }
 
     [Fact]

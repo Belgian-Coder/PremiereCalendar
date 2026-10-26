@@ -22,7 +22,7 @@ See [speed and reliability validation](SpeedReliabilityValidation.md) for the co
 
 ## .NET 11 Notes
 
-The app targets `net11.0` and `global.json` pins the required .NET 11 preview SDK. Local builds use the machine-wide SDK and write their outputs to the sibling `PremiereCalendar.Build` directory, keeping SDK and build copies out of the checkout. The deployed Windows compatibility build is self-contained.
+The app targets `net11.0` and `global.json` pins .NET SDK `11.0.100-rc.3.26522.148`. Local builds use the machine-wide SDK and write their outputs to the sibling `PremiereCalendar.Build` directory, keeping SDK and build copies out of the checkout. The deployed Windows compatibility build is self-contained.
 
 The .NET 11 release notes drove the current dense-list change:
 
