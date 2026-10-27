@@ -371,7 +371,8 @@ public sealed partial class PremiereService
             var hasRuntimeMismatch = hasRuntimeFilter
                 && runtimeMinutes is > 0
                 && (runtimeMinutes < requestedMovieCriteria.RuntimeMinMinutes
-                    || runtimeMinutes > requestedMovieCriteria.RuntimeMaxMinutes);
+                    || requestedMovieCriteria.RuntimeMaxMinutes < 360
+                        && runtimeMinutes > requestedMovieCriteria.RuntimeMaxMinutes);
 
             if (hasLanguageMismatch || hasRuntimeMismatch)
             {

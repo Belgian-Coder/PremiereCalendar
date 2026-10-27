@@ -1,12 +1,44 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using PremiereCalendar.Models;
+using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
 public sealed partial class PremiereServiceTests
 {
+    [Fact]
+    public async Task RepeatedMetadataDoesNotRenewAnUnchangedSourceWorkCounter()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "premiere-progress-tests", Guid.NewGuid().ToString("N"));
+        using var store = new PerformanceDiagnosticStore(new TelemetryOptions(), directory);
+        var telemetry = new PremiereTelemetry(store);
+        var row = new TmdbMovieDiscoverItem { Id = 71, Title = "Fixture", ReleaseDate = "2026-08-31" };
+        var tmdb = new FakeTmdbClient
+        {
+            MovieStreamBatches = [new(1, 1, 2, 2, [row]), new(2, 2, 2, 2, [row])]
+        };
+        var service = CreateService(tmdb, telemetry: telemetry, sourceTimeoutSeconds: 1);
+        var items = await service.GetPremieresAsync(new(2026, 8, 31), new(2026, 8, 31),
+            CancellationToken.None, filters: new() { ShowSeries = false });
+        Assert.Single(items);
+        telemetry.FlushDiagnostics();
+        store.Dispose();
+        var progress = Directory.GetFiles(Path.Combine(directory, "App_Data", "logs", "performance"))
+            .SelectMany(File.ReadAllLines).Select(line => JsonDocument.Parse(line)).ToArray();
+        try
+        {
+            var renewals = progress.Where(entry => entry.RootElement.GetProperty("event").GetString() == "source.deadline.renewed")
+                .Select(entry => entry.RootElement.GetProperty("details").GetProperty("sequence").GetInt64()).ToArray();
+            // Metadata first adds the row, then actual enrichment completes each input.
+            // Re-emitting the same metadata at completed-work=1 cannot renew again.
+            Assert.Equal([0L, 1L, 2L], renewals);
+        }
+        finally { foreach (var entry in progress) entry.Dispose(); }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

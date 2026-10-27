@@ -4296,6 +4296,7 @@ public sealed partial class PremiereServiceTests
         public IReadOnlyList<TmdbTvDiscoverItem> TvItems { get; init; } = [];
         public Dictionary<string, IReadOnlyList<TmdbTvDiscoverItem>> TvItemsByOriginalLanguage { get; init; } = [];
         public IReadOnlyList<TmdbMovieDiscoverItem> MovieItems { get; init; } = [];
+        public IReadOnlyList<TmdbDiscoverBatch<TmdbMovieDiscoverItem>>? MovieStreamBatches { get; init; }
         public bool FilterMovieItemsByDate { get; init; }
         public IReadOnlyList<TmdbDiscoverBatch<TmdbTvDiscoverItem>>? TvStreamBatches { get; init; }
         public TimeSpan? TvDetailDelay { get; init; }
@@ -4424,6 +4425,11 @@ public sealed partial class PremiereServiceTests
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken,
             bool forceRefresh = false)
         {
+            if (MovieStreamBatches is not null)
+            {
+                foreach (var batch in MovieStreamBatches) { yield return batch; await Task.Yield(); }
+                yield break;
+            }
             var items = await DiscoverMoviesAsync(start, end, filters, cancellationToken, forceRefresh);
             yield return new TmdbDiscoverBatch<TmdbMovieDiscoverItem>(1, 1, 1, items.Count, items);
         }

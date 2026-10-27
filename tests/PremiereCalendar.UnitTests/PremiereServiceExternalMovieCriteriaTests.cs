@@ -6,6 +6,20 @@ namespace PremiereCalendar.UnitTests;
 
 public sealed partial class PremiereServiceTests
 {
+    [Fact]
+    public async Task GetPremieresAsync_PreservesDirectRuntimeLimitsAboveTheNormalizedUiMaximum()
+    {
+        var date = new DateOnly(2026, 5, 5);
+        var tmdb = new FakeTmdbClient();
+        tmdb.MovieDetailsById[306] = MovieDetails(306, "en", 380);
+        var filters = MovieRequestFilters();
+        filters.MovieFilters.RuntimeMaxMinutes = 400;
+        var service = CreateService(tmdb, discoveryProviders: [MovieProvider(
+            new ExternalPremiereCandidate(PremiereMediaType.Movie, date, "Long fixture", 306, null, null, "Simkl"))]);
+        var items = await service.GetPremieresAsync(date, date, CancellationToken.None, filters: filters);
+        Assert.Equal(380, Assert.Single(items).RuntimeMinutes);
+    }
+
     [Theory]
     [InlineData("fr", 90)]
     [InlineData("en", 44)]
