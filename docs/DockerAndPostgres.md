@@ -17,13 +17,13 @@ The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed
 
 ## Production container
 
-An operator explicitly starts the manual container workflow for an intended
-version. A push, pull request, tag, schedule, or GitHub release does not start
-it. The manual workflow builds the runtime image once, launches that exact
-image to prove readiness, non-root identity, root HTML and the Blazor boot
-asset, rejects fixable HIGH or CRITICAL vulnerability findings, retains a
-CycloneDX SBOM and scan report, then publishes the scanned image to GitHub
-Container Registry.
+Do not use GitHub Actions, including manual workflow dispatches. The CI and
+Container workflows are disabled. Build and publish locally: build the runtime
+image once, launch that exact image to prove readiness, non-root identity,
+root HTML and the Blazor boot asset, reject fixable HIGH or CRITICAL
+vulnerability findings, retain a CycloneDX SBOM and scan report, then publish
+the scanned image to GitHub Container Registry. Registry hosting does not
+require hosted CI.
 Deploy by digest. The runtime:
 
 - runs as the image's non-root application user;
