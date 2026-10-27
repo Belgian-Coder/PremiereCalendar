@@ -1,5 +1,7 @@
 # Slow movie-week load and persistent diagnostics
 
+The subsequent [movie-week speed investigation](MovieWeekSpeedValidation.md) separates the remaining cold-provider cost from measured restart-cache improvements, with captured-response replay, preserved full results and fine-grained cache I/O evidence.
+
 ## Observed incident
 
 Read-only investigation of the installed 1.2.3 container on 27 October 2026 confirmed the reported route: movies, 31 August–6 September 2026, selected day 2 September, English/Dutch, minimum runtime 45 minutes. The screenshot showed 141 titles and “not cached yet”.
