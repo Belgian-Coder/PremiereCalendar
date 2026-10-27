@@ -4243,7 +4243,8 @@ public sealed partial class PremiereServiceTests
         int sourceFetchConcurrency = 4,
         int enrichmentProgressBatchSize = 10,
         IProviderWorkScheduler? workScheduler = null,
-        PremiereTelemetry? telemetry = null)
+        PremiereTelemetry? telemetry = null,
+        int maxEnrichmentConcurrency = 16)
     {
         return new PremiereService(
             tmdb,
@@ -4260,7 +4261,8 @@ public sealed partial class PremiereServiceTests
                 SourceRegions = sourceRegions ?? [],
                 SourceTimeoutSeconds = sourceTimeoutSeconds,
                 SourceFetchConcurrency = sourceFetchConcurrency,
-                EnrichmentProgressBatchSize = enrichmentProgressBatchSize
+                EnrichmentProgressBatchSize = enrichmentProgressBatchSize,
+                MaxEnrichmentConcurrency = maxEnrichmentConcurrency
             }),
             NullLogger<PremiereService>.Instance,
             imdbRatingsStore,

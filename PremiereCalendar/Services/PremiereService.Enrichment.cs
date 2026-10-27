@@ -333,7 +333,8 @@ public sealed partial class PremiereService
         CancellationToken cancellationToken,
         bool forceRefresh,
         IReadOnlyDictionary<string, PremiereItem>? cachedEnrichment = null,
-        bool allowWatchmodeAvailabilityFallback = true)
+        bool allowWatchmodeAvailabilityFallback = true,
+        MediaDiscoveryCriteria? requestedMovieCriteria = null)
     {
         var releaseDateValue = CoalesceText(item.ReleaseDate, item.PrimaryReleaseDate);
         if (item.Id <= 0
@@ -354,6 +355,36 @@ public sealed partial class PremiereService
             PremiereMediaType.Movie,
             item.Id,
             cancellationToken));
+
+        if (requestedMovieCriteria is not null)
+        {
+            var originalLanguage = CoalesceText(item.OriginalLanguage, details?.OriginalLanguage);
+            var hasLanguageMismatch = requestedMovieCriteria.OriginalLanguages.Length > 0
+                && !string.IsNullOrWhiteSpace(originalLanguage)
+                && !requestedMovieCriteria.OriginalLanguages.Any(language => string.Equals(
+                    originalLanguage,
+                    language.Trim(),
+                    StringComparison.OrdinalIgnoreCase));
+            var runtimeMinutes = details?.Runtime;
+            var hasRuntimeFilter = requestedMovieCriteria.RuntimeMinMinutes > 0
+                || requestedMovieCriteria.RuntimeMaxMinutes < 360;
+            var hasRuntimeMismatch = hasRuntimeFilter
+                && runtimeMinutes is > 0
+                && (runtimeMinutes < requestedMovieCriteria.RuntimeMinMinutes
+                    || runtimeMinutes > requestedMovieCriteria.RuntimeMaxMinutes);
+
+            if (hasLanguageMismatch || hasRuntimeMismatch)
+            {
+                _telemetry.RecordDiagnostic("enrichment.skipped", details: new()
+                {
+                    Stage = "movie",
+                    Outcome = "skipped",
+                    Reason = "request_filter",
+                    ItemId = item.Id
+                });
+                return null;
+            }
+        }
 
         var ratingsTask = TraceEnrichmentStageAsync("movie.ratings",
             () => GetExternalRatingsAsync(details?.ExternalIds?.ImdbId, cancellationToken, forceRefresh));

@@ -10,9 +10,11 @@ public sealed partial class PremiereService
 {
     private Task<PremiereItem?> MapMovieAsync(
         TmdbMovieDiscoverItem item, CancellationToken cancellationToken, bool forceRefresh,
-        IReadOnlyDictionary<string, PremiereItem>? cachedEnrichment = null, bool allowWatchmodeAvailabilityFallback = true)
+        IReadOnlyDictionary<string, PremiereItem>? cachedEnrichment = null, bool allowWatchmodeAvailabilityFallback = true,
+        MediaDiscoveryCriteria? requestedMovieCriteria = null)
         => TraceItemEnrichmentAsync("movie", item.Id, () => MapMovieCoreAsync(
-            item, cancellationToken, forceRefresh, cachedEnrichment, allowWatchmodeAvailabilityFallback));
+            item, cancellationToken, forceRefresh, cachedEnrichment, allowWatchmodeAvailabilityFallback,
+            requestedMovieCriteria));
 
     private Task<PremiereItem?> MapSeriesAsync(
         TmdbTvDiscoverItem item, CancellationToken cancellationToken, bool forceRefresh,

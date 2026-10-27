@@ -77,7 +77,7 @@ Default non-secret settings:
 - `Tmdb:EnrichmentProgressBatchSize` - how many enriched cards are emitted per partial progress update during fresh refreshes. Default 10, so broad days start rendering quickly even when later page batches contain hundreds of raw TMDb rows.
 - `Tmdb:ExternalCandidateBatchSize` - how many external-provider candidates are accumulated before TMDb ID resolution/enrichment. Default 100.
 - `Tmdb:RequestTimeoutSeconds` - HTTP timeout for TMDb requests.
-- `Tmdb:SourceTimeoutSeconds` - timeout for one source batch before it is skipped and progress continues.
+- `Tmdb:SourceTimeoutSeconds` - inactivity timeout for a streaming source: renewed only when completed work or distinct rows advance. A stalled batch is skipped after this interval; finite sources that keep progressing may take longer overall. Caller cancellation and per-provider HTTP timeouts remain separate. Non-streaming sources retain a single batch deadline.
 - `Tmdb:MaxRequestsPerSecond` - local TMDb request-rate limit. Keep it below TMDb's documented upper-limit guidance and respect `429` responses.
 
 The same TMDb token is also used by `TmdbFilterCatalogService` to load official filter values for genres, languages, countries, watch providers, and certifications. These catalog responses are cached in memory and have local fallback values so the filter pane still opens if a catalog request fails.

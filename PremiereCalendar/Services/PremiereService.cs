@@ -1076,6 +1076,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var startedAt = Stopwatch.GetTimestamp();
         var lastEmissionAt = startedAt;
         PremiereItemBatch? lastItemBatch = null;
+        var furthestCompletedWork = 0;
 
         long ElapsedMilliseconds()
         {
@@ -1091,7 +1092,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
             try
             {
+                token.ThrowIfCancellationRequested();
                 hasNext = await enumerator.MoveNextAsync();
+                token.ThrowIfCancellationRequested();
                 if (hasNext)
                 {
                     itemBatch = enumerator.Current;
@@ -1102,7 +1105,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             {
                 _logger.LogWarning(
                     ex,
-                    "Skipping premiere discovery source {SourceName} for {StartDate} through {EndDate} after the configured {TimeoutSeconds}s source timeout.",
+                    "Skipping premiere discovery source {SourceName} for {StartDate} through {EndDate} after {TimeoutSeconds}s without forward source progress.",
                     name,
                     start,
                     end,
@@ -1170,7 +1173,22 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             }
 
             lastItemBatch = itemBatch;
+            var previousItemCount = accumulated.Count;
             accumulated.AddRange(itemBatch?.Items ?? []);
+            var completedWork = itemBatch?.CompletedWork ?? 0;
+            var madeProgress = accumulated.Count > previousItemCount || completedWork > furthestCompletedWork;
+            if (madeProgress)
+            {
+                // This is a per-progress-batch inactivity budget, not a total
+                // runtime cap on a finite source that continues making progress.
+                if (!token.IsCancellationRequested) sourceTimeoutCts?.CancelAfter(sourceTimeout);
+                furthestCompletedWork = Math.Max(furthestCompletedWork, completedWork);
+                _telemetry.RecordDiagnostic("source.deadline.renewed", details: new()
+                {
+                    Stage = "inactivity", Count = accumulated.Count, Total = itemBatch?.TotalWork,
+                    Sequence = furthestCompletedWork, DurationMilliseconds = ElapsedMilliseconds()
+                });
+            }
             // Dense sources can emit hundreds of tiny enrichment batches. Keep
             // their rows, but avoid rebuilding and serializing a full snapshot
             // faster than the page can render it. Completion/errors always flush.
@@ -1181,6 +1199,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             var filteredItems = ApplyRequestedFilters(unfilteredItems, filters);
             var filteredCount = CountFilteredOut(unfilteredItems, filteredItems);
             emitted = true;
+            // A consumer persisting/rendering a real progress batch is not a
+            // stalled provider. Do not spend its next inactivity budget here.
+            if (madeProgress) sourceTimeoutCts?.CancelAfter(Timeout.InfiniteTimeSpan);
             yield return new PremiereSourceBatch(
                 name,
                 filteredItems,
@@ -1191,6 +1212,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 IsComplete: false,
                 UnmappedCount: CountUnverified(filteredItems),
                 FilteredCount: filteredCount);
+            if (madeProgress && !token.IsCancellationRequested) sourceTimeoutCts?.CancelAfter(sourceTimeout);
         }
     }
 

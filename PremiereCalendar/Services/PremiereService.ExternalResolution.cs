@@ -121,7 +121,7 @@ public sealed partial class PremiereService
                 .WithCancellation(cancellationToken))
             {
                 emitted = true;
-                yield return mappedBatch;
+                yield return OffsetExternalCandidateProgress(mappedBatch, acceptedCandidateCount - pendingCandidates.Count);
             }
 
             pendingCandidates.Clear();
@@ -144,7 +144,7 @@ public sealed partial class PremiereService
                 }
                 if (!moved) break;
                 emitted = true;
-                yield return mapped.Current;
+                yield return OffsetExternalCandidateProgress(mapped.Current, acceptedCandidateCount - pendingCandidates.Count);
             }
         }
 
@@ -158,6 +158,13 @@ public sealed partial class PremiereService
             yield return EmptyExternalCandidateProgress(rawCandidateCount, acceptedCandidateCount);
         }
     }
+
+    private static PremiereItemBatch OffsetExternalCandidateProgress(PremiereItemBatch batch, int offset)
+        => batch with
+        {
+            CompletedWork = batch.CompletedWork is { } completed ? offset + completed : null,
+            TotalWork = batch.TotalWork is { } total ? offset + total : null
+        };
 
     private static PremiereItemBatch EmptyExternalCandidateProgress(int rawCandidateCount, int acceptedCandidateCount)
     {
@@ -358,7 +365,8 @@ public sealed partial class PremiereService
                 cancellationToken,
                 forceRefresh,
                 cachedEnrichment,
-                allowWatchmodeAvailabilityFallback: false)
+                allowWatchmodeAvailabilityFallback: false,
+                requestedMovieCriteria: criteria.Movies)
             : await MapSeriesAsync(
                 new TmdbTvDiscoverItem
                 {
@@ -1187,6 +1195,10 @@ public sealed partial class PremiereService
         var completedWork = 0;
         var totalWork = rawItemList.Count;
         var lastEmittedCompletedWork = 0;
+        var lastProgressAt = Stopwatch.GetTimestamp();
+        var progressInterval = TimeSpan.FromMilliseconds(_options.SourceTimeoutSeconds > 0
+            ? Math.Clamp(_options.SourceTimeoutSeconds * 250L, 100L, 1000L)
+            : 1000L);
 
         void StartPending()
         {
@@ -1233,9 +1245,12 @@ public sealed partial class PremiereService
 
                 StartPending();
 
-                if (batch.Count >= progressBatchSize)
+                if (batch.Count >= progressBatchSize
+                    || completedWork - lastEmittedCompletedWork >= progressBatchSize
+                    || Stopwatch.GetElapsedTime(lastProgressAt) >= progressInterval)
                 {
                     lastEmittedCompletedWork = completedWork;
+                    lastProgressAt = Stopwatch.GetTimestamp();
                     yield return new PremiereItemBatch(batch.ToArray(), completedWork, totalWork);
                     batch.Clear();
                 }
@@ -1297,7 +1312,9 @@ public sealed partial class PremiereService
         var total = EstimateTmdbWork(rawBatch, completed);
         return batch with
         {
-            CompletedWork = Math.Min(completed, total),
+            // Discovery metadata is available, but this batch's enrichment work
+            // has not completed yet. Keep its subsequent progress monotonic.
+            CompletedWork = completedRawItemsBeforeBatch,
             TotalWork = total,
             ProgressText = $"{TmdbPageText(rawBatch)} · metadata {Math.Min(completed, total):N0} of {total:N0} rows"
         };
