@@ -14,6 +14,23 @@ namespace PremiereCalendar.ComponentTests;
 public sealed class CalendarPageDiagnosticsTests
 {
     [Fact]
+    public async Task FirstNonemptyTimingDoesNotCountAnEmptyProgressNotification()
+    {
+        using var fixture = new DiagnosticFixture();
+        fixture.Service.EmitEmptyFirst = true;
+        fixture.Navigation.NavigateTo("/movies?week=2026-05-04");
+        var component = fixture.Context.Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(fixture.Service.Contexts));
+        fixture.Service.ReleaseFirst.TrySetResult();
+        var events = await fixture.WaitForEventAsync("calendar.page.finished");
+        var first = Assert.Single(events, entry => EventName(entry) == "calendar.page.first_result");
+        var nonempty = Assert.Single(events, entry => EventName(entry) == "calendar.page.first_nonempty_result");
+        Assert.Equal(0, first.GetProperty("details").GetProperty("count").GetInt32());
+        Assert.Equal(1, nonempty.GetProperty("details").GetProperty("count").GetInt32());
+        Assert.True(nonempty.GetProperty("eventSequence").GetInt64() > first.GetProperty("eventSequence").GetInt64());
+    }
+
+    [Fact]
     public async Task CachedCardsGetFreshnessBeforeBackgroundCompletionAndPersistCorrelatedRenderEvents()
     {
         using var fixture = new DiagnosticFixture();
@@ -265,6 +282,7 @@ public sealed class CalendarPageDiagnosticsTests
         public TaskCompletionSource ReleaseFirst { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool IgnoreFirstCancellation { get; set; }
         public bool FailFirst { get; set; }
+        public bool EmitEmptyFirst { get; set; }
         public IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(DateOnly start, DateOnly end, bool forceRefresh = false,
             CalendarFilters? filters = null, CancellationToken cancellationToken = default)
         {
@@ -279,6 +297,7 @@ public sealed class CalendarPageDiagnosticsTests
                 MediaType = PremiereMediaType.Movie, Type = PremiereItemType.MovieFirstRelease, PremiereDate = start, OriginalLanguage = "en" };
             if (first)
             {
+                if (EmitEmptyFirst) yield return new PremiereLoadProgress("Started", 0, 0, []);
                 telemetry.RecordDiagnostic("test.service.produced");
                 yield return new PremiereLoadProgress("Expired week cache", 1, 1, [item], FromCache: true) { IsStaleCache = true };
                 if (IgnoreFirstCancellation) await ReleaseFirst.Task;

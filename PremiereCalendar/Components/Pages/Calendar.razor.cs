@@ -755,6 +755,7 @@ public partial class Calendar
         var hasAuthoritativeResult = false;
         var hasFinalResult = false;
         var firstResult = true;
+        var firstNonemptyResult = true;
         var firstCachedFreshnessStarted = false;
         var loadOutcome = "ended_without_final";
         string? loadReason = null;
@@ -864,6 +865,15 @@ public partial class Calendar
                         {
                             firstResult = false;
                             RecordPageDiagnostic(diagnostic, "first_result", new()
+                            {
+                                FromCache = update.FromCache, IsFinal = update.IsFinal,
+                                Cache = update.IsStaleCache ? "stale" : update.FromCache ? "cached" : "miss"
+                            });
+                        }
+                        if (firstNonemptyResult && update.Items.Count > 0)
+                        {
+                            firstNonemptyResult = false;
+                            RecordPageDiagnostic(diagnostic, "first_nonempty_result", new()
                             {
                                 FromCache = update.FromCache, IsFinal = update.IsFinal,
                                 Cache = update.IsStaleCache ? "stale" : update.FromCache ? "cached" : "miss"

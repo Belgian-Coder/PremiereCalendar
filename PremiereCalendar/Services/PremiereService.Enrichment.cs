@@ -595,6 +595,17 @@ public sealed partial class PremiereService
                 cancellationToken,
                 forceRefresh);
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Optional HTTP deadlines must not discard an otherwise valid discovery
+            // batch. Cancellation of the source or caller still propagates unchanged.
+            _telemetry.RecordDiagnostic("enrichment.optional.timeout", details: new()
+            {
+                Provider = "rottentomatoes", Stage = "rotten_tomatoes", Outcome = "skipped", Reason = "dependency_timeout"
+            });
+            _logger.LogWarning("Skipping Rotten Tomatoes enrichment after its optional request timed out.");
+            return RottenTomatoesScores.Empty;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Skipping Rotten Tomatoes enrichment for {MediaType} {Title}.", mediaType, title);
