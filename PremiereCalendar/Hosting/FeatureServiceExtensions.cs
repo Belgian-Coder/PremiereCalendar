@@ -45,6 +45,7 @@ public static class FeatureServiceExtensions
         services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();
         services.AddSingleton<IOmdbCacheStore, SqliteOmdbCacheStore>();
         services.AddSingleton<IProviderCacheStateStore, SqliteProviderCacheStateStore>();
+        services.AddSingleton<ProviderResponseCache>();
         services.AddSingleton<IViewSyncStore, SqliteViewSyncStore>();
         services.AddSingleton<IViewSyncService, ViewSyncService>();
         return services;

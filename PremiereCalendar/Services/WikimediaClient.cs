@@ -96,19 +96,25 @@ public sealed class WikimediaClient : IWikimediaClient
         string wikidataId,
         CancellationToken cancellationToken,
         bool forceRefresh = false)
+        => (await GetRottenTomatoesIdResultAsync(wikidataId, cancellationToken, forceRefresh)).Value;
+
+    public async Task<WikimediaIdentifierResult> GetRottenTomatoesIdResultAsync(
+        string wikidataId,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
     {
         var enabled = _settingsStore is null
             ? _options.Enabled
             : (await _settingsStore.GetAsync(cancellationToken)).Sources.Wikimedia.Enabled;
         if (!enabled || string.IsNullOrWhiteSpace(wikidataId))
         {
-            return null;
+            return new(null, IsSuccess: false);
         }
 
         var cacheKey = $"wikimedia:rtid:{wikidataId}";
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out string? cached))
         {
-            return string.IsNullOrWhiteSpace(cached) ? null : cached;
+            return new(string.IsNullOrWhiteSpace(cached) ? null : cached, IsSuccess: true);
         }
 
         try
@@ -116,18 +122,18 @@ public sealed class WikimediaClient : IWikimediaClient
             var rottenTomatoesId = await GetWikidataStringClaimAsync(wikidataId.Trim(), "P1258", cancellationToken);
             if (!rottenTomatoesId.IsSuccess)
             {
-                return null;
+                return new(null, IsSuccess: false);
             }
 
             _cache.Set(
                 cacheKey,
                 string.IsNullOrWhiteSpace(rottenTomatoesId.Value) ? "" : rottenTomatoesId.Value,
                 string.IsNullOrWhiteSpace(rottenTomatoesId.Value) ? TimeSpan.FromDays(7) : TimeSpan.FromDays(30));
-            return rottenTomatoesId.Value;
+            return new(rottenTomatoesId.Value, IsSuccess: true);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return null;
+            return new(null, IsSuccess: false);
         }
         catch (OperationCanceledException)
         {
@@ -135,11 +141,11 @@ public sealed class WikimediaClient : IWikimediaClient
         }
         catch (HttpRequestException)
         {
-            return null;
+            return new(null, IsSuccess: false);
         }
         catch (JsonException)
         {
-            return null;
+            return new(null, IsSuccess: false);
         }
     }
 

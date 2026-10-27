@@ -22,6 +22,7 @@ public sealed class TmdbClient : ITmdbClient
     private readonly TmdbRequestLimiter _requestLimiter;
     private readonly ILogger<TmdbClient> _logger;
     private readonly ISingleFlightCoordinator _singleFlight;
+    private readonly ProviderResponseCache? _responseCache;
 
     public TmdbClient(
         HttpClient httpClient,
@@ -30,7 +31,8 @@ public sealed class TmdbClient : ITmdbClient
         ILogger<TmdbClient> logger,
         TmdbRequestLimiter? requestLimiter = null,
         IIntegrationSettingsStore? settingsStore = null,
-        ISingleFlightCoordinator? singleFlight = null)
+        ISingleFlightCoordinator? singleFlight = null,
+        ProviderResponseCache? responseCache = null)
     {
         _httpClient = httpClient;
         _cache = cache;
@@ -39,6 +41,7 @@ public sealed class TmdbClient : ITmdbClient
         _requestLimiter = requestLimiter ?? new TmdbRequestLimiter(options);
         _logger = logger;
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
+        _responseCache = responseCache;
     }
 
     public async Task<IReadOnlyList<TmdbTvDiscoverItem>> DiscoverTvAsync(
@@ -155,7 +158,8 @@ public sealed class TmdbClient : ITmdbClient
                 token,
                 notFoundReturnsNull: true),
             cancellationToken,
-            forceRefresh);
+            forceRefresh,
+            persistentRequestKey: $"details-v1:{_options.BaseUrl}:{TmdbQueryBuilder.BuildTvDetailsPath(id)}");
     }
 
     public Task<TmdbSeasonDetails?> GetTvSeasonDetailsAsync(
@@ -196,7 +200,8 @@ public sealed class TmdbClient : ITmdbClient
                 token,
                 notFoundReturnsNull: true),
             cancellationToken,
-            forceRefresh);
+            forceRefresh,
+            persistentRequestKey: $"details-v1:{_options.BaseUrl}:{TmdbQueryBuilder.BuildMovieDetailsPath(id)}");
     }
 
     public async Task<int?> FindTmdbIdByExternalIdAsync(
@@ -648,8 +653,10 @@ public sealed class TmdbClient : ITmdbClient
         TimeSpan duration,
         Func<CancellationToken, Task<T?>> factory,
         CancellationToken cancellationToken,
-        bool forceRefresh)
+        bool forceRefresh,
+        string? persistentRequestKey = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? cached))
         {
             return cached;
@@ -665,9 +672,38 @@ public sealed class TmdbClient : ITmdbClient
                     return flightCached;
                 }
 
+                using var publication = persistentRequestKey is null ? null : _responseCache?.BeginOperation("tmdb", persistentRequestKey, forceRefresh);
+                if (!forceRefresh && persistentRequestKey is not null && _responseCache is not null)
+                {
+                    var persisted = await _responseCache.GetAsync<T>("tmdb", persistentRequestKey, duration, token);
+                    if (persisted is not null)
+                    {
+                        return await publication!.PublishAsync(current =>
+                        {
+                            if (_cache.TryGetValue(cacheKey, out T? latest)) return Task.FromResult(latest);
+                            if (current) _cache.Set(cacheKey, persisted.Value, persisted.ExpiresAtUtc);
+                            return Task.FromResult<T?>(persisted.Value);
+                        }, token);
+                    }
+                }
+
                 var value = await factory(token);
                 if (value is not null)
                 {
+                    if (publication is not null)
+                    {
+                        return await publication.PublishAsync(async current =>
+                        {
+                            if (current)
+                            {
+                                _cache.Set(cacheKey, value, duration);
+                                await _responseCache!.SaveAsync("tmdb", persistentRequestKey!, value, token, invalidateOversized: forceRefresh);
+                            }
+                            else if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? latest)) return latest;
+                            return value;
+                        }, token);
+                    }
+
                     _cache.Set(cacheKey, value, duration);
                 }
 

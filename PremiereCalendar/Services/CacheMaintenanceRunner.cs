@@ -12,6 +12,7 @@ public sealed class CacheMaintenanceRunner
     private readonly CacheMaintenanceOptions _maintenanceOptions;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<CacheMaintenanceRunner> _logger;
+    private readonly ProviderResponseCache? _responseCache;
 
     public CacheMaintenanceRunner(
         ICalendarCacheMaintenance calendarCacheMaintenance,
@@ -20,7 +21,8 @@ public sealed class CacheMaintenanceRunner
         IOptions<CalendarWarmupOptions> warmupOptions,
         IOptions<CacheMaintenanceOptions> maintenanceOptions,
         TimeProvider timeProvider,
-        ILogger<CacheMaintenanceRunner> logger)
+        ILogger<CacheMaintenanceRunner> logger,
+        ProviderResponseCache? responseCache = null)
     {
         _calendarCacheMaintenance = calendarCacheMaintenance;
         _imageCacheMaintenance = imageCacheMaintenance;
@@ -29,6 +31,7 @@ public sealed class CacheMaintenanceRunner
         _maintenanceOptions = maintenanceOptions.Value;
         _timeProvider = timeProvider;
         _logger = logger;
+        _responseCache = responseCache;
     }
 
     public async Task RunOnceAsync(CancellationToken cancellationToken)
@@ -56,6 +59,7 @@ public sealed class CacheMaintenanceRunner
         var removedCalendarFiles = await _calendarCacheMaintenance.CleanupAsync(nowUtc, retention, cancellationToken);
         var removedImageEntries = await _imageCacheMaintenance.CleanupAsync(nowUtc, retention, cancellationToken);
         var removedUsageRows = await _usageStore.CleanupAsync(cutoffUtc, retainedProfileKeys, cancellationToken);
+        var removedProviderResponses = _responseCache is null ? 0 : await _responseCache.CleanupAsync(cancellationToken);
 
         _logger.LogInformation(
             "Cache maintenance removed {CalendarFiles} calendar files, {ImageEntries} image entries, and {UsageRows} filter usage rows older than {RetentionDays} days.",
@@ -63,5 +67,6 @@ public sealed class CacheMaintenanceRunner
             removedImageEntries,
             removedUsageRows,
             retention.TotalDays);
+        _logger.LogInformation("Cache maintenance removed {ProviderResponses} provider response rows older than eight days.", removedProviderResponses);
     }
 }

@@ -82,6 +82,8 @@ Default non-secret settings:
 
 The same TMDb token is also used by `TmdbFilterCatalogService` to load official filter values for genres, languages, countries, watch providers, and certifications. These catalog responses are cached in memory and have local fallback values so the filter pane still opens if a catalog request fails.
 
+Successful movie/TV detail responses also persist in the application database for their existing 12-hour lifetime; Rotten Tomatoes scores use their configured lifetime. Restart reads keep the original expiry, and forced refresh bypasses both cache tiers. Response envelopes are limited to 256 KiB; larger responses remain usable without persistence. Cache I/O is best effort with a 500 ms cooperative budget and five-second backoff per provider. SQLite response-cache connections additionally limit native busy retries to one second. PostgreSQL serves at most four response-cache operations concurrently; remote request limits are unchanged. Existing scheduled maintenance trims only these response-cache rows older than eight days when warmup and maintenance are enabled. See [measured movie-week refresh behavior](MovieWeekSpeedValidation.md).
+
 ## OMDb
 
 OMDb is disabled by default. Enable it from the Settings page only when an API key is configured.

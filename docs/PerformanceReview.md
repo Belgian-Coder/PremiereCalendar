@@ -18,6 +18,8 @@ Calendar metadata reads use an optional item-count header; older envelopes retai
 
 Backfill batches IMDb lookups, deduplicates detail and rating requests by their provider keys, and uses bounded workers while preserving input order and known values.
 
+Movie enrichment overlaps independent ratings, score and artwork work. Successful TMDb detail and Rotten Tomatoes responses retain their existing freshness across restarts, avoiding repeated filtering/enrichment HTTP requests. Forced refreshes bypass both tiers, with publication fences preventing stale normal work from undoing them. See [movie-week speed investigation](MovieWeekSpeedValidation.md) for controlled before/after measurements and the remaining cold-provider cost.
+
 See [speed and reliability validation](SpeedReliabilityValidation.md) for the controlled workload, results, and container acceptance evidence.
 
 ## .NET 11 Notes

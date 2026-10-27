@@ -387,92 +387,133 @@ public sealed partial class PremiereService
             }
         }
 
-        var ratingsTask = TraceEnrichmentStageAsync("movie.ratings",
-            () => GetExternalRatingsAsync(details?.ExternalIds?.ImdbId, cancellationToken, forceRefresh));
-        var sourcesTask = allowWatchmodeAvailabilityFallback
-            ? SourceEntriesWithWatchmodeFallbackAsync(
-                SourceEntries(details, _options.SourceRegions),
-                PremiereMediaType.Movie,
-                item.Id,
-                details?.ExternalIds?.ImdbId,
-                cancellationToken,
-                forceRefresh)
-            : Task.FromResult(SourceEntries(details, _options.SourceRegions));
-        var ratings = await ratingsTask;
-        var rottenTomatoesScores = await TraceEnrichmentStageAsync("movie.rotten_tomatoes", () => GetRottenTomatoesScoresAsync(
-            PremiereMediaType.Movie,
-            item.Title,
-            premiereDate.Year,
-            details?.ExternalIds?.WikidataId,
-            cancellationToken,
-            forceRefresh));
-        var bestBackdropPath = CoalesceText(
-            item.BackdropPath,
-            details?.BackdropPath,
-            SelectBestImagePath(details?.Images?.Backdrops));
-        var tmdbPosterUrl = BuildImageUrl(
-            _options.PosterSize,
-            CoalesceText(item.PosterPath, details?.PosterPath, SelectBestImagePath(details?.Images?.Posters)));
-        var tmdbBackdropUrl = BuildImageUrl(_options.BackdropSize, bestBackdropPath);
-        var artwork = await TraceEnrichmentStageAsync("movie.artwork", () => ResolveArtworkAsync(
-            tmdbPosterUrl,
-            ratings.PosterUrl,
-            null,
-            tmdbBackdropUrl,
-            new ArtworkRequest(
-                PremiereMediaType.Movie,
-                item.Id,
-                details?.ExternalIds?.ImdbId,
-                details?.ExternalIds?.TvdbId,
-                details?.ExternalIds?.WikidataId,
-                item.Title),
-            cancellationToken,
-            forceRefresh));
-        var sources = await sourcesTask;
-        var usedReleaseDate = !string.IsNullOrWhiteSpace(item.ReleaseDate);
-
-        return new PremiereItem
+        var startedTasks = new List<Task>(4);
+        try
         {
-            CanonicalId = PremiereIdentity.CanonicalId(PremiereMediaType.Movie, item.Id),
-            Type = PremiereIdentity.ItemType(PremiereMediaType.Movie),
-            MediaType = PremiereMediaType.Movie,
-            TmdbId = item.Id,
-            ImdbId = details?.ExternalIds?.ImdbId,
-            WikidataId = details?.ExternalIds?.WikidataId,
-            Title = CoalesceText(item.Title, details?.Title, details?.OriginalTitle) ?? item.Title,
-            OriginalTitle = CoalesceText(item.OriginalTitle, details?.OriginalTitle),
-            PremiereDate = premiereDate,
-            Overview = CoalesceText(item.Overview, details?.Overview, ratings.Plot),
-            PosterUrl = artwork?.Url,
-            BackdropUrl = tmdbBackdropUrl,
-            ImageSource = artwork?.Source,
-            TrailerUrl = _trailerSelector.SelectBestYouTubeTrailer(details?.Videos?.Results),
-            TmdbUrl = $"https://www.themoviedb.org/movie/{item.Id}",
-            ImdbUrl = BuildImdbUrl(details?.ExternalIds?.ImdbId),
-            OriginalLanguage = CoalesceText(item.OriginalLanguage, details?.OriginalLanguage) ?? "",
-            OriginCountries = ProductionCountriesOrFallback(details, item.OriginCountry),
-            SourceNames = SourceNames(sources),
-            Sources = sources,
-            GenreIds = GenreIdsOrFallback(details, item.GenreIds),
-            Genres = GenreNames(details),
-            Keywords = KeywordNames(details?.Keywords),
-            MovieReleaseTypes = MovieReleaseTypes(details, _options.SourceRegions),
-            Certifications = MovieCertifications(details, _options.SourceRegions),
-            RuntimeMinutes = details?.Runtime,
-            TmdbScore = item.VoteAverage,
-            TmdbVoteCount = item.VoteCount,
-            ImdbScore = ratings.ImdbScore,
-            ImdbVoteCount = ratings.ImdbVoteCount,
-            RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
-            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore,
-            MetacriticScore = ratings.MetacriticScore,
-            DateSemantics = new PremiereDateSemantics(
-                premiereDate,
-                usedReleaseDate ? PremiereDateSourceKind.TmdbMovieReleaseDate : PremiereDateSourceKind.TmdbMoviePrimaryReleaseDate,
-                PremiereDataConfidence.Medium,
-                usedReleaseDate ? "TMDb movie release date." : "TMDb primary release date."),
-            MergeContributions = [PremiereDiagnosticsFactory.TmdbContribution(PremiereMediaType.Movie, item.Id)]
-        };
+            var ratingsTask = TraceEnrichmentStageAsync("movie.ratings",
+                () => GetExternalRatingsAsync(details?.ExternalIds?.ImdbId, cancellationToken, forceRefresh));
+            startedTasks.Add(ratingsTask);
+            var rottenTomatoesTask = TraceEnrichmentStageAsync("movie.rotten_tomatoes", () => GetRottenTomatoesScoresAsync(
+                PremiereMediaType.Movie,
+                item.Title,
+                premiereDate.Year,
+                details?.ExternalIds?.WikidataId,
+                cancellationToken,
+                forceRefresh));
+            startedTasks.Add(rottenTomatoesTask);
+            var sourcesTask = allowWatchmodeAvailabilityFallback
+                ? SourceEntriesWithWatchmodeFallbackAsync(
+                    SourceEntries(details, _options.SourceRegions),
+                    PremiereMediaType.Movie,
+                    item.Id,
+                    details?.ExternalIds?.ImdbId,
+                    cancellationToken,
+                    forceRefresh)
+                : Task.FromResult(SourceEntries(details, _options.SourceRegions));
+            startedTasks.Add(sourcesTask);
+
+            // Rotten Tomatoes and availability are independent of OMDb ratings. Start
+            // both before waiting for ratings so their latency overlaps.
+            var ratings = await ratingsTask;
+            var bestBackdropPath = CoalesceText(
+                item.BackdropPath,
+                details?.BackdropPath,
+                SelectBestImagePath(details?.Images?.Backdrops));
+            var tmdbPosterUrl = BuildImageUrl(
+                _options.PosterSize,
+                CoalesceText(item.PosterPath, details?.PosterPath, SelectBestImagePath(details?.Images?.Posters)));
+            var tmdbBackdropUrl = BuildImageUrl(_options.BackdropSize, bestBackdropPath);
+            var artworkTask = TraceEnrichmentStageAsync("movie.artwork", () => ResolveArtworkAsync(
+                tmdbPosterUrl,
+                ratings.PosterUrl,
+                null,
+                tmdbBackdropUrl,
+                new ArtworkRequest(
+                    PremiereMediaType.Movie,
+                    item.Id,
+                    details?.ExternalIds?.ImdbId,
+                    details?.ExternalIds?.TvdbId,
+                    details?.ExternalIds?.WikidataId,
+                    item.Title),
+                cancellationToken,
+                forceRefresh));
+            startedTasks.Add(artworkTask);
+
+            // Artwork needs the resolved ratings poster, but does not depend on
+            // Rotten Tomatoes. Await all remaining branches together and observe
+            // every started branch if the caller cancels or one branch fails.
+            await Task.WhenAll(rottenTomatoesTask, sourcesTask, artworkTask);
+            var rottenTomatoesScores = await rottenTomatoesTask;
+            var artwork = await artworkTask;
+            var sources = await sourcesTask;
+            var usedReleaseDate = !string.IsNullOrWhiteSpace(item.ReleaseDate);
+
+            return new PremiereItem
+            {
+                CanonicalId = PremiereIdentity.CanonicalId(PremiereMediaType.Movie, item.Id),
+                Type = PremiereIdentity.ItemType(PremiereMediaType.Movie),
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = item.Id,
+                ImdbId = details?.ExternalIds?.ImdbId,
+                WikidataId = details?.ExternalIds?.WikidataId,
+                Title = CoalesceText(item.Title, details?.Title, details?.OriginalTitle) ?? item.Title,
+                OriginalTitle = CoalesceText(item.OriginalTitle, details?.OriginalTitle),
+                PremiereDate = premiereDate,
+                Overview = CoalesceText(item.Overview, details?.Overview, ratings.Plot),
+                PosterUrl = artwork?.Url,
+                BackdropUrl = tmdbBackdropUrl,
+                ImageSource = artwork?.Source,
+                TrailerUrl = _trailerSelector.SelectBestYouTubeTrailer(details?.Videos?.Results),
+                TmdbUrl = $"https://www.themoviedb.org/movie/{item.Id}",
+                ImdbUrl = BuildImdbUrl(details?.ExternalIds?.ImdbId),
+                OriginalLanguage = CoalesceText(item.OriginalLanguage, details?.OriginalLanguage) ?? "",
+                OriginCountries = ProductionCountriesOrFallback(details, item.OriginCountry),
+                SourceNames = SourceNames(sources),
+                Sources = sources,
+                GenreIds = GenreIdsOrFallback(details, item.GenreIds),
+                Genres = GenreNames(details),
+                Keywords = KeywordNames(details?.Keywords),
+                MovieReleaseTypes = MovieReleaseTypes(details, _options.SourceRegions),
+                Certifications = MovieCertifications(details, _options.SourceRegions),
+                RuntimeMinutes = details?.Runtime,
+                TmdbScore = item.VoteAverage,
+                TmdbVoteCount = item.VoteCount,
+                ImdbScore = ratings.ImdbScore,
+                ImdbVoteCount = ratings.ImdbVoteCount,
+                RottenTomatoesScore = ratings.RottenTomatoesScore ?? rottenTomatoesScores.CriticScore,
+                RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? rottenTomatoesScores.AudienceScore,
+                MetacriticScore = ratings.MetacriticScore,
+                DateSemantics = new PremiereDateSemantics(
+                    premiereDate,
+                    usedReleaseDate ? PremiereDateSourceKind.TmdbMovieReleaseDate : PremiereDateSourceKind.TmdbMoviePrimaryReleaseDate,
+                    PremiereDataConfidence.Medium,
+                    usedReleaseDate ? "TMDb movie release date." : "TMDb primary release date."),
+                MergeContributions = [PremiereDiagnosticsFactory.TmdbContribution(PremiereMediaType.Movie, item.Id)]
+            };
+        }
+        catch
+        {
+            await ObserveStartedEnrichmentTasksAsync(startedTasks);
+            throw;
+        }
+    }
+
+    private static async Task ObserveStartedEnrichmentTasksAsync(IReadOnlyCollection<Task> tasks)
+    {
+        if (tasks.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch
+        {
+            // Preserve the original failure while ensuring all sibling tasks have
+            // completed and their exceptions have been observed.
+        }
     }
 
     private static PremiereDateSemantics BuildSeriesDateSemantics(

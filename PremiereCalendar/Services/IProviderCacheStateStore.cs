@@ -31,6 +31,10 @@ public interface IProviderCacheStateStore
 
     Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(string provider, int take, CancellationToken cancellationToken);
 
+    // Optional for older adapters; only the isolated provider-response namespaces are eligible.
+    Task<int> CleanupResponseCacheAsync(DateTimeOffset cutoffUtc, CancellationToken cancellationToken)
+        => Task.FromResult(0);
+
     async Task SaveManyAsync(IEnumerable<ProviderCacheState> states, CancellationToken cancellationToken)
     {
         foreach (var state in states)

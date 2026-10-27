@@ -759,14 +759,17 @@ public sealed partial class PremiereService
             return item;
         }
 
-        var ratings = await GetExternalRatingsAsync(candidateImdbId, cancellationToken, forceRefresh);
-        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+        var ratingsTask = GetExternalRatingsAsync(candidateImdbId, cancellationToken, forceRefresh);
+        var rottenTomatoesTask = GetRottenTomatoesScoresAsync(
             candidate.MediaType,
             CoalesceText(candidate.Title, item.Title) ?? item.Title,
             candidate.ReleaseYear ?? item.PremiereDate.Year,
             item.WikidataId,
             cancellationToken,
             forceRefresh);
+        await Task.WhenAll(ratingsTask, rottenTomatoesTask);
+        var ratings = await ratingsTask;
+        var rottenTomatoesScores = await rottenTomatoesTask;
         return item with
         {
             ImdbScore = ratings.ImdbScore ?? item.ImdbScore,
