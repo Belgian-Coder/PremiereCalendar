@@ -16,6 +16,7 @@ internal sealed class DeadlineProviderContent : HttpContent
     private readonly CancellationToken _callerToken;
     private readonly ProviderExecutionLease? _lease;
     private readonly long? _contentLength;
+    private readonly Action<ProviderExecutionResult, string>? _onCompleted;
     private long _bytesRead;
     private int _completed;
     private int _disposed;
@@ -27,7 +28,8 @@ internal sealed class DeadlineProviderContent : HttpContent
         CancellationTokenSource? timeoutSource,
         CancellationTokenSource requestSource,
         CancellationToken callerToken,
-        ProviderExecutionLease? lease)
+        ProviderExecutionLease? lease,
+        Action<ProviderExecutionResult, string>? onCompleted = null)
     {
         _inner = inner;
         _provider = provider;
@@ -37,6 +39,7 @@ internal sealed class DeadlineProviderContent : HttpContent
         _requestToken = requestSource.Token;
         _callerToken = callerToken;
         _lease = lease;
+        _onCompleted = onCompleted;
         _contentLength = inner.Headers.ContentLength;
         foreach (var header in inner.Headers) Headers.TryAddWithoutValidation(header.Key, header.Value);
     }
@@ -65,7 +68,7 @@ internal sealed class DeadlineProviderContent : HttpContent
             linked.Token.ThrowIfCancellationRequested();
             await _inner.CopyToAsync(stream, context, linked.Token).ConfigureAwait(false);
             linked.Token.ThrowIfCancellationRequested();
-            Complete(ProviderExecutionResult.Success);
+            Complete(ProviderExecutionResult.Success, "consumed");
         }
         catch (Exception exception)
         {
@@ -109,17 +112,22 @@ internal sealed class DeadlineProviderContent : HttpContent
         var failure = !cancelled && _timeoutSource?.IsCancellationRequested == true
             ? TimeoutException(_provider, _requestTimeout, exception, _requestToken)
             : exception;
-        Complete(cancelled ? ProviderExecutionResult.Cancelled : ProviderExecutionResult.Failed);
+        Complete(cancelled ? ProviderExecutionResult.Cancelled : ProviderExecutionResult.Failed,
+            Volatile.Read(ref _disposed) != 0 ? "disposed" : cancelled ? "cancelled"
+                : _timeoutSource?.IsCancellationRequested == true ? "timeout" : "failed");
         return failure;
     }
 
-    private void Complete(ProviderExecutionResult result)
+    private void Complete(ProviderExecutionResult result, string reason)
     {
         if (Interlocked.Exchange(ref _completed, 1) != 0) return;
         // CompleteAsync releases capacity and updates in-memory health before its
         // first await. Persistence is observed without blocking a UI context from
         // synchronous Read/Dispose or starting an additional worker task.
         if (_lease is not null) _ = ObserveCompletionAsync(_lease.CompleteAsync(result, null, CancellationToken.None));
+        // Diagnostics must never alter response completion or disposal behavior.
+        try { _onCompleted?.Invoke(result, reason); }
+        catch (Exception) { }
         _requestSource.Dispose();
         _timeoutSource?.Dispose();
     }
@@ -144,7 +152,7 @@ internal sealed class DeadlineProviderContent : HttpContent
             // so its resulting cancellation/IOException remains health-neutral.
             try { _requestSource.Cancel(); }
             catch (ObjectDisposedException) { }
-            Complete(ProviderExecutionResult.Cancelled);
+            Complete(ProviderExecutionResult.Cancelled, "disposed");
             _inner.Dispose();
         }
         finally { base.Dispose(true); }
@@ -178,7 +186,7 @@ internal sealed class DeadlineProviderContent : HttpContent
                     || (read > 0 && owner._contentLength is { } length
                         && Interlocked.Add(ref owner._bytesRead, read) >= length))
                 {
-                    owner.Complete(ProviderExecutionResult.Success);
+                    owner.Complete(ProviderExecutionResult.Success, "consumed");
                 }
                 return read;
             }

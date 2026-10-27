@@ -5,6 +5,7 @@
 @using System.Globalization
 @using Microsoft.AspNetCore.WebUtilities
 @implements IDisposable
+@inject IServiceProvider PageServices
 @inject IPremiereService PremiereService
 @inject IAdjacentWeekPrefetcher AdjacentWeekPrefetcher
 @inject CalendarPageCoordinator CalendarLoadCoordinator

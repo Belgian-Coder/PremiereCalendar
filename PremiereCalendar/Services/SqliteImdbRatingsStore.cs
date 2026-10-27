@@ -1,7 +1,10 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
+using Npgsql;
+using NpgsqlTypes;
 using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
@@ -14,8 +17,9 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
 
     private readonly AppDatabaseOptions _options;
     private readonly IWebHostEnvironment _environment;
-    private readonly SemaphoreSlim _gate = new(1, 1);
-    private bool _initialized;
+    private readonly SemaphoreSlim _writeGate = new(1, 1);
+    private readonly SemaphoreSlim _initializationGate = new(1, 1);
+    private volatile bool _initialized;
 
     public SqliteImdbRatingsStore(
         IOptions<AppDatabaseOptions> options,
@@ -32,36 +36,19 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             return null;
         }
 
-        await _gate.WaitAsync(cancellationToken);
-        try
-        {
-            await EnsureInitializedAsync(cancellationToken);
-            await using var connection = CreateConnection();
-            await connection.OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                SELECT ImdbId, AverageRating, VoteCount, ImportedAtUtc
-                FROM ImdbRatings
-                WHERE ImdbId = @imdbId
-                """;
-            DatabaseParameters.Add(command, "@imdbId", NormalizeImdbId(imdbId));
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT ImdbId, AverageRating, VoteCount, ImportedAtUtc
+            FROM ImdbRatings
+            WHERE ImdbId = @imdbId
+            """;
+        DatabaseParameters.Add(command, "@imdbId", NormalizeImdbId(imdbId));
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken))
-            {
-                return null;
-            }
-
-            return new ImdbRatingRecord(
-                reader.GetString(0),
-                reader.GetDouble(1),
-                reader.GetInt32(2),
-                DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
-        }
-        finally
-        {
-            _gate.Release();
-        }
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadRating(reader) : null;
     }
 
     public async Task<IReadOnlyDictionary<string, ImdbRatingRecord>> GetByImdbIdsAsync(
@@ -78,43 +65,42 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             return new Dictionary<string, ImdbRatingRecord>(StringComparer.OrdinalIgnoreCase);
         }
 
-        await _gate.WaitAsync(cancellationToken);
-        try
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        // Every batch must see the same committed dataset if an import publishes
+        // between queries. A deferred SQLite transaction does not acquire a writer lock.
+        await using var transaction = connection is SqliteConnection sqlite
+            ? sqlite.BeginTransaction(IsolationLevel.Serializable, deferred: true)
+            : await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        var ratings = new Dictionary<string, ImdbRatingRecord>(normalizedIds.Length, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var batch in normalizedIds.Chunk(400))
         {
-            await EnsureInitializedAsync(cancellationToken);
-            await using var connection = CreateConnection();
-            await connection.OpenAsync(cancellationToken);
-            var ratings = new Dictionary<string, ImdbRatingRecord>(normalizedIds.Length, StringComparer.OrdinalIgnoreCase);
-
-            foreach (var batch in normalizedIds.Chunk(400))
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            var parameterNames = new string[batch.Length];
+            for (var index = 0; index < batch.Length; index++)
             {
-                await using var command = connection.CreateCommand();
-                var parameterNames = new string[batch.Length];
-                for (var index = 0; index < batch.Length; index++)
-                {
-                    parameterNames[index] = $"@id{index}";
-                    DatabaseParameters.Add(command, parameterNames[index], batch[index]);
-                }
-
-                command.CommandText = $"""
-                    SELECT ImdbId, AverageRating, VoteCount, ImportedAtUtc
-                    FROM ImdbRatings
-                    WHERE ImdbId IN ({string.Join(", ", parameterNames)})
-                    """;
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    var rating = ReadRating(reader);
-                    ratings[rating.ImdbId] = rating;
-                }
+                parameterNames[index] = $"@id{index}";
+                DatabaseParameters.Add(command, parameterNames[index], batch[index]);
             }
 
-            return ratings;
+            command.CommandText = $"""
+                SELECT ImdbId, AverageRating, VoteCount, ImportedAtUtc
+                FROM ImdbRatings
+                WHERE ImdbId IN ({string.Join(", ", parameterNames)})
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var rating = ReadRating(reader);
+                ratings[rating.ImdbId] = rating;
+            }
         }
-        finally
-        {
-            _gate.Release();
-        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return ratings;
     }
 
     public async Task ReplaceAllAsync(
@@ -130,55 +116,18 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         DateTimeOffset importedAtUtc,
         CancellationToken cancellationToken)
     {
-        await _gate.WaitAsync(cancellationToken);
+        await _writeGate.WaitAsync(cancellationToken);
         try
         {
             await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
-            await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            var count = connection is NpgsqlConnection postgres
+                ? await ReplacePostgresRatingsAsync(postgres, transaction, ratings, importedAtUtc, cancellationToken)
+                : await ReplaceSqliteRatingsAsync(connection, transaction, ratings, importedAtUtc, cancellationToken);
 
-            await using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = "DELETE FROM ImdbRatings";
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            var count = 0;
-            await using (var insert = connection.CreateCommand())
-            {
-                insert.Transaction = transaction;
-                insert.CommandText = """
-                    INSERT INTO ImdbRatings (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
-                    VALUES (@imdbId, @averageRating, @voteCount, @importedAtUtc)
-                    ON CONFLICT(ImdbId) DO UPDATE SET
-                        AverageRating = excluded.AverageRating,
-                        VoteCount = excluded.VoteCount,
-                        ImportedAtUtc = excluded.ImportedAtUtc
-                    """;
-                var imdbIdParameter = DatabaseParameters.Add(insert, "@imdbId", DbType.String);
-                var ratingParameter = DatabaseParameters.Add(insert, "@averageRating", DbType.Double);
-                var voteCountParameter = DatabaseParameters.Add(insert, "@voteCount", DbType.Int64);
-                var importedAtParameter = DatabaseParameters.Add(insert, "@importedAtUtc", DbType.String);
-                var importedAt = importedAtUtc.ToString("O", CultureInfo.InvariantCulture);
-
-                await foreach (var rating in ratings.WithCancellation(cancellationToken))
-                {
-                    if (string.IsNullOrWhiteSpace(rating.ImdbId))
-                    {
-                        continue;
-                    }
-
-                    imdbIdParameter.Value = NormalizeImdbId(rating.ImdbId);
-                    ratingParameter.Value = rating.AverageRating;
-                    voteCountParameter.Value = rating.VoteCount;
-                    importedAtParameter.Value = importedAt;
-                    await insert.ExecuteNonQueryAsync(cancellationToken);
-                    count++;
-                }
-            }
-
+            cancellationToken.ThrowIfCancellationRequested();
             await UpsertStateAsync(connection, transaction, LastImportedUtcKey, importedAtUtc.ToString("O", CultureInfo.InvariantCulture), cancellationToken);
             await UpsertStateAsync(connection, transaction, RatingCountKey, count.ToString(CultureInfo.InvariantCulture), cancellationToken);
             await UpsertStateAsync(connection, transaction, LastErrorKey, "", cancellationToken);
@@ -188,8 +137,112 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         }
         finally
         {
-            _gate.Release();
+            _writeGate.Release();
         }
+    }
+
+    private static async Task<int> ReplacePostgresRatingsAsync(
+        NpgsqlConnection connection,
+        DbTransaction transaction,
+        IAsyncEnumerable<ImdbRatingRecord> ratings,
+        DateTimeOffset importedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        await using (var staging = connection.CreateCommand())
+        {
+            staging.Transaction = (NpgsqlTransaction)transaction;
+            staging.CommandText = """
+                CREATE TEMP TABLE ImdbRatingsImport (
+                    Sequence INTEGER NOT NULL,
+                    ImdbId TEXT NOT NULL,
+                    AverageRating DOUBLE PRECISION NOT NULL,
+                    VoteCount INTEGER NOT NULL
+                ) ON COMMIT DROP
+                """;
+            await staging.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // COPY streams through Npgsql's bounded buffer without a round trip per
+        // rating. Keep the live tables untouched until the complete input is valid.
+        var count = 0;
+        await using (var copy = await connection.BeginBinaryImportAsync(
+            "COPY ImdbRatingsImport (Sequence, ImdbId, AverageRating, VoteCount) FROM STDIN (FORMAT BINARY)", cancellationToken))
+        {
+            await foreach (var rating in ratings.WithCancellation(cancellationToken))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (string.IsNullOrWhiteSpace(rating.ImdbId)) continue;
+                await copy.StartRowAsync(cancellationToken);
+                await copy.WriteAsync(count, NpgsqlDbType.Integer, cancellationToken);
+                await copy.WriteAsync(NormalizeImdbId(rating.ImdbId), NpgsqlDbType.Text, cancellationToken);
+                await copy.WriteAsync(rating.AverageRating, NpgsqlDbType.Double, cancellationToken);
+                await copy.WriteAsync(rating.VoteCount, NpgsqlDbType.Integer, cancellationToken);
+                count++;
+            }
+            await copy.CompleteAsync(cancellationToken);
+        }
+
+        await using var publish = connection.CreateCommand();
+        publish.Transaction = (NpgsqlTransaction)transaction;
+        // A complete dataset publication can exceed the ordinary 30-second
+        // lookup timeout. Keep it bounded while honoring caller cancellation.
+        publish.CommandTimeout = 600;
+        // DELETE preserves MVCC snapshots; TRUNCATE would block readers. The last
+        // occurrence of a normalized ID wins, as with the SQLite upsert path.
+        publish.CommandText = """
+            DELETE FROM ImdbRatings;
+            INSERT INTO ImdbRatings (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
+            SELECT DISTINCT ON (ImdbId) ImdbId, AverageRating, VoteCount, @importedAtUtc
+            FROM ImdbRatingsImport
+            ORDER BY ImdbId, Sequence DESC
+            """;
+        DatabaseParameters.Add(publish, "@importedAtUtc", importedAtUtc.ToString("O", CultureInfo.InvariantCulture));
+        await publish.ExecuteNonQueryAsync(cancellationToken);
+        return count;
+    }
+
+    private static async Task<int> ReplaceSqliteRatingsAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        IAsyncEnumerable<ImdbRatingRecord> ratings,
+        DateTimeOffset importedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "DELETE FROM ImdbRatings";
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var count = 0;
+        await using var insert = connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT INTO ImdbRatings (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
+            VALUES (@imdbId, @averageRating, @voteCount, @importedAtUtc)
+            ON CONFLICT(ImdbId) DO UPDATE SET
+                AverageRating = excluded.AverageRating,
+                VoteCount = excluded.VoteCount,
+                ImportedAtUtc = excluded.ImportedAtUtc
+            """;
+        var imdbIdParameter = DatabaseParameters.Add(insert, "@imdbId", DbType.String);
+        var ratingParameter = DatabaseParameters.Add(insert, "@averageRating", DbType.Double);
+        var voteCountParameter = DatabaseParameters.Add(insert, "@voteCount", DbType.Int64);
+        var importedAtParameter = DatabaseParameters.Add(insert, "@importedAtUtc", DbType.String);
+        importedAtParameter.Value = importedAtUtc.ToString("O", CultureInfo.InvariantCulture);
+
+        await foreach (var rating in ratings.WithCancellation(cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(rating.ImdbId)) continue;
+            imdbIdParameter.Value = NormalizeImdbId(rating.ImdbId);
+            ratingParameter.Value = rating.AverageRating;
+            voteCountParameter.Value = rating.VoteCount;
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+            count++;
+        }
+        return count;
     }
 
     private static ImdbRatingRecord ReadRating(DbDataReader reader)
@@ -216,36 +269,28 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
 
     public async Task<ImdbDatasetState> GetStateAsync(CancellationToken cancellationToken)
     {
-        await _gate.WaitAsync(cancellationToken);
-        try
-        {
-            await EnsureInitializedAsync(cancellationToken);
-            await using var connection = CreateConnection();
-            await connection.OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT Key, Value FROM ImdbDatasetState";
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT Key, Value FROM ImdbDatasetState";
 
-            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                values[reader.GetString(0)] = reader.GetString(1);
-            }
-
-            return new ImdbDatasetState(
-                GetDateTimeOffset(values, LastImportedUtcKey),
-                GetInt(values, RatingCountKey),
-                GetString(values, LastErrorKey));
-        }
-        finally
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
-            _gate.Release();
+            values[reader.GetString(0)] = reader.GetString(1);
         }
+
+        return new ImdbDatasetState(
+            GetDateTimeOffset(values, LastImportedUtcKey),
+            GetInt(values, RatingCountKey),
+            GetString(values, LastErrorKey));
     }
 
     public async Task SaveStateAsync(ImdbDatasetState state, CancellationToken cancellationToken)
     {
-        await _gate.WaitAsync(cancellationToken);
+        await _writeGate.WaitAsync(cancellationToken);
         try
         {
             await EnsureInitializedAsync(cancellationToken);
@@ -269,7 +314,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         }
         finally
         {
-            _gate.Release();
+            _writeGate.Release();
         }
     }
 
@@ -280,10 +325,19 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             return;
         }
 
-        await using var connection = CreateConnection();
-        await connection.OpenAsync(cancellationToken);
-        await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
-        _initialized = true;
+        await _initializationGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_initialized) return;
+            await using var connection = CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
+            _initialized = true;
+        }
+        finally
+        {
+            _initializationGate.Release();
+        }
     }
 
     private static async Task UpsertStateAsync(
@@ -311,17 +365,6 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
     private DbConnection CreateConnection()
     {
         return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
-    }
-
-    private string ResolveDatabasePath()
-    {
-        var configuredPath = string.IsNullOrWhiteSpace(_options.Path)
-            ? "App_Data/data/premiere-calendar.db"
-            : _options.Path.Trim();
-
-        return Path.IsPathFullyQualified(configuredPath)
-            ? configuredPath
-            : Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configuredPath));
     }
 
     private static string NormalizeImdbId(string imdbId)

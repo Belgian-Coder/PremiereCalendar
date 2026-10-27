@@ -4,7 +4,7 @@ using System.Diagnostics.Metrics;
 
 namespace PremiereCalendar.Services;
 
-public sealed class PremiereTelemetry
+public sealed partial class PremiereTelemetry
 {
     public const string ActivitySourceName = "PremiereCalendar";
     public const string MeterName = "PremiereCalendar";
@@ -33,12 +33,20 @@ public sealed class PremiereTelemetry
     private long _queuedJobs;
     private long _runningJobs;
 
-    public PremiereTelemetry()
+    public PremiereTelemetry(PerformanceDiagnosticStore? diagnosticStore = null)
     {
+        _diagnosticStore = diagnosticStore;
+        _diagnosticInstanceId = diagnosticStore?.InstanceId ?? Guid.NewGuid().ToString("N");
         Meter.CreateObservableGauge("premierecalendar.scheduler.jobs.queued", () => Volatile.Read(ref _queuedJobs));
         Meter.CreateObservableGauge("premierecalendar.scheduler.jobs.running", () => Volatile.Read(ref _runningJobs));
         Meter.CreateObservableGauge("premierecalendar.provider.concurrency.limit", ObserveProviderLimits);
         Meter.CreateObservableGauge("premierecalendar.provider.concurrency.active", ObserveProviderActive);
+        Meter.CreateObservableGauge("premierecalendar.diagnostics.events.written", () => DiagnosticsHealth.WrittenEvents);
+        Meter.CreateObservableGauge("premierecalendar.diagnostics.events.dropped", () => DiagnosticsHealth.DroppedEvents);
+        Meter.CreateObservableGauge("premierecalendar.diagnostics.writer.failures", () => DiagnosticsHealth.WriterFailures);
+        Meter.CreateObservableGauge("premierecalendar.diagnostics.writer.healthy", () => DiagnosticsHealth.Healthy ? 1 : 0);
+        Meter.CreateObservableGauge("premierecalendar.diagnostics.events.queued", () => DiagnosticsHealth.QueuedEvents);
+        Meter.CreateObservableGauge("premierecalendar.diagnostics.queue.full", () => DiagnosticsHealth.QueueFull ? 1 : 0);
     }
 
     public Activity? StartActivity(string operation, ActivityKind kind = ActivityKind.Internal)

@@ -151,7 +151,7 @@ public sealed partial class PremiereService
         };
     }
 
-    private async Task<PremiereItem?> MapSeriesAsync(
+    private async Task<PremiereItem?> MapSeriesCoreAsync(
         TmdbTvDiscoverItem item,
         CancellationToken cancellationToken,
         bool forceRefresh,
@@ -328,7 +328,7 @@ public sealed partial class PremiereService
         };
     }
 
-    private async Task<PremiereItem?> MapMovieAsync(
+    private async Task<PremiereItem?> MapMovieCoreAsync(
         TmdbMovieDiscoverItem item,
         CancellationToken cancellationToken,
         bool forceRefresh,
@@ -349,13 +349,14 @@ public sealed partial class PremiereService
             return cachedItem;
         }
 
-        var details = await TryGetDetailsAsync(
+        var details = await TraceEnrichmentStageAsync("movie.details", () => TryGetDetailsAsync(
             () => _tmdbClient.GetMovieDetailsAsync(item.Id, cancellationToken, forceRefresh),
             PremiereMediaType.Movie,
             item.Id,
-            cancellationToken);
+            cancellationToken));
 
-        var ratingsTask = GetExternalRatingsAsync(details?.ExternalIds?.ImdbId, cancellationToken, forceRefresh);
+        var ratingsTask = TraceEnrichmentStageAsync("movie.ratings",
+            () => GetExternalRatingsAsync(details?.ExternalIds?.ImdbId, cancellationToken, forceRefresh));
         var sourcesTask = allowWatchmodeAvailabilityFallback
             ? SourceEntriesWithWatchmodeFallbackAsync(
                 SourceEntries(details, _options.SourceRegions),
@@ -366,13 +367,13 @@ public sealed partial class PremiereService
                 forceRefresh)
             : Task.FromResult(SourceEntries(details, _options.SourceRegions));
         var ratings = await ratingsTask;
-        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+        var rottenTomatoesScores = await TraceEnrichmentStageAsync("movie.rotten_tomatoes", () => GetRottenTomatoesScoresAsync(
             PremiereMediaType.Movie,
             item.Title,
             premiereDate.Year,
             details?.ExternalIds?.WikidataId,
             cancellationToken,
-            forceRefresh);
+            forceRefresh));
         var bestBackdropPath = CoalesceText(
             item.BackdropPath,
             details?.BackdropPath,
@@ -381,7 +382,7 @@ public sealed partial class PremiereService
             _options.PosterSize,
             CoalesceText(item.PosterPath, details?.PosterPath, SelectBestImagePath(details?.Images?.Posters)));
         var tmdbBackdropUrl = BuildImageUrl(_options.BackdropSize, bestBackdropPath);
-        var artwork = await ResolveArtworkAsync(
+        var artwork = await TraceEnrichmentStageAsync("movie.artwork", () => ResolveArtworkAsync(
             tmdbPosterUrl,
             ratings.PosterUrl,
             null,
@@ -394,7 +395,7 @@ public sealed partial class PremiereService
                 details?.ExternalIds?.WikidataId,
                 item.Title),
             cancellationToken,
-            forceRefresh);
+            forceRefresh));
         var sources = await sourcesTask;
         var usedReleaseDate = !string.IsNullOrWhiteSpace(item.ReleaseDate);
 

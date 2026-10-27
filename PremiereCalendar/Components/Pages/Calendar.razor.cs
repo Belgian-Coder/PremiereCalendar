@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Diagnostics;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Routing;
 using Microsoft.AspNetCore.WebUtilities;
@@ -29,6 +31,9 @@ public partial class Calendar
     private CalendarVisitChangeSummary? _visitChangeSummary;
     private readonly CancellationTokenSource _disposeCancellation = new();
     private CancellationTokenSource? _loadCancellation;
+    private PageLoadDiagnostic? _pageLoadDiagnostic;
+    private PageRenderDiagnostic? _pendingPageRenderDiagnostic;
+    private long _cacheFreshnessRevision;
     private bool _isFilterPaneOpen;
     private bool _refreshImageCache;
     private string? _imageCacheVersion;
@@ -176,6 +181,7 @@ public partial class Calendar
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        CompletePageRenderDiagnostic();
         if (firstRender)
         {
             try
@@ -210,18 +216,21 @@ public partial class Calendar
             return;
         }
 
-        if (!await LoadIntegrationSettingsAsync())
+        var diagnostic = BeginPageLoadDiagnostic(forceRefresh: false);
+        if (!await LoadIntegrationSettingsAsync(diagnostic))
         {
+            RecordPageDiagnostic(diagnostic, "finished", new() { Outcome = "precondition_failed", Reason = "settings" });
             return;
         }
 
         if (RedirectToSettingsIfTmdbMissing())
         {
+            RecordPageDiagnostic(diagnostic, "finished", new() { Outcome = "precondition_failed", Reason = "missing_configuration" });
             return;
         }
 
         await PublishCurrentViewSyncUrlAsync(Navigation.Uri, requireQuery: true);
-        await Task.WhenAll(LoadFilterCatalogAsync(), LoadAsync());
+        await Task.WhenAll(LoadFilterCatalogAsync(), LoadAsync(forceRefresh: false, diagnostic));
     }
 
     private async Task ToggleDensityAsync()
@@ -266,16 +275,21 @@ public partial class Calendar
         }
     }
 
-    private async Task<bool> LoadIntegrationSettingsAsync()
+    private async Task<bool> LoadIntegrationSettingsAsync(PageLoadDiagnostic? diagnostic = null)
     {
+        var started = Stopwatch.GetTimestamp();
+        var outcome = "failed";
+        RecordPageDiagnostic(diagnostic, "settings_started");
         try
         {
             _integrationSettings = await IntegrationSettingsStore.GetAsync();
             _integrationSettingsLoaded = true;
+            outcome = "loaded";
             return true;
         }
         catch (OperationCanceledException) when (_disposeCancellation.Token.IsCancellationRequested)
         {
+            outcome = "canceled";
             return false;
         }
         catch (Exception ex)
@@ -284,18 +298,31 @@ public partial class Calendar
             _integrationSettings = new IntegrationSettings();
             _isLoading = false;
             _error = "Settings could not be loaded. Check local database access and try again.";
-            await InvokeAsync(StateHasChanged);
+            await InvokeAsync(() => RequestPageRender(diagnostic, "settings_failure"));
             return false;
+        }
+        finally
+        {
+            if (diagnostic is not null) diagnostic.SettingsRecorded = true;
+            RecordPageDiagnostic(diagnostic, "settings_completed", new()
+            {
+                Outcome = outcome, DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
         }
     }
 
-    private async Task<bool> EnsureIntegrationSettingsLoadedAsync()
+    private async Task<bool> EnsureIntegrationSettingsLoadedAsync(PageLoadDiagnostic? diagnostic = null)
     {
         if (!_integrationSettingsLoaded)
         {
-            return await LoadIntegrationSettingsAsync();
+            return await LoadIntegrationSettingsAsync(diagnostic);
         }
 
+        if (diagnostic is { SettingsRecorded: false })
+        {
+            diagnostic.SettingsRecorded = true;
+            RecordPageDiagnostic(diagnostic, "settings_completed", new() { Outcome = "cached", DurationMilliseconds = 0 });
+        }
         return true;
     }
 
@@ -683,36 +710,54 @@ public partial class Calendar
         await LoadAsync(forceRefresh: false);
     }
 
-    private async Task LoadAsync(bool forceRefresh = false)
+    private async Task LoadAsync(bool forceRefresh = false, PageLoadDiagnostic? diagnostic = null)
     {
-        if (!await EnsureIntegrationSettingsLoadedAsync())
+        diagnostic ??= BeginPageLoadDiagnostic(forceRefresh);
+        if (!await EnsureIntegrationSettingsLoadedAsync(diagnostic))
         {
+            RecordPageDiagnostic(diagnostic, "finished", new() { Outcome = "precondition_failed", Reason = "settings" });
             return;
         }
 
+        if (diagnostic is not null && !IsCurrentPageDiagnostic(diagnostic))
+        {
+            RecordPageDiagnostic(diagnostic, "finished", new() { Outcome = "canceled", Reason = "superseded" });
+            return;
+        }
         if (RedirectToSettingsIfTmdbMissing())
         {
+            RecordPageDiagnostic(diagnostic, "finished", new() { Outcome = "precondition_failed", Reason = "missing_configuration" });
             return;
         }
 
         var foregroundLoad = CalendarLoadCoordinator.BeginForegroundLoad();
         var previousCancellation = _loadCancellation;
         var budgetSeconds = Math.Max(1, CalendarLoadOptions.Value.ForegroundLoadBudgetSeconds);
+        var backgroundCompletionBudgetSeconds = Math.Clamp(CalendarLoadOptions.Value.BackgroundCompletionBudgetSeconds, 1, 300);
         var staleCacheBudgetSeconds = Math.Clamp(
             CalendarLoadOptions.Value.StaleCacheForegroundBudgetSeconds,
             1,
             budgetSeconds);
         using var budgetCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(budgetSeconds));
         using var staleCacheBudgetCancellation = new CancellationTokenSource();
-        var loadCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            _disposeCancellation.Token,
-            budgetCancellation.Token,
-            staleCacheBudgetCancellation.Token);
+        // Keep the original stream/watch alive after the foreground presentation budget.
+        // Reopening the service stream could enqueue another provider refresh.
+        var loadCancellation = CancellationTokenSource.CreateLinkedTokenSource(_disposeCancellation.Token);
+        var foregroundDeadline = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var budgetRegistration = budgetCancellation.Token.Register(() => foregroundDeadline.TrySetResult(false));
+        using var staleBudgetRegistration = staleCacheBudgetCancellation.Token.Register(() => foregroundDeadline.TrySetResult(true));
+        var isForeground = true;
+        var staleDeadlineStarted = false;
         _loadCancellation = loadCancellation;
         var shouldPrefetchAdjacentWeeks = false;
         var prefetchWeekStart = default(DateOnly);
         CalendarFilters? prefetchFilters = null;
         var hasAuthoritativeResult = false;
+        var hasFinalResult = false;
+        var firstResult = true;
+        var firstCachedFreshnessStarted = false;
+        var loadOutcome = "ended_without_final";
+        string? loadReason = null;
         try
         {
             previousCancellation?.Cancel();
@@ -728,7 +773,6 @@ public partial class Calendar
         _isRefreshingStaleCache = false;
         _error = null;
         _visitChangeSummary = null;
-        var hasExistingItems = _items.Count > 0;
         _loadProgress.Clear();
         InvalidateLoadProgressCache();
         _sourceProgressFilter = null;
@@ -740,115 +784,35 @@ public partial class Calendar
             ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)
             : null;
 
-        try
+        var completion = ObserveLoadCompletionAsync(ConsumeLoadAsync());
+        if (await Task.WhenAny(completion, foregroundDeadline.Task) == completion)
         {
-            var start = _filters.WeekStart;
-            var end = start.AddDays(6);
-            var pageMode = _pageMode;
-            CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: true, _visibleItems.Count);
-            var loadFilters = CalendarFilterState.Clone(_filters);
-            loadFilters.PriorityDate = PriorityDateForCurrentWeek(start, end);
-            var lastUiUpdateUtc = DateTimeOffset.MinValue;
-            var renderedFirstUpdate = false;
-            await foreach (var update in PremiereService.StreamPremieresAsync(start, end, forceRefresh, loadFilters, token)
-                .WithCancellation(token))
-            {
-                await InvokeAsync(() =>
-                {
-                    if (_isDisposed || token.IsCancellationRequested || !ReferenceEquals(_loadCancellation, loadCancellation))
-                    {
-                        return;
-                    }
-
-                    _items = update.Items;
-                    if (update.IsStaleCache)
-                    {
-                        _isRefreshingStaleCache = !update.IsFinal;
-                        if (!update.IsFinal)
-                        {
-                            staleCacheBudgetCancellation.CancelAfter(TimeSpan.FromSeconds(staleCacheBudgetSeconds));
-                        }
-                    }
-                    if (update.IsFinal)
-                    {
-                        hasAuthoritativeResult = !update.HasSourceErrors && !update.IsStaleCache;
-                        _isRefreshingStaleCache = false;
-                        FinalizeOpenProgressEntries();
-                    }
-
-                    var progressEntry = new LoadProgressEntry(
-                        update.SourceName,
-                        update.SourceItemCount,
-                        update.TotalItemCount,
-                        update.IsFinal,
-                        update.FromCache,
-                        update.SourceItems,
-                        update.Items,
-                        update.CompletedWork,
-                        update.TotalWork,
-                        update.ProgressText,
-                        update.ElapsedMilliseconds,
-                        update.Phase,
-                        update.UnmappedCount);
-                    var existingProgressIndex = _loadProgress.FindIndex(entry =>
-                        string.Equals(entry.SourceName, progressEntry.SourceName, StringComparison.Ordinal));
-                    if (existingProgressIndex >= 0)
-                    {
-                        _loadProgress[existingProgressIndex] = progressEntry;
-                    }
-                    else
-                    {
-                        _loadProgress.Add(progressEntry);
-                    }
-
-                    InvalidateLoadProgressCache();
-
-                    var now = DateTimeOffset.UtcNow;
-                    var minimumUiUpdateInterval = update.Items.Count >= 200
-                        ? TimeSpan.FromMilliseconds(750)
-                        : TimeSpan.FromMilliseconds(250);
-                    if (!renderedFirstUpdate
-                        || update.IsFinal
-                        || now - lastUiUpdateUtc >= minimumUiUpdateInterval)
-                    {
-                        renderedFirstUpdate = true;
-                        lastUiUpdateUtc = now;
-                        // A calendar load can stream many differently ordered provider batches.
-                        // Keep existing cards in place, update matching cards, and append discoveries so
-                        // the page fills progressively without rebuilding or reshuffling the whole grid.
-                        RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
-                        CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: !update.IsFinal, _visibleItems.Count);
-                        StateHasChanged();
-                    }
-                });
-            }
-
-            if (!token.IsCancellationRequested && ReferenceEquals(_loadCancellation, loadCancellation))
-            {
-                _hasLoadedAtLeastOnce = true;
-                await RecordFilterUsageAsync(pageMode, loadFilters, _items.Count, token);
-                if (!token.IsCancellationRequested && ReferenceEquals(_loadCancellation, loadCancellation))
-                {
-                    shouldPrefetchAdjacentWeeks = hasAuthoritativeResult;
-                    prefetchWeekStart = start;
-                    prefetchFilters = CalendarFilterState.Clone(loadFilters);
-                }
-            }
+            await completion;
+            return;
         }
-        catch (OperationCanceledException) when ((budgetCancellation.IsCancellationRequested
-                || staleCacheBudgetCancellation.IsCancellationRequested)
-            && !_disposeCancellation.IsCancellationRequested
-            && ReferenceEquals(_loadCancellation, loadCancellation))
-        {
-            await InvokeAsync(() =>
-            {
-                if (_isDisposed || !ReferenceEquals(_loadCancellation, loadCancellation))
-                {
-                    return;
-                }
 
+        await InvokeAsync(() =>
+        {
+            if (_isDisposed || !ReferenceEquals(_loadCancellation, loadCancellation))
+            {
+                return;
+            }
+
+            isForeground = false;
+            foregroundLoad.Dispose();
+            RecordPageDiagnostic(diagnostic, "foreground_handoff", new()
+            {
+                Outcome = hasFinalResult ? "final_metadata_pending" : "background_watch",
+                Reason = foregroundDeadline.Task.Result ? "stale_cache_budget" : "foreground_budget",
+                Limit = hasFinalResult ? null : backgroundCompletionBudgetSeconds
+            });
+            // Final data can arrive before slow usage/freshness writes finish. Only a live
+            // provider stream needs a bounded watch and a background-running status.
+            if (!hasFinalResult)
+            {
+                loadCancellation.CancelAfter(TimeSpan.FromSeconds(backgroundCompletionBudgetSeconds));
                 FinalizeOpenProgressEntries();
-                if (staleCacheBudgetCancellation.IsCancellationRequested)
+                if (foregroundDeadline.Task.Result)
                 {
                     AddBackgroundRefreshProgressEntry(staleCacheBudgetSeconds);
                 }
@@ -856,90 +820,349 @@ public partial class Calendar
                 {
                     AddLoadBudgetProgressEntry(budgetSeconds);
                 }
-                _isRefreshingStaleCache = false;
-                RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
-                _hasLoadedAtLeastOnce = true;
-            });
-        }
-        catch (OperationCanceledException) when (token.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            if (!ReferenceEquals(_loadCancellation, loadCancellation))
-            {
-                return;
             }
+            _isLoading = false;
+            _isRefreshingStaleCache = false;
+            _hasLoadedAtLeastOnce = true;
+            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
+            CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
+            RequestPageRender(diagnostic, "foreground_handoff");
+        });
 
-            if (!hasExistingItems)
-            {
-                _items = [];
-                RecalculateVisibleItems();
-            }
-
-            _error = ex.Message;
-        }
-        finally
+        async Task ConsumeLoadAsync()
         {
-            foregroundLoad.Dispose();
-
-            if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
+            try
             {
-                await RefreshCacheFreshnessAsync(_disposeCancellation.Token);
-                if (hasAuthoritativeResult)
+                var start = _filters.WeekStart;
+                var end = start.AddDays(6);
+                var pageMode = _pageMode;
+                CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: true, _visibleItems.Count);
+                var loadFilters = CalendarFilterState.Clone(_filters);
+                loadFilters.PriorityDate = PriorityDateForCurrentWeek(start, end);
+                var lastUiUpdateUtc = DateTimeOffset.MinValue;
+                var renderedFirstUpdate = false;
+                IAsyncEnumerable<PremiereLoadProgress> stream;
+                using (diagnostic?.Telemetry.UseDiagnosticContext(diagnostic.Context))
                 {
-                    await RefreshVisitChangeSummaryAsync(_disposeCancellation.Token);
+                    // The service captures this context synchronously. Never retain an AsyncLocal
+                    // scope while yielding to the renderer or another page load.
+                    stream = PremiereService.StreamPremieresAsync(start, end, forceRefresh, loadFilters, token);
+                }
+                await foreach (var update in stream.WithCancellation(token))
+                {
+                    var refreshFirstCachedFreshness = false;
+                    await InvokeAsync(() =>
+                    {
+                        if (_isDisposed || token.IsCancellationRequested || !ReferenceEquals(_loadCancellation, loadCancellation))
+                        {
+                            return;
+                        }
+
+                        _items = update.Items;
+                        if (diagnostic is not null) diagnostic.ItemCount = update.Items.Count;
+                        if (firstResult)
+                        {
+                            firstResult = false;
+                            RecordPageDiagnostic(diagnostic, "first_result", new()
+                            {
+                                FromCache = update.FromCache, IsFinal = update.IsFinal,
+                                Cache = update.IsStaleCache ? "stale" : update.FromCache ? "cached" : "miss"
+                            });
+                        }
+                        if (update.FromCache && !firstCachedFreshnessStarted)
+                        {
+                            firstCachedFreshnessStarted = true;
+                            refreshFirstCachedFreshness = true;
+                        }
+                        if (update.IsStaleCache)
+                        {
+                            _isRefreshingStaleCache = isForeground && !update.IsFinal;
+                            if (!update.IsFinal && isForeground && !staleDeadlineStarted)
+                            {
+                                staleDeadlineStarted = true;
+                                staleCacheBudgetCancellation.CancelAfter(TimeSpan.FromSeconds(staleCacheBudgetSeconds));
+                            }
+                        }
+                        if (update.IsFinal)
+                        {
+                            hasFinalResult = true;
+                            hasAuthoritativeResult = !update.HasSourceErrors && !update.IsStaleCache;
+                            loadOutcome = update.RetryAfterUtc > DateTimeOffset.UtcNow ? "cooldown"
+                                : update.HasSourceErrors ? "partial" : update.IsStaleCache ? "stale" : "complete";
+                            RecordPageDiagnostic(diagnostic, "result_completed", new()
+                            {
+                                Outcome = loadOutcome, FromCache = update.FromCache, IsFinal = true
+                            });
+                            _isRefreshingStaleCache = false;
+                            _loadProgress.RemoveAll(entry => entry.SourceName is "Background refresh" or "Load budget");
+                            FinalizeOpenProgressEntries();
+                        }
+
+                        var progressEntry = new LoadProgressEntry(
+                            update.SourceName,
+                            update.SourceItemCount,
+                            update.TotalItemCount,
+                            update.IsFinal,
+                            update.FromCache,
+                            update.SourceItems,
+                            update.Items,
+                            update.CompletedWork,
+                            update.TotalWork,
+                            update.ProgressText,
+                            update.ElapsedMilliseconds,
+                            update.Phase,
+                            update.UnmappedCount);
+                        var existingProgressIndex = _loadProgress.FindIndex(entry =>
+                            string.Equals(entry.SourceName, progressEntry.SourceName, StringComparison.Ordinal));
+                        if (existingProgressIndex >= 0)
+                        {
+                            _loadProgress[existingProgressIndex] = progressEntry;
+                        }
+                        else
+                        {
+                            _loadProgress.Add(progressEntry);
+                        }
+
+                        InvalidateLoadProgressCache();
+
+                        var now = DateTimeOffset.UtcNow;
+                        var minimumUiUpdateInterval = update.Items.Count >= 200
+                            ? TimeSpan.FromMilliseconds(750)
+                            : TimeSpan.FromMilliseconds(250);
+                        if (!renderedFirstUpdate
+                            || update.IsFinal
+                            || now - lastUiUpdateUtc >= minimumUiUpdateInterval)
+                        {
+                            var renderReason = update.IsFinal ? "final_result" : renderedFirstUpdate ? "progress" : "first_result";
+                            renderedFirstUpdate = true;
+                            lastUiUpdateUtc = now;
+                            // A calendar load can stream many differently ordered provider batches.
+                            // Keep existing cards in place, update matching cards, and append discoveries so
+                            // the page fills progressively without rebuilding or reshuffling the whole grid.
+                            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
+                            CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: isForeground && !update.IsFinal, _visibleItems.Count);
+                            RequestPageRender(diagnostic, renderReason);
+                        }
+                    });
+                    if (refreshFirstCachedFreshness)
+                    {
+                        _ = RefreshFirstCachedFreshnessAsync(token, loadCancellation, diagnostic);
+                    }
+                }
+
+                if (!token.IsCancellationRequested && ReferenceEquals(_loadCancellation, loadCancellation))
+                {
+                    _hasLoadedAtLeastOnce = true;
+                    await RecordFilterUsageAsync(pageMode, loadFilters, _items.Count, token);
+                    if (!token.IsCancellationRequested && ReferenceEquals(_loadCancellation, loadCancellation))
+                    {
+                        shouldPrefetchAdjacentWeeks = hasAuthoritativeResult;
+                        prefetchWeekStart = start;
+                        prefetchFilters = CalendarFilterState.Clone(loadFilters);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                loadOutcome = "canceled";
+                loadReason = _isDisposed ? "disposed" : "superseded";
+                if (!_isDisposed && !isForeground && !hasFinalResult
+                    && ReferenceEquals(_loadCancellation, loadCancellation))
+                {
+                    loadOutcome = "deadline";
+                    loadReason = "background_budget";
+                    RecordPageDiagnostic(diagnostic, "deadline", new() { Outcome = loadOutcome, Reason = loadReason });
+                    await InvokeAsync(() =>
+                    {
+                        if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
+                        {
+                            StopBackgroundObservationProgress(backgroundCompletionBudgetSeconds);
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                loadOutcome = "failed";
+                loadReason = "service_exception";
+                if (_isDisposed || !ReferenceEquals(_loadCancellation, loadCancellation))
+                {
+                    return;
+                }
+
+                _loadProgress.RemoveAll(entry => entry.SourceName is "Background refresh" or "Load budget");
+                InvalidateLoadProgressCache();
+                if (_visibleItems.Count > 0)
+                {
+                    ShowToast(ToastKind.Error, "Calendar refresh failed", ex.Message);
                 }
                 else
                 {
-                    _visitChangeSummary = null;
+                    _error = ex.Message;
                 }
-                _isLoading = false;
-                _isRefreshingStaleCache = false;
-                CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
-                _loadCancellation = null;
-                await InvokeAsync(() =>
+            }
+            finally
+            {
+                foregroundLoad.Dispose();
+
+                try
                 {
-                    if (!_isDisposed)
+                    if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
                     {
-                        StateHasChanged();
+                        await RefreshCacheFreshnessAsync(token, loadCancellation, diagnostic, "load_cleanup");
+                        if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
+                        {
+                            if (hasAuthoritativeResult)
+                            {
+                                await RefreshVisitChangeSummaryAsync(token);
+                            }
+                            else
+                            {
+                                _visitChangeSummary = null;
+                            }
+                        }
                     }
-                });
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                }
+                finally
+                {
+                    try
+                    {
+                        if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
+                        {
+                            _isLoading = false;
+                            _isRefreshingStaleCache = false;
+                            CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
+                            _loadCancellation = null;
+                            await InvokeAsync(() =>
+                            {
+                                if (!_isDisposed)
+                                {
+                                    RequestPageRender(diagnostic, "load_cleanup");
+                                }
+                            });
+                        }
+                    }
+                    finally
+                    {
+                        if (token.IsCancellationRequested && loadOutcome is not "deadline" and not "failed")
+                        {
+                            loadOutcome = "canceled";
+                            loadReason = _isDisposed ? "disposed" : "superseded";
+                        }
+                        RecordPageDiagnostic(diagnostic, "finished", new() { Outcome = loadOutcome, Reason = loadReason });
+                        loadCancellation.Dispose();
+                    }
+                }
             }
 
-            loadCancellation.Dispose();
-        }
-
-        if (shouldPrefetchAdjacentWeeks && prefetchFilters is not null)
-        {
-            AdjacentWeekPrefetcher.PrefetchAdjacentWeeks(prefetchWeekStart, prefetchFilters);
+            if (!token.IsCancellationRequested && shouldPrefetchAdjacentWeeks && prefetchFilters is not null)
+            {
+                AdjacentWeekPrefetcher.PrefetchAdjacentWeeks(prefetchWeekStart, prefetchFilters);
+            }
         }
     }
 
-    private async Task RefreshCacheFreshnessAsync(CancellationToken cancellationToken)
+    private async Task ObserveLoadCompletionAsync(Task completion)
     {
+        // A background continuation has no awaiting UI event handler. Always observe its result.
+        try
+        {
+            await completion;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or JSDisconnectedException)
+        {
+            Logger.LogDebug(ex, "Calendar completion stopped after circuit shutdown.");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Calendar completion failed.");
+        }
+    }
+
+    private async Task RefreshFirstCachedFreshnessAsync(
+        CancellationToken cancellationToken, CancellationTokenSource loadCancellation, PageLoadDiagnostic? diagnostic)
+    {
+        try
+        {
+            if (await RefreshCacheFreshnessAsync(cancellationToken, loadCancellation, diagnostic, "first_cached_result"))
+            {
+                await InvokeAsync(() =>
+                {
+                    if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation)
+                        && !cancellationToken.IsCancellationRequested)
+                    {
+                        RequestPageRender(diagnostic, "cache_metadata");
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or JSDisconnectedException)
+        {
+            Logger.LogDebug(ex, "Initial cache freshness stopped after circuit shutdown.");
+        }
+    }
+
+    private async Task<bool> RefreshCacheFreshnessAsync(
+        CancellationToken cancellationToken, CancellationTokenSource loadCancellation,
+        PageLoadDiagnostic? diagnostic, string reason)
+    {
+        if (_isDisposed || cancellationToken.IsCancellationRequested
+            || !ReferenceEquals(_loadCancellation, loadCancellation)
+            || (diagnostic is not null && !IsCurrentPageDiagnostic(diagnostic))) return false;
+        var started = Stopwatch.GetTimestamp();
+        var revision = Interlocked.Increment(ref _cacheFreshnessRevision);
+        var outcome = "failed";
+        RecordPageDiagnostic(diagnostic, "cache_metadata_started", new() { Reason = reason });
         try
         {
             var start = _filters.WeekStart;
             var end = start.AddDays(6);
+            var requests = CacheFreshnessModes().Select(entry =>
+                (entry.Label, CacheKey: PremiereDiscoveryCriteria.FromFilters(FiltersForCacheFreshness(entry.Mode)).CacheKey())).ToArray();
             var entries = new List<CacheFreshnessEntry>();
-            foreach (var (mode, label) in CacheFreshnessModes())
+            foreach (var request in requests)
             {
-                var filters = FiltersForCacheFreshness(mode);
-                var cacheKey = PremiereDiscoveryCriteria.FromFilters(filters).CacheKey();
                 var metadata = await CalendarCacheMaintenance.GetWeekMetadataAsync(
-                    start,
-                    end,
-                    cacheKey,
-                    cancellationToken);
-                entries.Add(new CacheFreshnessEntry(label, metadata));
+                    start, end, request.CacheKey, cancellationToken);
+                entries.Add(new CacheFreshnessEntry(request.Label, metadata));
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_isDisposed || !ReferenceEquals(_loadCancellation, loadCancellation)
+                || revision != Volatile.Read(ref _cacheFreshnessRevision)
+                || (diagnostic is not null && !IsCurrentPageDiagnostic(diagnostic)))
+            {
+                outcome = "superseded";
+                return false;
+            }
             _cacheFreshness = entries;
+            outcome = "applied";
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            outcome = "canceled";
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _cacheFreshness = [];
+            if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation)
+                && revision == Volatile.Read(ref _cacheFreshnessRevision)) _cacheFreshness = [];
+            return false;
+        }
+        finally
+        {
+            RecordPageDiagnostic(diagnostic, "cache_metadata_completed", new()
+            {
+                Reason = reason, Outcome = outcome, DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
         }
     }
 
@@ -948,10 +1171,12 @@ public partial class Calendar
         try
         {
             var cacheKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
-            _visitChangeSummary = await CalendarVisitChangeService.RecordVisitAsync(
+            var summary = await CalendarVisitChangeService.RecordVisitAsync(
                 new CalendarVisitScope(_pageMode, _filters.WeekStart, cacheKey),
                 _items.Select(item => item.CanonicalId).ToArray(),
                 cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            _visitChangeSummary = summary;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1147,6 +1372,42 @@ public partial class Calendar
         InvalidateLoadProgressCache();
     }
 
+    private void StopBackgroundObservationProgress(int budgetSeconds)
+    {
+        _loadProgress.RemoveAll(entry => entry.SourceName is "Background refresh" or "Load budget");
+        var stoppedText = $"Observation stopped after {budgetSeconds.ToString(CultureInfo.InvariantCulture)} s background budget; latest results kept";
+        var stoppedSource = false;
+        for (var index = 0; index < _loadProgress.Count; index++)
+        {
+            var entry = _loadProgress[index];
+            if (entry.FromCache)
+            {
+                continue;
+            }
+
+            // The watch ended, so incomplete provider work must not look active or complete.
+            _loadProgress[index] = entry with
+            {
+                IsFinal = false,
+                CompletedWork = null,
+                TotalWork = null,
+                ProgressText = stoppedText,
+                Phase = "stopped"
+            };
+            stoppedSource = true;
+        }
+
+        if (!stoppedSource)
+        {
+            _loadProgress.Add(new LoadProgressEntry(
+                "Background observation", _items.Count, _items.Count, IsFinal: false, FromCache: false,
+                SourceItems: _items, Items: _items, CompletedWork: null, TotalWork: null,
+                ProgressText: stoppedText, ElapsedMilliseconds: budgetSeconds * 1000L,
+                Phase: "stopped", UnmappedCount: null));
+        }
+        InvalidateLoadProgressCache();
+    }
+
     private async Task RecordFilterUsageAsync(
         CalendarPageMode pageMode,
         CalendarFilters filters,
@@ -1296,6 +1557,10 @@ public partial class Calendar
             }
 
             var phase = !daySourceGroupStillLoading
+                && entries.Any(entry => string.Equals(entry.Phase, "stopped", StringComparison.OrdinalIgnoreCase))
+                && entries.All(IsCompletedProgressEntry)
+                ? "stopped"
+                : !daySourceGroupStillLoading
                 && entries.All(entry => entry.IsFinal || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase))
                 ? "complete"
                 : entries.All(entry => string.Equals(entry.Phase, "cache", StringComparison.OrdinalIgnoreCase))
@@ -1480,7 +1745,8 @@ public partial class Calendar
     {
         return entry.IsFinal
             || string.Equals(entry.Phase, "complete", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(entry.Phase, "cache", StringComparison.OrdinalIgnoreCase);
+            || string.Equals(entry.Phase, "cache", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(entry.Phase, "stopped", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool ShouldQuietCompactQueryProgressOnMobile()
@@ -1578,6 +1844,11 @@ public partial class Calendar
         if (entry.FromCache)
         {
             classes.Add("cache");
+        }
+
+        if (string.Equals(entry.Phase, "stopped", StringComparison.OrdinalIgnoreCase))
+        {
+            classes.Add("stopped");
         }
 
         return string.Join(' ', classes);
@@ -2861,6 +3132,7 @@ public partial class Calendar
 
     public void Dispose()
     {
+        if (_isDisposed) return;
         _isDisposed = true;
         Navigation.LocationChanged -= OnLocationChanged;
         ViewSyncService.StateChanged -= OnViewSyncStateChanged;
@@ -2869,6 +3141,87 @@ public partial class Calendar
         _loadCancellation?.Dispose();
         _disposeCancellation.Dispose();
     }
+
+    private PageLoadDiagnostic? BeginPageLoadDiagnostic(bool forceRefresh)
+    {
+        var telemetry = PageServices.GetService<PremiereTelemetry>();
+        if (telemetry is null) return null;
+        var diagnostic = new PageLoadDiagnostic(telemetry, telemetry.CreateDiagnosticContext(), _filters.WeekStart,
+            _pageMode.ToString().ToLowerInvariant(), PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey());
+        _pageLoadDiagnostic = diagnostic;
+        _pendingPageRenderDiagnostic = null;
+        RecordPageDiagnostic(diagnostic, "started", new() { Reason = forceRefresh ? "forced" : "normal" });
+        return diagnostic;
+    }
+
+    private bool IsCurrentPageDiagnostic(PageLoadDiagnostic diagnostic)
+        => !_isDisposed && ReferenceEquals(_pageLoadDiagnostic, diagnostic)
+            && diagnostic.WeekStart == _filters.WeekStart
+            && string.Equals(diagnostic.Media, _pageMode.ToString(), StringComparison.OrdinalIgnoreCase)
+            && string.Equals(diagnostic.CacheKey, PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey(), StringComparison.Ordinal);
+
+    private void RecordPageDiagnostic(PageLoadDiagnostic? diagnostic, string eventName, PerformanceDiagnosticDetails? details = null)
+    {
+        if (diagnostic is null) return;
+        var measurements = (details ?? new PerformanceDiagnosticDetails()) with
+        {
+            Stage = diagnostic.Media, WeekStart = diagnostic.WeekStart, WeekEnd = diagnostic.WeekStart.AddDays(6),
+            CacheKey = diagnostic.CacheKey, Count = details?.Count ?? diagnostic.ItemCount,
+            Total = details?.Total ?? diagnostic.VisibleCount,
+            DurationMilliseconds = details?.DurationMilliseconds ?? Stopwatch.GetElapsedTime(diagnostic.Started).TotalMilliseconds
+        };
+        diagnostic.Telemetry.RecordDiagnostic("calendar.page." + eventName, diagnostic.Context, measurements);
+    }
+
+    private void RequestPageRender(PageLoadDiagnostic? diagnostic, string reason)
+    {
+        if (diagnostic is not null && IsCurrentPageDiagnostic(diagnostic))
+        {
+            diagnostic.ItemCount = _items.Count;
+            diagnostic.VisibleCount = _visibleItems.Count;
+            if (_pendingPageRenderDiagnostic is { } previous)
+            {
+                RecordPageDiagnostic(previous.Load, "render_coalesced", new()
+                {
+                    Sequence = previous.Sequence, Reason = previous.Reason, Outcome = "coalesced"
+                });
+            }
+            var request = new PageRenderDiagnostic(diagnostic, ++diagnostic.RenderSequence, reason, Stopwatch.GetTimestamp());
+            _pendingPageRenderDiagnostic = request;
+            RecordPageDiagnostic(diagnostic, "render_requested", new() { Sequence = request.Sequence, Reason = reason });
+        }
+        StateHasChanged();
+    }
+
+    private void CompletePageRenderDiagnostic()
+    {
+        var pending = _pendingPageRenderDiagnostic;
+        _pendingPageRenderDiagnostic = null;
+        if (pending is null || !IsCurrentPageDiagnostic(pending.Load)) return;
+        // This is the server component lifecycle commit, not a measurement of browser paint.
+        RecordPageDiagnostic(pending.Load, "render_completed", new()
+        {
+            Sequence = pending.Sequence, Reason = pending.Reason, Outcome = "server_render_commit",
+            DurationMilliseconds = Stopwatch.GetElapsedTime(pending.Started).TotalMilliseconds
+        });
+    }
+
+    private sealed class PageLoadDiagnostic(
+        PremiereTelemetry telemetry, PerformanceDiagnosticContext context, DateOnly weekStart, string media, string cacheKey)
+    {
+        public PremiereTelemetry Telemetry { get; } = telemetry;
+        public PerformanceDiagnosticContext Context { get; } = context;
+        public DateOnly WeekStart { get; } = weekStart;
+        public string Media { get; } = media;
+        public string CacheKey { get; } = cacheKey;
+        public long Started { get; } = Stopwatch.GetTimestamp();
+        public bool SettingsRecorded { get; set; }
+        public int ItemCount { get; set; }
+        public int VisibleCount { get; set; }
+        public long RenderSequence { get; set; }
+    }
+
+    private sealed record PageRenderDiagnostic(PageLoadDiagnostic Load, long Sequence, string Reason, long Started);
 
     private sealed record LoadProgressEntry(
         string SourceName,

@@ -4242,7 +4242,8 @@ public sealed partial class PremiereServiceTests
         int sourceTimeoutSeconds = 120,
         int sourceFetchConcurrency = 4,
         int enrichmentProgressBatchSize = 10,
-        IProviderWorkScheduler? workScheduler = null)
+        IProviderWorkScheduler? workScheduler = null,
+        PremiereTelemetry? telemetry = null)
     {
         return new PremiereService(
             tmdb,
@@ -4265,7 +4266,8 @@ public sealed partial class PremiereServiceTests
             imdbRatingsStore,
             providerCacheStateStore: null,
             rottenTomatoesClient: rottenTomatoes,
-            workScheduler: workScheduler);
+            workScheduler: workScheduler,
+            telemetry: telemetry);
     }
 
     private static string CacheKeyForPageMode(CalendarFilters filters, CalendarPageMode pageMode)
@@ -4296,6 +4298,7 @@ public sealed partial class PremiereServiceTests
         public IReadOnlyList<TmdbDiscoverBatch<TmdbTvDiscoverItem>>? TvStreamBatches { get; init; }
         public TimeSpan? TvDetailDelay { get; init; }
         public TimeSpan? MovieDelay { get; init; }
+        public TimeSpan? MovieDetailDelay { get; init; }
         public IReadOnlyList<TmdbKeyword> KeywordResults { get; init; } = [];
         public Dictionary<int, TmdbDetailsWithExtras> TvDetailsById { get; } = [];
         public Dictionary<int, TmdbDetailsWithExtras> MovieDetailsById { get; } = [];
@@ -4494,14 +4497,15 @@ public sealed partial class PremiereServiceTests
             });
         }
 
-        public Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false)
+        public async Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false)
         {
+            if (MovieDetailDelay is { } delay) await Task.Delay(delay, cancellationToken);
             if (MovieDetailExceptions.TryGetValue(id, out var exception))
             {
                 throw exception;
             }
 
-            return Task.FromResult(MovieDetailsById.TryGetValue(id, out var details) ? details : null);
+            return MovieDetailsById.TryGetValue(id, out var details) ? details : null;
         }
 
         public Task<int?> FindTmdbIdByExternalIdAsync(

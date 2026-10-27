@@ -60,3 +60,7 @@ accepted digest-pinned container image while preserving the PostgreSQL volume.
 Recover data only from a checksum-verified PostgreSQL dump that first passes an
 isolated restore. The final SQLite migration input is retained as restricted
 historical evidence on the NAS, not as an executable fallback.
+
+## Read-only runtime logging
+
+The runtime image sets `HOME=/tmp`. .NET 11 named mutexes need writable user-shared storage under HOME; leaving it at `/home/app` on the read-only root filesystem silently prevents Serilog's shared file sink from opening. The existing `/tmp` tmpfs supplies this temporary runtime state. Persistent application data and logs remain under `/app/App_Data`. Validate both actual log-file writes and `/health/version` diagnostic counters after an update.

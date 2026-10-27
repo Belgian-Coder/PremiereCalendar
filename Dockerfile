@@ -37,6 +37,7 @@ LABEL org.opencontainers.image.title="PremiereCalendar" \
       org.opencontainers.image.created="$BUILD_TIME_UTC"
 WORKDIR /app
 ENV Urls=http://0.0.0.0:8080 \
+    HOME=/tmp \
     DOTNET_EnableDiagnostics=0 \
     COMPlus_EnableDiagnostics=0
 COPY --from=build --chown=$APP_UID:$APP_UID /out/ ./

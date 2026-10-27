@@ -68,10 +68,23 @@ public sealed partial class PremiereService
         var rawCandidateCount = 0;
         var acceptedCandidateCount = 0;
         var emitted = false;
+        Exception? providerFailure = null;
 
-        await foreach (var providerBatch in StreamCandidatesFromProviderAsync(provider, start, end, forceRefresh, cancellationToken)
-            .WithCancellation(cancellationToken))
+        await using var providerEnumerator = StreamCandidatesFromProviderAsync(
+            provider, start, end, criteria, forceRefresh, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        while (true)
         {
+            bool moved;
+            try { moved = await providerEnumerator.MoveNextAsync(); }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Successful feeds below the batching threshold still belong to this load.
+                // Map them before reporting the later feed failure; they remain partial.
+                providerFailure = ex;
+                break;
+            }
+            if (!moved) break;
+            var providerBatch = providerEnumerator.Current;
             rawCandidateCount += providerBatch.Count;
             var candidates = providerBatch
                 .Where(candidate => candidate.PremiereDate >= start && candidate.PremiereDate <= end)
@@ -91,7 +104,8 @@ public sealed partial class PremiereService
 
             acceptedCandidateCount += candidates.Length;
             pendingCandidates.AddRange(candidates);
-            if (pendingCandidates.Count < candidateBatchSize)
+            if (pendingCandidates.Count < candidateBatchSize
+                && provider is not IStreamingPremiereDiscoveryProvider { PreserveBatchBoundaries: true })
             {
                 continue;
             }
@@ -115,19 +129,28 @@ public sealed partial class PremiereService
 
         if (pendingCandidates.Count > 0)
         {
-            await foreach (var mappedBatch in MapExternalCandidatesInProgressAsync(
-                    pendingCandidates,
-                    forceRefresh,
-                    criteria,
-                    cachedEnrichment,
-                    start,
-                    end,
-                    cancellationToken)
-                .WithCancellation(cancellationToken))
+            await using var mapped = MapExternalCandidatesInProgressAsync(
+                pendingCandidates, forceRefresh, criteria, cachedEnrichment, start, end, cancellationToken)
+                .GetAsyncEnumerator(cancellationToken);
+            while (true)
             {
+                bool moved;
+                try { moved = await mapped.MoveNextAsync(); }
+                catch (Exception mappingFailure) when (providerFailure is not null)
+                {
+                    // The source deadline can expire while draining an accepted sub-batch.
+                    // Retain the provider's retry deadline for durable scheduler deferral.
+                    throw new AggregateException(providerFailure, mappingFailure);
+                }
+                if (!moved) break;
                 emitted = true;
-                yield return mappedBatch;
+                yield return mapped.Current;
             }
+        }
+
+        if (providerFailure is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(providerFailure).Throw();
         }
 
         if (!emitted)
@@ -163,9 +186,20 @@ public sealed partial class PremiereService
         IPremiereDiscoveryProvider provider,
         DateOnly start,
         DateOnly end,
+        PremiereDiscoveryCriteria criteria,
         bool forceRefresh,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        if (provider is IMediaFilteredStreamingPremiereDiscoveryProvider filteredProvider)
+        {
+            await foreach (var batch in filteredProvider.StreamCandidatesAsync(
+                start, end, criteria.IncludeSeries, criteria.IncludeMovies, forceRefresh, cancellationToken)
+                .WithCancellation(cancellationToken))
+            {
+                yield return batch;
+            }
+            yield break;
+        }
         if (provider is IStreamingPremiereDiscoveryProvider streamingProvider)
         {
             await foreach (var batch in streamingProvider.StreamCandidatesAsync(start, end, forceRefresh, cancellationToken)

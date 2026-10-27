@@ -717,6 +717,238 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public async Task CalendarPage_BackgroundCompletionUpdatesCurrentCardsWithoutStartingAnotherLoad()
+    {
+        ConfigureBackgroundCompletionBudget();
+        var service = new GatedBackgroundPremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        WaitForForegroundRelease(component);
+
+        Assert.Single(service.Calls);
+        Assert.False(service.FirstStreamFinished.Task.IsCompleted);
+        service.Release.TrySetResult();
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        component.WaitForAssertion(() =>
+        {
+            var cards = component.FindAll("[data-testid='premiere-card']");
+            Assert.Equal(10, cards.Count);
+            Assert.Contains("Updated cached movie", cards[0].TextContent);
+            Assert.Contains("Retained cached movie", cards[1].TextContent);
+            Assert.Contains("Background movie", cards[2].TextContent);
+            Assert.Single(service.Calls);
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+            Assert.Single(_prefetcher.WeekStarts);
+        });
+        for (var batch = 0; batch < 3; batch++) component.Find("[data-day-load-more]").Click();
+        Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+        component.Find("[data-day-load-more]").Click();
+        Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+    }
+
+    [Fact]
+    public async Task CalendarPage_LateBackgroundCompletionCannotReplaceNewWeek()
+    {
+        ConfigureBackgroundCompletionBudget();
+        var service = new GatedBackgroundPremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/movies?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        WaitForForegroundRelease(component);
+
+        navigation.NavigateTo("/movies?week=2026-05-11");
+        component.WaitForAssertion(() => Assert.Contains("Next week movie",
+            Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent));
+        service.Release.TrySetResult();
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("Next week movie", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent);
+            Assert.Equal(2, service.Calls.Count);
+        });
+    }
+
+    [Fact]
+    public async Task CalendarPage_DisposalCancelsBackgroundSubscription()
+    {
+        ConfigureBackgroundCompletionBudget();
+        var service = new GatedBackgroundPremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        WaitForForegroundRelease(component);
+
+        await component.InvokeAsync(component.Instance.Dispose);
+        Assert.True(service.FirstCancellation.IsCancellationRequested);
+        service.Release.TrySetResult();
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Single(service.Calls);
+        Assert.Empty(_prefetcher.WeekStarts);
+    }
+
+    [Fact]
+    public async Task CalendarPage_BackgroundFailureKeepsStaleCardsAndShowsError()
+    {
+        ConfigureBackgroundCompletionBudget();
+        var service = new GatedBackgroundPremiereService { FailRefresh = true };
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        WaitForForegroundRelease(component);
+
+        service.Release.TrySetResult();
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count);
+            Assert.Contains("Background provider unavailable", component.Markup);
+            Assert.Single(service.Calls);
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+            Assert.Empty(_prefetcher.WeekStarts);
+        });
+    }
+
+    [Fact]
+    public async Task CalendarPage_BackgroundCooldownKeepsCardsWithoutRetryOrVisitRemovalSummary()
+    {
+        ConfigureBackgroundCompletionBudget();
+        var service = new GatedBackgroundPremiereService { FinalHasSourceErrors = true };
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        WaitForForegroundRelease(component);
+
+        service.Release.TrySetResult();
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
+            Assert.Contains("Retained cached movie", component.Markup);
+            Assert.Single(service.Calls);
+            Assert.Empty(_prefetcher.WeekStarts);
+            Assert.Empty(component.FindAll("[data-testid='visit-change-summary']"));
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+        });
+    }
+
+    [Fact]
+    public async Task CalendarPage_BackgroundObservationExpiryStopsProgressAndKeepsCards()
+    {
+        ConfigureBackgroundCompletionBudget();
+        Services.Configure<CalendarLoadOptions>(options => options.BackgroundCompletionBudgetSeconds = 1);
+        var service = new GatedBackgroundPremiereService { WaitForCancellationAfterNonFinalUpdate = true };
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        WaitForForegroundRelease(component);
+        ExpandQueryProgress(component);
+
+        service.Release.TrySetResult();
+        await service.NonFinalProgressYielded.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("Resolving background candidates", component.Markup);
+            Assert.Single(component.FindAll("[data-testid='query-progress-bar']"));
+        });
+
+        await service.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        component.WaitForAssertion(() =>
+        {
+            var progress = component.Find("[data-testid='query-progress']");
+            Assert.Contains("Observation stopped after 1 s background budget; latest results kept", progress.TextContent);
+            Assert.DoesNotContain("continues in background", progress.TextContent);
+            Assert.DoesNotContain("Resolving background candidates", progress.TextContent);
+            Assert.Empty(component.FindAll("[data-testid='query-progress-bar']"));
+            var entries = component.FindAll(".query-progress-entry");
+            Assert.Contains(entries, entry => entry.ClassList.Contains("stopped"));
+            Assert.All(entries, entry => Assert.True(entry.ClassList.Contains("stopped") || entry.ClassList.Contains("cache")));
+            Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count);
+            Assert.Single(service.Calls);
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+            Assert.False(Services.GetRequiredService<CalendarPageCoordinator>().HasActiveForegroundLoad);
+            Assert.Empty(_prefetcher.WeekStarts);
+        });
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CalendarPage_FinalResultBeforeDeadlineDoesNotReopenBackgroundStatusDuringSlowUsageWrite(bool staleCache)
+    {
+        Services.Configure<CalendarLoadOptions>(options =>
+        {
+            options.ForegroundLoadBudgetSeconds = staleCache ? 5 : 1;
+            options.StaleCacheForegroundBudgetSeconds = 1;
+            options.BackgroundCompletionBudgetSeconds = 1;
+        });
+        var usageStore = new FakeCalendarFilterUsageStore
+        {
+            RecordRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
+        };
+        Services.AddSingleton<ICalendarFilterUsageStore>(usageStore);
+        var service = new FakePremiereService
+        {
+            ReportStaleCacheProgress = staleCache,
+            ReportPartialProgress = true,
+            Items = [CreateMovie("movie:1", "Final movie", new DateOnly(2026, 5, 4))]
+        };
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        await usageStore.RecordStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        ExpandQueryProgress(component);
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.False(Services.GetRequiredService<CalendarPageCoordinator>().HasActiveForegroundLoad);
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+            Assert.Contains("Final movie", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent);
+            var progress = component.Find("[data-testid='query-progress']");
+            Assert.DoesNotContain("Background refresh", progress.TextContent);
+            Assert.DoesNotContain("Load budget", progress.TextContent);
+            Assert.DoesNotContain("continues in background", progress.TextContent);
+        }, TimeSpan.FromSeconds(3));
+        Assert.False(usageStore.RecordRelease.Task.IsCompleted);
+        // Keep metadata blocked beyond the would-be one-second background-watch timeout.
+        await Task.Delay(TimeSpan.FromMilliseconds(1200));
+        Assert.False(usageStore.RecordCancellation.IsCancellationRequested);
+        Assert.Empty(_prefetcher.WeekStarts);
+
+        usageStore.RecordRelease.TrySetResult();
+        await _prefetcher.Prefetched.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(_prefetcher.WeekStarts);
+            Assert.Single(service.Calls);
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+            Assert.DoesNotContain("Background refresh", component.Markup);
+            Assert.DoesNotContain("Load budget", component.Markup);
+        });
+    }
+
+    private void ConfigureBackgroundCompletionBudget()
+    {
+        Services.Configure<CalendarLoadOptions>(options =>
+        {
+            options.ForegroundLoadBudgetSeconds = 5;
+            options.StaleCacheForegroundBudgetSeconds = 1;
+        });
+    }
+
+    private void WaitForForegroundRelease(IRenderedComponent<PremiereCalendar.Components.Pages.Calendar> component)
+    {
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count);
+            Assert.Empty(component.FindAll("[data-testid='refreshing']"));
+            Assert.False(Services.GetRequiredService<CalendarPageCoordinator>().HasActiveForegroundLoad);
+        }, TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
     public async Task CalendarPage_MediaRouteChangeAppendsStreamedCardsWithoutReorderingExistingCards()
     {
         var service = new RouteTransitionPremiereService();
@@ -2712,6 +2944,81 @@ public sealed class CalendarPageTests : BunitContext
         OriginalLanguage = "en"
     };
 
+    private sealed class GatedBackgroundPremiereService : IPremiereService
+    {
+        public List<DateOnly> Calls { get; } = [];
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource FirstStreamFinished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource NonFinalProgressYielded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public CancellationToken FirstCancellation { get; private set; }
+        public bool FailRefresh { get; init; }
+        public bool FinalHasSourceErrors { get; init; }
+        public bool WaitForCancellationAfterNonFinalUpdate { get; init; }
+
+        public Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
+            DateOnly start, DateOnly end, CancellationToken cancellationToken, bool forceRefresh = false,
+            IProgress<PremiereLoadProgress>? progress = null, CalendarFilters? filters = null) =>
+            throw new NotSupportedException();
+
+        public async IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(
+            DateOnly start, DateOnly end, bool forceRefresh = false, CalendarFilters? filters = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            Calls.Add(start);
+            if (Calls.Count > 1)
+            {
+                var nextWeekItems = new[] { CreateMovie("movie:999", "Next week movie", start) };
+                yield return new PremiereLoadProgress("Week cache", 1, 1, nextWeekItems, IsFinal: true, FromCache: true);
+                yield break;
+            }
+
+            FirstCancellation = cancellationToken;
+            try
+            {
+                var cachedItems = new[]
+                {
+                    CreateMovie("movie:1", "Cached movie", start),
+                    CreateMovie("movie:2", "Retained cached movie", start)
+                };
+                yield return new PremiereLoadProgress("Expired week cache", 2, 2, cachedItems, FromCache: true)
+                {
+                    IsStaleCache = true
+                };
+                // Intentionally deliver late even if canceled, to exercise route/disposal guards.
+                await Release.Task;
+                if (WaitForCancellationAfterNonFinalUpdate)
+                {
+                    NonFinalProgressYielded.TrySetResult();
+                    yield return new PremiereLoadProgress("TMDb movies Mon 04 May", 2, 2, cachedItems,
+                        CompletedWork: 1, TotalWork: 10, ProgressText: "Resolving background candidates");
+                    try
+                    {
+                        await Task.Delay(Timeout.Infinite, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        CancellationObserved.TrySetResult();
+                        throw;
+                    }
+                }
+                if (FailRefresh) throw new ExternalApiException("Background provider unavailable");
+                var finalItems = new[] { CreateMovie("movie:1", "Updated cached movie", start) }
+                    .Concat(Enumerable.Range(3, 85).Select(id => CreateMovie($"movie:{id}", $"Background movie {id}", start)))
+                    .ToArray();
+                yield return new PremiereLoadProgress("Complete", finalItems.Length, finalItems.Length, finalItems, IsFinal: true)
+                {
+                    HasSourceErrors = FinalHasSourceErrors,
+                    RetryAfterUtc = FinalHasSourceErrors ? DateTimeOffset.UtcNow.AddMinutes(10) : null
+                };
+            }
+            finally
+            {
+                FirstStreamFinished.TrySetResult();
+            }
+        }
+    }
+
     private sealed class FakePremiereService : IPremiereService
     {
         public List<(DateOnly Start, DateOnly End, bool ForceRefresh, DateOnly? PriorityDate)> Calls { get; } = [];
@@ -3032,10 +3339,12 @@ public sealed class CalendarPageTests : BunitContext
     private sealed class FakeAdjacentWeekPrefetcher : IAdjacentWeekPrefetcher
     {
         public List<DateOnly> WeekStarts { get; } = [];
+        public TaskCompletionSource Prefetched { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public void PrefetchAdjacentWeeks(DateOnly weekStart, CalendarFilters? filters = null)
         {
             WeekStarts.Add(weekStart);
+            Prefetched.TrySetResult();
         }
     }
 
@@ -3150,14 +3459,23 @@ public sealed class CalendarPageTests : BunitContext
 
     private sealed class FakeCalendarFilterUsageStore : ICalendarFilterUsageStore
     {
-        public Task RecordUseAsync(
+        public TaskCompletionSource? RecordRelease { get; init; }
+        public TaskCompletionSource RecordStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public CancellationToken RecordCancellation { get; private set; }
+
+        public async Task RecordUseAsync(
             CalendarPageMode pageMode,
             CalendarFilters filters,
             int itemCount,
             DateTimeOffset usedAtUtc,
             CancellationToken cancellationToken)
         {
-            return Task.CompletedTask;
+            RecordCancellation = cancellationToken;
+            RecordStarted.TrySetResult();
+            if (RecordRelease is { } release)
+            {
+                await release.Task.WaitAsync(cancellationToken);
+            }
         }
 
         public Task<CalendarFilterUsageProfile?> GetProfileAsync(string profileKey, CancellationToken cancellationToken)

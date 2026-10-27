@@ -157,7 +157,13 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             throw new ArgumentException("Provider work requires a deduplication key.", nameof(request));
         }
 
+        var enqueueStarted = _timeProvider.GetTimestamp();
         var result = await _store.EnqueueAsync(request, _timeProvider.GetUtcNow(), cancellationToken);
+        _telemetry.RecordDiagnostic("scheduler.enqueue.completed", JobContext(result.JobId), new()
+        {
+            Stage = "enqueue", JobKind = request.Kind.ToString(), Outcome = result.Created ? "created" : "attached",
+            DurationMilliseconds = _timeProvider.GetElapsedTime(enqueueStarted).TotalMilliseconds
+        });
         if (request.Priority <= ProviderWorkPriority.ActiveWeek)
         {
             lock (_preemptionGate) _activeBackgroundCancellation?.Cancel();
@@ -214,6 +220,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
 
     internal async Task<ProviderWorkSnapshot?> ClaimNextAsync(bool foregroundOnly, string leaseOwner, CancellationToken cancellationToken)
     {
+        var claimStarted = _timeProvider.GetTimestamp();
         var job = await _store.ClaimNextAsync(
             foregroundOnly,
             leaseOwner,
@@ -223,6 +230,13 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         if (job is not null)
         {
             _executions[job.LeaseOwner!] = new ExecutionCheckpoint(ReadResumeCheckpoint(job));
+            RecordDiagnostic(job, "scheduler.claim.completed", new()
+            {
+                Stage = "claim", Outcome = "claimed",
+                DurationMilliseconds = _timeProvider.GetElapsedTime(claimStarted).TotalMilliseconds,
+                WaitMilliseconds = (_timeProvider.GetUtcNow() - (job.NextAttemptUtc ?? job.EnqueuedUtc)).TotalMilliseconds,
+                Reason = string.IsNullOrWhiteSpace(job.CheckpointJson) ? "fresh" : "resumed"
+            });
             _telemetry.RecordJobWait(job.Kind.ToString(), _timeProvider.GetUtcNow() - job.EnqueuedUtc, !string.IsNullOrWhiteSpace(job.CheckpointJson));
             await RefreshCountsAsync(cancellationToken);
         }
@@ -232,7 +246,10 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     internal CancellationTokenSource BeginExecution(ProviderWorkSnapshot job, CancellationToken stoppingToken)
     {
         var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        GetExecution(job).Cancellation = linked;
+        var checkpoint = GetExecution(job);
+        checkpoint.Cancellation = linked;
+        checkpoint.StartedTimestamp = _timeProvider.GetTimestamp();
+        RecordDiagnostic(job, "scheduler.execution.started", new() { Stage = "execution", Outcome = "started" });
         if (job.Priority > ProviderWorkPriority.ActiveWeek)
         {
             lock (_preemptionGate) _activeBackgroundCancellation = linked;
@@ -258,6 +275,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         ProviderWorkProgress progress,
         CancellationToken cancellationToken)
     {
+        var progressStarted = _timeProvider.GetTimestamp();
         var execution = GetExecution(job);
         await execution.Gate.WaitAsync(cancellationToken);
         try
@@ -288,6 +306,12 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }
         finally { execution.Gate.Release(); }
         Publish(job.JobId, progress);
+        RecordDiagnostic(job, "scheduler.progress.published", new()
+        {
+            Stage = "progress", Outcome = "published", Count = progress.CompletedWork, Total = progress.TotalWork,
+            IsFinal = progress.CalendarProgress?.IsFinal,
+            DurationMilliseconds = _timeProvider.GetElapsedTime(progressStarted).TotalMilliseconds
+        });
     }
 
     internal void ReplayPersistedProgress(ProviderWorkSnapshot job, PremiereLoadProgress persisted)
@@ -297,12 +321,19 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
 
     internal async Task CompleteAsync(ProviderWorkSnapshot job, CancellationToken cancellationToken)
     {
+        var transitionStarted = _timeProvider.GetTimestamp();
         if (!await FlushAsync(job, cancellationToken)) return;
         var now = _timeProvider.GetUtcNow();
         if (GetExecution(job).Latest?.CalendarProgress?.RetryAfterUtc is { } retryAfter && retryAfter > now)
         {
             if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), now, retryAfter, false,
-                    "Provider work is waiting for provider recovery.", cancellationToken, retryWaiting: true)) return;
+                    "Provider work is waiting for provider recovery.", cancellationToken, retryWaiting: true))
+            { RecordLeaseLost(job, "defer"); return; }
+            RecordDiagnostic(job, "scheduler.job.deferred", new()
+            {
+                Stage = "durable", Outcome = "deferred", Reason = "provider_recovery", IsFinal = false,
+                DurationMilliseconds = _timeProvider.GetElapsedTime(transitionStarted).TotalMilliseconds, WaitMilliseconds = (retryAfter - now).TotalMilliseconds
+            });
             await RefreshQueuedForegroundInterestAsync(job.JobId);
             await RefreshCountsAsync(cancellationToken);
             _telemetry.RecordJob(job.Kind.ToString(), "deferred", Elapsed(job));
@@ -310,7 +341,12 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
                 "Provider work will resume after provider recovery."));
             return;
         }
-        if (!await _store.CompleteAsync(job.JobId, RequireOwner(job), now, cancellationToken)) return;
+        if (!await _store.CompleteAsync(job.JobId, RequireOwner(job), now, cancellationToken))
+        { RecordLeaseLost(job, "complete"); return; }
+        RecordDiagnostic(job, "scheduler.job.completed", new()
+        {
+            Stage = "durable", Outcome = "completed", IsFinal = true, DurationMilliseconds = _timeProvider.GetElapsedTime(transitionStarted).TotalMilliseconds
+        });
         await RefreshCountsAsync(cancellationToken);
         _telemetry.RecordJob(job.Kind.ToString(), "completed", Elapsed(job));
         Publish(job.JobId,
@@ -319,9 +355,15 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
 
     internal async Task PreemptAsync(ProviderWorkSnapshot job, CancellationToken cancellationToken)
     {
+        var transitionStarted = _timeProvider.GetTimestamp();
         if (!await FlushAsync(job, cancellationToken)) return;
         var now = _timeProvider.GetUtcNow();
-        if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), now, now, incrementAttempt: false, null, cancellationToken)) return;
+        if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), now, now, incrementAttempt: false, null, cancellationToken))
+        { RecordLeaseLost(job, "preempt"); return; }
+        RecordDiagnostic(job, "scheduler.job.preempted", new()
+        {
+            Stage = "durable", Outcome = "preempted", IsFinal = false, DurationMilliseconds = _timeProvider.GetElapsedTime(transitionStarted).TotalMilliseconds
+        });
         await RefreshQueuedForegroundInterestAsync(job.JobId);
         await RefreshCountsAsync(cancellationToken);
         _telemetry.RecordJob(job.Kind.ToString(), "preempted", Elapsed(job));
@@ -332,13 +374,22 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
 
     internal async Task FailAsync(ProviderWorkSnapshot job, Exception error, CancellationToken cancellationToken)
     {
+        RecordDiagnostic(job, "scheduler.execution.error", new()
+        { Stage = "execution", Outcome = "failed", Reason = error.GetType().Name, DurationMilliseconds = ExecutionMilliseconds(job) });
         var sanitized = SanitizeFailure(error);
+        var transitionStarted = _timeProvider.GetTimestamp();
         if (!await FlushAsync(job, cancellationToken)) return;
         var currentTime = _timeProvider.GetUtcNow();
         if (RetryDeadline(error, currentTime) is { } retryDeadline)
         {
             if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), currentTime, retryDeadline, false,
-                    sanitized, cancellationToken, retryWaiting: true)) return;
+                    sanitized, cancellationToken, retryWaiting: true))
+            { RecordLeaseLost(job, "defer"); return; }
+            RecordDiagnostic(job, "scheduler.job.deferred", new()
+            {
+                Stage = "durable", Outcome = "deferred", Reason = error.GetType().Name, IsFinal = false,
+                DurationMilliseconds = _timeProvider.GetElapsedTime(transitionStarted).TotalMilliseconds, WaitMilliseconds = (retryDeadline - currentTime).TotalMilliseconds
+            });
             await RefreshQueuedForegroundInterestAsync(job.JobId);
             await RefreshCountsAsync(cancellationToken);
             Publish(job.JobId, new ProviderWorkProgress(job.JobId, ProviderWorkState.RetryWaiting,
@@ -352,7 +403,13 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
                 Math.Clamp(_options.RetryBaseMilliseconds, 50, 30_000) * Math.Pow(2, job.AttemptCount));
             var delay = TimeSpan.FromMilliseconds(exponentialMilliseconds * (0.75 + (_jitter.NextDouble() * 0.5)));
             var now = _timeProvider.GetUtcNow();
-            if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), now, now.Add(delay), true, sanitized, cancellationToken)) return;
+            if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), now, now.Add(delay), true, sanitized, cancellationToken))
+            { RecordLeaseLost(job, "retry"); return; }
+            RecordDiagnostic(job, "scheduler.job.retry.scheduled", new()
+            {
+                Stage = "durable", Outcome = "retry_waiting", Reason = error.GetType().Name, IsFinal = false,
+                DurationMilliseconds = _timeProvider.GetElapsedTime(transitionStarted).TotalMilliseconds, WaitMilliseconds = delay.TotalMilliseconds
+            });
             await RefreshQueuedForegroundInterestAsync(job.JobId);
             await RefreshCountsAsync(cancellationToken);
             _telemetry.RecordJob(job.Kind.ToString(), "retry", Elapsed(job));
@@ -362,7 +419,13 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             return;
         }
 
-        if (!await _store.FailAsync(job.JobId, RequireOwner(job), sanitized, _timeProvider.GetUtcNow(), cancellationToken)) return;
+        if (!await _store.FailAsync(job.JobId, RequireOwner(job), sanitized, _timeProvider.GetUtcNow(), cancellationToken))
+        { RecordLeaseLost(job, "fail"); return; }
+        RecordDiagnostic(job, "scheduler.job.failed", new()
+        {
+            Stage = "durable", Outcome = "failed", Reason = error.GetType().Name, IsFinal = true,
+            DurationMilliseconds = _timeProvider.GetElapsedTime(transitionStarted).TotalMilliseconds
+        });
         await RefreshCountsAsync(cancellationToken);
         _telemetry.RecordJob(job.Kind.ToString(), "failed", Elapsed(job));
         Publish(job.JobId,
@@ -391,8 +454,15 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     internal async Task PublishOwnedCacheAsync(
         ProviderWorkSnapshot job, Func<CancellationToken, Task> publish, CancellationToken cancellationToken)
     {
+        var started = _timeProvider.GetTimestamp();
         if (await _store.WithOwnedLeaseAsync(job.JobId, RequireOwner(job), _timeProvider,
-                LeaseDuration, publish, cancellationToken)) return;
+                LeaseDuration, publish, cancellationToken))
+        {
+            RecordDiagnostic(job, "scheduler.cache.publish.completed", new()
+            { Stage = "cache_publish", Outcome = "published", DurationMilliseconds = _timeProvider.GetElapsedTime(started).TotalMilliseconds });
+            return;
+        }
+        RecordLeaseLost(job, "cache_publish");
         GetExecution(job).Cancellation?.Cancel();
         throw new ProviderWorkLeaseLostException(job.JobId);
     }
@@ -405,17 +475,22 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             {
                 await Task.Delay(LeaseDuration / 3, _timeProvider, execution.Token);
                 var now = _timeProvider.GetUtcNow();
+                var renewalStarted = _timeProvider.GetTimestamp();
                 if (!await _store.RenewLeaseAsync(job.JobId, RequireOwner(job), now, now.Add(LeaseDuration), execution.Token))
                 {
+                    RecordLeaseLost(job, "renew");
                     execution.Cancel();
                     return;
                 }
+                RecordDiagnostic(job, "scheduler.lease.renewed", new()
+                { Stage = "lease", Outcome = "renewed", DurationMilliseconds = _timeProvider.GetElapsedTime(renewalStarted).TotalMilliseconds });
             }
         }
         catch (OperationCanceledException) when (execution.IsCancellationRequested) { }
         catch (DbException exception)
         {
             _telemetry.RecordDatabaseException(exception);
+            RecordDiagnostic(job, "scheduler.lease.error", new() { Stage = "lease", Outcome = "failed", Reason = exception.GetType().Name });
             execution.Cancel();
         }
     }
@@ -456,6 +531,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     private async Task FlushAsync(ProviderWorkSnapshot job, ExecutionCheckpoint execution, CancellationToken cancellationToken)
     {
         if (!execution.Dirty || execution.Latest is not { } latest) return;
+        var checkpointStarted = _timeProvider.GetTimestamp();
         var checkpoint = JsonSerializer.Serialize(new ProviderWorkCheckpoint(
             latest.Message, latest.CompletedWork, latest.TotalWork,
             latest.CalendarProgress is { } calendar ? calendar with { SourceItems = [] } : null,
@@ -475,12 +551,45 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }, CheckpointJsonOptions);
         if (!await _store.UpdateProgressAsync(job.JobId, RequireOwner(job), checkpoint, _timeProvider.GetUtcNow(), cancellationToken))
         {
+            RecordLeaseLost(job, "checkpoint");
             execution.Cancellation?.Cancel();
             throw new ProviderWorkLeaseLostException(job.JobId);
         }
         execution.Dirty = false;
         execution.LastPersistedUtc = _timeProvider.GetUtcNow();
+        RecordDiagnostic(job, "scheduler.checkpoint.completed", new()
+        {
+            Stage = "checkpoint", Outcome = "persisted", Count = latest.CompletedWork, Total = latest.TotalWork,
+            IsFinal = latest.CalendarProgress?.IsFinal,
+            DurationMilliseconds = _timeProvider.GetElapsedTime(checkpointStarted).TotalMilliseconds
+        });
     }
+
+    internal IDisposable UseJobDiagnosticContext(ProviderWorkSnapshot job)
+        => _telemetry.UseDiagnosticContext(JobContext(job.JobId));
+
+    internal void RecordExecutionFinished(ProviderWorkSnapshot job, string outcome, string? reason = null)
+    {
+        var execution = GetExecution(job);
+        if (Interlocked.Exchange(ref execution.FinishedDiagnostic, 1) != 0) return;
+        RecordDiagnostic(job, "scheduler.execution.finished", new()
+        { Stage = "execution", Outcome = outcome, Reason = reason, DurationMilliseconds = ExecutionMilliseconds(job) });
+    }
+
+    private static PerformanceDiagnosticContext JobContext(string jobId)
+        => new() { JobId = jobId, SourceKey = "scheduler" };
+
+    private void RecordDiagnostic(ProviderWorkSnapshot job, string name, PerformanceDiagnosticDetails details)
+        => _telemetry.RecordDiagnostic(name, JobContext(job.JobId), details with
+        { JobKind = job.Kind.ToString(), Attempt = job.AttemptCount + 1 });
+
+    private void RecordLeaseLost(ProviderWorkSnapshot job, string stage)
+        => RecordDiagnostic(job, "scheduler.lease.lost", new()
+        { Stage = stage, Outcome = "ownership_rejected", DurationMilliseconds = ExecutionMilliseconds(job) });
+
+    private double ExecutionMilliseconds(ProviderWorkSnapshot job)
+        => GetExecution(job).StartedTimestamp is { } started
+            ? _timeProvider.GetElapsedTime(started).TotalMilliseconds : Elapsed(job).TotalMilliseconds;
 
     private void Publish(string jobId, ProviderWorkProgress progress)
     {
@@ -535,6 +644,8 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         public bool Dirty { get; set; }
         public DateTimeOffset? LastPersistedUtc { get; set; }
         public CancellationTokenSource? Cancellation { get; set; }
+        public long? StartedTimestamp { get; set; }
+        public int FinishedDiagnostic;
     }
 
     private static bool IsTerminal(ProviderWorkState state)
@@ -902,28 +1013,34 @@ public sealed class ProviderWorkSchedulerHostedService(
                     continue;
                 }
 
+                using var diagnosticContext = scheduler.UseJobDiagnosticContext(job);
                 var execution = scheduler.BeginExecution(job, stoppingToken);
                 var heartbeat = scheduler.MaintainLeaseAsync(job, execution);
                 try
                 {
                     await ExecuteJobAsync(job, execution.Token);
+                    scheduler.RecordExecutionFinished(job, "success");
                     await scheduler.CompleteAsync(job, stoppingToken);
                 }
                 catch (ProviderWorkLeaseLostException)
                 {
+                    scheduler.RecordExecutionFinished(job, "lease_lost");
                     logger.LogInformation("Provider work {ProviderWorkJobId} stopped after losing its lease.", job.JobId);
                 }
                 catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested && execution.IsCancellationRequested)
                 {
+                    scheduler.RecordExecutionFinished(job, "cancelled", "preempted");
                     await scheduler.PreemptAsync(job, CancellationToken.None);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
+                    scheduler.RecordExecutionFinished(job, "cancelled", "shutdown");
                     await scheduler.PreemptAsync(job, CancellationToken.None);
                     return;
                 }
                 catch (Exception ex)
                 {
+                    scheduler.RecordExecutionFinished(job, "failed", ex.GetType().Name);
                     logger.LogWarning(ex, "Provider work {ProviderWorkJobId} failed.", job.JobId);
                     await scheduler.FailAsync(job, ex, CancellationToken.None);
                 }
@@ -1169,7 +1286,7 @@ public sealed class ProviderWorkStore(
     }
 
     public Task<bool> UpdateProgressAsync(string jobId, string owner, string checkpointJson, DateTimeOffset now, CancellationToken cancellationToken)
-        => ExecuteOwnedAsync("CheckpointJson = @value, ProgressJson = @value", false,
+        => ExecuteOwnedAsync("CheckpointJson = @value, ProgressJson = NULL", false,
             jobId, owner, checkpointJson, now, now, cancellationToken);
 
     public Task<bool> RenewLeaseAsync(string jobId, string owner, DateTimeOffset now, DateTimeOffset expires, CancellationToken cancellationToken)

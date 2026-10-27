@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
@@ -14,11 +15,14 @@ public sealed class SimklClient : ISimklClient
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan CalendarCacheDuration = TimeSpan.FromHours(5);
     private const int MaxCalendarCacheEntries = 8;
+    private const int MaxConcurrentCalendarFeeds = 2;
 
     private readonly HttpClient _httpClient;
     private readonly SimklOptions _options;
     private readonly ISimklSyncStateStore _stateStore;
     private readonly IIntegrationSettingsStore? _settingsStore;
+    private readonly PremiereTelemetry? _telemetry;
+    private readonly SemaphoreSlim _calendarFeedSlots = new(MaxConcurrentCalendarFeeds);
     private readonly object _calendarCacheLock = new();
     private readonly Dictionary<string, LinkedListNode<CalendarCacheEntry>> _calendarCache = new(StringComparer.Ordinal);
     private readonly LinkedList<CalendarCacheEntry> _calendarCacheLru = new();
@@ -27,12 +31,14 @@ public sealed class SimklClient : ISimklClient
         HttpClient httpClient,
         IOptions<SimklOptions> options,
         ISimklSyncStateStore stateStore,
-        IIntegrationSettingsStore? settingsStore = null)
+        IIntegrationSettingsStore? settingsStore = null,
+        PremiereTelemetry? telemetry = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _stateStore = stateStore;
         _settingsStore = settingsStore;
+        _telemetry = telemetry;
     }
 
     public async Task<SimklPinCodeResult> RequestPinCodeAsync(CancellationToken cancellationToken)
@@ -200,30 +206,120 @@ public sealed class SimklClient : ISimklClient
         return new SimklSyncResult(SimklSyncStatus.DeltaSyncCompleted, activitiesAllUtc);
     }
 
-    public async Task<IReadOnlyList<SimklCalendarItem>> GetCalendarAsync(
+    public Task<IReadOnlyList<SimklCalendarItem>> GetCalendarAsync(
         DateOnly start,
         DateOnly end,
         CancellationToken cancellationToken,
         bool forceRefresh = false)
+        => GetCalendarAsync(start, end, true, true, cancellationToken, forceRefresh);
+
+    public async Task<IReadOnlyList<SimklCalendarItem>> GetCalendarAsync(
+        DateOnly start,
+        DateOnly end,
+        bool includeSeries,
+        bool includeMovies,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
     {
+        var items = new List<SimklCalendarItem>();
+        await foreach (var batch in StreamCalendarAsync(start, end, includeSeries, includeMovies, forceRefresh, cancellationToken))
+        {
+            items.AddRange(batch);
+        }
+        return items;
+    }
+
+    public async IAsyncEnumerable<IReadOnlyList<SimklCalendarItem>> StreamCalendarAsync(
+        DateOnly start,
+        DateOnly end,
+        bool includeSeries,
+        bool includeMovies,
+        bool forceRefresh = false,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!includeSeries && !includeMovies) yield break;
         var settings = await GetEffectiveSettingsAsync(cancellationToken);
         if (!IsCalendarConfigured(settings))
         {
-            return [];
+            yield break;
         }
 
-        var items = new List<SimklCalendarItem>();
-        foreach (var (path, type) in CalendarPaths(start, end))
-        {
-            var fileItems = await GetCalendarFileAsync(path, type, settings, start, end, cancellationToken, forceRefresh);
-            items.AddRange(fileItems);
-        }
-
-        return items
-            .Where(item => CalendarItemDate(item) >= start && CalendarItemDate(item) <= end)
-            .GroupBy(CalendarItemKey, StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.First())
+        var feeds = CalendarPaths(start, end)
+            .Where(feed => feed.Type == SimklCalendarItemType.Tv ? includeSeries : includeMovies)
             .ToArray();
+        using var feedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var pending = feeds.Select(feed => FetchCalendarFeedAsync(
+            feed.Path, feed.Type, settings, start, end, feedCancellation.Token, forceRefresh)).ToArray();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var failures = new List<Exception>();
+        var remaining = Enumerable.Range(0, feeds.Length).ToList();
+        try
+        {
+            while (remaining.Count > 0)
+            {
+                // A slow TV feed must not hide completed movies. Keep current-before-archive
+                // precedence within each media type so duplicate selection stays deterministic.
+                var heads = remaining.GroupBy(index => feeds[index].Type).Select(group => group.First()).ToArray();
+                var completed = await Task.WhenAny(heads.Select(index => pending[index])).WaitAsync(cancellationToken);
+                var index = heads.First(index => ReferenceEquals(pending[index], completed));
+                remaining.Remove(index);
+                var result = await pending[index];
+                cancellationToken.ThrowIfCancellationRequested();
+                if (result.Error is { } error)
+                {
+                    // Keep successful feeds available to streaming callers, but never report a partial calendar as complete.
+                    failures.Add(error);
+                    continue;
+                }
+
+                var batch = result.Items.Where(item => seen.Add(CalendarItemKey(item))).ToArray();
+                if (batch.Length > 0) yield return batch;
+            }
+            if (failures.Count == 1) throw failures[0];
+            if (failures.Count > 1) throw new AggregateException("One or more SIMKL calendar feeds failed.", failures);
+        }
+        finally
+        {
+            // Also release requests when a consumer stops enumerating after its first batch.
+            // Observe cleanup faults without replacing the primary failure or caller cancellation.
+            try { await feedCancellation.CancelAsync(); }
+            catch (Exception) { RecordCleanupFailure(); }
+            try { await Task.WhenAll(pending); }
+            catch (Exception) { RecordCleanupFailure(); }
+        }
+
+        void RecordCleanupFailure() => _telemetry?.RecordDiagnostic("simkl.calendar.feed", details: new PerformanceDiagnosticDetails
+        {
+            Provider = "simkl", Stage = "calendar_cleanup", Outcome = "failed"
+        });
+    }
+
+    private async Task<CalendarFeedResult> FetchCalendarFeedAsync(
+        string path,
+        SimklCalendarItemType type,
+        SimklSourceSettings settings,
+        DateOnly start,
+        DateOnly end,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+    {
+        try
+        {
+            await _calendarFeedSlots.WaitAsync(cancellationToken);
+            try
+            {
+                return new CalendarFeedResult(await GetCalendarFileAsync(path, type, settings, start, end, cancellationToken, forceRefresh), null);
+            }
+            finally
+            {
+                _calendarFeedSlots.Release();
+            }
+        }
+        catch (Exception exception) when (exception is HttpRequestException or JsonException or InvalidDataException or IOException or TimeoutException or OperationCanceledException)
+        {
+            return new CalendarFeedResult([], exception);
+        }
     }
 
     private async Task<bool> FetchInitialLibrariesSequentiallyAsync(
@@ -252,24 +348,27 @@ public sealed class SimklClient : ISimklClient
         bool forceRefresh)
     {
         var cacheKey = $"{path}:{start:yyyyMMdd}:{end:yyyyMMdd}";
+        var feedCode = (path.Count(character => character == '/') == 1 ? "current_" : "archive_")
+            + (type == SimklCalendarItemType.Tv ? "tv" : "movie");
         if (!forceRefresh && TryGetCachedCalendar(cacheKey, out var cached))
         {
+            _telemetry?.RecordDiagnostic("simkl.calendar.feed", details: new PerformanceDiagnosticDetails
+            {
+                Provider = "simkl", Stage = "calendar_feed", Reason = feedCode, Outcome = "success", FromCache = true, Count = cached.Count
+            });
             return cached;
         }
 
         var uri = BuildCalendarUri(path, settings);
-        var items = await StreamCalendarItemsAsync(uri, type, start, end, cancellationToken);
-        if (items is null)
-        {
-            return [];
-        }
+        var items = await StreamCalendarItemsAsync(uri, feedCode, type, start, end, cancellationToken);
 
         SetCachedCalendar(cacheKey, items);
         return items;
     }
 
-    private async Task<IReadOnlyList<SimklCalendarItem>?> StreamCalendarItemsAsync(
+    private async Task<IReadOnlyList<SimklCalendarItem>> StreamCalendarItemsAsync(
         Uri uri,
+        string feedCode,
         SimklCalendarItemType type,
         DateOnly start,
         DateOnly end,
@@ -277,23 +376,34 @@ public sealed class SimklClient : ISimklClient
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var timeout = TimeSpan.FromSeconds(Math.Clamp(_options.RequestTimeoutSeconds, 5, 120));
+        if (_httpClient.Timeout != Timeout.InfiniteTimeSpan && _httpClient.Timeout < timeout) timeout = _httpClient.Timeout;
+        requestCancellation.CancelAfter(timeout);
+        var started = Stopwatch.GetTimestamp();
+        var stage = "calendar_headers";
+        int? statusCode = null;
         try
         {
             using var response = await _httpClient.SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
+                requestCancellation.Token);
+            statusCode = (int)response.StatusCode;
             if (!response.IsSuccessStatusCode)
             {
-                return null;
+                throw new HttpRequestException("SIMKL calendar feed returned an unsuccessful response.", null, response.StatusCode);
             }
 
+            RecordFeed("success");
+            stage = "calendar_body";
+            started = Stopwatch.GetTimestamp();
             var items = new List<SimklCalendarItem>();
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using var stream = await response.Content.ReadAsStreamAsync(requestCancellation.Token);
             await foreach (var rawItem in JsonSerializer.DeserializeAsyncEnumerable<SimklCalendarPayloadItem>(
                 stream,
                 JsonOptions,
-                cancellationToken))
+                requestCancellation.Token))
             {
                 if (rawItem is null || ToCalendarItem(type, rawItem) is not { } item)
                 {
@@ -303,12 +413,47 @@ public sealed class SimklClient : ISimklClient
                 var date = CalendarItemDate(item);
                 if (date >= start && date <= end) items.Add(item);
             }
+            RecordFeed("success", items.Count);
             return items;
         }
-        catch (JsonException) { return null; }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return null; }
-        catch (OperationCanceledException) { throw; }
-        catch (HttpRequestException) { return null; }
+        catch (JsonException)
+        {
+            RecordFeed("invalid_json");
+            throw new InvalidDataException("SIMKL calendar feed did not contain valid calendar JSON.");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            RecordFeed("timeout");
+            throw new TimeoutException("SIMKL calendar feed timed out.");
+        }
+        catch (OperationCanceledException)
+        {
+            RecordFeed("canceled");
+            throw;
+        }
+        catch (HttpRequestException exception) when (exception is ProviderCircuitOpenException or ProviderRetryAfterException)
+        {
+            RecordFeed(exception is ProviderCircuitOpenException ? "circuit_open" : "retry_after");
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            RecordFeed("http_error");
+            throw new HttpRequestException("SIMKL calendar feed request failed.", null,
+                statusCode is { } value ? (HttpStatusCode)value : null);
+        }
+        catch (IOException)
+        {
+            RecordFeed("io_error");
+            throw new IOException("SIMKL calendar feed could not be read.");
+        }
+
+        void RecordFeed(string outcome, int? count = null)
+            => _telemetry?.RecordDiagnostic("simkl.calendar.feed", details: new PerformanceDiagnosticDetails
+            {
+                Provider = "simkl", Stage = stage, Reason = feedCode, Outcome = outcome,
+                StatusCode = statusCode, Count = count, DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
     }
 
     private bool TryGetCachedCalendar(string cacheKey, out IReadOnlyList<SimklCalendarItem> items)
@@ -715,4 +860,6 @@ public sealed class SimklClient : ISimklClient
         string Key,
         IReadOnlyList<SimklCalendarItem> Items,
         DateTimeOffset ExpiresUtc);
+
+    private sealed record CalendarFeedResult(IReadOnlyList<SimklCalendarItem> Items, Exception? Error);
 }

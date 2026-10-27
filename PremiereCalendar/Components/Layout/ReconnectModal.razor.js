@@ -3,16 +3,48 @@ const reconnectModal = document.getElementById("components-reconnect-modal");
 reconnectModal.addEventListener("components-reconnect-state-changed", handleReconnectStateChanged);
 
 const retryButton = document.getElementById("components-reconnect-button");
-retryButton.addEventListener("click", retry);
+retryButton.addEventListener("click", () => retry());
 
 const resumeButton = document.getElementById("components-resume-button");
 resumeButton.addEventListener("click", resume);
 
+const automaticRetryDelayMilliseconds = 5000;
+const maximumAutomaticRetryAttempts = 12;
 let reconnectInProgress = false;
 let resumeInProgress = false;
+let recoveryEnabled = false;
+let automaticRetryAttempts = 0;
+let retryTimer;
 
-function stopVisibilityRetry() {
+function stopAutomaticRetry() {
+    recoveryEnabled = false;
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
     document.removeEventListener("visibilitychange", retryWhenDocumentBecomesVisible);
+    window.removeEventListener("online", retryWhenOnline);
+}
+
+function enableAutomaticRetry() {
+    recoveryEnabled = true;
+    document.addEventListener("visibilitychange", retryWhenDocumentBecomesVisible);
+    window.addEventListener("online", retryWhenOnline);
+    scheduleAutomaticRetry();
+}
+
+function scheduleAutomaticRetry() {
+    if (!recoveryEnabled || reconnectInProgress || retryTimer !== undefined
+        || document.visibilityState !== "visible" || navigator.onLine === false
+        || automaticRetryAttempts >= maximumAutomaticRetryAttempts) {
+        return;
+    }
+
+    retryTimer = setTimeout(async () => {
+        retryTimer = undefined;
+        if (document.visibilityState === "visible" && navigator.onLine !== false) {
+            automaticRetryAttempts++;
+            await retry();
+        }
+    }, automaticRetryDelayMilliseconds);
 }
 
 function handleReconnectStateChanged(event) {
@@ -21,15 +53,16 @@ function handleReconnectStateChanged(event) {
             reconnectModal.showModal();
         }
     } else if (event.detail.state === "hide") {
-        stopVisibilityRetry();
+        stopAutomaticRetry();
+        automaticRetryAttempts = 0;
         if (reconnectModal.open) {
             reconnectModal.close();
         }
     } else if (event.detail.state === "failed") {
-        stopVisibilityRetry();
-        document.addEventListener("visibilitychange", retryWhenDocumentBecomesVisible);
+        automaticRetryAttempts = 0;
+        enableAutomaticRetry();
     } else if (event.detail.state === "rejected") {
-        stopVisibilityRetry();
+        stopAutomaticRetry();
         location.reload();
     }
 }
@@ -40,28 +73,22 @@ async function retry() {
     }
 
     reconnectInProgress = true;
-    stopVisibilityRetry();
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
+    enableAutomaticRetry();
 
     try {
-        // Reconnect will asynchronously return:
-        // - true to mean success
-        // - false to mean we reached the server, but it rejected the connection (e.g., unknown circuit ID)
-        // - exception to mean we didn't reach the server (this can be sync or async)
+        // false means the server rejected the circuit; exceptions mean it is unavailable.
         const successful = await Blazor.reconnect();
+        stopAutomaticRetry();
         if (!successful) {
-            // We have been able to reach the server, but the circuit is no longer available.
-            // We'll reload the page so the user can continue using the app as quickly as possible.
             location.reload();
-            return;
         }
-
-        stopVisibilityRetry();
-    } catch (err) {
-        // We got an exception, server is currently unavailable
-        stopVisibilityRetry();
-        document.addEventListener("visibilitychange", retryWhenDocumentBecomesVisible);
+    } catch {
+        // Keep recovery listeners active while a bounded visible retry window runs.
     } finally {
         reconnectInProgress = false;
+        scheduleAutomaticRetry();
     }
 }
 
@@ -73,8 +100,8 @@ async function resume() {
     resumeInProgress = true;
     try {
         const successful = await Blazor.resumeCircuit();
+        stopAutomaticRetry();
         if (!successful) {
-            stopVisibilityRetry();
             location.reload();
         }
     } catch {
@@ -85,6 +112,17 @@ async function resume() {
 }
 
 async function retryWhenDocumentBecomesVisible() {
+    if (document.visibilityState === "visible") {
+        automaticRetryAttempts = 0;
+        await retry();
+    } else {
+        clearTimeout(retryTimer);
+        retryTimer = undefined;
+    }
+}
+
+async function retryWhenOnline() {
+    automaticRetryAttempts = 0;
     if (document.visibilityState === "visible") {
         await retry();
     }

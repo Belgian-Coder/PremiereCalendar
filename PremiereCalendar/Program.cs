@@ -82,6 +82,9 @@ builder.Services
     .AddPremiereCalendarServices(builder.Configuration);
 
 var app = builder.Build();
+app.Lifetime.ApplicationStarted.Register(() =>
+    app.Services.GetRequiredService<PremiereTelemetry>().RecordDiagnostic("diagnostics.started",
+        details: new() { Stage = "startup", Outcome = "running" }));
 app.Services.GetRequiredService<PremiereTelemetry>().RecordVersionValidation(
     "database_schema",
     BuildVersionInfo.Current.DatabaseSchemaVersion == DatabaseSchema.CurrentVersion);
@@ -113,7 +116,7 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
 {
     Predicate = check => check.Tags.Contains("ready")
 });
-app.MapGet("/health/version", (DatabaseRecoveryState databaseState, IOptions<AppDatabaseOptions> databaseOptions) => Results.Json(new
+app.MapGet("/health/version", (DatabaseRecoveryState databaseState, IOptions<AppDatabaseOptions> databaseOptions, PremiereTelemetry telemetry) => Results.Json(new
 {
     version = BuildVersionInfo.Current.Version,
     informationalVersion = BuildVersionInfo.Current.InformationalVersion,
@@ -121,6 +124,8 @@ app.MapGet("/health/version", (DatabaseRecoveryState databaseState, IOptions<App
     buildId = BuildVersionInfo.Current.BuildId,
     buildTimeUtc = BuildVersionInfo.Current.BuildTimeUtc,
     databaseSchemaVersion = BuildVersionInfo.Current.DatabaseSchemaVersion,
+    performanceDiagnostics = telemetry.DiagnosticsHealth,
+    operationalLogging = OperationalLoggingDiagnostics.Snapshot,
     database = new
     {
         currentSchemaVersion = databaseState.Snapshot.CurrentVersion,

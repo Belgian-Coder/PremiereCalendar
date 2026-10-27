@@ -3,7 +3,7 @@ using PremiereCalendar.Models;
 
 namespace PremiereCalendar.Services;
 
-public sealed class SimklCalendarDiscoveryProvider : IStreamingPremiereDiscoveryProvider, INamedPremiereDiscoveryProvider
+public sealed class SimklCalendarDiscoveryProvider : IMediaFilteredStreamingPremiereDiscoveryProvider, INamedPremiereDiscoveryProvider
 {
     private readonly ISimklClient _client;
 
@@ -13,6 +13,7 @@ public sealed class SimklCalendarDiscoveryProvider : IStreamingPremiereDiscovery
     }
 
     public string DisplayName => "Simkl";
+    public bool PreserveBatchBoundaries => true;
 
     public async Task<IReadOnlyList<ExternalPremiereCandidate>> GetCandidatesAsync(
         DateOnly start,
@@ -28,16 +29,25 @@ public sealed class SimklCalendarDiscoveryProvider : IStreamingPremiereDiscovery
             .ToArray();
     }
 
-    public async IAsyncEnumerable<IReadOnlyList<ExternalPremiereCandidate>> StreamCandidatesAsync(
+    public IAsyncEnumerable<IReadOnlyList<ExternalPremiereCandidate>> StreamCandidatesAsync(
         DateOnly start,
         DateOnly end,
         bool forceRefresh = false,
+        CancellationToken cancellationToken = default)
+        => StreamCandidatesAsync(start, end, true, true, forceRefresh, cancellationToken);
+
+    public async IAsyncEnumerable<IReadOnlyList<ExternalPremiereCandidate>> StreamCandidatesAsync(
+        DateOnly start,
+        DateOnly end,
+        bool includeSeries,
+        bool includeMovies,
+        bool forceRefresh = false,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var candidates = await GetCandidatesAsync(start, end, cancellationToken, forceRefresh);
-        if (candidates.Count > 0)
+        await foreach (var items in _client.StreamCalendarAsync(start, end, includeSeries, includeMovies, forceRefresh, cancellationToken))
         {
-            yield return candidates;
+            var candidates = items.Select(ToCandidate).OfType<ExternalPremiereCandidate>().ToArray();
+            if (candidates.Length > 0) yield return candidates;
         }
     }
 

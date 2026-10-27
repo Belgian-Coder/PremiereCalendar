@@ -330,7 +330,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task SharedCooldownWaitConsumesTheSameTotalRequestTimeoutBudget()
+    public async Task CooldownBeyondRemainingRequestBudgetPreservesRetryDeadlineInsteadOfTimingOut()
     {
         var policy = CreatePolicy(new ProviderSchedulerOptions { RetryBaseMilliseconds = 1_000, RetryMaximumSeconds = 10 });
         var inner = new ScriptedHandler(
@@ -348,14 +348,10 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         };
         var request = client.GetAsync("https://example.test/");
 
-        await WaitUntilAsync(() => inner.SendCount == 1 && _time.CreatedTimerCount >= 2);
-        _time.Advance(TimeSpan.FromMilliseconds(499));
-        await FlushContinuationsAsync();
-        Assert.Equal(1, inner.SendCount);
-        Assert.False(request.IsCompleted);
-
-        _time.Advance(TimeSpan.FromMilliseconds(1));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(StartUtc.AddSeconds(2), deferred.RetryAtUtc);
+        Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, deferred.StatusCode);
+        Assert.Equal(1, _time.CreatedTimerCount);
         Assert.Equal(1, inner.SendCount);
         var snapshot = Assert.Single(policy.GetSnapshots(), value => value.Provider == "cooldown-timeout");
         Assert.Equal(0, snapshot.ActiveRequests);
@@ -476,6 +472,196 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         var circuit = await Assert.ThrowsAsync<ProviderCircuitOpenException>(
             () => policy.AcquireAsync("open-circuit", 4, CancellationToken.None));
         Assert.Equal(StartUtc.AddSeconds(60), circuit.RetryAtUtc);
+    }
+
+    [Fact]
+    public async Task CooldownUsesBudgetRemainingAfterHeadersRatherThanWholeRequestTimeout()
+    {
+        var policy = CreatePolicy(new ProviderSchedulerOptions { RetryMaximumSeconds = 30 });
+        var inner = new ScriptedHandler(_ =>
+        {
+            _time.Advance(TimeSpan.FromSeconds(9));
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+            response.Headers.RetryAfter = new(TimeSpan.FromSeconds(3));
+            return response;
+        });
+        using var client = new HttpClient(CreateAdaptiveHandler(policy, "remaining-budget", 1, TimeSpan.FromSeconds(10), inner))
+        { Timeout = Timeout.InfiniteTimeSpan };
+        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/"));
+        Assert.Equal(StartUtc.AddSeconds(12), deferred.RetryAtUtc);
+        Assert.Equal(1, inner.SendCount);
+        Assert.Equal(1, _time.CreatedTimerCount);
+        Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+    }
+
+    [Fact]
+    public async Task CooldownThatFitsRemainingBudgetStillRetriesInline()
+    {
+        var policy = CreatePolicy();
+        var inner = new ScriptedHandler(_ =>
+        {
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+            response.Headers.RetryAfter = new(TimeSpan.FromMilliseconds(200));
+            return response;
+        }, _ => new HttpResponseMessage(System.Net.HttpStatusCode.NoContent));
+        using var client = new HttpClient(CreateAdaptiveHandler(policy, "fitting-budget", 1, TimeSpan.FromMilliseconds(500), inner))
+        { Timeout = Timeout.InfiniteTimeSpan };
+        var request = client.GetAsync("https://example.test/");
+        await WaitUntilAsync(() => _time.CreatedTimerCount == 2);
+        Assert.False(request.IsCompleted);
+        _time.Advance(TimeSpan.FromMilliseconds(200));
+        using var response = await request.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(2, inner.SendCount);
+        Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Final429PreservesTypedDeadlineAndStatusWithoutExtraAttempts(bool post)
+    {
+        var policy = CreatePolicy();
+        var inner = new ScriptedHandler(_ =>
+        {
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+            response.Headers.RetryAfter = new(TimeSpan.FromMilliseconds(100));
+            return response;
+        });
+        using var client = new HttpClient(new AdaptiveProviderHandler("final-429", 1, policy, deferFinalThrottle: true) { InnerHandler = inner });
+        using var message = new HttpRequestMessage(post ? HttpMethod.Post : HttpMethod.Get, "https://example.test/");
+        var request = client.SendAsync(message);
+        var attempts = post ? 1 : 3;
+        for (var attempt = 1; attempt < attempts; attempt++)
+        {
+            var expectedTimers = attempt;
+            await WaitUntilAsync(() => _time.CreatedTimerCount == expectedTimers);
+            _time.Advance(TimeSpan.FromMilliseconds(100));
+        }
+        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(StartUtc.AddMilliseconds(attempts * 100), deferred.RetryAtUtc);
+        Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, deferred.StatusCode);
+        Assert.Equal(attempts, inner.SendCount);
+        var state = Assert.Single(policy.GetSnapshots());
+        Assert.Equal(0, state.ActiveRequests);
+        Assert.Equal(attempts, state.ConsecutiveFailures);
+    }
+
+    [Fact]
+    public async Task CallerCancellationDuring429DoesNotBecomeRetryDeadlineFailure()
+    {
+        var policy = CreatePolicy();
+        using var cancellation = new CancellationTokenSource();
+        var inner = new ScriptedHandler(_ =>
+        {
+            cancellation.Cancel();
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+            response.Headers.RetryAfter = new(TimeSpan.FromSeconds(25));
+            return response;
+        });
+        using var client = new HttpClient(CreateAdaptiveHandler(policy, "cancel-throttle", 1, TimeSpan.FromSeconds(20), inner))
+        { Timeout = Timeout.InfiniteTimeSpan };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GetAsync("https://example.test/", cancellation.Token));
+        Assert.Equal(1, inner.SendCount);
+        Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DefaultFinal429StillReturnsStatusHeadersAndBody(bool post)
+    {
+        var policy = CreatePolicy();
+        var inner = new ScriptedHandler(_ =>
+        {
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests) { Content = new StringContent("provider quota body") };
+            response.Headers.RetryAfter = new(TimeSpan.FromMilliseconds(100));
+            return response;
+        });
+        using var client = new HttpClient(new AdaptiveProviderHandler("default-429", 1, policy) { InnerHandler = inner });
+        using var message = new HttpRequestMessage(post ? HttpMethod.Post : HttpMethod.Get, "https://example.test/");
+        var request = client.SendAsync(message);
+        var attempts = post ? 1 : 3;
+        for (var attempt = 1; attempt < attempts; attempt++)
+        {
+            var expectedTimers = attempt;
+            await WaitUntilAsync(() => _time.CreatedTimerCount == expectedTimers);
+            _time.Advance(TimeSpan.FromMilliseconds(100));
+        }
+        using var response = await request.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.Equal(TimeSpan.FromMilliseconds(100), response.Headers.RetryAfter!.Delta);
+        Assert.Equal("provider quota body", await response.Content.ReadAsStringAsync());
+        Assert.Equal(attempts, inner.SendCount);
+    }
+
+    [Fact]
+    public async Task DefaultFinal429LetsOmdbPersistRateLimitFromResponseBodyAndDeadline()
+    {
+        var policy = CreatePolicy();
+        var inner = RateLimitedClientHandler();
+        using var http = new HttpClient(new AdaptiveProviderHandler("omdb", 1, policy) { InnerHandler = inner })
+        { BaseAddress = new Uri("https://example.test/") };
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var store = new RecordingOmdbCacheStore();
+        var client = new OmdbClient(http, cache, Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "test" }),
+            cacheStore: store, timeProvider: _time);
+        var lookup = client.GetByImdbIdAsync("tt001", CancellationToken.None);
+        await AdvanceClientRetryDelaysAsync();
+        var error = await Assert.ThrowsAsync<ExternalApiException>(() => lookup);
+        Assert.Contains("Request limit reached", error.Message);
+        Assert.Equal(_time.GetUtcNow().AddSeconds(30), store.State.RateLimitedUntilUtc);
+        Assert.Contains("Request limit reached", store.State.LastError);
+        Assert.Null(await client.GetByImdbIdAsync("tt002", CancellationToken.None));
+        Assert.Equal(3, inner.SendCount);
+    }
+
+    [Fact]
+    public async Task DefaultFinal429LetsWatchmodeRememberCooldownAndSkipNextRequest()
+    {
+        var policy = CreatePolicy();
+        var inner = RateLimitedClientHandler();
+        using var http = new HttpClient(new AdaptiveProviderHandler("watchmode", 1, policy) { InnerHandler = inner })
+        { BaseAddress = new Uri("https://example.test/") };
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var client = new WatchmodeClient(http, cache, Microsoft.Extensions.Options.Options.Create(new WatchmodeOptions
+        { Enabled = true, ApiKey = "test", EnableReleaseDiscovery = true }));
+        var lookup = client.GetReleaseCandidatesAsync(new(2026, 10, 26), new(2026, 11, 1), CancellationToken.None);
+        await AdvanceClientRetryDelaysAsync();
+        Assert.Empty(await lookup);
+        Assert.Empty(await client.GetReleaseCandidatesAsync(new(2026, 11, 2), new(2026, 11, 8), CancellationToken.None));
+        Assert.Equal(3, inner.SendCount);
+    }
+
+    private static ScriptedHandler RateLimitedClientHandler()
+        => new(attempt =>
+        {
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests)
+            { Content = new StringContent("{\"Response\":\"False\",\"Error\":\"Request limit reached!\"}") };
+            response.Headers.RetryAfter = new(attempt == 3 ? TimeSpan.FromSeconds(30) : TimeSpan.FromMilliseconds(50));
+            return response;
+        });
+
+    private async Task AdvanceClientRetryDelaysAsync()
+    {
+        for (var attempt = 1; attempt < 3; attempt++)
+        {
+            var expectedTimers = attempt;
+            await WaitUntilAsync(() => _time.CreatedTimerCount == expectedTimers);
+            _time.Advance(TimeSpan.FromMilliseconds(50));
+        }
+    }
+
+    private sealed class RecordingOmdbCacheStore : IOmdbCacheStore
+    {
+        public OmdbProviderCacheState State { get; private set; } = new(null, null, null);
+        public Task<OmdbCacheEntry?> GetAsync(string imdbId, CancellationToken cancellationToken) => Task.FromResult<OmdbCacheEntry?>(null);
+        public Task SetAsync(string imdbId, PremiereCalendar.Models.OmdbItem item, DateTimeOffset cachedAtUtc, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<OmdbProviderCacheState> GetProviderStateAsync(CancellationToken cancellationToken) => Task.FromResult(State);
+        public Task MarkRateLimitedAsync(DateTimeOffset untilUtc, string error, CancellationToken cancellationToken)
+        { State = new(untilUtc, error, null); return Task.CompletedTask; }
+        public Task MarkFailureAsync(string error, CancellationToken cancellationToken)
+        { State = new(null, error, null); return Task.CompletedTask; }
     }
 
     public Task DisposeAsync()

@@ -28,6 +28,7 @@ public sealed class CalendarDataMaintenanceService
     {
         return MaintainRecentWeeksAsync(
             (items, token) => _scoreBackfillService.BackfillItemsAsync(items, token, forceRefresh: true),
+            CalendarCacheMaintenanceKind.Scores,
             cancellationToken);
     }
 
@@ -35,11 +36,13 @@ public sealed class CalendarDataMaintenanceService
     {
         return MaintainRecentWeeksAsync(
             (items, token) => _missingExternalIdRepairService.RepairItemsAsync(items, token, forceRefresh: true),
+            CalendarCacheMaintenanceKind.ExternalIds,
             cancellationToken);
     }
 
     private async Task<BackfillResult> MaintainRecentWeeksAsync(
         Func<IReadOnlyList<PremiereItem>, CancellationToken, Task<BackfillResult>> maintain,
+        CalendarCacheMaintenanceKind kind,
         CancellationToken cancellationToken)
     {
         var states = await _providerCacheStateStore.GetByProviderAsync("calendar", 20, cancellationToken);
@@ -55,23 +58,25 @@ public sealed class CalendarDataMaintenanceService
             }
 
             var weekEnd = weekStart.AddDays(6);
-            var items = await _calendarCache.GetWeekAsync(weekStart, weekEnd, cacheKey, cancellationToken, allowExpired: true);
-            if (items is null || items.Count == 0)
+            var snapshot = await _calendarCache.GetWeekSnapshotAsync(weekStart, weekEnd, cacheKey, cancellationToken);
+            if (snapshot is null || snapshot.Items.Count == 0)
             {
                 continue;
             }
 
             try
             {
-                var result = await maintain(items, cancellationToken);
+                var result = await maintain(snapshot.Items, cancellationToken);
                 scanned += result.ScannedCount;
                 changed += result.ChangedCount;
+                IReadOnlyList<PremiereItem>? published = null;
                 if (result.ChangedCount > 0)
                 {
-                    await _calendarCache.SetWeekAsync(weekStart, weekEnd, cacheKey, result.Items, cancellationToken);
+                    published = await _calendarCache.UpdateWeekMetadataAsync(
+                        weekStart, weekEnd, cacheKey, snapshot, result.Items, kind, cancellationToken);
                 }
 
-                latestItems = [.. result.Items];
+                latestItems = [.. published ?? result.Items];
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

@@ -1,6 +1,6 @@
 # Performance Review
 
-Last reviewed: 2026-10-26.
+Last reviewed: 2026-10-27.
 
 ## Calendar loading and recovery
 
@@ -150,3 +150,6 @@ Nearby-week prefetch now runs after the visible week completes. The default queu
 ## Browser Rendering
 
 The calendar renders one selected day at a time. Every day starts with 10 cards and uses the measured 40-card two-way window described above. The card grid uses one shared gap variable so both desktop columns remain consistent. Day switching keys the selected day so the short entrance animation reliably runs, scrolls the board immediately on browser navigation, and avoids `content-visibility:auto` on cards because it caused visible paint flicker in this variable-height layout.
+## Follow-up implementation
+
+See [follow-up validation](FollowUpPerformanceValidation.md) for the cache-maintenance race correction, concurrent bulk IMDb import, reduced progressive merging work, page completion/reconnect recovery, and measured limits.

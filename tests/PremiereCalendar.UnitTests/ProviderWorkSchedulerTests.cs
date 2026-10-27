@@ -50,6 +50,14 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
 
         var claimed = await _scheduler.ClaimNextAsync(false, "test", CancellationToken.None);
         Assert.Equal(foreground.JobId, claimed!.JobId);
+        await using (var legacy = new SqliteConnection($"Data Source={Path.Combine(_root, "scheduler.db")}"))
+        {
+            await legacy.OpenAsync();
+            await using var seed = legacy.CreateCommand();
+            seed.CommandText = "UPDATE ProviderWorkJobs SET ProgressJson='legacy duplicate' WHERE JobId=$id";
+            seed.Parameters.AddWithValue("$id", claimed.JobId);
+            await seed.ExecuteNonQueryAsync();
+        }
         await _scheduler.PublishAsync(claimed, new ProviderWorkProgress(claimed.JobId, ProviderWorkState.Running, "page 2", 2, 5), CancellationToken.None);
         var persisted = await _scheduler.GetAsync(claimed.JobId);
         Assert.Contains("page 2", persisted!.CheckpointJson);
@@ -59,6 +67,10 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
         leases.CommandText = "SELECT COUNT(*) FROM ProviderWorkLeases WHERE JobId=$id";
         leases.Parameters.AddWithValue("$id", claimed.JobId);
         Assert.Equal(1L, await leases.ExecuteScalarAsync());
+        await using var payload = connection.CreateCommand();
+        payload.CommandText = "SELECT ProgressJson FROM ProviderWorkJobs WHERE JobId=$id";
+        payload.Parameters.AddWithValue("$id", claimed.JobId);
+        Assert.Equal(DBNull.Value, await payload.ExecuteScalarAsync());
     }
 
     [Fact]

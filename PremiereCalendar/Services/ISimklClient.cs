@@ -13,6 +13,32 @@ public interface ISimklClient
         DateOnly end,
         CancellationToken cancellationToken,
         bool forceRefresh = false);
+
+    async Task<IReadOnlyList<SimklCalendarItem>> GetCalendarAsync(
+        DateOnly start,
+        DateOnly end,
+        bool includeSeries,
+        bool includeMovies,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!includeSeries && !includeMovies) return [];
+        var items = await GetCalendarAsync(start, end, cancellationToken, forceRefresh);
+        return items.Where(item => item.Type == SimklCalendarItemType.Tv ? includeSeries : includeMovies).ToArray();
+    }
+
+    async IAsyncEnumerable<IReadOnlyList<SimklCalendarItem>> StreamCalendarAsync(
+        DateOnly start,
+        DateOnly end,
+        bool includeSeries,
+        bool includeMovies,
+        bool forceRefresh = false,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var items = await GetCalendarAsync(start, end, includeSeries, includeMovies, cancellationToken, forceRefresh);
+        if (items.Count > 0) yield return items;
+    }
 }
 
 public enum SimklSyncStatus

@@ -489,6 +489,344 @@ public sealed class FileCalendarCacheTests : IDisposable
         Assert.False(File.Exists(tempPath));
     }
 
+    [Theory]
+    [InlineData(false, CalendarCacheCompleteness.Complete)]
+    [InlineData(true, CalendarCacheCompleteness.Complete)]
+    [InlineData(false, CalendarCacheCompleteness.Partial)]
+    [InlineData(true, CalendarCacheCompleteness.Partial)]
+    public async Task GetWeekSnapshotAsync_ReturnsItemsAndEnvelopeStateTogether(
+        bool expired, CalendarCacheCompleteness completeness)
+    {
+        var cache = CreateCache(weekCacheHours: 1);
+        var start = new DateOnly(2026, 5, 4);
+        var cachedAt = DateTimeOffset.UtcNow.AddHours(expired ? -3 : -0.25);
+        await WriteEnvelopeAsync([Item("movie:1", "Snapshot")], cachedAt, completeness);
+
+        var snapshot = await cache.GetWeekSnapshotAsync(start, start.AddDays(6), "default", CancellationToken.None);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal("Snapshot", Assert.Single(snapshot.Items).Title);
+        Assert.Equal(cachedAt, snapshot.Metadata.CachedAtUtc);
+        Assert.Equal(1, snapshot.Metadata.ItemCount);
+        Assert.Equal(8, snapshot.Metadata.SchemaVersion);
+        Assert.Equal(completeness, snapshot.Metadata.Completeness);
+        Assert.Equal(!expired, snapshot.IsFresh);
+        Assert.Equal(!expired && completeness == CalendarCacheCompleteness.Complete, snapshot.IsComplete);
+        Assert.NotNull(snapshot.Generation); // Existing v8 envelopes need no migration.
+    }
+
+    [Theory]
+    [InlineData(CalendarCacheMaintenanceKind.Scores)]
+    [InlineData(CalendarCacheMaintenanceKind.ExternalIds)]
+    public async Task UpdateWeekMetadataAsync_MergesDeltasIntoNewerCanonicalRows(
+        CalendarCacheMaintenanceKind kind)
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = start.AddDays(6);
+        var originalRow = Item("movie:1", "Old title") with
+        {
+            ImdbId = kind == CalendarCacheMaintenanceKind.Scores ? "tt0000001" : null
+        };
+        var removedRow = Item("movie:removed", "Removed");
+        await cache.SetWeekAsync(start, end, "default", [originalRow, removedRow], CancellationToken.None);
+        var original = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+        var maintained = original.Items.Select(item => item with
+        {
+            Title = "Must not overwrite discovery",
+            ImdbScore = 7.4,
+            ImdbVoteCount = 123,
+            RottenTomatoesScore = 86,
+            RottenTomatoesAudienceScore = 90,
+            MetacriticScore = 75,
+            ImdbId = "tt0000001",
+            ImdbUrl = "https://www.imdb.com/title/tt0000001/",
+            TvdbId = 101,
+            WikidataId = "Q101"
+        }).ToArray();
+
+        var latestRow = originalRow with
+        {
+            Title = "New discovery title",
+            Overview = "New discovery overview",
+            PremiereDate = end,
+            SourceNames = ["new source"],
+            ImdbScore = 9.1, // A newer enrichment wins over a delayed score write.
+            WikidataId = "Q202", // The same conflict rule applies to identifiers.
+            LastUpdatedUtc = DateTimeOffset.UtcNow.AddMinutes(-1)
+        };
+        var addedRow = Item("movie:added", "Added during remote work");
+        await cache.SetWeekAsync(start, end, "default", [latestRow, addedRow], CancellationToken.None);
+        var latest = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+
+        var merged = await cache.UpdateWeekMetadataAsync(
+            start, end, "default", original, maintained, kind, CancellationToken.None);
+        var final = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+
+        Assert.Equal(2, merged!.Count);
+        Assert.DoesNotContain(final.Items, item => item.CanonicalId == removedRow.CanonicalId);
+        Assert.Equal(JsonSerializer.Serialize(addedRow), JsonSerializer.Serialize(final.Items[1]));
+        var updated = final.Items[0];
+        Assert.Equal(latestRow.Title, updated.Title);
+        Assert.Equal(latestRow.Overview, updated.Overview);
+        Assert.Equal(latestRow.PremiereDate, updated.PremiereDate);
+        Assert.Equal(latestRow.SourceNames, updated.SourceNames);
+        Assert.Equal(latestRow.LastUpdatedUtc, updated.LastUpdatedUtc);
+        Assert.Equal(9.1, updated.ImdbScore);
+        Assert.Equal("Q202", updated.WikidataId);
+        Assert.Equal(latest.Metadata.CachedAtUtc, final.Metadata.CachedAtUtc);
+        Assert.Equal(latest.Metadata.Completeness, final.Metadata.Completeness);
+        Assert.NotEqual(latest.Generation, final.Generation);
+        if (kind == CalendarCacheMaintenanceKind.Scores)
+        {
+            Assert.Equal(123, updated.ImdbVoteCount);
+            Assert.Null(updated.RottenTomatoesScore); // Title/Wikidata identity changed during the remote lookup.
+            Assert.Null(updated.RottenTomatoesAudienceScore);
+            Assert.Equal(75, updated.MetacriticScore);
+            Assert.Equal("tt0000001", updated.ImdbId);
+            Assert.Null(updated.ImdbUrl);
+            Assert.Null(updated.TvdbId);
+        }
+        else
+        {
+            Assert.Equal("tt0000001", updated.ImdbId);
+            Assert.Equal("https://www.imdb.com/title/tt0000001/", updated.ImdbUrl);
+            Assert.Equal(101, updated.TvdbId);
+            Assert.Null(updated.ImdbVoteCount);
+            Assert.Null(updated.RottenTomatoesScore);
+        }
+    }
+
+    [Theory]
+    [InlineData("imdb", false)]
+    [InlineData("title", true)]
+    [InlineData("wikidata", true)]
+    [InlineData("year", true)]
+    [InlineData("tmdb", false)]
+    public async Task UpdateWeekMetadataAsync_DoesNotAttachScoresToChangedProviderIdentity(
+        string changedIdentity, bool imdbStillMatches)
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = start.AddDays(6);
+        var row = Item("movie:1", "Original identity");
+        await cache.SetWeekAsync(start, end, "default", [row], CancellationToken.None);
+        var original = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+        var latest = changedIdentity switch
+        {
+            "imdb" => row with { ImdbId = "tt0000002" },
+            "title" => row with { Title = "Corrected title" },
+            "wikidata" => row with { WikidataId = "Q202" },
+            "year" => row with { PremiereDate = row.PremiereDate.AddYears(1) },
+            _ => row with { TmdbId = 2 }
+        };
+        await cache.SetWeekAsync(start, end, "default", [latest], CancellationToken.None);
+
+        await cache.UpdateWeekMetadataAsync(start, end, "default", original,
+            [row with { ImdbScore = 7.4, ImdbVoteCount = 123, MetacriticScore = 75,
+                RottenTomatoesScore = 86, RottenTomatoesAudienceScore = 90 }],
+            CalendarCacheMaintenanceKind.Scores, CancellationToken.None);
+        var final = Assert.Single((await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!.Items);
+
+        Assert.Equal(latest.ImdbId, final.ImdbId);
+        Assert.Equal(latest.Title, final.Title);
+        Assert.Equal(latest.WikidataId, final.WikidataId);
+        Assert.Equal(latest.PremiereDate, final.PremiereDate);
+        Assert.Equal(imdbStillMatches ? 7.4 : (double?)null, final.ImdbScore);
+        Assert.Equal(imdbStillMatches ? 123 : (int?)null, final.ImdbVoteCount);
+        Assert.Equal(imdbStillMatches ? 75 : (int?)null, final.MetacriticScore);
+        Assert.Null(final.RottenTomatoesScore);
+        Assert.Null(final.RottenTomatoesAudienceScore);
+    }
+
+    [Fact]
+    public async Task UpdateWeekMetadataAsync_DoesNotPairRepairedUrlWithNewerImdbId()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = start.AddDays(6);
+        var row = Item("movie:1", "Missing ID") with { ImdbId = null };
+        await cache.SetWeekAsync(start, end, "default", [row], CancellationToken.None);
+        var original = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+        await cache.SetWeekAsync(start, end, "default", [row with { ImdbId = "tt0000002" }], CancellationToken.None);
+
+        await cache.UpdateWeekMetadataAsync(start, end, "default", original,
+            [row with { ImdbId = "tt0000001", ImdbUrl = "https://www.imdb.com/title/tt0000001/", TvdbId = 101 }],
+            CalendarCacheMaintenanceKind.ExternalIds, CancellationToken.None);
+        var final = Assert.Single((await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!.Items);
+
+        Assert.Equal("tt0000002", final.ImdbId);
+        Assert.Null(final.ImdbUrl);
+        Assert.Equal(101, final.TvdbId);
+    }
+
+    [Theory]
+    [InlineData(CalendarCacheCompleteness.Complete)]
+    [InlineData(CalendarCacheCompleteness.Partial)]
+    public async Task UpdateWeekMetadataAsync_PreservesExpiredDiscoveryState(CalendarCacheCompleteness completeness)
+    {
+        var cache = CreateCache(weekCacheHours: 1);
+        var start = new DateOnly(2026, 5, 4);
+        var end = start.AddDays(6);
+        var cachedAt = DateTimeOffset.UtcNow.AddHours(-3);
+        await WriteEnvelopeAsync([Item("movie:1", "Expired")], cachedAt, completeness);
+        var original = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+
+        await cache.UpdateWeekMetadataAsync(start, end, "default", original,
+            [original.Items[0] with { ImdbScore = 7.4, ImdbVoteCount = 123, RottenTomatoesScore = 86,
+                RottenTomatoesAudienceScore = 90, MetacriticScore = 75 }], CalendarCacheMaintenanceKind.Scores, CancellationToken.None);
+        var final = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+
+        var updated = Assert.Single(final.Items);
+        Assert.Equal(7.4, updated.ImdbScore);
+        Assert.Equal(123, updated.ImdbVoteCount);
+        Assert.Equal(86, updated.RottenTomatoesScore);
+        Assert.Equal(90, updated.RottenTomatoesAudienceScore);
+        Assert.Equal(75, updated.MetacriticScore);
+        Assert.Equal(cachedAt, final.Metadata.CachedAtUtc);
+        Assert.Equal(completeness, final.Metadata.Completeness);
+        Assert.False(final.IsFresh);
+        Assert.False(final.IsComplete);
+        Assert.Null(await cache.GetWeekAsync(start, end, "default", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task UpdateWeekMetadataAsync_NoDeltaDoesNotPublishAnotherGeneration()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = start.AddDays(6);
+        await cache.SetWeekAsync(start, end, "default", [Item("movie:1", "Unchanged")], CancellationToken.None);
+        var original = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+        var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
+        var before = await File.ReadAllBytesAsync(path);
+
+        await cache.UpdateWeekMetadataAsync(start, end, "default", original, original.Items,
+            CalendarCacheMaintenanceKind.Scores, CancellationToken.None);
+
+        Assert.Equal(before, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
+    public async Task UpdateWeekMetadataAsync_RejectsReplacedSchemaAndDoesNotResurrectDeletedWeek()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = start.AddDays(6);
+        await cache.SetWeekAsync(start, end, "default", [Item("movie:1", "Old")], CancellationToken.None);
+        var original = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+        var maintained = new[] { original.Items[0] with { ImdbScore = 7.4 } };
+        var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
+        var json = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
+        json["schemaVersion"] = 999;
+        await File.WriteAllTextAsync(path, json.ToJsonString());
+        var incompatible = await File.ReadAllBytesAsync(path);
+
+        Assert.Null(await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None));
+        Assert.Null(await cache.UpdateWeekMetadataAsync(start, end, "default", original, maintained,
+            CalendarCacheMaintenanceKind.Scores, CancellationToken.None));
+        Assert.Equal(incompatible, await File.ReadAllBytesAsync(path));
+
+        File.Delete(path);
+        Assert.Null(await cache.UpdateWeekMetadataAsync(start, end, "default", original, maintained,
+            CalendarCacheMaintenanceKind.Scores, CancellationToken.None));
+        Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public async Task ScoreMaintenance_AllowsDiscoveryDuringRemoteWorkAndMergesAfterwards()
+    {
+        var cache = CreateCache();
+        var start = new DateOnly(2026, 5, 4);
+        var end = start.AddDays(6);
+        var old = Item("movie:1", "Before maintenance");
+        await cache.SetWeekAsync(start, end, "default", [old], CancellationToken.None);
+        var omdb = new PausedOmdbClient();
+        var service = new CalendarDataMaintenanceService(
+            new WeekStateStore(start), cache,
+            new ScoreBackfillService(null, omdb, new RatingMapper(), null, NullLogger<ScoreBackfillService>.Instance),
+            new MissingExternalIdRepairService(null!, NullLogger<MissingExternalIdRepairService>.Instance),
+            NullLogger<CalendarDataMaintenanceService>.Instance);
+
+        var maintenance = service.BackfillRecentScoresAsync(CancellationToken.None);
+        await omdb.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(maintenance.IsCompleted);
+        try
+        {
+            await cache.SetWeekAsync(start, end, "default",
+                [old with { Title = "New discovery", PremiereDate = end }, Item("movie:2", "New row")],
+                CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            omdb.Release.TrySetResult();
+        }
+
+        await maintenance.WaitAsync(TimeSpan.FromSeconds(5));
+        var final = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
+        Assert.Equal(2, final.Items.Count);
+        Assert.Equal("New discovery", final.Items[0].Title);
+        Assert.Equal(end, final.Items[0].PremiereDate);
+        Assert.Equal(7.4, final.Items[0].ImdbScore);
+        Assert.Equal("New row", final.Items[1].Title);
+        Assert.Null(final.Items[1].ImdbScore);
+    }
+
+    private async Task WriteEnvelopeAsync(
+        IReadOnlyList<PremiereItem> items,
+        DateTimeOffset cachedAt,
+        CalendarCacheCompleteness completeness)
+    {
+        var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new
+        {
+            schemaVersion = 8,
+            cachedAtUtc = cachedAt,
+            completeness,
+            items
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+    }
+
+    private static PremiereItem Item(string canonicalId, string title) => new()
+    {
+        CanonicalId = canonicalId,
+        Type = PremiereItemType.MovieFirstRelease,
+        MediaType = PremiereMediaType.Movie,
+        TmdbId = 1,
+        Title = title,
+        PremiereDate = new DateOnly(2026, 5, 4),
+        ImdbId = "tt0000001"
+    };
+
+    private sealed class PausedOmdbClient : IOmdbClient
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<OmdbItem?> GetByImdbIdAsync(
+            string imdbId, CancellationToken cancellationToken, bool forceRefresh = false)
+        {
+            Started.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return new OmdbItem { Response = "True", ImdbRating = "7.4" };
+        }
+    }
+
+    private sealed class WeekStateStore(DateOnly weekStart) : IProviderCacheStateStore
+    {
+        public Task<ProviderCacheState?> GetAsync(string provider, ProviderCacheScope scope, string key, CancellationToken cancellationToken)
+            => Task.FromResult<ProviderCacheState?>(null);
+        public Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<ProviderCacheState>> GetRecentAsync(int take, CancellationToken cancellationToken)
+            => GetByProviderAsync("calendar", take, cancellationToken);
+        public Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(string provider, int take, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<ProviderCacheState>>([
+                new("calendar", ProviderCacheScope.Week, $"{weekStart:yyyyMMdd}:default", DateTimeOffset.UtcNow,
+                    null, null, 1, null)
+            ]);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

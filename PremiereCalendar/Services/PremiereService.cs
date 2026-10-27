@@ -99,7 +99,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         return items;
     }
 
-    public async IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(
+    private async IAsyncEnumerable<PremiereLoadProgress> StreamPremieresTrackedAsync(
         DateOnly start,
         DateOnly end,
         bool forceRefresh = false,
@@ -135,9 +135,15 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             var snapshot = await ReadCalendarCacheAsync(start, end, filters, cancellationToken);
             if (snapshot.Items is { } cached)
             {
-                var hydrated = await HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken, allowRemote: false);
+                var hydrated = await TraceEnrichmentStageAsync("cache.local_hydration",
+                    () => HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken, allowRemote: false));
                 var items = ApplyRequestedFilters(hydrated, filters);
                 var isFinal = snapshot.IsComplete && !NeedsRemoteCachedHydration(hydrated, filters);
+                _telemetry.RecordDiagnostic("calendar.cache.decision", details: new()
+                {
+                    Outcome = isFinal ? "direct_complete" : "provisional", Count = items.Count,
+                    FromCache = true, IsFinal = isFinal
+                });
                 var progress = CreateProgress(snapshot.IsComplete ? "Week cache" : "Expired week cache",
                     items, items, isFinal: isFinal, fromCache: true, isStaleCache: !snapshot.IsComplete);
                 if (isFinal || items.Count > 0)
@@ -159,6 +165,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             ProviderWorkPriority.Foreground,
             JsonSerializer.Serialize(payload));
         var handle = await _workScheduler.EnqueueAsync(request, cancellationToken);
+        _telemetry.RecordDiagnostic("calendar.job.attached",
+            (_telemetry.CaptureDiagnosticContext() ?? _telemetry.CreateDiagnosticContext()) with { JobId = handle.JobId },
+            new() { Outcome = handle.Created ? "created" : "attached", JobKind = request.Kind.ToString() });
         await foreach (var update in _workScheduler.WatchAsync(handle, cancellationToken)
                            .WithCancellation(cancellationToken))
         {
@@ -180,7 +189,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
     }
 
-    public async IAsyncEnumerable<PremiereLoadProgress> StreamCoreAsync(
+    private async IAsyncEnumerable<PremiereLoadProgress> StreamCoreTrackedAsync(
         DateOnly start,
         DateOnly end,
         bool forceRefresh = false,
@@ -205,7 +214,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             var snapshot = await ReadCalendarCacheAsync(start, end, filters, cancellationToken);
             if (snapshot.Items is { } cached)
             {
-                var hydrated = await HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken);
+                var hydrated = await TraceEnrichmentStageAsync("cache.hydration",
+                    () => HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken));
                 var cachedItems = ApplyRequestedFilters(hydrated, filters);
                 if (snapshot.IsComplete)
                 {
@@ -260,6 +270,10 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         PremiereLoadProgress? finalUpdate = null;
         var progressHistory = new Dictionary<string, PremiereLoadProgress>(StringComparer.Ordinal);
         Exception? refreshError = null;
+        // The seed is immutable for this execution; avoid rebuilding it for every provider update.
+        var provisionalSeed = seededItems.Count == 0 ? staleSeededItems
+            : staleSeededItems.Count == 0 ? seededItems
+            : MergePremiereItems(seededItems.Concat(staleSeededItems));
 
         await using (var enumerator = FetchFreshPremiereUpdatesAsync(start, end, forceRefresh, fetchCriteria, filters, cachedEnrichment, resumeState, cancellationToken)
             .GetAsyncEnumerator(cancellationToken))
@@ -284,7 +298,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
                 var progressSeed = update.IsFinal && !update.HasSourceErrors
                     ? seededItems
-                    : MergePremiereItems(seededItems.Concat(staleSeededItems));
+                    : provisionalSeed;
                 if (progressSeed.Count > 0)
                 {
                     update = MergeProgressWithSeed(update, progressSeed);
@@ -366,6 +380,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
         if (finalUpdate is not null && !finalUpdate.HasSourceErrors)
         {
+            var publicationStarted = Stopwatch.GetTimestamp();
             try
             {
                 if (ShouldUseSharedMediaCache(criteria))
@@ -378,18 +393,33 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                         token => _cacheOrchestrator.WriteAsync(start, end, cacheKey, finalItems, token), cancellationToken);
                     await RecordWeekCacheStateAsync(start, cacheKey, finalItems.Count, cancellationToken);
                 }
+                _telemetry.RecordDiagnostic("calendar.cache.publication", details: new()
+                {
+                    Cache = "complete", Outcome = "success", Count = finalItems.Count, CacheKey = cacheKey,
+                    DurationMilliseconds = Stopwatch.GetElapsedTime(publicationStarted).TotalMilliseconds
+                });
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Could not write premiere calendar cache for {StartDate} through {EndDate}.", start, end);
+                _telemetry.RecordDiagnostic("calendar.cache.publication", details: new()
+                {
+                    Cache = "complete", Outcome = "failed", Reason = ex.GetType().Name,
+                    DurationMilliseconds = Stopwatch.GetElapsedTime(publicationStarted).TotalMilliseconds
+                });
             }
         }
         else if (finalUpdate?.HasSourceErrors == true)
         {
-            _logger.LogDebug(
-                "Skipping premiere calendar cache write for {StartDate} through {EndDate} because one or more sources failed.",
-                start,
-                end);
+            if (finalItems.Count > 0)
+            {
+                await SavePartialCalendarCacheAsync(start, end, filters, criteria, finalItems, resumeState, cancellationToken);
+            }
+            _telemetry.RecordDiagnostic("calendar.cache.incomplete", details: new()
+            {
+                Reason = "source_failure", Count = finalItems.Count, CacheKey = cacheKey,
+                WeekStart = start, WeekEnd = end, Outcome = finalItems.Count > 0 ? "partial_retained" : "no_rows"
+            });
         }
 
         if (finalUpdate is not null)
@@ -451,35 +481,35 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         IReadOnlyList<PremiereItem> FreshItems,
         bool IsComplete,
         bool HasFreshSeries,
-        bool HasFreshMovies);
+        bool HasFreshMovies,
+        bool HasPartialCache = false);
 
-    private async Task<CalendarCacheSnapshot> ReadCalendarCacheAsync(
+    private async Task<CalendarCacheSnapshot> ReadCalendarCacheCoreAsync(
         DateOnly start, DateOnly end, CalendarFilters? filters, CancellationToken cancellationToken)
     {
         var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
         if (!ShouldUseSharedMediaCache(criteria))
         {
-            var fresh = await _cacheOrchestrator.ReadAsync(start, end, criteria.CacheKey(), cancellationToken);
-            var items = fresh ?? await _cacheOrchestrator.ReadAsync(start, end, criteria.CacheKey(), cancellationToken, allowExpired: true);
+            var envelope = await _cacheOrchestrator.ReadSnapshotAsync(start, end, criteria.CacheKey(), cancellationToken);
+            var items = envelope?.Items;
+            var fresh = envelope?.IsComplete == true ? items : null;
             return new CalendarCacheSnapshot(items is null ? null : MergePremiereItems(items), fresh ?? [],
-                fresh is not null, criteria.IncludeSeries && fresh is not null, criteria.IncludeMovies && fresh is not null);
+                fresh is not null, criteria.IncludeSeries && fresh is not null, criteria.IncludeMovies && fresh is not null,
+                envelope?.Metadata.Completeness == CalendarCacheCompleteness.Partial);
         }
 
-        var snapshot = await GetSharedMediaCacheSnapshotAsync(start, end, filters, allowExpired: false, cancellationToken);
-        var series = snapshot.SeriesItems;
-        var movies = snapshot.MovieItems;
-        if (series is null)
-        {
-            var seriesKey = PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Series)).CacheKey();
-            series = await _cacheOrchestrator.ReadAsync(start, end, seriesKey, cancellationToken, allowExpired: true);
-        }
-        if (movies is null)
-        {
-            var movieKey = PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Movies)).CacheKey();
-            movies = await _cacheOrchestrator.ReadAsync(start, end, movieKey, cancellationToken, allowExpired: true);
-        }
+        var seriesKey = PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Series)).CacheKey();
+        var movieKey = PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Movies)).CacheKey();
+        var seriesEnvelope = await _cacheOrchestrator.ReadSnapshotAsync(start, end, seriesKey, cancellationToken);
+        var movieEnvelope = await _cacheOrchestrator.ReadSnapshotAsync(start, end, movieKey, cancellationToken);
+        var series = seriesEnvelope?.Items;
+        var movies = movieEnvelope?.Items;
+        var snapshot = new SharedMediaCacheSnapshot(seriesEnvelope?.IsComplete == true ? series : null,
+            movieEnvelope?.IsComplete == true ? movies : null);
         return new CalendarCacheSnapshot(series is null && movies is null ? null : MergePremiereItems((series ?? []).Concat(movies ?? [])),
-            snapshot.Items, snapshot.HasSeries && snapshot.HasMovies, snapshot.HasSeries, snapshot.HasMovies);
+            snapshot.Items, snapshot.HasSeries && snapshot.HasMovies, snapshot.HasSeries, snapshot.HasMovies,
+            seriesEnvelope?.Metadata.Completeness == CalendarCacheCompleteness.Partial
+                || movieEnvelope?.Metadata.Completeness == CalendarCacheCompleteness.Partial);
     }
 
     private bool NeedsRemoteCachedHydration(IReadOnlyList<PremiereItem> items, CalendarFilters? filters)
@@ -851,7 +881,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
                 var factory = pendingSources[sourceIndex];
                 pendingSources.RemoveAt(sourceIndex);
-                var enumerator = factory.Open().GetAsyncEnumerator(sourceToken);
+                var enumerator = TraceSourceBatchesAsync(factory, sourceToken).GetAsyncEnumerator(sourceToken);
                 active.Add(new ActivePremiereSource(
                     factory.Key,
                     ProviderKeyForSource(factory.Name),
@@ -997,6 +1027,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             _logger.LogWarning(
                 ex,
                 "Skipping premiere discovery source {SourceName} for {StartDate} through {EndDate}.",
@@ -1090,6 +1121,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 _logger.LogWarning(
                     ex,
                     "Skipping premiere discovery source {SourceName} for {StartDate} through {EndDate}.",
@@ -1674,17 +1706,34 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
     private readonly record struct SeriesDayKey(int TmdbId, DateOnly PremiereDate);
 
-    private sealed class SourceAwarePremiereMergeAccumulator
+    internal sealed class SourceAwarePremiereMergeAccumulator
     {
         private readonly Dictionary<string, IReadOnlyList<PremiereItem>> _itemsBySource = new(StringComparer.Ordinal);
         private readonly Dictionary<string, List<PremiereItem>> _itemsByCanonicalId = new(StringComparer.Ordinal);
         private readonly Dictionary<string, PremiereItem> _mergedByCanonicalId = new(StringComparer.Ordinal);
         private readonly HashSet<string> _dirtyCanonicalIds = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, PremiereItem> _reusableMergedRows = new(StringComparer.Ordinal);
 
         public void ReplaceSource(string sourceKey, IReadOnlyList<PremiereItem> items)
         {
+            // Reuse unchanged single-source rows, but preserve the original dictionary and
+            // dirty-set mutation order: reconciliation uses first-match identity resolution.
+            _reusableMergedRows.Clear();
             if (_itemsBySource.TryGetValue(sourceKey, out var previousItems))
             {
+                var incoming = items.GroupBy(item => item.CanonicalId, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+                foreach (var group in previousItems.GroupBy(item => item.CanonicalId, StringComparer.Ordinal))
+                {
+                    if (incoming.TryGetValue(group.Key, out var next)
+                        && !_dirtyCanonicalIds.Contains(group.Key)
+                        && _itemsByCanonicalId.TryGetValue(group.Key, out var contributors)
+                        && contributors.Count == next.Length && group.SequenceEqual(next)
+                        && _mergedByCanonicalId.TryGetValue(group.Key, out var merged))
+                    {
+                        _reusableMergedRows[group.Key] = merged;
+                    }
+                }
                 foreach (var item in previousItems)
                 {
                     if (_itemsByCanonicalId.TryGetValue(item.CanonicalId, out var existing))
@@ -1720,11 +1769,14 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             {
                 if (_itemsByCanonicalId.TryGetValue(canonicalId, out var items) && items.Count > 0)
                 {
-                    _mergedByCanonicalId[canonicalId] = MergeCanonicalGroup(items.GroupBy(item => item.CanonicalId, StringComparer.Ordinal).Single());
+                    _mergedByCanonicalId[canonicalId] = _reusableMergedRows.TryGetValue(canonicalId, out var reusable)
+                        ? reusable
+                        : MergeCanonicalGroup(items.GroupBy(item => item.CanonicalId, StringComparer.Ordinal).Single());
                 }
             }
 
             _dirtyCanonicalIds.Clear();
+            _reusableMergedRows.Clear();
             return ReconcileAndSortMergedItems(_mergedByCanonicalId.Values);
         }
     }

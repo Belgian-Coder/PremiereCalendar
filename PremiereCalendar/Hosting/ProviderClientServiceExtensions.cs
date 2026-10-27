@@ -96,7 +96,7 @@ public static class ProviderClientServiceExtensions
         {
             var timeout = TimeSpan.FromSeconds(Math.Clamp(
                 sp.GetRequiredService<IOptions<SimklOptions>>().Value.RequestTimeoutSeconds, 5, 120));
-            return sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("simkl", 2, timeout);
+            return sp.GetRequiredService<AdaptiveProviderHandlerFactory>().Create("simkl", 2, timeout, deferFinalThrottle: true);
         });
         services.AddHttpClient<FileImageCache>(client =>
         {

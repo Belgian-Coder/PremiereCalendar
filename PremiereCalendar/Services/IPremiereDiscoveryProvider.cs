@@ -23,6 +23,10 @@ public interface IMediaScopedPremiereDiscoveryProvider : IPremiereDiscoveryProvi
 
 public interface IStreamingPremiereDiscoveryProvider : IPremiereDiscoveryProvider
 {
+    // Independent successful feeds must be mapped before waiting for a later feed.
+    // Existing incremental providers retain their batching behavior by default.
+    bool PreserveBatchBoundaries => false;
+
     IAsyncEnumerable<IReadOnlyList<ExternalPremiereCandidate>> StreamCandidatesAsync(
         DateOnly start,
         DateOnly end,
