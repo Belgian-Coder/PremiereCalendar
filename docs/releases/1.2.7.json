@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "version": "1.2.7",
+  "tag": "v1.2.7",
+  "sourceRevision": "48b17ac5243a1df2b259ae06939d874b7872707b",
+  "createdUtc": "2026-10-28T15:41:19.3503134+00:00",
+  "distribution": "docker-archive",
+  "platform": "linux/amd64",
+  "imageConfigurationDigest": "sha256:e77baef2a65215b5b65d72ac5e2a479705cd341cad7b531207e7c43bb002cf11",
+  "archive": "premierecalendar-1.2.7.tar",
+  "archiveSha256": "f9d191041033fe504ecb3004e2118f1e5c74a84e101fda058a62b2276a82b715",
+  "databaseSchemaVersion": 3,
+  "acceptance": {
+    "windowsPassed": 949,
+    "linuxPassed": 942,
+    "linuxExpectedSkipped": 1,
+    "actualPostgreSql": true,
+    "astraHighAccepted": true,
+    "claudeOpus55HighAccepted": true,
+    "fixableHighCriticalVulnerabilities": 0,
+    "githubCiUsed": false
+  },
+  "assets": [
+    {
+      "name": "astra-speed-release-review.md",
+      "bytes": 874,
+      "sha256": "721550c61406e505aef6d9de66a239c27d47c3a9f89c76256f6dc03bad0125d7"
+    },
+    {
+      "name": "browser-windows.log",
+      "bytes": 2518,
+      "sha256": "e2f92911ab843f9023716da532c0314babddffc23f0f0dd4a1510913981435b6"
+    },
+    {
+      "name": "claude-speed-release-review.json",
+      "bytes": 5418,
+      "sha256": "377708364a0a171ee718865d96a44be9f2020f5174322ebfb8792e7c8ccc3bed"
+    },
+    {
+      "name": "final-component-windows.log",
+      "bytes": 23712,
+      "sha256": "5f01cd67252edbd50e56b514ae2560d98b147411bf933ffc7ad2781bea89096c"
+    },
+    {
+      "name": "final-unit-windows.log",
+      "bytes": 73098,
+      "sha256": "48c542973ec4bd2cb427052b98f37c8be07ff9230d3843f233149136f7e5c683"
+    },
+    {
+      "name": "installed-health-20261028.json",
+      "bytes": 1028,
+      "sha256": "9dada2dafa745508761cb432c642b119e67e697eccad18b9dcfccdf69a50d741"
+    },
+    {
+      "name": "premierecalendar-1.2.7.tar",
+      "bytes": 185078272,
+      "sha256": "f9d191041033fe504ecb3004e2118f1e5c74a84e101fda058a62b2276a82b715"
+    },
+    {
+      "name": "release-1.2.7-sbom.cdx.json",
+      "bytes": 313653,
+      "sha256": "1013b7931aeb6bf7f0a14eb02687a546969c2d56a41eea4c2419217d430a936e"
+    },
+    {
+      "name": "release-1.2.7-smoke.log",
+      "bytes": 1495,
+      "sha256": "f950e332ceed2c6106137f090ae98275eb1683a3707f17e06a8db2206b0eac8f"
+    },
+    {
+      "name": "release-1.2.7-source.tar",
+      "bytes": 15206400,
+      "sha256": "29831b6a769a008952918f9a7c25c6ea6e647655302f8177f9eeeae6db9b4103"
+    },
+    {
+      "name": "release-1.2.7-trivy.json",
+      "bytes": 60064,
+      "sha256": "d3b652a595a4a33ecb3f3e72c597ad9f8c087a97cb6d26033f816f0d9c28fba5"
+    },
+    {
+      "name": "release-Component-linux.log",
+      "bytes": 23496,
+      "sha256": "ae29f94f7fea3e42adfa17513303bbaf21db2817ba736336c53bf6c724c8e43c"
+    },
+    {
+      "name": "release-Integration-linux.log",
+      "bytes": 143295,
+      "sha256": "63823997dffcdda4d10c3da8d0a61a867763390c1c6932795835339d1edfa3b1"
+    },
+    {
+      "name": "release-integration-windows.log",
+      "bytes": 117152,
+      "sha256": "0172d75868c57a2d0332fca3e552b6df80ea46b208bd39d658ec8f2d1aa59651"
+    },
+    {
+      "name": "release-nuget-audit.log",
+      "bytes": 296,
+      "sha256": "a9bb52d8fdc5719f771ba34afc2c18273fda23e28207f189fd3f9fe607288722"
+    },
+    {
+      "name": "release-Unit-linux.log",
+      "bytes": 72868,
+      "sha256": "9b7080bca427be06f22b7be09da2f87008d6222a686a79f070123bda58d963ae"
+    }
+  ]
+}

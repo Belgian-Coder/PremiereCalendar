@@ -1,5 +1,14 @@
 # Releases and updates
 
+Production uses Docker/PostgreSQL releases built and validated locally. See the
+[v1.2.7 local container release](releases/1.2.7.md) for its manifest, checksums,
+validation and installation evidence. Generated release artifacts live under
+`artifacts/release/<version>/`; release records and tags are pushed with main.
+Both GitHub workflows must remain disabled and must never be dispatched.
+
+The signed Windows publishing instructions below describe the retained Windows
+compatibility deployment, not the primary NAS/container release path.
+
 PremiereCalendar uses signed, immutable GitHub releases. Initialize the
 non-exportable operator signing key once:
 
@@ -19,7 +28,7 @@ tests, makes a self-contained Windows x64 package, emits deterministic build
 metadata, signs `stable.manifest.json`, writes `SHA256SUMS.txt`, creates a draft,
 uploads all assets, and only then publishes it.
 
-Publishing the signed Windows release is always an explicit operator action; no GitHub Actions workflow creates it. GitHub does not automatically build, test, publish, or release PremiereCalendar on pushes, pull requests, tags, schedules, or releases. The CI and container workflows are manual-only safety tools: an operator must explicitly select **Run workflow**, and the container workflow requires the intended version input. Creating or pushing a release tag does not start either workflow.
+Publishing a signed Windows release is an explicit local operator action. GitHub Actions and hosted CI/CD are prohibited, including manual workflow dispatches. Keep the CI and container workflows disabled when pushing code, tags or release records; a release tag is not authorization to enable either workflow.
 
 The first administrator-reviewed installation uses the local release directory:
 
