@@ -1,6 +1,6 @@
 # Provider retrieval and automatic timings
 
-This follows the [installed v1.2.9 profile](ProviderRetrievalProfile.md). Release acceptance is recorded separately after the final build and installation.
+This follows the [installed v1.2.9 profile](ProviderRetrievalProfile.md). Exact-image and installed acceptance are recorded in the [v1.2.10 release record](releases/1.2.10.md).
 
 ## Request reduction and throughput
 
@@ -57,3 +57,13 @@ The full ordered identifier projection SHA-256 is identical across all six runs:
 The earlier 57.306-second movie refresh was one specific forced load, not a bound on all loading. Retained logs also contain foreground job `8763b821d785448384edbe347e20d6d1` in process `79f972f1ce994c2fb2358bcac7f84a77`: after a cancelled attempt it resumed at 18:39:26 UTC and finished at 18:49:01, 9 minutes 34 seconds later, with 6,223 items. Its first cached non-final result arrived in about 199 ms. This is a different series-heavy workload and cache key, not established as the user's exact session.
 
 Exact-job correlation shows 6,417 successful TVMaze request outcomes (including HTTP 404 responses), plus 98 shared-cooldown retry events for HTTP 429. Watchmode's 1,927 failed request outcomes had median 0.06 ms and no matching HTTP status; they must not be presented as 1,927 network sends or attributed to a specific transport failure. The long-load evidence is retained separately from the small movie refresh. The new batching/throughput fixtures do not prove that this large series workload is now fast.
+
+## Installed provider refresh — November 2
+
+The deployed v1.2.10 forced refresh for October 19–25, English/Dutch and minimum runtime 45 minutes completed in 50.109 seconds with all 134 titles and daily counts 7/20/21/15/32/21/18. Reloading confirmed the same complete cache. The previous 57.306-second observation was a separate run with existing caches and different provider/background conditions; these two observations do not establish a controlled full-load speedup. The nine-minute series workload was not rerun as a cold-provider acceptance test.
+
+The new capture retained 25,033 correlated records with zero malformed lines. Attributed HTTP request starts were TMDb 1,105, Rotten Tomatoes 157 and Wikimedia 11. The movie workload did not demonstrate a large batch reduction: the controlled 50-to-one identifier fixture applies when multiple identifiers are pending together, not to every real request pattern. TVMaze schedule reuse is exercised by its separate integration coverage and applies to shows present in fetched schedules.
+
+The SIMKL source including mapping took 47.257 seconds. RT search HTTP stages had median 3,880.53 ms including admission/consumption, while response headers after admission had median 618 ms. TMDb header median was 9.12 ms; its separately measured local admission p95 was 806.89 ms. These overlapping distributions describe separate stages and are not additive. RT search and capacity waits remain a significant cost. No attributed HTTP 429 header response occurred in this movie run.
+
+Load `9976ca7ecea449ee812e5fc58ef6cf79`, job `a002d19dbc3a4f87a7c995e88ac47325`, instance `3305c36599924f00a628147152dd13e3` identify this exact capture. Post-refresh health showed 58,709 persisted events, zero dropped events, writer failures, operational-log failures or queued events. The release bundle contains the raw correlated events, numeric summary, extraction script, installed health/browser checks and screenshot. The tab recorded transient 502 negotiation errors during the app replacement; final reload verification had no new console errors or warnings.

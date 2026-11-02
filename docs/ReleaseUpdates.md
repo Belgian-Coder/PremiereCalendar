@@ -1,5 +1,7 @@
 # Releases and updates
 
+[v1.2.10 release record](releases/1.2.10.md)
+
 Production uses Docker/PostgreSQL releases built and validated locally. See the
 [v1.2.7 local container release](releases/1.2.7.md) for its manifest, checksums,
 validation and installation evidence. Generated release artifacts live under
