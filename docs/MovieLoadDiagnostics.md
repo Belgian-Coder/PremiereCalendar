@@ -1,6 +1,6 @@
 # Slow movie-week load and persistent diagnostics
 
-The installed v1.2.9 [provider retrieval profile](ProviderRetrievalProfile.md) measures the remaining service costs for a real forced movie refresh, separately from cache reads and controlled phase benchmarks.
+The [retrieval improvements and automatic timings](RetrievalImprovements.md) describe the newer batching and logging behavior. The installed v1.2.9 [provider retrieval profile](ProviderRetrievalProfile.md) measures the remaining service costs for a real forced movie refresh, separately from cache reads and controlled phase benchmarks.
 
 The subsequent [movie-week speed investigation](MovieWeekSpeedValidation.md) separates the remaining cold-provider cost from measured restart-cache improvements, with captured-response replay, preserved full results and fine-grained cache I/O evidence.
 
@@ -25,7 +25,7 @@ The operational file-sink failure was reproduced independently in the hardened c
 
 ## What is saved
 
-Dedicated performance NDJSON is default-on and works without OTLP or sampled tracing. The configurable default is 25 MiB per file and 14 retained files, approximately 350 MiB maximum. Capture never waits for filesystem I/O: a background writer consumes a bounded queue of 4,096 records, at most 32 MiB of payload. Queue overflow is counted and later persisted as a loss marker. Buffer flushes run every two seconds and at shutdown; abrupt termination can lose queued/buffered records. Flush and shutdown waits are bounded to five seconds by default. Each process has an instance ID, UTC timestamps, monotonic elapsed times and event sequence numbers. Overlapping app instances need separate diagnostic directories.
+Dedicated performance NDJSON is default-on and works without OTLP or sampled tracing. The configurable default is 25 MiB per file and 64 retained files, approximately 1.56 GiB maximum. Capture never waits for filesystem I/O: a background writer consumes a bounded queue of 4,096 records, at most 32 MiB of payload. Queue overflow is counted and later persisted as a loss marker. Buffer flushes run every two seconds and at shutdown; abrupt termination can lose queued/buffered records. Flush and shutdown waits are bounded to five seconds by default. Each process has an instance ID, UTC timestamps, monotonic elapsed times and event sequence numbers. Overlapping app instances need separate diagnostic directories.
 
 Events include:
 
@@ -50,7 +50,7 @@ On the installed container the default directory is `/app/App_Data/logs/performa
 ./eng/Read-CalendarPerformance.ps1 -LogDirectory '<performance directory>' -LoadId '<load GUID>'
 ```
 
-The reader follows load-to-job links and shares active files safely with the writer/retention process. It keeps at most 10,000 matching events by default; `-MaximumEvents` can increase this to 100,000. Truncation emits a warning. Summary percentiles describe retained matching events, not all production traffic or a complete retention period.
+The reader follows load-to-job links and shares active files safely with the writer/retention process. It keeps at most 100,000 matching events by default; `-MaximumEvents` can increase this to 500,000. Truncation emits a warning. Summary percentiles describe retained matching events, not all production traffic or a complete retention period.
 
 Local Debug capture of 10,000 detailed events took approximately 293–339 ms, followed by 8–17 ms for durable drain/flush; producer allocations were approximately 1,957 bytes per event, with roughly 5.3 MiB saved including warmup. A default-capacity burst persisted all 10,000 with no drops. Controlled blocked-writer tests verify bounded overflow, health responsiveness and persisted loss markers. A permanently hung OS write may retain its background handle until the call returns or the process exits; capture and health remain responsive. Installed NAS overhead and retention duration depend on traffic and storage. Fine-grained history begins after installation and cannot reconstruct missing details from earlier loads.
 

@@ -248,7 +248,12 @@ public sealed partial class PremiereService
         string? reason = null;
         _telemetry.RecordDiagnostic("enrichment.stage.started", details: new() { Stage = stage });
         try { var result = await operation(); outcome = "success"; return result; }
-        catch (Exception ex) { reason = ex.GetType().Name; throw; }
+        catch (Exception ex)
+        {
+            outcome = ex is OperationCanceledException ? "cancelled" : "failed";
+            reason = ex.GetType().Name;
+            throw;
+        }
         finally
         {
             _telemetry.RecordDiagnostic("enrichment.stage.finished", details: new()

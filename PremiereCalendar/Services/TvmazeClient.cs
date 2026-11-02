@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
@@ -10,6 +12,7 @@ namespace PremiereCalendar.Services;
 public sealed class TvmazeClient : ITvmazeClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly ConditionalWeakTable<IMemoryCache, object> LookupPublicationGates = new();
 
     private readonly HttpClient _httpClient;
     private readonly IMemoryCache _cache;
@@ -17,6 +20,8 @@ public sealed class TvmazeClient : ITvmazeClient
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly ISingleFlightCoordinator _singleFlight;
     private readonly ProviderRequestThrottler _requestThrottler;
+    private readonly object _lookupPublicationGate;
+    private readonly PremiereTelemetry? _telemetry;
 
     public TvmazeClient(
         HttpClient httpClient,
@@ -24,7 +29,8 @@ public sealed class TvmazeClient : ITvmazeClient
         IOptions<TvmazeOptions> options,
         IIntegrationSettingsStore? settingsStore = null,
         ISingleFlightCoordinator? singleFlight = null,
-        ProviderRequestThrottler? requestThrottler = null)
+        ProviderRequestThrottler? requestThrottler = null,
+        PremiereTelemetry? telemetry = null)
     {
         _httpClient = httpClient;
         _cache = cache;
@@ -32,6 +38,8 @@ public sealed class TvmazeClient : ITvmazeClient
         _settingsStore = settingsStore;
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
         _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
+        _lookupPublicationGate = LookupPublicationGates.GetValue(cache, static _ => new object());
+        _telemetry = telemetry;
     }
 
     public async Task<TvmazeShow?> LookupShowAsync(
@@ -83,7 +91,11 @@ public sealed class TvmazeClient : ITvmazeClient
                     var show = await response.Content.ReadFromJsonAsync<TvmazeShow>(JsonOptions, token);
                     if (show is not null)
                     {
-                        _cache.Set(cacheKey, show, TimeSpan.FromDays(7));
+                        lock (_lookupPublicationGate)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            _cache.Set(cacheKey, show, TimeSpan.FromDays(7));
+                        }
                     }
 
                     return show;
@@ -252,17 +264,49 @@ public sealed class TvmazeClient : ITvmazeClient
         CancellationToken cancellationToken,
         bool forceRefresh = false)
     {
+        var started = Stopwatch.GetTimestamp();
+        var context = _telemetry?.CaptureDiagnosticContext();
+        var outcome = "failed";
+        var cache = "miss";
+        var count = 0;
+        try
+        {
+            var result = await GetScheduleCoreAsync(date, country, webSchedule, cancellationToken, forceRefresh);
+            outcome = result.Outcome;
+            cache = result.Cache;
+            count = result.Episodes.Count;
+            return result.Episodes;
+        }
+        catch (OperationCanceledException)
+        {
+            outcome = cancellationToken.IsCancellationRequested ? "cancelled" : "timeout";
+            throw;
+        }
+        finally
+        {
+            _telemetry?.RecordDiagnostic("provider.tvmaze.schedule.completed", context, new()
+            {
+                Provider = "tvmaze", Stage = "schedule", Outcome = outcome, Cache = cache, Count = count,
+                Reason = forceRefresh ? "force_refresh" : null,
+                DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
+        }
+    }
+
+    private async Task<ScheduleResult> GetScheduleCoreAsync(
+        DateOnly date, string? country, bool webSchedule, CancellationToken cancellationToken, bool forceRefresh)
+    {
         var settings = await GetEffectiveSettingsAsync(cancellationToken);
         if (!settings.Enabled || !settings.EnableScheduleDiscovery)
         {
-            return [];
+            return new([], "skipped", "none");
         }
 
         var countryKey = country ?? "";
         var cacheKey = $"tvmaze:schedule:{(webSchedule ? "web" : "broadcast")}:{date:yyyyMMdd}:{countryKey}";
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<TvmazeScheduleEpisode>? cached) && cached is not null)
         {
-            return cached;
+            return new(cached, cached.Count == 0 ? "absent" : "completed", "hit");
         }
 
         return await _singleFlight.RunAsync(
@@ -271,7 +315,7 @@ public sealed class TvmazeClient : ITvmazeClient
             {
                 if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<TvmazeScheduleEpisode>? flightCached) && flightCached is not null)
                 {
-                    return flightCached;
+                    return new ScheduleResult(flightCached, flightCached.Count == 0 ? "absent" : "completed", "hit");
                 }
 
                 try
@@ -280,19 +324,22 @@ public sealed class TvmazeClient : ITvmazeClient
                     using var response = await GetWithRetryAsync(path, token);
                     if (!response.IsSuccessStatusCode)
                     {
-                        return [];
+                        return new ScheduleResult([], "failed", "miss");
                     }
 
                     var episodes = await response.Content.ReadFromJsonAsync<IReadOnlyList<TvmazeScheduleEpisode>>(
                         JsonOptions,
                         token) ?? [];
 
-                    _cache.Set(cacheKey, episodes, TimeSpan.FromMinutes(60));
-                    return episodes;
+                    token.ThrowIfCancellationRequested();
+                    var expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(60);
+                    PrimeScheduleLookups(episodes, expiresAtUtc, token);
+                    _cache.Set(cacheKey, episodes, expiresAtUtc);
+                    return new ScheduleResult(episodes, episodes.Count == 0 ? "absent" : "completed", "miss");
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    return [];
+                    return new ScheduleResult([], "timeout", "miss");
                 }
                 catch (OperationCanceledException)
                 {
@@ -300,14 +347,75 @@ public sealed class TvmazeClient : ITvmazeClient
                 }
                 catch (HttpRequestException)
                 {
-                    return [];
+                    return new ScheduleResult([], "failed", "miss");
                 }
                 catch (JsonException)
                 {
-                    return [];
+                    return new ScheduleResult([], "failed", "miss");
                 }
             },
             cancellationToken);
+    }
+
+    private sealed record ScheduleResult(IReadOnlyList<TvmazeScheduleEpisode> Episodes, string Outcome, string Cache);
+
+    private void PrimeScheduleLookups(IReadOnlyList<TvmazeScheduleEpisode> episodes, DateTimeOffset expiresAtUtc,
+        CancellationToken cancellationToken)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var context = _telemetry?.CaptureDiagnosticContext();
+        var candidates = new Dictionary<string, TvmazeShow?>(StringComparer.Ordinal);
+        var seeded = 0;
+        var outcome = "failed";
+        try
+        {
+            foreach (var episode in episodes)
+            {
+                var show = episode?.Show ?? episode?.Embedded?.Show;
+                if (show is null || show.Id <= 0 || string.IsNullOrWhiteSpace(show.Name)) continue;
+                if (show.Externals?.TheTvdb is > 0)
+                    AddCandidate(BuildLookupPath(show.Externals.TheTvdb, null)!, show);
+                var imdbId = show.Externals?.Imdb;
+                if (imdbId is { Length: >= 9 } && imdbId.StartsWith("tt", StringComparison.Ordinal)
+                    && imdbId.Skip(2).All(char.IsAsciiDigit) && imdbId.Skip(2).Any(character => character != '0'))
+                    AddCandidate(BuildLookupPath(null, imdbId)!, show);
+            }
+
+            // Lookup responses and schedule seeding share this per-cache gate across
+            // transient clients. No network or parsing work runs while it is held.
+            lock (_lookupPublicationGate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var (key, show) in candidates)
+                {
+                    if (show is null || _cache.TryGetValue(key, out _)) continue;
+                    _cache.Set(key, show, expiresAtUtc);
+                    seeded++;
+                }
+            }
+            outcome = candidates.Count == 0 ? "absent" : "completed";
+        }
+        catch (OperationCanceledException)
+        {
+            outcome = "cancelled";
+            throw;
+        }
+        finally
+        {
+            _telemetry?.RecordDiagnostic("provider.tvmaze.schedule_prime.completed", context, new()
+            {
+                Provider = "tvmaze", Stage = "schedule_prime", Outcome = outcome,
+                Count = seeded, Total = candidates.Count,
+                DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
+        }
+
+        void AddCandidate(string path, TvmazeShow show)
+        {
+            var key = $"tvmaze:lookup:{path}";
+            if (!candidates.TryGetValue(key, out var previous)) candidates.Add(key, show);
+            else if (previous?.Id != show.Id) candidates[key] = null;
+        }
     }
 
     public async Task<IReadOnlyList<TvmazeShowUpdate>> GetShowUpdatesAsync(

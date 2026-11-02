@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.RateLimiting;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
@@ -11,14 +12,18 @@ public sealed class TmdbRequestLimiter : IDisposable
     private readonly ProviderAdmissionQueue<TaskCompletionSource<TmdbRequestLease>> _admissions = new();
     private readonly CancellationTokenSource _stopping = new();
     private readonly int _maximumConcurrency;
+    private readonly int _requestsPerSecond;
+    private readonly PremiereTelemetry? _telemetry;
     private int _activeRequests;
     private CancellationTokenSource? _rateWaitCancellation;
     private bool _processing;
     private bool _disposed;
 
-    public TmdbRequestLimiter(IOptions<TmdbOptions> options)
+    public TmdbRequestLimiter(IOptions<TmdbOptions> options, PremiereTelemetry? telemetry = null)
     {
         var requestsPerSecond = Math.Clamp(options.Value.MaxRequestsPerSecond, 1, 40);
+        _requestsPerSecond = requestsPerSecond;
+        _telemetry = telemetry;
         _maximumConcurrency = Math.Clamp(options.Value.MaxConcurrentRequests, 1, 40);
         _limiter = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
         {
@@ -34,12 +39,18 @@ public sealed class TmdbRequestLimiter : IDisposable
     public async ValueTask<TmdbRequestLease> AcquireAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var started = Stopwatch.GetTimestamp();
+        var context = _telemetry?.CaptureDiagnosticContext();
         var completion = new TaskCompletionSource<TmdbRequestLease>(TaskCreationOptions.RunContinuationsAsynchronously);
         ProviderAdmissionQueue<TaskCompletionSource<TmdbRequestLease>>.Entry waiter;
+        int queued;
+        int active;
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             waiter = _admissions.Enqueue(completion, ProviderExecutionContext.CapturePriorityAccessor(), cancellationToken);
+            queued = _admissions.Count;
+            active = _activeRequests;
         }
         using var registration = cancellationToken.Register(() =>
         {
@@ -50,7 +61,29 @@ public sealed class TmdbRequestLimiter : IDisposable
             }
         });
         StartProcessing();
-        return await completion.Task;
+        var outcome = "failed";
+        try
+        {
+            var lease = await completion.Task;
+            outcome = lease.IsAcquired ? "acquired" : "rejected";
+            return lease;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            outcome = "cancelled";
+            throw;
+        }
+        finally
+        {
+            // This admission precedes HttpClient and is deliberately separate
+            // from remote request/headers timing in AdaptiveProviderHandler.
+            _telemetry?.RecordDiagnostic("provider.local_admission.completed", context, new()
+            {
+                Provider = "tmdb", Stage = "local_admission", Outcome = outcome,
+                DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds,
+                Count = queued, Active = active, Limit = _maximumConcurrency, Total = _requestsPerSecond
+            });
+        }
     }
 
     private void StartProcessing()

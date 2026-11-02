@@ -8,6 +8,8 @@ internal sealed class ProviderAdmissionQueue<T>
     private readonly LinkedList<Entry> _entries = new();
     private int _foregroundBurst;
 
+    internal int Count => _entries.Count;
+
     internal sealed class Entry(T value, Func<ProviderWorkPriority> priority, CancellationToken cancellationToken)
     {
         private TaskCompletionSource? _signal;

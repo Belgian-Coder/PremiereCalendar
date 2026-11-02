@@ -13,12 +13,12 @@ public sealed class RottenTomatoesClientIntegrationTests
     [Fact]
     public async Task TryGetCachedScores_ReturnsOnlyPreviouslyFetchedScoresWithoutAnotherRequest()
     {
-        var handler = new StubHttpMessageHandler(_ => Html(
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath == "/search" ? Html(
             """
             <search-page-media-row release-year="2026" tomatometer-score="72">
               <a href="https://www.rottentomatoes.com/m/saccharine" data-qa="info-name" slot="title">Saccharine</a>
             </search-page-media-row>
-            """));
+            """) : Html("<script id=\"media-scorecard-json\">{}</script>"));
         var client = CreateClient(handler);
 
         Assert.False(client.TryGetCachedScores(

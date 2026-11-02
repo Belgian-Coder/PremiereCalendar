@@ -746,7 +746,15 @@ public sealed partial class PremiereService
         return "Title/date";
     }
 
-    private async Task<PremiereItem> HydrateExternalCandidateRatingsAsync(
+    private Task<PremiereItem> HydrateExternalCandidateRatingsAsync(
+        PremiereItem item,
+        ExternalPremiereCandidate candidate,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+        => TraceEnrichmentStageAsync("external.ratings", () => HydrateExternalCandidateRatingsCoreAsync(
+            item, candidate, cancellationToken, forceRefresh));
+
+    private async Task<PremiereItem> HydrateExternalCandidateRatingsCoreAsync(
         PremiereItem item,
         ExternalPremiereCandidate candidate,
         CancellationToken cancellationToken,
@@ -1197,6 +1205,16 @@ public sealed partial class PremiereService
         var hasMore = true;
         var completedWork = 0;
         var totalWork = rawItemList.Count;
+        var mappedCount = 0;
+        var mappingStarted = Stopwatch.GetTimestamp();
+        var mappingOutcome = "abandoned";
+        var mappingContext = (_telemetry.CaptureDiagnosticContext() ?? _telemetry.CreateDiagnosticContext())
+            with { OperationId = Guid.NewGuid().ToString("N") };
+        var mappingStage = typeof(T) == typeof(ExternalPremiereCandidate) ? "external_candidates" : "tmdb_items";
+        _telemetry.RecordDiagnostic("mapping.batch.started", mappingContext, new()
+        {
+            Stage = mappingStage, Total = totalWork, Limit = concurrency
+        });
         var lastEmittedCompletedWork = 0;
         var lastProgressAt = Stopwatch.GetTimestamp();
         var progressInterval = TimeSpan.FromMilliseconds(_options.SourceTimeoutSeconds > 0
@@ -1235,6 +1253,7 @@ public sealed partial class PremiereService
                 }
                 catch
                 {
+                    mappingOutcome = "failed";
                     mapperCancellation.Cancel();
                     await ObservePendingMappingsAsync(pending);
                     throw;
@@ -1244,6 +1263,7 @@ public sealed partial class PremiereService
                 if (mapped is not null)
                 {
                     batch.Add(mapped);
+                    mappedCount++;
                 }
 
                 StartPending();
@@ -1274,6 +1294,14 @@ public sealed partial class PremiereService
         {
             mapperCancellation.Cancel();
             await ObservePendingMappingsAsync(pending);
+            _telemetry.RecordDiagnostic("mapping.batch.finished", mappingContext, new()
+            {
+                Stage = mappingStage,
+                Outcome = cancellationToken.IsCancellationRequested ? "cancelled"
+                    : completedWork == totalWork ? "complete" : mappingOutcome,
+                Count = mappedCount, Total = totalWork, Sequence = completedWork, Limit = concurrency,
+                DurationMilliseconds = Stopwatch.GetElapsedTime(mappingStarted).TotalMilliseconds
+            });
         }
     }
 

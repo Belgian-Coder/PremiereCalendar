@@ -1,6 +1,9 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO.Compression;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.Extensions.Caching.Memory;
@@ -23,6 +26,7 @@ public sealed class TmdbClient : ITmdbClient
     private readonly ILogger<TmdbClient> _logger;
     private readonly ISingleFlightCoordinator _singleFlight;
     private readonly ProviderResponseCache? _responseCache;
+    private readonly PremiereTelemetry? _telemetry;
 
     public TmdbClient(
         HttpClient httpClient,
@@ -32,16 +36,18 @@ public sealed class TmdbClient : ITmdbClient
         TmdbRequestLimiter? requestLimiter = null,
         IIntegrationSettingsStore? settingsStore = null,
         ISingleFlightCoordinator? singleFlight = null,
-        ProviderResponseCache? responseCache = null)
+        ProviderResponseCache? responseCache = null,
+        PremiereTelemetry? telemetry = null)
     {
         _httpClient = httpClient;
         _cache = cache;
         _options = options.Value;
         _settingsStore = settingsStore;
-        _requestLimiter = requestLimiter ?? new TmdbRequestLimiter(options);
+        _requestLimiter = requestLimiter ?? new TmdbRequestLimiter(options, telemetry);
         _logger = logger;
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
         _responseCache = responseCache;
+        _telemetry = telemetry;
     }
 
     public async Task<IReadOnlyList<TmdbTvDiscoverItem>> DiscoverTvAsync(
@@ -655,6 +661,16 @@ public sealed class TmdbClient : ITmdbClient
         CancellationToken cancellationToken,
         bool forceRefresh,
         string? persistentRequestKey = null)
+        => TraceLookupAsync(cacheKey, forceRefresh, () => GetOrCreateScopedAsync(
+            cacheKey, duration, factory, cancellationToken, forceRefresh, persistentRequestKey));
+
+    private Task<T?> GetOrCreateScopedAsync<T>(
+        string cacheKey,
+        TimeSpan duration,
+        Func<CancellationToken, Task<T?>> factory,
+        CancellationToken cancellationToken,
+        bool forceRefresh,
+        string? persistentRequestKey)
     {
         if (typeof(T) != typeof(TmdbDetailsWithExtras) || ProviderRefreshScope.Current is not { } refresh)
             return GetOrCreateCoreAsync(cacheKey, duration, factory, cancellationToken, forceRefresh, persistentRequestKey);
@@ -680,18 +696,24 @@ public sealed class TmdbClient : ITmdbClient
         string? persistentRequestKey = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var memoryStarted = Stopwatch.GetTimestamp();
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? cached))
         {
+            RecordMemoryLookup(cacheKey, "hit", memoryStarted);
             return cached;
         }
+
+        RecordMemoryLookup(cacheKey, forceRefresh ? "bypassed" : "miss", memoryStarted);
 
         var flightKey = forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}";
         return await _singleFlight.RunAsync(
             flightKey,
             async token =>
             {
+                var flightMemoryStarted = Stopwatch.GetTimestamp();
                 if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? flightCached))
                 {
+                    RecordMemoryLookup(cacheKey, "shared_hit", flightMemoryStarted);
                     return flightCached;
                 }
 
@@ -735,25 +757,40 @@ public sealed class TmdbClient : ITmdbClient
             cancellationToken);
     }
 
-    private async Task<T> GetOrCreateRequiredAsync<T>(
+    private Task<T> GetOrCreateRequiredAsync<T>(
+        string cacheKey,
+        TimeSpan duration,
+        Func<CancellationToken, Task<T>> factory,
+        CancellationToken cancellationToken,
+        bool forceRefresh)
+        => TraceLookupAsync(cacheKey, forceRefresh, () => GetOrCreateRequiredCoreAsync(
+            cacheKey, duration, factory, cancellationToken, forceRefresh));
+
+    private async Task<T> GetOrCreateRequiredCoreAsync<T>(
         string cacheKey,
         TimeSpan duration,
         Func<CancellationToken, Task<T>> factory,
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
+        var memoryStarted = Stopwatch.GetTimestamp();
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? cached) && cached is not null)
         {
+            RecordMemoryLookup(cacheKey, "hit", memoryStarted);
             return cached;
         }
+
+        RecordMemoryLookup(cacheKey, forceRefresh ? "bypassed" : "miss", memoryStarted);
 
         var flightKey = forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}";
         return await _singleFlight.RunAsync(
             flightKey,
             async token =>
             {
+                var flightMemoryStarted = Stopwatch.GetTimestamp();
                 if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? flightCached) && flightCached is not null)
                 {
+                    RecordMemoryLookup(cacheKey, "shared_hit", flightMemoryStarted);
                     return flightCached;
                 }
 
@@ -814,11 +851,68 @@ public sealed class TmdbClient : ITmdbClient
         }
     }
 
-    private static async Task<T?> ReadJsonContentAsync<T>(HttpContent content, CancellationToken cancellationToken)
+    private async Task<T?> ReadJsonContentAsync<T>(HttpContent content, CancellationToken cancellationToken)
     {
-        await using var contentStream = await OpenDecodedContentStreamAsync(content, cancellationToken);
-        return await JsonSerializer.DeserializeAsync<T>(contentStream, JsonOptions, cancellationToken);
+        var started = Stopwatch.GetTimestamp();
+        var outcome = "failed";
+        try
+        {
+            await using var contentStream = await OpenDecodedContentStreamAsync(content, cancellationToken);
+            var value = await JsonSerializer.DeserializeAsync<T>(contentStream, JsonOptions, cancellationToken);
+            outcome = value is null ? "empty" : "success";
+            return value;
+        }
+        catch (OperationCanceledException)
+        {
+            outcome = "cancelled";
+            throw;
+        }
+        finally
+        {
+            _telemetry?.RecordDiagnostic("provider.parse.completed", details: new()
+            {
+                Provider = "tmdb", Stage = "json_decode", Outcome = outcome,
+                DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
+        }
     }
+
+    private async Task<T> TraceLookupAsync<T>(string cacheKey, bool forceRefresh, Func<Task<T>> operation)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var outcome = "failed";
+        try
+        {
+            var value = await operation();
+            outcome = value is null ? "absent" : "success";
+            return value;
+        }
+        catch (OperationCanceledException)
+        {
+            outcome = "cancelled";
+            throw;
+        }
+        finally
+        {
+            _telemetry?.RecordDiagnostic("provider.lookup.completed", details: new()
+            {
+                Provider = "tmdb", Stage = "lookup", Outcome = outcome,
+                Reason = forceRefresh ? "forced" : "normal", CacheKey = DiagnosticCacheKey(cacheKey),
+                DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
+        }
+    }
+
+    private void RecordMemoryLookup(string cacheKey, string outcome, long started)
+        => _telemetry?.RecordDiagnostic("provider.memory_cache.completed", details: new()
+        {
+            Provider = "tmdb", Stage = "memory_cache", Outcome = outcome,
+            CacheKey = DiagnosticCacheKey(cacheKey),
+            DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+        });
+
+    private static string DiagnosticCacheKey(string cacheKey)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cacheKey)));
 
     private static async Task<Stream> OpenDecodedContentStreamAsync(
         HttpContent content,

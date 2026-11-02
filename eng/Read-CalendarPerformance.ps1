@@ -3,14 +3,17 @@ param(
     [string] $LogDirectory = (Join-Path $PSScriptRoot '../PremiereCalendar/App_Data/logs/performance'),
     [guid] $LoadId = [guid]::Empty,
     [guid] $JobId = [guid]::Empty,
+    [guid] $InstanceId = [guid]::Empty,
     [ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string] $WeekStart,
     [DateTimeOffset] $SinceUtc = [DateTimeOffset]::UtcNow.AddDays(-7),
-    [ValidateRange(1,100000)][int] $MaximumEvents = 10000,
+    [ValidateRange(1,500000)][int] $MaximumEvents = 100000,
     [switch] $Summary
 )
 
 $ErrorActionPreference = 'Stop'
-$files = @(Get-ChildItem -LiteralPath $LogDirectory -Filter 'performance-*.ndjson' -File | Sort-Object Name)
+$filePattern = if ($InstanceId -eq [guid]::Empty) { 'performance-*.ndjson' }
+    else { 'performance-*-' + $InstanceId.ToString('N') + '-*.ndjson' }
+$files = @(Get-ChildItem -LiteralPath $LogDirectory -Filter $filePattern -File | Sort-Object Name)
 $loads = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $jobs = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 if ($LoadId -ne [guid]::Empty) { [void]$loads.Add($LoadId.ToString('N')) }

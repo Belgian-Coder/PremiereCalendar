@@ -10,6 +10,98 @@ namespace PremiereCalendar.UnitTests;
 public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
 {
     [Fact]
+    public async Task TmdbLookupAutomaticallyPersistsCacheParseFailureAndDurationWithoutPayloads()
+    {
+        using var directory = new TestDirectory();
+        using var store = new PerformanceDiagnosticStore(new(), directory.Path);
+        var telemetry = new PremiereTelemetry(store);
+        var context = telemetry.CreateDiagnosticContext(jobId: Guid.NewGuid().ToString("N"));
+        using var scope = telemetry.UseDiagnosticContext(context);
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        using var handler = new RetrievalDiagnosticHandler();
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("https://private-provider.example/") };
+        var options = Microsoft.Extensions.Options.Options.Create(new TmdbOptions { BearerToken = "private-test-token" });
+        using var limiter = new TmdbRequestLimiter(options, telemetry);
+        var client = new TmdbClient(http, cache, options,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TmdbClient>.Instance, limiter, telemetry: telemetry);
+
+        Assert.Equal(123, (await client.GetMovieDetailsAsync(123, CancellationToken.None))!.Id);
+        Assert.Equal(123, (await client.GetMovieDetailsAsync(123, CancellationToken.None))!.Id);
+        handler.Malformed = true;
+        await Assert.ThrowsAsync<ExternalApiException>(() => client.GetMovieDetailsAsync(123, CancellationToken.None, forceRefresh: true));
+        Assert.Equal(2, handler.Requests);
+        telemetry.FlushDiagnostics();
+
+        var events = ReadEvents(directory.Path);
+        var lookups = events.Where(item => item.GetProperty("event").GetString() == "provider.lookup.completed").ToArray();
+        Assert.Equal(3, lookups.Length);
+        Assert.Equal("failed", lookups[2].GetProperty("details").GetProperty("outcome").GetString());
+        Assert.Contains(events, item => item.GetProperty("event").GetString() == "provider.memory_cache.completed"
+            && item.GetProperty("details").GetProperty("outcome").GetString() == "hit");
+        Assert.Equal(2, events.Count(item => item.GetProperty("event").GetString() == "provider.parse.completed"));
+        Assert.All(events, item =>
+        {
+            Assert.Equal(context.JobId, item.GetProperty("jobId").GetString());
+            Assert.True(item.GetProperty("details").GetProperty("durationMilliseconds").GetDouble() >= 0);
+            Assert.DoesNotContain("private-provider", item.GetRawText());
+            Assert.DoesNotContain("private-test-token", item.GetRawText());
+            Assert.DoesNotContain("Private movie title", item.GetRawText());
+        });
+    }
+
+    [Fact]
+    public async Task TmdbLocalAdmissionMeasuresRateWaitBeforeHttpAndPreservesContext()
+    {
+        using var directory = new TestDirectory();
+        using var store = new PerformanceDiagnosticStore(new(), directory.Path);
+        var telemetry = new PremiereTelemetry(store);
+        var context = telemetry.CreateDiagnosticContext(jobId: Guid.NewGuid().ToString("N"));
+        using var scope = telemetry.UseDiagnosticContext(context);
+        using var limiter = new TmdbRequestLimiter(Microsoft.Extensions.Options.Options.Create(new TmdbOptions
+        {
+            MaxRequestsPerSecond = 1, MaxConcurrentRequests = 4
+        }), telemetry);
+        using var first = await limiter.AcquireAsync(CancellationToken.None);
+        first.Dispose();
+        using var second = await limiter.AcquireAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        telemetry.FlushDiagnostics();
+        var events = ReadEvents(directory.Path);
+        var admissions = events.Where(item => item.GetProperty("event").GetString() == "provider.local_admission.completed").ToArray();
+        Assert.Equal(2, admissions.Length);
+        Assert.All(admissions, item => Assert.Equal(context.JobId, item.GetProperty("jobId").GetString()));
+        var details = admissions[1].GetProperty("details");
+        Assert.Equal("acquired", details.GetProperty("outcome").GetString());
+        Assert.True(details.GetProperty("durationMilliseconds").GetDouble() >= 100);
+        Assert.Equal(1, details.GetProperty("count").GetInt32());
+        Assert.Equal(1, details.GetProperty("total").GetInt32());
+        Assert.Equal(4, details.GetProperty("limit").GetInt32());
+        Assert.DoesNotContain(events, item => item.GetProperty("event").GetString() == "provider.request.started");
+    }
+
+    [Fact]
+    public async Task TmdbLocalAdmissionRecordsCancelledCapacityWait()
+    {
+        using var directory = new TestDirectory();
+        using var store = new PerformanceDiagnosticStore(new(), directory.Path);
+        var telemetry = new PremiereTelemetry(store);
+        using var limiter = new TmdbRequestLimiter(Microsoft.Extensions.Options.Options.Create(new TmdbOptions
+        {
+            MaxRequestsPerSecond = 40, MaxConcurrentRequests = 1
+        }), telemetry);
+        using var first = await limiter.AcquireAsync(CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+        var waiting = limiter.AcquireAsync(cancellation.Token).AsTask();
+        Assert.False(waiting.IsCompleted);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+        telemetry.FlushDiagnostics();
+        var admission = Assert.Single(ReadEvents(directory.Path), item =>
+            item.GetProperty("details").GetProperty("outcome").GetString() == "cancelled");
+        Assert.Equal(1, admission.GetProperty("details").GetProperty("active").GetInt32());
+        Assert.Equal(1, admission.GetProperty("details").GetProperty("limit").GetInt32());
+    }
+
+    [Fact]
     public void DetailedEventBurstReportsPersistenceCost()
     {
         using var directory = new TestDirectory();
@@ -636,6 +728,20 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
+    }
+
+    private sealed class RetrievalDiagnosticHandler : HttpMessageHandler
+    {
+        public bool Malformed { get; set; }
+        public int Requests { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests++;
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(Malformed ? "{" : "{\"id\":123,\"title\":\"Private movie title\"}")
+            });
+        }
     }
 
     private sealed class TestDirectory : IDisposable

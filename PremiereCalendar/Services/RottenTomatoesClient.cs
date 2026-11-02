@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Text.Json;
@@ -34,6 +35,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
     private readonly IWikimediaClient? _wikimediaClient;
     private readonly ISingleFlightCoordinator _singleFlight;
     private readonly ProviderResponseCache? _responseCache;
+    private readonly PremiereTelemetry? _telemetry;
 
     public RottenTomatoesClient(
         HttpClient httpClient,
@@ -42,7 +44,8 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         ILogger<RottenTomatoesClient> logger,
         IWikimediaClient? wikimediaClient = null,
         ISingleFlightCoordinator? singleFlight = null,
-        ProviderResponseCache? responseCache = null)
+        ProviderResponseCache? responseCache = null,
+        PremiereTelemetry? telemetry = null)
     {
         _httpClient = httpClient;
         _cache = cache;
@@ -51,6 +54,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         _wikimediaClient = wikimediaClient;
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
         _responseCache = responseCache;
+        _telemetry = telemetry;
     }
 
     public bool TryGetCachedScores(
@@ -188,18 +192,24 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                 }
 
                 var fetchOutcome = new FetchOutcome();
+                var pageScope = ProviderRefreshScope.Current ?? ProviderRefreshScope.Create();
                 var hasIdentifierContext = !string.IsNullOrWhiteSpace(wikidataId);
-                var scores = await TryGetScoresByWikidataIdAsync(mediaType, wikidataId, token, forceRefresh, fetchOutcome);
+                var scores = await TryGetScoresByWikidataIdAsync(mediaType, wikidataId, token, forceRefresh, fetchOutcome, pageScope);
                 if (!scores.HasAnyScore && ShouldSearchByTitle(mediaType, year, hasIdentifierContext))
                 {
-                    scores = await SearchAndFetchScoresAsync(
+                    var searchOutcome = new FetchOutcome();
+                    scores = await TrackStageAsync("search_fallback", () => SearchAndFetchScoresAsync(
                         mediaType,
                         title.Trim(),
                         normalizedTitle,
                         year,
                         hasIdentifierContext,
                         token,
-                        fetchOutcome);
+                        searchOutcome,
+                        pageScope,
+                        forceRefresh), token, _ => searchOutcome.Successful,
+                        result => result.HasAnyScore ? "completed" : "absent");
+                    fetchOutcome.Successful &= searchOutcome.Successful;
                 }
 
                 if (forceRefresh && !fetchOutcome.Successful) return new ProviderRefreshResult<RottenTomatoesScores>(scores, false);
@@ -284,7 +294,8 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         string? wikidataId,
         CancellationToken cancellationToken,
         bool forceRefresh,
-        FetchOutcome fetchOutcome)
+        FetchOutcome fetchOutcome,
+        ProviderRefreshScope pageScope)
     {
         if (_wikimediaClient is null || string.IsNullOrWhiteSpace(wikidataId))
         {
@@ -293,7 +304,10 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
 
         try
         {
-            var identifier = await _wikimediaClient.GetRottenTomatoesIdResultAsync(wikidataId, cancellationToken, forceRefresh);
+            var identifier = await TrackStageAsync("wikidata_identifier",
+                () => _wikimediaClient.GetRottenTomatoesIdResultAsync(wikidataId, cancellationToken, forceRefresh),
+                cancellationToken, result => result.IsSuccess,
+                result => string.IsNullOrWhiteSpace(result.Value) ? "absent" : "completed");
             var rottenTomatoesId = identifier.Value;
             if (!identifier.IsSuccess) fetchOutcome.Successful = false;
             if (string.IsNullOrWhiteSpace(rottenTomatoesId) || !IsExpectedMediaPath(mediaType, rottenTomatoesId))
@@ -301,7 +315,8 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                 return RottenTomatoesScores.Empty;
             }
 
-            return await FetchDirectScoresAsync(rottenTomatoesId, fallbackCriticScore: null, cancellationToken, fetchOutcome);
+            return await FetchDirectScoresAsync(rottenTomatoesId, fallbackCriticScore: null,
+                cancellationToken, fetchOutcome, pageScope, forceRefresh);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -318,22 +333,28 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         int? year,
         bool hasIdentifierContext,
         CancellationToken cancellationToken,
-        FetchOutcome fetchOutcome)
+        FetchOutcome fetchOutcome,
+        ProviderRefreshScope pageScope,
+        bool forceRefresh)
     {
-        var html = await GetStringAsync($"search?search={Uri.EscapeDataString(title)}", cancellationToken, fetchOutcome);
+        var html = await TrackStageAsync("search_http",
+            () => GetStringAsync($"search?search={Uri.EscapeDataString(title)}", cancellationToken, fetchOutcome),
+            cancellationToken, _ => fetchOutcome.Successful);
         if (string.IsNullOrWhiteSpace(html))
         {
             return RottenTomatoesScores.Empty;
         }
 
-        var match = SelectBestSearchResult(ParseSearchResults(html), mediaType, normalizedTitle, year);
+        var match = await TrackStageAsync("search_match",
+            () => Task.FromResult(SelectBestSearchResult(ParseSearchResults(html), mediaType, normalizedTitle, year)),
+            cancellationToken, completedOutcome: result => result is null ? "absent" : "completed");
         if (match is null)
         {
             return RottenTomatoesScores.Empty;
         }
 
         return ShouldFetchDirectSearchMatch(match, year, hasIdentifierContext)
-            ? await FetchDirectScoresAsync(match.Url, match.Score, cancellationToken, fetchOutcome)
+            ? await FetchDirectScoresAsync(match.Url, match.Score, cancellationToken, fetchOutcome, pageScope, forceRefresh)
             : new RottenTomatoesScores(match.Score, AudienceScore: null);
     }
 
@@ -351,19 +372,103 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         string urlOrPath,
         int? fallbackCriticScore,
         CancellationToken cancellationToken,
-        FetchOutcome fetchOutcome)
+        FetchOutcome fetchOutcome,
+        ProviderRefreshScope pageScope,
+        bool forceRefresh)
     {
-        var html = await GetStringAsync(urlOrPath, cancellationToken, fetchOutcome);
-        if (string.IsNullOrWhiteSpace(html))
+        // Keep the search-row fallback outside the page memo: different title matches
+        // may supply different fallback scores for the same successfully empty page.
+        var started = Stopwatch.GetTimestamp();
+        var context = _telemetry?.CaptureDiagnosticContext();
+        var cache = "shared";
+        var status = "failed";
+        try
         {
-            return new RottenTomatoesScores(fallbackCriticScore, AudienceScore: null);
-        }
+            if (!Uri.TryCreate(_httpClient.BaseAddress, urlOrPath, out var uri))
+            {
+                fetchOutcome.Successful = false;
+                return new RottenTomatoesScores(fallbackCriticScore, AudienceScore: null);
+            }
+            var pageKey = "rottentomatoes:page:" + uri.GetComponents(
+                UriComponents.SchemeAndServer | UriComponents.PathAndQuery, UriFormat.UriEscaped);
+            var result = await pageScope.RunAsync(pageKey, forceRefresh, async token =>
+            {
+                cache = "miss";
+                var outcome = new FetchOutcome();
+                var html = await TrackStageAsync("page_http", () => GetStringAsync(uri.AbsoluteUri, token, outcome),
+                    token, value => outcome.Successful && !string.IsNullOrWhiteSpace(value));
+                var scores = RottenTomatoesScores.Empty;
+                if (string.IsNullOrWhiteSpace(html)) outcome.Successful = false;
+                else
+                {
+                    try
+                    {
+                        scores = await TrackStageAsync("scorecard_parse",
+                            () => Task.FromResult(ParseScorecardScores(html)), token,
+                            completedOutcome: result => result.HasAnyScore ? "completed" : "absent");
+                    }
+                    catch (JsonException)
+                    {
+                        outcome.Successful = false;
+                        _logger.LogWarning("Skipping a malformed Rotten Tomatoes scorecard.");
+                    }
+                }
 
-        var scores = ParseScorecardScores(html);
-        return scores with
+                return new ProviderRefreshResult<DirectPageResult>(
+                    new DirectPageResult(scores, outcome.Successful), outcome.Successful);
+            }, cancellationToken, _ => { cache = "hit"; return true; });
+            fetchOutcome.Successful &= result.Successful;
+            status = !result.Successful ? "failed" : result.Scores.HasAnyScore ? "completed" : "absent";
+            return result.Scores with
+            {
+                CriticScore = result.Scores.CriticScore ?? fallbackCriticScore
+            };
+        }
+        catch (OperationCanceledException)
         {
-            CriticScore = scores.CriticScore ?? fallbackCriticScore
-        };
+            status = cancellationToken.IsCancellationRequested ? "cancelled" : "timeout";
+            throw;
+        }
+        finally
+        {
+            _telemetry?.RecordDiagnostic("provider.rt.stage.completed", context, new()
+            {
+                Provider = "rottentomatoes", Stage = "page_lookup", Outcome = status, Cache = cache,
+                Reason = forceRefresh ? "force_refresh" : null,
+                DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
+        }
+    }
+
+    private readonly record struct DirectPageResult(RottenTomatoesScores Scores, bool Successful);
+
+    private async Task<T> TrackStageAsync<T>(string stage, Func<Task<T>> action, CancellationToken cancellationToken,
+        Func<T, bool>? successful = null, Func<T, string>? completedOutcome = null)
+    {
+        if (_telemetry is null) return await action();
+        var started = Stopwatch.GetTimestamp();
+        var context = _telemetry.CaptureDiagnosticContext();
+        var outcome = "failed";
+        try
+        {
+            var result = await action();
+            outcome = successful is not null && !successful(result) ? "failed"
+                : completedOutcome?.Invoke(result) ?? "completed";
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            outcome = cancellationToken.IsCancellationRequested ? "cancelled" : "timeout";
+            throw;
+        }
+        finally
+        {
+            _telemetry.RecordDiagnostic("provider.rt.stage.completed", context, new()
+            {
+                Provider = "rottentomatoes", Stage = stage, Outcome = outcome,
+                DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
+        }
     }
 
     private async Task<string?> GetStringAsync(string url, CancellationToken cancellationToken, FetchOutcome fetchOutcome)
@@ -481,17 +586,21 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         var match = ScorecardJsonRegex.Match(html);
         if (!match.Success)
         {
-            return RottenTomatoesScores.Empty;
+            // A 200 response can be a challenge, consent or error document.
+            // Without a parsed scorecard it does not verify rating absence.
+            throw new JsonException("The Rotten Tomatoes scorecard is missing.");
         }
 
         var json = WebUtility.HtmlDecode(match.Groups["json"].Value).Trim();
         if (string.IsNullOrWhiteSpace(json))
         {
-            return RottenTomatoesScores.Empty;
+            throw new JsonException("The Rotten Tomatoes scorecard is empty.");
         }
 
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new JsonException("The Rotten Tomatoes scorecard must be an object.");
         int? criticScore = null;
         int? audienceScore = null;
         if (TryGetProperty(root, "criticsScore", out var criticsScore))

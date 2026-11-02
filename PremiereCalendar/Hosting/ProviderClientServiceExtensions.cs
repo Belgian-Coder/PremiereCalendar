@@ -57,12 +57,14 @@ public static class ProviderClientServiceExtensions
             ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<TheTvdbOptions>>().Value.BaseUrl))
             .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
                 .Create("thetvdb", 2, TimeSpan.FromSeconds(30)));
-        services.AddHttpClient<IWikimediaClient, WikimediaClient>((sp, client) =>
+        services.AddHttpClient<WikimediaClient>((sp, client) =>
         {
             ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<WikimediaOptions>>().Value.WikidataBaseUrl);
             AddUserAgent(client);
         }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
             .Create("wikimedia", 2, TimeSpan.FromSeconds(100)));
+        // Artwork and identifier callers share one short-lived batching queue.
+        services.AddSingleton<IWikimediaClient>(sp => sp.GetRequiredService<WikimediaClient>());
         services.AddHttpClient<IRottenTomatoesClient, RottenTomatoesClient>((sp, client) =>
         {
             var options = sp.GetRequiredService<IOptions<RottenTomatoesOptions>>().Value;
