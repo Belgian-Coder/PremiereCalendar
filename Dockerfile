@@ -41,6 +41,9 @@ ENV Urls=http://0.0.0.0:8080 \
     DOTNET_EnableDiagnostics=0 \
     COMPlus_EnableDiagnostics=0
 COPY --from=build --chown=$APP_UID:$APP_UID /out/ ./
+# Nightly schedules use IANA zones. Reuse timezone data from the pinned SDK
+# image so the runtime supports Brussels/DST and configurable zone overrides.
+COPY --from=build /usr/share/zoneinfo/ /usr/share/zoneinfo/
 RUN mkdir -p /app/App_Data && chown -R $APP_UID:$APP_UID /app/App_Data
 USER $APP_UID
 EXPOSE 8080
