@@ -340,6 +340,8 @@ Nightly work rebuilds the normalized calendar snapshot while respecting provider
 
 The daily plan uses application-state key `calendar-warmup:nightly-plan:v1`. Receipts use `calendar-warmup:nightly-receipt:v1:<cutoff ticks>:<profile hash>:<week start>:<week end>` and remain as small historical proof records. A typical two-month plan adds 20 rows per day, approximately 7,300 per year. No new retention/deletion policy is introduced.
 
+Plan coverage is a snapshot from the last scheduler wake (15 minutes by default); individual job completion, window duration logs and receipts are persisted immediately. Recheck cache envelopes and receipts when investigating work completed since that snapshot.
+
 Foreground UI loads have their own budget:
 
 ```json
