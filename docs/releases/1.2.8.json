@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 1,
+  "version": "1.2.8",
+  "tag": "v1.2.8",
+  "sourceRevision": "2cf9da401bbb77cf11d66b157478f101bdcac17c",
+  "createdUtc": "2026-11-02T18:39:46.4069838Z",
+  "distribution": "docker-archive",
+  "platform": "linux/amd64",
+  "imageConfigurationDigest": "sha256:4bdc1f422230752f4ec3c06672f345b5eee6cb9e0111bc41b5bcbfb416084725",
+  "archive": "premierecalendar-1.2.8.tar",
+  "archiveSha256": "22684a9946a264c2a7b957e12366892a47897ccb199a8a45f129275e55743249",
+  "databaseSchemaVersion": 3,
+  "acceptance": {
+    "vulnerabilities": 0,
+    "linuxExpectedSkipped": 1,
+    "installedBrowserPassed": true,
+    "githubCiUsed": false,
+    "dependenciesUnchanged": true,
+    "automatedBrowserSuiteRun": false,
+    "linuxPassed": 949,
+    "actualPostgreSql": true,
+    "fixableHighCriticalVulnerabilities": 0
+  },
+  "installation": {
+    "appContainer": "081ea3a4802b297efd70587e6cda7ec641de977b1d8af94faea2785c76f70d45",
+    "stackFileVersion": 7,
+    "stackId": 20,
+    "movieItems": 134
+  },
+  "assets": [
+    {
+      "name": "final-unit-component-linux.log",
+      "bytes": 2842,
+      "sha256": "b5c01b84fac26d447b46034947faef031cc6e72f9173cd708b875dbf38358eee"
+    },
+    {
+      "name": "installed-browser.json",
+      "bytes": 702,
+      "sha256": "ebd915a384e79ac0e0e956b4369d0e7281ffa844404e0151a36fe05300eda45b"
+    },
+    {
+      "name": "installed-containers.json",
+      "bytes": 1580,
+      "sha256": "e1c530963a34dfcb67d7faf3c43be70b4685192406a120d56bed20de459c86d6"
+    },
+    {
+      "name": "installed-health-20261102.json",
+      "bytes": 1058,
+      "sha256": "a05d26e267c5c874881a4d87ee44ae0fef1949c86a1e36ae9b6807e2000166b0"
+    },
+    {
+      "name": "installed-http.json",
+      "bytes": 242,
+      "sha256": "a735d14510d5d75d5fa2f2a7df1201258c9e320cf3fed49835626cc21ff4d3e6"
+    },
+    {
+      "name": "installed-log-writes.log",
+      "bytes": 436,
+      "sha256": "4321c963d2cc6b430dbedc97149d0253271ed17f50446c566f3a7c7454a46d23"
+    },
+    {
+      "name": "installed-movies.jpg",
+      "bytes": 109204,
+      "sha256": "5efdfaf448216c8c7db5505ce05b20de639a2fb963660e867416a68ecc50b976"
+    },
+    {
+      "name": "integration-and-initial-environment-linux.log",
+      "bytes": 5677,
+      "sha256": "7ad32aaf71752cc8467c85984540fe828fb3d7ab8e391e1a88d0cf6e9052d01f"
+    },
+    {
+      "name": "pre-upgrade-backup.log",
+      "bytes": 282,
+      "sha256": "f3ef6efe39a522abdd316d7398a44bd03236818d14e1b2f64ab4d1101c9fef43"
+    },
+    {
+      "name": "premierecalendar-1.2.8.tar",
+      "bytes": 185070592,
+      "sha256": "22684a9946a264c2a7b957e12366892a47897ccb199a8a45f129275e55743249"
+    },
+    {
+      "name": "release-1.2.8-sbom.cdx.json",
+      "bytes": 313657,
+      "sha256": "2a420cf774b27d641323c903808bf2a6084d81989bb5f7174b0d4095303f643e"
+    },
+    {
+      "name": "release-1.2.8-smoke-accepted.json",
+      "bytes": 436,
+      "sha256": "8921c3335426cdf6d92c8d9773abd75feba7e6e85218333adb784659a3029454"
+    },
+    {
+      "name": "release-1.2.8-smoke.log",
+      "bytes": 3316,
+      "sha256": "f804b197b22f9d6c705cf0d2cb7b17a07429e88f081ef7e882e7ceb1ed78ccd6"
+    },
+    {
+      "name": "release-1.2.8-source.tar",
+      "bytes": 15237120,
+      "sha256": "123a18b8229c8d44a8ae0fb2fdb5533cae660256fea612458bdafbb2c3d45783"
+    },
+    {
+      "name": "release-1.2.8-trivy.json",
+      "bytes": 60076,
+      "sha256": "15f1322fc5b8c77bf675a635c77bb4ecf4387927d0cc88e24b4217e55aaa84ec"
+    },
+    {
+      "name": "release-nuget-audit.log",
+      "bytes": 280,
+      "sha256": "d1f24b5eaa86c9261cd56b04d52d65ca87b42c3b54072fc7784905ae848d8af5"
+    },
+    {
+      "name": "release-syft.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "release-trivy.log",
+      "bytes": 12284,
+      "sha256": "f598205195ef55610d0cad80d20d9ca98a74fed3cd162dfdb59134fe09662b8d"
+    },
+    {
+      "name": "smoke-blazor.web.js",
+      "bytes": 245494,
+      "sha256": "79728f577616593b254f06297dbf177f68a15ece5e90e0b6d9bb4443ae948321"
+    },
+    {
+      "name": "smoke-health.json",
+      "bytes": 1090,
+      "sha256": "59bb84bf96f9759c43402b98dd4d8150ce45473acd393a3fca993124e83ed94b"
+    },
+    {
+      "name": "smoke-root.html",
+      "bytes": 16216,
+      "sha256": "b5ea8d9297851d9078c1a0b4c9f203301e5fce01c7312c146f9197ad0cc7d77f"
+    }
+  ]
+}
