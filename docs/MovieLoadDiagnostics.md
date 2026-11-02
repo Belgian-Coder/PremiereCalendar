@@ -1,5 +1,7 @@
 # Slow movie-week load and persistent diagnostics
 
+The installed v1.2.9 [provider retrieval profile](ProviderRetrievalProfile.md) measures the remaining service costs for a real forced movie refresh, separately from cache reads and controlled phase benchmarks.
+
 The subsequent [movie-week speed investigation](MovieWeekSpeedValidation.md) separates the remaining cold-provider cost from measured restart-cache improvements, with captured-response replay, preserved full results and fine-grained cache I/O evidence.
 
 ## Observed incident
