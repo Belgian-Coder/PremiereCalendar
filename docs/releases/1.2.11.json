@@ -1,0 +1,408 @@
+{
+  "schemaVersion": 1,
+  "version": "1.2.11",
+  "tag": "v1.2.11",
+  "sourceRevision": "52bd16491425ae56600a713d20625c7dffd37b1d",
+  "createdUtc": "2026-11-02T21:59:44Z",
+  "distribution": "docker-archive",
+  "platform": "linux/amd64",
+  "imageConfigurationDigest": "sha256:3ba21ea58994eb3815e3154f2e4dab1e90cce554bf04ba4faedcc9d7066c37c8",
+  "ociIndexDigest": "sha256:767bed84151cf31fa59e776eceb5d82dc821b9ff952d6a03610d2e2cf85ebdbf",
+  "archive": "premierecalendar-1.2.11.tar",
+  "archiveBytes": 185146880,
+  "archiveSha256": "63761e6e9ccb6a9c2f310b349edbf7bd31933c42413fd5351cda69f66485e298",
+  "databaseSchemaVersion": 3,
+  "status": "installed",
+  "acceptance": {
+    "linuxPassed": 1106,
+    "unitPassed": 586,
+    "componentPassed": 191,
+    "integrationPassed": 329,
+    "actualPostgreSql": true,
+    "linuxExpectedSkipped": 1,
+    "astraHighOpenFindings": 0,
+    "nugetVulnerabilities": 0,
+    "trivyVersion": "0.74.0",
+    "trivyVulnerabilities": 0,
+    "sbomGenerator": "Syft 1.51.0",
+    "sbomFormat": "CycloneDX 1.7",
+    "sbomComponents": 488,
+    "exactImageSmokePassed": true,
+    "installedReadinessPassed": true,
+    "installedBrowserPassed": true,
+    "databaseAndBackupContainersUnchanged": true,
+    "schemaUnchanged": true,
+    "githubCiUsed": false,
+    "automatedBrowserSuiteRun": false
+  },
+  "installation": {
+    "installedUtc": "2026-11-02T22:06:07.146089978Z",
+    "stackFileVersion": 10,
+    "stackId": 20,
+    "appContainer": "39a7f8043cfb7d93c54a1fa05903ee64ab9f5863ccb81306e90e1d2cfaaaaded",
+    "previousAppContainer": "85c5b470afcaad0c6174e56ea532dcbf297c26591940582c8ecedd5a48b9aed6",
+    "databaseContainer": "47e2c0c19b625113b0b88b6e734ae8a2cb1745b0c89fa9ad098abc79c35e4f16",
+    "backupContainer": "e5e41753ec9617eddd12d9921370b7cf88d7f0aeec2955d46a253e3bdcde2ed6",
+    "directAndPrivateHttpChecksPassed": true,
+    "databaseAndBackupContainersUnchanged": true,
+    "schemaUnchanged": true,
+    "diagnosticEventsWritten": 46730,
+    "diagnosticDroppedEvents": 0,
+    "diagnosticWriterFailures": 0,
+    "operationalLoggingFailures": 0,
+    "diagnosticQueueDepth": 0,
+    "seriesCurrentWeekItems": 31,
+    "seriesReportedWeekItems": 49,
+    "movieItems": 134,
+    "movieDailyCounts": [
+      7,
+      20,
+      21,
+      15,
+      32,
+      21,
+      18
+    ],
+    "finalReloadConsoleErrors": 0,
+    "finalReloadConsoleWarnings": 0,
+    "profiles": [
+      {
+        "name": "series Nov 2-8",
+        "jobId": "ecfca8e353f34ee49d3b3b9f615f7ed6",
+        "enqueueToCompleteMs": 11776.4056,
+        "pipelineMs": 11761.9,
+        "firstNonemptyMs": 219.4303,
+        "firstNonemptyRows": 13,
+        "finalRows": 31,
+        "httpResponseCount": 207,
+        "repairMs": 1323.79,
+        "backfillMs": 2127.41
+      },
+      {
+        "name": "series Oct 19-25",
+        "jobId": "c5479e3a279e435fa804fd5b21bea7be",
+        "enqueueToCompleteMs": 29628.7531,
+        "pipelineMs": 29620.6964,
+        "firstNonemptyMs": 368.0484,
+        "firstNonemptyRows": 20,
+        "finalRows": 49,
+        "httpResponseCount": 455,
+        "repairMs": 853.67,
+        "backfillMs": 4290.85
+      },
+      {
+        "name": "movies Oct 19-25 English/Dutch runtime 45",
+        "jobId": "5903e1fd8f344c6782c63e18872c3c9b",
+        "enqueueToCompleteMs": 48888.0185,
+        "pipelineMs": 48880.3038,
+        "firstNonemptyMs": 53.0024,
+        "firstNonemptyRows": 7,
+        "finalRows": 134,
+        "httpResponseCount": 1289,
+        "repairMs": 979.52,
+        "backfillMs": 1561.62
+      }
+    ],
+    "profileInstanceId": "87cbdd89da1b4c148450fd87d9e3eea8",
+    "profileCacheWasWarm": true,
+    "versionSpeedupClaimed": false
+  },
+  "preUpgradeBackup": {
+    "path": "/volume1/Docker/PremiereCalendar/backups/pre-upgrade-1.2.11-20261102/daily/premierecalendar-20261102T214813Z-31774.dump",
+    "sha256": "cfabf9c7cc51677fe0c99e8ef9dedddd3f4dba2c7837babbc1109e6f2bd6d82d",
+    "portainerBackupEntries": 232,
+    "portainerBackupTimestamp": "20261102T214826Z-before-1.2.11"
+  },
+  "assets": [
+    {
+      "name": "activation.json",
+      "bytes": 137,
+      "sha256": "0f776ba6a53300b45b03d3ddcd10983135d697f9b2b0dc8dac0db79f664ff51e"
+    },
+    {
+      "name": "astra-high-review.md",
+      "bytes": 8704,
+      "sha256": "6818b466a9783fbe2b18d94ae18a98e2b065ca70c090263185e83a4bd0293e31"
+    },
+    {
+      "name": "browser-console.json",
+      "bytes": 12977,
+      "sha256": "7f931d4aca78449436926ff023671f9191273f8b3322374742a6b1c4737d3c06"
+    },
+    {
+      "name": "browser-current-after-refresh.png",
+      "bytes": 99848,
+      "sha256": "a862d726819df4a2819bc4ba393a8107ae52e97690a8830ba0833ceee4b06c29"
+    },
+    {
+      "name": "browser-current-before-refresh.png",
+      "bytes": 99742,
+      "sha256": "54030fbe6c7f1e9bd86c0e93a33d6097137b9bd663f23327cbee5cb9e00e8957"
+    },
+    {
+      "name": "browser-current-final.png",
+      "bytes": 99206,
+      "sha256": "b9c0c842c25d5a020a1f3b2b66f82b329ea38f60c8bea0848961b97977b03c9f"
+    },
+    {
+      "name": "browser-movies-after-refresh.png",
+      "bytes": 110765,
+      "sha256": "a6e5371d51d8258823bfb96871f6d6ef2915f6eb4e547a73a12169e051dcf133"
+    },
+    {
+      "name": "browser-movies-after-refresh.txt",
+      "bytes": 10247,
+      "sha256": "060e6cb3d26d98240b9be2b9b725719ae80f12769aa76c0674c946af9f69983c"
+    },
+    {
+      "name": "browser-movies-final.png",
+      "bytes": 110673,
+      "sha256": "ba73e936df8e19fb3fa1608bbfd571a8e2e7c7e43468f0fba97dbc24ddf4c3be"
+    },
+    {
+      "name": "browser-oct-after-refresh.png",
+      "bytes": 99464,
+      "sha256": "47dbe83f14099d36243310a373a50630e605fd0a5e89f5637bece600ae852773"
+    },
+    {
+      "name": "browser-oct-after-refresh.txt",
+      "bytes": 8227,
+      "sha256": "b2d54958ffd76dad0142f7bc32277fe6d0153e5587315e46603b587439634cf8"
+    },
+    {
+      "name": "build-metadata.json",
+      "bytes": 986,
+      "sha256": "119fb45acd0418ad207a2476c4d2d370963a262620453e8b02c408bf73a5ea5f"
+    },
+    {
+      "name": "build.log",
+      "bytes": 5367,
+      "sha256": "76204735ab42ad3b1181c7d1f3da431e2e8d10003b6a9f14c6507c67bcc9af66"
+    },
+    {
+      "name": "component-tests.log",
+      "bytes": 1084,
+      "sha256": "b2fc3eeb656f0dffbdb86dbb8661b48a4f7362ae4864f05a27748795d2922577"
+    },
+    {
+      "name": "config-backup-summary.json",
+      "bytes": 301,
+      "sha256": "de6908d095786ec874679dd61c3aecbab1d589902e868b1849810e12af27d167"
+    },
+    {
+      "name": "containers-after.json",
+      "bytes": 1419,
+      "sha256": "4ffd686488acbe6a87caff762c9a1a0e374fed111906e01554121626f7d96ee7"
+    },
+    {
+      "name": "containers-before.json",
+      "bytes": 961,
+      "sha256": "b581760234525da969d1be4b6523f6233a60f5a9184f9a567bb4ee067400f4e0"
+    },
+    {
+      "name": "containers-final.json",
+      "bytes": 967,
+      "sha256": "5997e23a4ef2de660e6080812b542435f93b5dd32dad1842b8db7ba5426d22b3"
+    },
+    {
+      "name": "installed-default-history-and-movie-job.ndjson",
+      "bytes": 712,
+      "sha256": "ffd62d7691d5f19ea85cb83fed1773c44497b87f5d92e7a69c63662b7215b343"
+    },
+    {
+      "name": "installed-health-final.json",
+      "bytes": 1287,
+      "sha256": "4753a0615a5e8d111a37f4b0405fc0a3b1926183e785ae203515ebe3f94d75c1"
+    },
+    {
+      "name": "installed-health.json",
+      "bytes": 1286,
+      "sha256": "be69f88575838ab8e53f4d7f6cd711941178c015b95238732221d81602a00082"
+    },
+    {
+      "name": "installed-http-checks.json",
+      "bytes": 668,
+      "sha256": "79cb88b98ba7c6294b97dfff312201b2431df9b2a2f621f9428bee41807180cd"
+    },
+    {
+      "name": "installed-profiles/combined-installed-results.json",
+      "bytes": 3179,
+      "sha256": "afe121e96dc6f6690875768b801f9b026b0e56cca017f1e94b9f34452fb8e970"
+    },
+    {
+      "name": "installed-profiles/combined-installed-results.md",
+      "bytes": 2322,
+      "sha256": "dde0c18287978dc0171c25230df2c38338f038af7978f7046f6d8895a9414f95"
+    },
+    {
+      "name": "installed-profiles/nov02-08-force/correlated-events-redacted.ndjson",
+      "bytes": 2076484,
+      "sha256": "25c07a0256c73973d7fdc04ef6b905f5aeeee564c7e720b4eee4774e5510d3d5"
+    },
+    {
+      "name": "installed-profiles/nov02-08-force/metrics-report.md",
+      "bytes": 14178,
+      "sha256": "97b42ef352c04a9ee4e67946c05adf21d6ee14f26d177b19de879e9be2359a20"
+    },
+    {
+      "name": "installed-profiles/nov02-08-force/metrics-summary.json",
+      "bytes": 2896448,
+      "sha256": "53e6e9e3402e791952d324a26183213c9a93a023f5af55029f5c8779fda6f48c"
+    },
+    {
+      "name": "installed-profiles/oct19-25-force/correlated-events-redacted.ndjson",
+      "bytes": 4944060,
+      "sha256": "1274ede553628995b1cf5de22d393c0ab1d2f2c6006ac63c4b34de8a3c1753f8"
+    },
+    {
+      "name": "installed-profiles/oct19-25-force/metrics-report.md",
+      "bytes": 14354,
+      "sha256": "703690abaad9b787952e5bd00782424523abc9be67faef47a02e4e99679fa4c5"
+    },
+    {
+      "name": "installed-profiles/oct19-25-force/metrics-summary.json",
+      "bytes": 6859703,
+      "sha256": "28a62af888ed8a7532216b98d3e47d43b425b40860166e0ec9f1d086c6dddef3"
+    },
+    {
+      "name": "installed-profiles/oct19-25-movies-force/correlated-events-redacted.ndjson",
+      "bytes": 18629010,
+      "sha256": "64f7399bb1235406c12d7ca270612cc3f3bf5662271172683344153714cbdc20"
+    },
+    {
+      "name": "installed-profiles/oct19-25-movies-force/metrics-report.md",
+      "bytes": 16135,
+      "sha256": "aff0c70cc8b4498879f054ae345c609308dd34f501f35053d764af97fc874686"
+    },
+    {
+      "name": "installed-profiles/oct19-25-movies-force/metrics-summary.json",
+      "bytes": 25800280,
+      "sha256": "8ea7f04e8d521350b47c992ba9892df113113e2ee3c90372fa36e44030024b56"
+    },
+    {
+      "name": "installed-series-job-states.ndjson",
+      "bytes": 421,
+      "sha256": "eba769985b7455fef9f0642013a8ac6eb96129c291a8e4d8458d5f7bf8276752"
+    },
+    {
+      "name": "nas-image-identity.json",
+      "bytes": 300,
+      "sha256": "b5f9ab83250d6aa24cadce20dd7c905d89600ac3dd1aa7704084fbc5fc7f0ddb"
+    },
+    {
+      "name": "nas-image-import-response.txt",
+      "bytes": 54,
+      "sha256": "8c02182555515bd497b44dd07fea352e0642c2727d24618f920cce56753f2de5"
+    },
+    {
+      "name": "postgres-integration-tests.log",
+      "bytes": 998,
+      "sha256": "7d7ec29c77842920aaf82011943fc8ff754668031c79e6f885c14f065fe28580"
+    },
+    {
+      "name": "premierecalendar-1.2.11.tar",
+      "bytes": 185146880,
+      "sha256": "63761e6e9ccb6a9c2f310b349edbf7bd31933c42413fd5351cda69f66485e298"
+    },
+    {
+      "name": "prepared-deployment.json",
+      "bytes": 447,
+      "sha256": "4b39ea7b88147ff3f5b058c2866749af528b5b8ee039d1d08f1be71f98d26d5c"
+    },
+    {
+      "name": "release-1.2.11-audit.json",
+      "bytes": 3713,
+      "sha256": "0e8f5693f351fd7dbb1a2aa045485442663309e0de0ce12bb1bc3351eb1454c8"
+    },
+    {
+      "name": "release-1.2.11-sbom.cdx.json",
+      "bytes": 313741,
+      "sha256": "784a07092409762ca672036316e4eae655690994c2e815d1baddd5a6f2b5b6e4"
+    },
+    {
+      "name": "release-1.2.11-smoke.log",
+      "bytes": 2186,
+      "sha256": "433a2a4ba594fd5cffe5bdfecae0c875d8340b4d27db12d40f9c763a3d8bcdfd"
+    },
+    {
+      "name": "release-1.2.11-trivy.json",
+      "bytes": 60227,
+      "sha256": "7eff79636b1bc097056219c83a1ad3c5783094ed3931574ecd3cf59229056f20"
+    },
+    {
+      "name": "release-notes.md",
+      "bytes": 5794,
+      "sha256": "6fb983c3640aa08b0dbf9243bdb22663ced749315f5cf82fe96a04306c83072e"
+    },
+    {
+      "name": "release-nuget-audit.log",
+      "bytes": 165,
+      "sha256": "943a0c7b661afc35c1906d895b3fb18261a70cae7cc0262873f1b5ecae63af6f"
+    },
+    {
+      "name": "release-syft.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "release-trivy.log",
+      "bytes": 480,
+      "sha256": "74d64e8e57e47ad2bbbc913c38fe74ef25bf5e30fd0b94de76c7759509dc12c5"
+    },
+    {
+      "name": "release131-backup-health.log",
+      "bytes": 128,
+      "sha256": "26df1eaf81109b5729c44fc2fcb6ffb274661328a898572f3689ced66dec651c"
+    },
+    {
+      "name": "release131-backup-strict.log",
+      "bytes": 74,
+      "sha256": "f3b9991c99ec97630864bab2af8043aaf07bfbdc01df1aa44c64d5ad20a7282e"
+    },
+    {
+      "name": "release131-pre-upgrade-backup.log",
+      "bytes": 156,
+      "sha256": "16a70241a71e1c0fdca33978af599fa2a8fe5ad7b75229936460d2cef3fc6785"
+    },
+    {
+      "name": "saved-filter-timings.md",
+      "bytes": 7176,
+      "sha256": "325f5a6b0118389f0fb70c0b6c4f7b3c2e88189e46d33c4423b2dde836314239"
+    },
+    {
+      "name": "SeriesRerunResults-20261102.md",
+      "bytes": 14779,
+      "sha256": "6b5553989b4dbb2d6e852c804d79073cf7e8f5deab381c23cf8b50d49c56fcd2"
+    },
+    {
+      "name": "smoke-blazor.web.js",
+      "bytes": 245494,
+      "sha256": "79728f577616593b254f06297dbf177f68a15ece5e90e0b6d9bb4443ae948321"
+    },
+    {
+      "name": "smoke-downgrade-command.json",
+      "bytes": 76,
+      "sha256": "ce0a67c168cade0162866e4e52bba6c9ee7000d1173aa4118dc023b4addb5ff5"
+    },
+    {
+      "name": "smoke-health.json",
+      "bytes": 1091,
+      "sha256": "78b6a70670f5618087811d1f115924153f859bf4c255980db932c5e0feb5e26e"
+    },
+    {
+      "name": "smoke-root.html",
+      "bytes": 16275,
+      "sha256": "06423384981983c69552d9e47eacf12fdd0262cbc047cad0989e1197f2d26c60"
+    },
+    {
+      "name": "source-1.2.11.tar",
+      "bytes": 15605760,
+      "sha256": "7a3d44e89ebf735b8e02753044a7f43283cdc42d320676aac596f714bc8f81b9"
+    },
+    {
+      "name": "unit-tests.log",
+      "bytes": 1629,
+      "sha256": "89239ff8e8dcb4c326e88a4f043c1ff767f8a5e118b25b31706b37df8de48a7f"
+    }
+  ]
+}

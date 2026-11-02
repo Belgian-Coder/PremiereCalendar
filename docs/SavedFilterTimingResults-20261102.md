@@ -1,8 +1,18 @@
 # Saved-filter timing results — 2026-11-02
 
-The relevant saved-filter result is **15.689 seconds, 49 complete series premieres and 449 HTTP responses**. Date-only navigation to November 2–8 kept the filters and displayed 31 complete premieres. The [legacy all-episodes trace](SeriesRerunResults-20261102.md) used different filters and is not representative of this view.
+Installed **v1.2.11** preserves the actual English/Dutch filters, new-series first-debut scope, series runtime 0–360 and movie runtime 45–360. Date-only navigation and reload retained those selections.
 
-## Scope and run
+| Installed forced refresh | Enqueue to complete | Final complete rows | HTTP responses |
+|---|---:|---:|---:|
+| Series, November 2–8 | 11.776s | 31 | 207 |
+| Series, October 19–25 | 29.629s | 49 | 455 |
+| Movies, October 19–25 | 48.888s | 134 | 1,289 |
+
+These are separate live observations with existing caches retained. They do not establish a cold-cache guarantee or controlled cross-version speedup. The earlier v1.2.10 observation below took 15.689s for the same 49-row scope with 449 responses; provider waits and process/cache state differed. The unrestricted [legacy all-episodes trace](SeriesRerunResults-20261102.md) was not representative of the saved user filters.
+
+[Installed detailed report](D:/Projects/PremiereCalendar/artifacts/release/1.2.11/installed-profiles/combined-installed-results.md) contains per-provider statuses, source and checkpoint timing, and the separately recorded final repair/backfill stages. Trakt returned HTTP403 and contributed no rows; non-2xx responses are not data successes. Wait/stage totals overlap and are not additive to elapsed wall time. The persisted detailed event writer remained healthy, with zero dropped events, writer failures and operational logging failures.
+
+## Earlier v1.2.10 scope and run
 
 This capture is the completed forced refresh job `8640262634324fea82dc2519d12f2007` on instance `3305c36599924f00a628147152dd13e3`. It used the actual saved series filters: new series only, English and Dutch, October 19–25, 2026, runtime 0, remaining filters at defaults. The authoritative cache key was `4da65c5f968e894b2adf`.
 
