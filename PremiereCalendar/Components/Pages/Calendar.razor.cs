@@ -34,6 +34,7 @@ public partial class Calendar
     private PageLoadDiagnostic? _pageLoadDiagnostic;
     private PageRenderDiagnostic? _pendingPageRenderDiagnostic;
     private long _cacheFreshnessRevision;
+    private string? _displayScopeKey;
     private bool _isFilterPaneOpen;
     private bool _refreshImageCache;
     private string? _imageCacheVersion;
@@ -613,6 +614,11 @@ public partial class Calendar
                 _pageMode = ResolvePageMode(args.Location);
                 ApplyQueryParameters(args.Location);
                 ApplyPageMode();
+                var scopeChanged = ResetDisplayedStateForScopeChange();
+                if (scopeChanged)
+                {
+                    StateHasChanged();
+                }
                 if (_pageMode != previousMode)
                 {
                     await ResetCalendarScrollAsync();
@@ -638,7 +644,8 @@ public partial class Calendar
                     return;
                 }
 
-                if (forceLoad
+                if (scopeChanged
+                    || forceLoad
                     || _filters.WeekStart != previousWeekStart
                     || !string.Equals(previousCriteriaKey, nextCriteriaKey, StringComparison.Ordinal))
                 {
@@ -712,6 +719,7 @@ public partial class Calendar
 
     private async Task LoadAsync(bool forceRefresh = false, PageLoadDiagnostic? diagnostic = null)
     {
+        ResetDisplayedStateForScopeChange();
         diagnostic ??= BeginPageLoadDiagnostic(forceRefresh);
         if (!await EnsureIntegrationSettingsLoadedAsync(diagnostic))
         {
@@ -1437,6 +1445,39 @@ public partial class Calendar
         {
             Logger.LogWarning(ex, "Calendar filter usage tracking failed.");
         }
+    }
+
+    private bool ResetDisplayedStateForScopeChange()
+    {
+        var scopeKey = $"{_pageMode}|{_filters.WeekStart:yyyyMMdd}|{PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey()}";
+        if (string.Equals(_displayScopeKey, scopeKey, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        _displayScopeKey = scopeKey;
+        var previousCancellation = _loadCancellation;
+        _loadCancellation = null;
+        if (previousCancellation is not null)
+        {
+            previousCancellation.Cancel();
+            previousCancellation.Dispose();
+        }
+
+        Interlocked.Increment(ref _cacheFreshnessRevision);
+        _items = [];
+        _visibleItems = [];
+        _cacheFreshness = [];
+        _visitChangeSummary = null;
+        _loadProgress.Clear();
+        InvalidateLoadProgressCache();
+        _sourceProgressFilter = null;
+        _isLoading = true;
+        _isRefreshingStaleCache = false;
+        _preserveStreamedItemOrder = false;
+        _error = null;
+        CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: true, 0);
+        return true;
     }
 
     private void RecalculateVisibleItems(

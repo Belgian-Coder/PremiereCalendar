@@ -129,6 +129,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     private readonly ConcurrentDictionary<string, JobBroadcast> _broadcasts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ExecutionCheckpoint> _executions = new(StringComparer.Ordinal);
     private readonly object _broadcastGate = new();
+    private readonly HashSet<string> _detachedJobs = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _signal = new(0);
     private readonly object _preemptionGate = new();
     private CancellationTokenSource? _activeBackgroundCancellation;
@@ -180,16 +181,22 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     {
         JobBroadcast broadcast;
         ChannelReader<ProviderWorkProgress> reader;
+        var missingJob = false;
         lock (_broadcastGate)
         {
             broadcast = _broadcasts.GetOrAdd(handle.JobId, _ => new JobBroadcast(_timeProvider));
             reader = broadcast.Subscribe();
+            _detachedJobs.Remove(handle.JobId);
         }
         try
         {
             await _store.SetForegroundInterestAsync(handle.JobId, true, cancellationToken);
             var snapshot = await _store.GetAsync(handle.JobId, cancellationToken);
-            if (snapshot is null) yield break;
+            if (snapshot is null)
+            {
+                missingJob = true;
+                yield break;
+            }
             broadcast.Seed(snapshot);
             _signal.Release();
             await foreach (var update in reader.ReadAllAsync(cancellationToken))
@@ -206,7 +213,22 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             {
                 broadcast.Unsubscribe(reader);
                 lastSubscriber = broadcast.SubscriberCount == 0;
-                if (lastSubscriber) _broadcasts.TryRemove(handle.JobId, out _);
+                if (lastSubscriber)
+                {
+                    _broadcasts.TryRemove(handle.JobId, out _);
+                    if (!missingJob && !broadcast.HasTerminalState)
+                    {
+                        // Remember an explicit detach across the claim/start gap. A
+                        // freshly enqueued job may start before its first watcher.
+                        _detachedJobs.Add(handle.JobId);
+                        foreach (var execution in _executions.Values.Where(value => value.JobId == handle.JobId))
+                        {
+                            if (execution.Cancellation is not { } cancellation) continue;
+                            if (execution.Kind == ProviderWorkKind.CalendarForeground
+                                && execution.Priority <= ProviderWorkPriority.ActiveWeek) cancellation.Cancel();
+                        }
+                    }
+                }
             }
             if (lastSubscriber)
             {
@@ -229,7 +251,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             cancellationToken);
         if (job is not null)
         {
-            _executions[job.LeaseOwner!] = new ExecutionCheckpoint(ReadResumeCheckpoint(job));
+            _executions[job.LeaseOwner!] = new ExecutionCheckpoint(job, ReadResumeCheckpoint(job));
             RecordDiagnostic(job, "scheduler.claim.completed", new()
             {
                 Stage = "claim", Outcome = "claimed",
@@ -247,7 +269,12 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     {
         var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var checkpoint = GetExecution(job);
-        checkpoint.Cancellation = linked;
+        lock (_broadcastGate)
+        {
+            checkpoint.Cancellation = linked;
+            if (_detachedJobs.Remove(job.JobId) && job.Kind == ProviderWorkKind.CalendarForeground
+                && job.Priority <= ProviderWorkPriority.ActiveWeek) linked.Cancel();
+        }
         checkpoint.StartedTimestamp = _timeProvider.GetTimestamp();
         RecordDiagnostic(job, "scheduler.execution.started", new() { Stage = "execution", Outcome = "started" });
         if (job.Priority > ProviderWorkPriority.ActiveWeek)
@@ -266,8 +293,11 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
                 if (ReferenceEquals(_activeBackgroundCancellation, execution)) _activeBackgroundCancellation = null;
             }
         }
-        execution.Dispose();
-        if (job.LeaseOwner is { } owner) _executions.TryRemove(owner, out _);
+        lock (_broadcastGate)
+        {
+            if (job.LeaseOwner is { } owner) _executions.TryRemove(owner, out _);
+            execution.Dispose();
+        }
     }
 
     internal async Task PublishAsync(
@@ -496,7 +526,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     }
 
     private ExecutionCheckpoint GetExecution(ProviderWorkSnapshot job)
-        => _executions.GetOrAdd(RequireOwner(job), _ => new ExecutionCheckpoint(ReadResumeCheckpoint(job)));
+        => _executions.GetOrAdd(RequireOwner(job), _ => new ExecutionCheckpoint(job, ReadResumeCheckpoint(job)));
 
     internal ProviderWorkCheckpoint? ReadResumeCheckpoint(ProviderWorkSnapshot job)
     {
@@ -595,6 +625,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     {
         lock (_broadcastGate)
         {
+            if (IsTerminal(progress.State)) _detachedJobs.Remove(jobId);
             if (_broadcasts.TryGetValue(jobId, out var broadcast)) broadcast.Publish(progress);
         }
     }
@@ -630,8 +661,11 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     private static string SummaryKey(PremiereLoadProgress progress)
         => $"{progress.CheckpointKey ?? progress.SourceName}:{(progress.HasSourceErrors ? "failure" : "complete")}";
 
-    private sealed class ExecutionCheckpoint(ProviderWorkCheckpoint? checkpoint)
+    private sealed class ExecutionCheckpoint(ProviderWorkSnapshot job, ProviderWorkCheckpoint? checkpoint)
     {
+        public string JobId { get; } = job.JobId;
+        public ProviderWorkKind Kind { get; } = job.Kind;
+        public ProviderWorkPriority Priority { get; } = job.Priority;
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public Dictionary<string, IReadOnlyList<PremiereItem>> CompletedSources { get; } = checkpoint?.CompletedSources is { } sources
             ? new(sources, StringComparer.Ordinal) : new(StringComparer.Ordinal);
@@ -781,6 +815,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         private long _sequence;
         private bool _terminal;
         public int SubscriberCount { get { lock (_gate) return _subscribers.Count; } }
+        public bool HasTerminalState { get { lock (_gate) return _terminal; } }
 
         public ChannelReader<ProviderWorkProgress> Subscribe()
         {

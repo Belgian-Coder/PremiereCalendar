@@ -228,6 +228,32 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
+    public void CalendarPage_ModeOnlyRouteTransitionReloadsEquivalentCriteria()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/?week=2026-05-04&media=series");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Single(service.Calls);
+            Assert.Contains("North Star", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent);
+        });
+
+        navigation.NavigateTo("/series?week=2026-05-04");
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, service.Calls.Count);
+            Assert.Contains("North Star", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent);
+            Assert.Contains("Series", component.Find(".calendar-mode-pill").TextContent);
+        });
+    }
+
+    [Fact]
     public void CalendarPage_NextWeekLoadsNextDateWindow()
     {
         var service = new FakePremiereService();
@@ -949,19 +975,33 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
-    public async Task CalendarPage_MediaRouteChangeAppendsStreamedCardsWithoutReorderingExistingCards()
+    public async Task CalendarPage_ClearsPriorScopeWhileNewRouteLoadsAndKeepsOnlyNewScopeItems()
     {
         var service = new RouteTransitionPremiereService();
         Services.AddSingleton<IPremiereService>(service);
+        _cacheMaintenance.DefaultMetadata = new CalendarCacheMetadata(
+            DateTimeOffset.Parse("2026-05-10T08:15:00Z"), ItemCount: 12, SchemaVersion: 3,
+            CalendarCacheCompleteness.Complete);
 
         var navigation = Services.GetRequiredService<NavigationManager>();
         navigation.NavigateTo("/series?week=2026-05-04");
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() =>
-            Assert.Contains("Initial Series", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent));
+        {
+            Assert.Contains("Initial Series", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent);
+            Assert.Contains("Series cache", component.Find("[data-testid='data-freshness-card']").TextContent);
+        });
 
         navigation.NavigateTo("/movies?week=2026-05-04");
+        await service.MovieRequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        component.WaitForAssertion(() =>
+        {
+            Assert.Empty(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Equal("Loading", component.Find(".calendar-result-count").TextContent.Trim());
+            Assert.Empty(component.FindAll("[data-testid='data-freshness-card']"));
+        });
+        service.ReleaseMoviePartial();
         await service.MoviePartialYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         component.WaitForAssertion(() =>
@@ -976,7 +1016,9 @@ public sealed class CalendarPageTests : BunitContext
         {
             var titles = component.FindAll("[data-testid='premiere-card'] h3").Select(node => node.TextContent).ToArray();
             Assert.Equal("Zulu Movie 01", titles[0]);
+            Assert.DoesNotContain("Initial Series", titles);
             Assert.DoesNotContain("Alpha Movie", titles);
+            Assert.Contains("Movies cache", component.Find("[data-testid='data-freshness-card']").TextContent);
         });
 
         component.WaitForElement("[data-day-load-more]").Click();
@@ -986,6 +1028,22 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Equal(11, titles.Length);
             Assert.Equal("Zulu Movie 01", titles[0]);
             Assert.Equal("Alpha Movie", titles[^1]);
+        });
+
+        navigation.NavigateTo("/movies?week=2026-05-11");
+        await service.NextWeekRequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        component.WaitForAssertion(() =>
+        {
+            Assert.Empty(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Equal("Loading", component.Find(".calendar-result-count").TextContent.Trim());
+            Assert.Empty(component.FindAll("[data-testid='data-freshness-card']"));
+        });
+        service.ReleaseNextWeekFinal();
+        component.WaitForAssertion(() =>
+        {
+            var card = Assert.Single(component.FindAll("[data-testid='premiere-card']"));
+            Assert.Contains("Next Week Movie", card.TextContent);
+            Assert.Equal("1 title", component.Find(".calendar-result-count").TextContent.Trim());
         });
     }
 
@@ -3261,13 +3319,23 @@ public sealed class CalendarPageTests : BunitContext
 
     private sealed class RouteTransitionPremiereService : IPremiereService
     {
+        private readonly TaskCompletionSource<bool> _releaseMoviePartial =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _releaseFinalMovieResult =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public TaskCompletionSource<bool> MoviePartialYielded { get; } =
+        private readonly TaskCompletionSource<bool> _releaseNextWeekFinal =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public TaskCompletionSource<bool> MovieRequestStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> MoviePartialYielded { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> NextWeekRequestStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ReleaseMoviePartial() => _releaseMoviePartial.TrySetResult(true);
         public void ReleaseFinalMovieResult() => _releaseFinalMovieResult.TrySetResult(true);
+        public void ReleaseNextWeekFinal() => _releaseNextWeekFinal.TrySetResult(true);
 
         public async IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(
             DateOnly start,
@@ -3279,6 +3347,17 @@ public sealed class CalendarPageTests : BunitContext
             var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
             if (criteria.IncludeMovies && !criteria.IncludeSeries)
             {
+                if (start == new DateOnly(2026, 5, 11))
+                {
+                    NextWeekRequestStarted.TrySetResult(true);
+                    await _releaseNextWeekFinal.Task.WaitAsync(cancellationToken);
+                    var nextWeekMovie = Movie("movie:next-week", "Next Week Movie", start);
+                    yield return new PremiereLoadProgress("Complete", 1, 1, [nextWeekMovie], IsFinal: true);
+                    yield break;
+                }
+
+                MovieRequestStarted.TrySetResult(true);
+                await _releaseMoviePartial.Task.WaitAsync(cancellationToken);
                 var partialMovies = Enumerable.Range(1, 10)
                     .Select(index => Movie($"movie:zulu:{index}", $"Zulu Movie {index:00}", start))
                     .ToArray();
