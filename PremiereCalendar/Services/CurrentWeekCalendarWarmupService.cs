@@ -12,6 +12,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
     private readonly ILogger<CurrentWeekCalendarWarmupService> _logger;
     private readonly BackgroundJobTimelineService? _timeline;
     private readonly IProviderWorkScheduler? _workScheduler;
+    private readonly NightlyCalendarWarmupPlanner? _nightlyPlanner;
     private DateTimeOffset? _lastMaintenanceUtc;
 
     public CurrentWeekCalendarWarmupService(
@@ -21,7 +22,8 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
         TimeProvider timeProvider,
         ILogger<CurrentWeekCalendarWarmupService> logger,
         BackgroundJobTimelineService? timeline = null,
-        IProviderWorkScheduler? workScheduler = null)
+        IProviderWorkScheduler? workScheduler = null,
+        NightlyCalendarWarmupPlanner? nightlyPlanner = null)
     {
         _scopeFactory = scopeFactory;
         _warmupOptions = warmupOptions;
@@ -30,6 +32,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
         _logger = logger;
         _timeline = timeline;
         _workScheduler = workScheduler;
+        _nightlyPlanner = nightlyPlanner;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -46,16 +49,35 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
                 var startupDelay = TimeSpan.FromSeconds(Math.Max(0, _warmupOptions.CurrentValue.StartupDelaySeconds));
                 if (startupDelay > TimeSpan.Zero)
                 {
-                    await Task.Delay(startupDelay, stoppingToken);
+                    await Task.Delay(startupDelay, _timeProvider, stoppingToken);
                 }
 
                 await RunWarmupAndMaintenanceAsync(stoppingToken);
+            }
+            else
+            {
+                // Catch up the most recent night even when the separate periodic
+                // current-week startup warmup is disabled.
+                await RunNightlyPlanAsync(stoppingToken);
             }
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 var wakeInterval = TimeSpan.FromMinutes(Math.Max(1, _warmupOptions.CurrentValue.WakeIntervalMinutes));
-                await Task.Delay(wakeInterval, stoppingToken);
+                if (_warmupOptions.CurrentValue.NightlyEnabled)
+                {
+                    try
+                    {
+                        var now = _timeProvider.GetUtcNow();
+                        var untilNight = NightlyCalendarWarmupPlanner.NextOccurrenceUtc(now, _warmupOptions.CurrentValue) - now;
+                        if (untilNight < wakeInterval) wakeInterval = untilNight;
+                    }
+                    catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException or ArgumentException)
+                    {
+                        _logger.LogWarning(ex, "Nightly calendar schedule is invalid; periodic warmup will continue at its configured wake interval.");
+                    }
+                }
+                await Task.Delay(wakeInterval, _timeProvider, stoppingToken);
                 await RunWarmupAndMaintenanceAsync(stoppingToken);
             }
         }
@@ -66,6 +88,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
 
     private async Task RunWarmupAndMaintenanceAsync(CancellationToken stoppingToken)
     {
+        await RunNightlyPlanAsync(stoppingToken);
         if (_workScheduler is not null)
         {
             try
@@ -149,6 +172,20 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
                 _timeProvider.GetUtcNow(),
                 _timeProvider.GetElapsedTime(startedTimestamp),
                 CancellationToken.None);
+        }
+    }
+
+    private async Task RunNightlyPlanAsync(CancellationToken stoppingToken)
+    {
+        if (_nightlyPlanner is null) return;
+        try
+        {
+            await _nightlyPlanner.RunOnceAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Nightly calendar plan scheduling failed; coverage will be checked again on the next wake.");
         }
     }
 

@@ -273,7 +273,7 @@ Week-level normalized results are stored in a local file cache by default:
 "CalendarCache": {
   "Enabled": true,
   "Directory": "App_Data/cache/calendar",
-  "WeekCacheHours": 6,
+  "WeekCacheHours": 30,
   "AdjacentWeekPrefetchEnabled": true,
   "FuturePrefetchWeeks": 4,
   "PastPrefetchWeeks": 2
@@ -321,6 +321,9 @@ The background warmer runs on startup and then wakes on a schedule to fill stale
   "CycleBudgetSeconds": 600,
   "WindowBudgetSeconds": 90,
   "StaleOnlyRemoteRefresh": true,
+  "NightlyEnabled": true,
+  "NightlyTimeZone": "Europe/Brussels",
+  "NightlyLocalTime": "02:00:00",
   "CleanupRetentionDays": 60
 }
 ```
@@ -328,6 +331,14 @@ The background warmer runs on startup and then wakes on a schedule to fill stale
 `WindowBudgetSeconds` defaults to 90 seconds. Large series weeks can take longer than a foreground
 cache hit to assemble; keep this comfortably above the observed provider-fetch duration so a warmup
 does not repeatedly time out and retry the same missing week on every wake.
+
+Nightly warmup builds every full week intersecting the current and next calendar month, using the factory Series and Movies profiles: English/Dutch, first-debut series, series runtime 0–360 and movies 45–360 minutes. It prioritizes the current week and interleaves both profiles. Explicit user selections remain unchanged; different filters have separate caches. Set the three `Nightly*` values through normal configuration providers, for example `CalendarWarmup__NightlyLocalTime=03:00:00`. `Enabled=false` disables both warmers; `NightlyEnabled=false` disables only nightly planning. An explicit `CalendarCache:WeekCacheHours` override takes precedence over the 30-hour default.
+
+At 02:00 Brussels time, the app persists a daily plan and queues independent durable week jobs without the periodic warmer's four-window cap. Startup catches up the most recent scheduled night. On daylight-saving transitions, a missing local time moves to the first valid minute; a repeated time runs at its earlier occurrence. Job handles and source checkpoints survive restart, foreground work keeps priority, and retries remain bounded by the provider scheduler. Terminal failures remain uncovered until the next night's plan.
+
+Nightly work rebuilds the normalized calendar snapshot while respecting provider response lifetimes and cached card enrichment. It does not force every external API call. A healthy discovery replaces removed rows; a failed source retains provisional fallback rows. A week counts as covered only when its cache is complete, was published at or after that night's cutoff, and has a persisted successful nightly receipt, including legitimately empty weeks. Old-night leaves are superseded before execution/publication when a newer schedule occurrence is due. The receipt proves that night's rebuild; subsequent ordinary refreshes can still replace the cache. An explicit shorter cache TTL can expire the result before the following night. Operational logs record plan coverage and each window's profile, range, job ID, outcome, row count and duration; detailed provider/stage timings continue in the performance logs described above. A successful enqueue alone is not proof of complete coverage.
+
+The daily plan uses application-state key `calendar-warmup:nightly-plan:v1`. Receipts use `calendar-warmup:nightly-receipt:v1:<cutoff ticks>:<profile hash>:<week start>:<week end>` and remain as small historical proof records. A typical two-month plan adds 20 rows per day, approximately 7,300 per year. No new retention/deletion policy is introduced.
 
 Foreground UI loads have their own budget:
 

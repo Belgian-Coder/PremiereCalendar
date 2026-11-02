@@ -217,16 +217,20 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 var hydrated = await TraceEnrichmentStageAsync("cache.hydration",
                     () => HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken));
                 var cachedItems = ApplyRequestedFilters(hydrated, filters);
-                if (snapshot.IsComplete)
+                if (snapshot.IsComplete && resumeState?.RefreshCalendarSnapshot != true)
                 {
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
                     yield break;
                 }
 
                 var freshIds = snapshot.FreshItems.Select(item => item.CanonicalId).ToHashSet(StringComparer.Ordinal);
-                seededItems = cachedItems.Where(item => freshIds.Contains(item.CanonicalId)).ToArray();
-                staleSeededItems = cachedItems.Where(item => !freshIds.Contains(item.CanonicalId)).ToArray();
-                if (snapshot.HasFreshSeries || snapshot.HasFreshMovies)
+                // Snapshot refresh may reuse metadata and provisional rows, but its
+                // successful final result must reflect fresh discovery (including removals).
+                seededItems = resumeState?.RefreshCalendarSnapshot == true
+                    ? [] : cachedItems.Where(item => freshIds.Contains(item.CanonicalId)).ToArray();
+                staleSeededItems = resumeState?.RefreshCalendarSnapshot == true
+                    ? cachedItems : cachedItems.Where(item => !freshIds.Contains(item.CanonicalId)).ToArray();
+                if (resumeState?.RefreshCalendarSnapshot != true && (snapshot.HasFreshSeries || snapshot.HasFreshMovies))
                 {
                     yield return CreateProgress("Week cache", seededItems, seededItems, fromCache: true);
                     if (ShouldUseSharedMediaCache(criteria))

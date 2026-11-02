@@ -65,6 +65,9 @@ public sealed record ProviderWorkResumeState(
     IReadOnlyDictionary<string, IReadOnlyList<PremiereItem>> CompletedSources,
     PremiereLoadProgress? LatestProgress)
 {
+    // Rebuild the normalized week while retaining provider TTLs and cached enrichment.
+    public bool RefreshCalendarSnapshot { get; init; }
+
     // The callback may publish local cache files only. Provider/network work and
     // other database connections must stay outside its ownership transaction.
     internal Func<Func<CancellationToken, Task>, CancellationToken, Task>? PublishCacheAsync { get; init; }
@@ -1211,6 +1214,35 @@ public sealed class ProviderWorkSchedulerHostedService(
                 break;
             }
             case ProviderWorkKind.CalendarWarmup:
+            {
+                var nightly = JsonSerializer.Deserialize<NightlyCalendarWarmupPayload>(job.PayloadJson);
+                if (nightly?.Marker == NightlyCalendarWarmupPayload.PayloadMarker)
+                {
+                    var checkpoint = scheduler.ReadResumeCheckpoint(job);
+                    var resume = new ProviderWorkResumeState(
+                        checkpoint?.CompletedSources ?? new Dictionary<string, IReadOnlyList<PremiereItem>>(StringComparer.Ordinal),
+                        checkpoint?.CalendarProgress)
+                    {
+                        RefreshCalendarSnapshot = true,
+                        PublishCacheAsync = (publish, token) => scheduler.PublishOwnedCacheAsync(job, publish, token)
+                    };
+                    if (checkpoint?.CalendarProgress is { IsFinal: false } persisted)
+                        scheduler.ReplayPersistedProgress(job, persisted);
+                    // A different load may have finished this cohort while the
+                    // job waited. Do not retain an old provider retry deadline
+                    // when the runner can now finish via its cache-only guard.
+                    await scheduler.PublishAsync(job, new ProviderWorkProgress(job.JobId,
+                        ProviderWorkState.Running, "Checking nightly calendar window coverage."), cancellationToken);
+                    var outcome = await scope.ServiceProvider.GetRequiredService<NightlyCalendarWarmupRunner>().RunAsync(
+                        nightly, job.JobId, resume,
+                        progress => scheduler.PublishAsync(job, new ProviderWorkProgress(job.JobId,
+                            ProviderWorkState.Running, progress.ProgressText ?? progress.SourceName,
+                            progress.CompletedWork, progress.TotalWork, progress), cancellationToken), cancellationToken);
+                    if (outcome == NightlyCalendarWarmupOutcome.Superseded)
+                        await scheduler.PublishAsync(job, new ProviderWorkProgress(job.JobId,
+                            ProviderWorkState.Running, "Nightly window superseded; no cache was published for a newer night."), cancellationToken);
+                    break;
+                }
                 await scope.ServiceProvider.GetRequiredService<CurrentWeekCalendarWarmupRunner>().RunOnceAsync(
                     cancellationToken,
                     new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(StringComparer.Ordinal), null)
@@ -1218,6 +1250,7 @@ public sealed class ProviderWorkSchedulerHostedService(
                         PublishCacheAsync = (publish, token) => scheduler.PublishOwnedCacheAsync(job, publish, token)
                     });
                 break;
+            }
             case ProviderWorkKind.ProviderDeltaSync:
                 await scope.ServiceProvider.GetRequiredService<ProviderDeltaSyncService>().RunOnceAsync(cancellationToken);
                 break;

@@ -8,7 +8,7 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
-public sealed class PostgresPersistenceTests
+public sealed partial class PostgresPersistenceTests
 {
     [PostgresFact]
     public async Task PostgreSql_InitializesStoresAndImportsVerifiedSqliteSnapshot()

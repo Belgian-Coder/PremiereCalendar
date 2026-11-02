@@ -14,6 +14,8 @@ Use it to:
 
 TMDb is required for live data. Everything else is optional.
 
+The app prepares the current and next month each night at 02:00 Brussels time for the default Series and Movies filters. Completed week caches stay fresh for 30 hours by default, so ordinary date navigation can use local data. Missed nightly work catches up after restart; progress and timings are logged automatically. See [configuration](docs/Configuration.md#adaptive-warmup-and-load-budget) for schedule overrides.
+
 ## Screenshots
 
 | Dark mode | Light mode |

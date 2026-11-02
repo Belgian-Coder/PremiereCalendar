@@ -15,4 +15,7 @@ public sealed class CalendarWarmupOptions
     public int CycleBudgetSeconds { get; set; } = 600;
     public int WindowBudgetSeconds { get; set; } = 90;
     public bool StaleOnlyRemoteRefresh { get; set; } = true;
+    public bool NightlyEnabled { get; set; } = true;
+    public string NightlyTimeZone { get; set; } = "Europe/Brussels";
+    public TimeOnly NightlyLocalTime { get; set; } = new(2, 0);
 }

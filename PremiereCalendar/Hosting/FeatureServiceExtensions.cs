@@ -64,6 +64,8 @@ public static class FeatureServiceExtensions
         services.AddSingleton<IAdjacentWeekPrefetcher>(provider => provider.GetRequiredService<AdjacentWeekPrefetcher>());
         services.AddHostedService(provider => provider.GetRequiredService<AdjacentWeekPrefetcher>());
         services.AddScoped<CurrentWeekCalendarWarmupRunner>();
+        services.AddSingleton<NightlyCalendarWarmupPlanner>();
+        services.AddScoped<NightlyCalendarWarmupRunner>();
         services.AddScoped<CacheMaintenanceRunner>();
         services.AddHostedService<CurrentWeekCalendarWarmupService>();
         services.AddSingleton<ImdbDatasetRefreshService>();
