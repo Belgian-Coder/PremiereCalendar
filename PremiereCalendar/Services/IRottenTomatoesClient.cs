@@ -4,6 +4,18 @@ namespace PremiereCalendar.Services;
 
 public interface IRottenTomatoesClient
 {
+    Task<RottenTomatoesScores?> TryGetCachedScoresAsync(
+        PremiereMediaType mediaType,
+        string title,
+        int? year,
+        string? wikidataId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(TryGetCachedScores(mediaType, title, year, wikidataId, out var scores)
+            ? scores : null);
+    }
+
     bool TryGetCachedScores(
         PremiereMediaType mediaType,
         string title,

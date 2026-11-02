@@ -4244,7 +4244,9 @@ public sealed partial class PremiereServiceTests
         int enrichmentProgressBatchSize = 10,
         IProviderWorkScheduler? workScheduler = null,
         PremiereTelemetry? telemetry = null,
-        int maxEnrichmentConcurrency = 16)
+        int maxEnrichmentConcurrency = 16,
+        ScoreBackfillService? scoreBackfill = null,
+        MissingExternalIdRepairService? missingExternalIdRepair = null)
     {
         return new PremiereService(
             tmdb,
@@ -4268,6 +4270,8 @@ public sealed partial class PremiereServiceTests
             imdbRatingsStore,
             providerCacheStateStore: null,
             rottenTomatoesClient: rottenTomatoes,
+            scoreBackfillService: scoreBackfill,
+            missingExternalIdRepairService: missingExternalIdRepair,
             workScheduler: workScheduler,
             telemetry: telemetry);
     }

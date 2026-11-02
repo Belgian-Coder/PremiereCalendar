@@ -72,9 +72,8 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
             return false;
         }
 
-        return _cache.TryGetValue(
-            ScoreCacheKey(mediaType, normalizedTitle, year, wikidataId),
-            out scores!);
+        var cacheKey = ScoreCacheKey(mediaType, normalizedTitle, year, wikidataId);
+        return TryGetVerifiedMemory(cacheKey, out scores!);
     }
 
     public async Task<RottenTomatoesScores> GetScoresAsync(
@@ -86,32 +85,87 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         bool forceRefresh = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(title)) return RottenTomatoesScores.Empty;
+        var key = $"rottentomatoes:{_options.BaseUrl}:{ScoreCacheKey(mediaType, NormalizeTitle(title), year, wikidataId)}";
+        if (ProviderRefreshScope.Current is { } refresh)
+        {
+            var cacheKey = ScoreCacheKey(mediaType, NormalizeTitle(title), year, wikidataId);
+            return await refresh.RunAsync(key, forceRefresh,
+                token => GetScoresCoreAsync(mediaType, title, year, wikidataId, token, forceRefresh),
+                cancellationToken,
+                value => TryGetVerifiedMemory(cacheKey, out var latest)
+                    && ReferenceEquals(latest, value));
+        }
+        return (await GetScoresCoreAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh)).Value;
+    }
+
+    public async Task<RottenTomatoesScores?> TryGetCachedScoresAsync(
+        PremiereMediaType mediaType,
+        string title,
+        int? year,
+        string? wikidataId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (TryGetCachedScores(mediaType, title, year, wikidataId, out var cached)) return cached;
+        if (!_options.Enabled || _responseCache is null || string.IsNullOrWhiteSpace(title)) return null;
+        var normalizedTitle = NormalizeTitle(title);
+        if (string.IsNullOrWhiteSpace(normalizedTitle)) return null;
+        var cacheKey = ScoreCacheKey(mediaType, normalizedTitle, year, wikidataId);
+        var requestKey = $"scores-v1:{_options.BaseUrl}:{cacheKey}";
+        using var publication = _responseCache.BeginOperation("rottentomatoes", requestKey, forceRefresh: false);
+        var persisted = await _responseCache.GetAsync<RottenTomatoesScores>(
+            "rottentomatoes", requestKey, TimeSpan.FromHours(Math.Clamp(_options.CacheHours, 1, 168)), cancellationToken);
+        if (persisted is null) return null;
+        return await publication.PublishAsync(current =>
+        {
+            if (TryGetVerifiedMemory(cacheKey, out var latest))
+                return Task.FromResult(latest);
+            if (current)
+            {
+                _cache.Set(cacheKey, new CachedScores(persisted.Value, true), persisted.ExpiresAtUtc);
+            }
+            return Task.FromResult(persisted.Value);
+        }, cancellationToken);
+    }
+
+    private async Task<ProviderRefreshResult<RottenTomatoesScores>> GetScoresCoreAsync(
+        PremiereMediaType mediaType,
+        string title,
+        int? year,
+        string? wikidataId,
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!_options.Enabled || string.IsNullOrWhiteSpace(title))
         {
-            return RottenTomatoesScores.Empty;
+            return new(RottenTomatoesScores.Empty, false);
         }
 
         var normalizedTitle = NormalizeTitle(title);
         if (string.IsNullOrWhiteSpace(normalizedTitle))
         {
-            return RottenTomatoesScores.Empty;
+            return new(RottenTomatoesScores.Empty, false);
         }
 
         var cacheKey = ScoreCacheKey(mediaType, normalizedTitle, year, wikidataId);
         var lifetime = TimeSpan.FromHours(Math.Clamp(_options.CacheHours, 1, 168));
         var persistentRequestKey = $"scores-v1:{_options.BaseUrl}:{cacheKey}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out RottenTomatoesScores? cachedScores) && cachedScores is not null)
+        if (!forceRefresh && TryGetMemory(cacheKey, out var cachedScores, out var cacheVerified)
+            && (ProviderRefreshScope.Current is null || cacheVerified))
         {
-            return cachedScores;
+            return new(cachedScores, cacheVerified);
         }
 
         return await _singleFlight.RunAsync(
             forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}",
             async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out RottenTomatoesScores? flightCachedScores) && flightCachedScores is not null)
+                if (!forceRefresh && TryGetMemory(cacheKey, out var flightCachedScores, out var flightVerified)
+                    && (ProviderRefreshScope.Current is null || flightVerified))
                 {
-                    return flightCachedScores;
+                    return new ProviderRefreshResult<RottenTomatoesScores>(flightCachedScores, flightVerified);
                 }
 
                 using var publication = _responseCache?.BeginOperation("rottentomatoes", persistentRequestKey, forceRefresh);
@@ -122,9 +176,13 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                     {
                         return await publication!.PublishAsync(current =>
                         {
-                            if (_cache.TryGetValue(cacheKey, out RottenTomatoesScores? latest) && latest is not null) return Task.FromResult(latest);
-                            if (current) _cache.Set(cacheKey, persisted.Value, persisted.ExpiresAtUtc);
-                            return Task.FromResult(persisted.Value);
+                            if (TryGetVerifiedMemory(cacheKey, out var latest))
+                                return Task.FromResult(new ProviderRefreshResult<RottenTomatoesScores>(latest, true));
+                            if (current)
+                            {
+                                _cache.Set(cacheKey, new CachedScores(persisted.Value, true), persisted.ExpiresAtUtc);
+                            }
+                            return Task.FromResult(new ProviderRefreshResult<RottenTomatoesScores>(persisted.Value, current));
                         }, token);
                     }
                 }
@@ -144,7 +202,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                         fetchOutcome);
                 }
 
-                if (forceRefresh && !fetchOutcome.Successful) return scores;
+                if (forceRefresh && !fetchOutcome.Successful) return new ProviderRefreshResult<RottenTomatoesScores>(scores, false);
 
                 if (publication is not null)
                 {
@@ -152,19 +210,48 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                     {
                         if (current)
                         {
-                            _cache.Set(cacheKey, scores, lifetime);
+                            _cache.Set(cacheKey, new CachedScores(scores, fetchOutcome.Successful), lifetime);
                             if (fetchOutcome.Successful) await _responseCache!.SaveAsync("rottentomatoes", persistentRequestKey, scores, token, invalidateOversized: forceRefresh);
                         }
-                        else if (!forceRefresh && _cache.TryGetValue(cacheKey, out RottenTomatoesScores? latest) && latest is not null) return latest;
-                        return scores;
+                        else if (!forceRefresh && TryGetMemory(cacheKey, out var latest, out var latestVerified))
+                            return new ProviderRefreshResult<RottenTomatoesScores>(latest, latestVerified);
+                        return new ProviderRefreshResult<RottenTomatoesScores>(scores, current && fetchOutcome.Successful);
                     }, token, successfulForceCommit: fetchOutcome.Successful);
                 }
 
-                _cache.Set(cacheKey, scores, lifetime);
-                return scores;
+                _cache.Set(cacheKey, new CachedScores(scores, fetchOutcome.Successful), lifetime);
+                return new ProviderRefreshResult<RottenTomatoesScores>(scores, fetchOutcome.Successful);
             },
             cancellationToken);
     }
+
+    private bool TryGetMemory(string cacheKey, out RottenTomatoesScores scores, out bool verified)
+    {
+        if (_cache.TryGetValue(cacheKey, out object? value))
+        {
+            if (value is CachedScores entry)
+            {
+                scores = entry.Scores;
+                verified = entry.Verified;
+                return true;
+            }
+            // Compatibility with scores supplied by older in-process consumers.
+            if (value is RottenTomatoesScores legacy)
+            {
+                scores = legacy;
+                verified = false;
+                return true;
+            }
+        }
+        scores = RottenTomatoesScores.Empty;
+        verified = false;
+        return false;
+    }
+
+    private bool TryGetVerifiedMemory(string cacheKey, out RottenTomatoesScores scores)
+        => TryGetMemory(cacheKey, out scores, out var verified) && verified;
+
+    private sealed record CachedScores(RottenTomatoesScores Scores, bool Verified);
 
     private static string ScoreCacheKey(
         PremiereMediaType mediaType,

@@ -32,94 +32,120 @@ public sealed class AdaptiveProviderPolicy(
         CancellationToken callerCancellationToken = default)
     {
         var acquisitionStarted = timeProvider.GetTimestamp();
+        var priority = ProviderExecutionContext.CapturePriorityAccessor();
         var state = _states.GetOrAdd(provider, key => new ProviderRuntimeState(key, Math.Max(1, maximumConcurrency)));
         await state.EnsureLoadedAsync(store, cancellationToken);
-        while (true)
+        ProviderAdmissionQueue<byte>.Entry waiter;
+        lock (state.Gate) waiter = state.Admissions.Enqueue(0, priority, cancellationToken);
+        try
         {
-            Task waitTask;
-            var waitStage = "cooldown";
-            lock (state.Gate)
+            while (true)
             {
-                var now = timeProvider.GetUtcNow();
-                if (state.CircuitState == ProviderCircuitState.Closed && state.CooldownUntilUtc is { } retryAfter && retryAfter > now)
+                cancellationToken.ThrowIfCancellationRequested();
+                Task waitTask;
+                var waitStage = "cooldown";
+                lock (state.Gate)
                 {
-                    var remaining = retryAfter - now;
-                    var exceedsRequestBudget = cooldownWaitBudget is { } budget
-                        && remaining >= budget - timeProvider.GetElapsedTime(acquisitionStarted);
-                    if (exceedsRequestBudget) callerCancellationToken.ThrowIfCancellationRequested();
-                    if (ExceedsInlineWaitLimit(state, retryAfter, remaining) || exceedsRequestBudget)
+                    var now = timeProvider.GetUtcNow();
+                    if (state.CircuitState == ProviderCircuitState.Closed && state.CooldownUntilUtc is { } retryAfter && retryAfter > now)
                     {
-                        throw new ProviderRetryAfterException(provider, retryAfter);
-                    }
-                    waitTask = state.GetOrStartCooldownWait(retryAfter, remaining, timeProvider);
-                }
-                else
-                {
-                    if (state.CircuitState == ProviderCircuitState.Closed && state.CooldownUntilUtc is { } closedCooldown && closedCooldown <= now)
-                    {
-                        state.CooldownUntilUtc = null;
-                        state.ClearCooldownWait();
-                    }
-
-                    if (state.CircuitState == ProviderCircuitState.Open)
-                    {
-                        if (state.CooldownUntilUtc is { } cooldown && cooldown > now)
+                        var remaining = retryAfter - now;
+                        var exceedsRequestBudget = cooldownWaitBudget is { } budget
+                            && remaining >= budget - timeProvider.GetElapsedTime(acquisitionStarted);
+                        if (exceedsRequestBudget) callerCancellationToken.ThrowIfCancellationRequested();
+                        if (ExceedsInlineWaitLimit(state, retryAfter, remaining) || exceedsRequestBudget)
                         {
-                            var remaining = cooldown - now;
-                            var exceedsRequestBudget = cooldownWaitBudget is { } budget
-                                && remaining >= budget - timeProvider.GetElapsedTime(acquisitionStarted);
-                            if (exceedsRequestBudget) callerCancellationToken.ThrowIfCancellationRequested();
-                            if (remaining > MaximumInlineWait() || exceedsRequestBudget)
-                            {
-                                throw new ProviderCircuitOpenException(provider, cooldown);
-                            }
-                            waitTask = state.GetOrStartCooldownWait(cooldown, remaining, timeProvider);
+                            throw new ProviderRetryAfterException(provider, retryAfter);
                         }
-                        else
-                        {
-                            state.CircuitState = ProviderCircuitState.HalfOpen;
-                            state.CurrentConcurrency = 1;
-                            state.ClearCooldownWait();
-                            waitTask = Task.CompletedTask;
-                        }
+                        waitTask = state.GetOrStartCooldownWait(retryAfter, remaining, timeProvider);
                     }
                     else
                     {
-                        waitTask = Task.CompletedTask;
-                    }
-
-                    if (waitTask.IsCompleted)
-                    {
-                        var allowed = state.CircuitState == ProviderCircuitState.HalfOpen ? 1 : state.CurrentConcurrency;
-                        if (state.ActiveRequests < allowed)
+                        if (state.CircuitState == ProviderCircuitState.Closed && state.CooldownUntilUtc is { } closedCooldown && closedCooldown <= now)
                         {
-                            state.ActiveRequests++;
-                            telemetry.SetProviderConcurrency(provider, state.CurrentConcurrency, state.ActiveRequests, state.CircuitState.ToString());
-                            diagnostics?.Record("provider.acquire.completed", new()
-                            {
-                                Stage = "acquire", Outcome = "acquired",
-                                DurationMilliseconds = timeProvider.GetElapsedTime(acquisitionStarted).TotalMilliseconds,
-                                Active = state.ActiveRequests, Limit = allowed
-                            });
-                            return new ProviderExecutionLease(this, state, timeProvider.GetTimestamp());
+                            state.CooldownUntilUtc = null;
+                            state.ClearCooldownWait();
                         }
 
-                        waitTask = state.Signal.Task;
-                        waitStage = "concurrency";
+                        if (state.CircuitState == ProviderCircuitState.Open)
+                        {
+                            if (state.CooldownUntilUtc is { } cooldown && cooldown > now)
+                            {
+                                var remaining = cooldown - now;
+                                var exceedsRequestBudget = cooldownWaitBudget is { } budget
+                                    && remaining >= budget - timeProvider.GetElapsedTime(acquisitionStarted);
+                                if (exceedsRequestBudget) callerCancellationToken.ThrowIfCancellationRequested();
+                                if (remaining > MaximumInlineWait() || exceedsRequestBudget)
+                                {
+                                    throw new ProviderCircuitOpenException(provider, cooldown);
+                                }
+                                waitTask = state.GetOrStartCooldownWait(cooldown, remaining, timeProvider);
+                            }
+                            else
+                            {
+                                state.CircuitState = ProviderCircuitState.HalfOpen;
+                                state.CurrentConcurrency = 1;
+                                state.ClearCooldownWait();
+                                waitTask = Task.CompletedTask;
+                            }
+                        }
+                        else
+                        {
+                            waitTask = Task.CompletedTask;
+                        }
+
+                        if (waitTask.IsCompleted)
+                        {
+                            var allowed = state.CircuitState == ProviderCircuitState.HalfOpen ? 1 : state.CurrentConcurrency;
+                            if (state.ActiveRequests < allowed)
+                            {
+                                var next = state.Admissions.PeekNext();
+                                if (ReferenceEquals(next, waiter))
+                                {
+                                    state.Admissions.Admit(waiter);
+                                    state.ActiveRequests++;
+                                    // Other queued callers may use the remaining capacity.
+                                    state.Pulse();
+                                    telemetry.SetProviderConcurrency(provider, state.CurrentConcurrency, state.ActiveRequests, state.CircuitState.ToString());
+                                    diagnostics?.Record("provider.acquire.completed", new()
+                                    {
+                                        Stage = "acquire", Outcome = "acquired",
+                                        DurationMilliseconds = timeProvider.GetElapsedTime(acquisitionStarted).TotalMilliseconds,
+                                        Active = state.ActiveRequests, Limit = allowed
+                                    });
+                                    return new ProviderExecutionLease(this, state, timeProvider.GetTimestamp());
+                                }
+                                // Promotion can change the selected caller between
+                                // wakeups. Ensure it runs even if every prior wakeup
+                                // has already been observed and no request is active.
+                                next?.Pulse();
+                            }
+
+                            waitTask = waiter.WaitTask;
+                            waitStage = "concurrency";
+                        }
                     }
                 }
-            }
-            var waitStarted = timeProvider.GetTimestamp();
-            var waitOutcome = "completed";
-            try { await waitTask.WaitAsync(cancellationToken); }
-            catch (OperationCanceledException) { waitOutcome = "cancelled"; throw; }
-            finally
-            {
-                diagnostics?.Record($"provider.{waitStage}.wait.completed", new()
+                var waitStarted = timeProvider.GetTimestamp();
+                var waitOutcome = "completed";
+                try { await waitTask.WaitAsync(cancellationToken); }
+                catch (OperationCanceledException) { waitOutcome = "cancelled"; throw; }
+                finally
                 {
-                    Stage = waitStage, Outcome = waitOutcome,
-                    WaitMilliseconds = timeProvider.GetElapsedTime(waitStarted).TotalMilliseconds
-                });
+                    diagnostics?.Record($"provider.{waitStage}.wait.completed", new()
+                    {
+                        Stage = waitStage, Outcome = waitOutcome,
+                        WaitMilliseconds = timeProvider.GetElapsedTime(waitStarted).TotalMilliseconds
+                    });
+                }
+            }
+        }
+        finally
+        {
+            lock (state.Gate)
+            {
+                // Cancellation or a deferred cooldown must not block the next caller.
+                if (state.Admissions.Remove(waiter)) state.Pulse();
             }
         }
     }
@@ -325,7 +351,7 @@ public sealed class AdaptiveProviderPolicy(
         public ProviderCircuitState CircuitState { get; set; }
         public DateTimeOffset? CooldownUntilUtc { get; set; }
         public DateTimeOffset? LastThrottledUtc { get; set; }
-        public TaskCompletionSource Signal { get; private set; } = NewSignal();
+        public ProviderAdmissionQueue<byte> Admissions { get; } = new();
 
         public async Task EnsureLoadedAsync(ProviderAdaptiveStateStore store, CancellationToken cancellationToken)
         {
@@ -395,12 +421,7 @@ public sealed class AdaptiveProviderPolicy(
             _cooldownWaitTask = null;
         }
 
-        public void Pulse()
-        {
-            var signal = Signal;
-            Signal = NewSignal();
-            signal.TrySetResult();
-        }
+        public void Pulse() => Admissions.PulseAll();
 
         public ProviderAdaptiveSnapshot ToSnapshot(DateTimeOffset now)
         {
@@ -422,8 +443,6 @@ public sealed class AdaptiveProviderPolicy(
             }
         }
 
-        private static TaskCompletionSource NewSignal()
-            => new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
 

@@ -40,9 +40,10 @@ public sealed class SingleFlightCoordinatorTests
 
         try
         {
-            Assert.True((bool)tryAddWaiter.Invoke(flight, null)!);
-            Assert.True((bool)releaseWaiter.Invoke(flight, null)!);
-            Assert.False((bool)tryAddWaiter.Invoke(flight, null)!);
+            object?[] arguments = [(Func<ProviderWorkPriority>)(() => ProviderWorkPriority.Foreground), 0L];
+            Assert.True((bool)tryAddWaiter.Invoke(flight, arguments)!);
+            Assert.True((bool)releaseWaiter.Invoke(flight, [arguments[1]])!);
+            Assert.False((bool)tryAddWaiter.Invoke(flight, arguments)!);
         }
         finally
         {

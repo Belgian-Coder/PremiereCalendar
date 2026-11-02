@@ -24,6 +24,8 @@ public sealed class SingleFlightCoordinator : ISingleFlightCoordinator
         cancellationToken.ThrowIfCancellationRequested();
 
         Flight flight;
+        long waiterId;
+        var priorityAccessor = ProviderExecutionContext.CapturePriorityAccessor();
         while (true)
         {
             flight = _flights.GetOrAdd(
@@ -35,7 +37,7 @@ public sealed class SingleFlightCoordinator : ISingleFlightCoordinator
                     return createdFlight;
                 });
 
-            if (flight.TryAddWaiter())
+            if (flight.TryAddWaiter(priorityAccessor, out waiterId))
             {
                 break;
             }
@@ -50,7 +52,7 @@ public sealed class SingleFlightCoordinator : ISingleFlightCoordinator
         }
         finally
         {
-            if (flight.ReleaseWaiter())
+            if (flight.ReleaseWaiter(waiterId))
             {
                 TryRemoveFlight(key, flight);
                 flight.Cancel();
@@ -86,39 +88,62 @@ public sealed class SingleFlightCoordinator : ISingleFlightCoordinator
         private readonly CancellationTokenSource _cancellation = new();
         private readonly Lazy<Task<object?>> _task;
         private readonly object _gate = new();
-        private int _waiterCount;
+        private readonly Dictionary<long, Func<ProviderWorkPriority>> _waiters = new();
+        private long _nextWaiterId;
         private bool _isCanceling;
         private bool _isDisposed;
 
         public Flight(Func<CancellationToken, Task<object?>> factory)
         {
             _task = new Lazy<Task<object?>>(
-                () => factory(_cancellation.Token),
+                () => RunWithPriorityAsync(factory),
                 LazyThreadSafetyMode.ExecutionAndPublication);
         }
 
         public Task<object?> Task => _task.Value;
 
-        public bool TryAddWaiter()
+        private async Task<object?> RunWithPriorityAsync(Func<CancellationToken, Task<object?>> factory)
+        {
+            using var scope = ProviderExecutionContext.Push(CurrentPriority);
+            return await factory(_cancellation.Token);
+        }
+
+        private ProviderWorkPriority CurrentPriority()
         {
             lock (_gate)
             {
+                var priority = ProviderWorkPriority.Maintenance;
+                foreach (var accessor in _waiters.Values)
+                {
+                    var current = accessor();
+                    if (current < priority) priority = current;
+                }
+                return priority;
+            }
+        }
+
+        public bool TryAddWaiter(Func<ProviderWorkPriority> priorityAccessor, out long waiterId)
+        {
+            lock (_gate)
+            {
+                waiterId = 0;
                 if (_isCanceling || _isDisposed)
                 {
                     return false;
                 }
 
-                _waiterCount++;
+                waiterId = ++_nextWaiterId;
+                _waiters.Add(waiterId, priorityAccessor);
                 return true;
             }
         }
 
-        public bool ReleaseWaiter()
+        public bool ReleaseWaiter(long waiterId)
         {
             lock (_gate)
             {
-                _waiterCount--;
-                if (_waiterCount > 0 || Task.IsCompleted)
+                _waiters.Remove(waiterId);
+                if (_waiters.Count > 0 || Task.IsCompleted)
                 {
                     return false;
                 }

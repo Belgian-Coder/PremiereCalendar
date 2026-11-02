@@ -648,7 +648,30 @@ public sealed class TmdbClient : ITmdbClient
             cancellationToken);
     }
 
-    private async Task<T?> GetOrCreateAsync<T>(
+    private Task<T?> GetOrCreateAsync<T>(
+        string cacheKey,
+        TimeSpan duration,
+        Func<CancellationToken, Task<T?>> factory,
+        CancellationToken cancellationToken,
+        bool forceRefresh,
+        string? persistentRequestKey = null)
+    {
+        if (typeof(T) != typeof(TmdbDetailsWithExtras) || ProviderRefreshScope.Current is not { } refresh)
+            return GetOrCreateCoreAsync(cacheKey, duration, factory, cancellationToken, forceRefresh, persistentRequestKey);
+
+        return refresh.RunAsync($"tmdb:{_options.BaseUrl}:{cacheKey}", forceRefresh,
+            async token =>
+            {
+                var value = await GetOrCreateCoreAsync(cacheKey, duration, factory, token, forceRefresh, persistentRequestKey);
+                return new ProviderRefreshResult<T?>(value, IsVerifiedDetail(value));
+            }, cancellationToken,
+            value => IsVerifiedDetail(value) && _cache.TryGetValue(cacheKey, out T? latest) && ReferenceEquals(latest, value));
+
+        bool IsVerifiedDetail(T? value) => value is TmdbDetailsWithExtras { Id: > 0 } details
+            && cacheKey.EndsWith($":{details.Id}", StringComparison.Ordinal);
+    }
+
+    private async Task<T?> GetOrCreateCoreAsync<T>(
         string cacheKey,
         TimeSpan duration,
         Func<CancellationToken, Task<T?>> factory,

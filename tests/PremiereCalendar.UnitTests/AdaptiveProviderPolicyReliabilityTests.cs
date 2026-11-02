@@ -31,6 +31,140 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AdmissionGivesForegroundTheNextSlotAndKeepsFifoWithinEachLane()
+    {
+        var policy = CreatePolicy();
+        await using var active = await policy.AcquireAsync("priority", 1, CancellationToken.None);
+        var backgroundFirst = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Warmup);
+        var backgroundSecond = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Maintenance);
+        var foregroundFirst = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Foreground);
+        var foregroundSecond = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Foreground);
+
+        await CompleteCancelledAsync(active);
+        await using var first = await foregroundFirst.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(foregroundSecond.IsCompleted);
+        Assert.False(backgroundFirst.IsCompleted);
+        await CompleteCancelledAsync(first);
+        await using var second = await foregroundSecond.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(backgroundFirst.IsCompleted);
+        await CompleteCancelledAsync(second);
+        await using var third = await backgroundFirst.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(backgroundSecond.IsCompleted);
+        await CompleteCancelledAsync(third);
+        await using var fourth = await backgroundSecond.WaitAsync(TimeSpan.FromSeconds(5));
+        await CompleteCancelledAsync(fourth);
+        Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+    }
+
+    [Fact]
+    public async Task AdmissionReevaluatesThePriorityOfAlreadyQueuedWork()
+    {
+        var policy = CreatePolicy();
+        await using var active = await policy.AcquireAsync("promotion", 1, CancellationToken.None);
+        var olderBackground = AcquireWithPriorityAsync(policy, "promotion", 1, () => ProviderWorkPriority.Warmup);
+        var priority = ProviderWorkPriority.Maintenance;
+        var promoted = AcquireWithPriorityAsync(policy, "promotion", 1, () => priority);
+        priority = ProviderWorkPriority.Foreground;
+
+        await CompleteCancelledAsync(active);
+        await using var foreground = await promoted.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(olderBackground.IsCompleted);
+        await CompleteCancelledAsync(foreground);
+        await using var background = await olderBackground.WaitAsync(TimeSpan.FromSeconds(5));
+        await CompleteCancelledAsync(background);
+    }
+
+    [Fact]
+    public async Task AdmissionBoundsForegroundBurstsSoBackgroundEventuallyReceivesCapacity()
+    {
+        var policy = CreatePolicy();
+        await using var active = await policy.AcquireAsync("fairness", 1, CancellationToken.None);
+        var background = AcquireWithPriorityAsync(policy, "fairness", 1, () => ProviderWorkPriority.Maintenance);
+        var foreground = Enumerable.Range(0, 9)
+            .Select(_ => AcquireWithPriorityAsync(policy, "fairness", 1, () => ProviderWorkPriority.Foreground)).ToArray();
+
+        await CompleteCancelledAsync(active);
+        for (var index = 0; index < 8; index++)
+        {
+            await using var lease = await foreground[index].WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(background.IsCompleted);
+            await CompleteCancelledAsync(lease);
+        }
+        await using var backgroundLease = await background.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(foreground[8].IsCompleted);
+        await CompleteCancelledAsync(backgroundLease);
+        await using var last = await foreground[8].WaitAsync(TimeSpan.FromSeconds(5));
+        await CompleteCancelledAsync(last);
+    }
+
+    [Fact]
+    public async Task CancelledAdmissionDoesNotBlockFreedSlotsOrIncreaseTheConfiguredLimit()
+    {
+        var policy = CreatePolicy();
+        await using var activeFirst = await policy.AcquireAsync("capacity", 2, CancellationToken.None);
+        await using var activeSecond = await policy.AcquireAsync("capacity", 2, CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Foreground, cancellation.Token);
+        var backgroundFirst = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Warmup);
+        var backgroundSecond = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Warmup);
+        var foreground = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Foreground);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        Assert.Equal(2, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+
+        await CompleteCancelledAsync(activeFirst);
+        await using var foregroundLease = await foreground.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(backgroundFirst.IsCompleted);
+        Assert.Equal(2, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+        await CompleteCancelledAsync(activeSecond);
+        await using var first = await backgroundFirst.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(backgroundSecond.IsCompleted);
+        Assert.Equal(2, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+        await CompleteCancelledAsync(foregroundLease);
+        await using var second = await backgroundSecond.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(2, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+        await CompleteCancelledAsync(first);
+        await CompleteCancelledAsync(second);
+        Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+    }
+
+    [Fact]
+    public async Task ForegroundAdmissionStillWaitsForCooldownAndOneHalfOpenProbe()
+    {
+        var policy = CreatePolicy(new ProviderSchedulerOptions { RetryMaximumSeconds = 300 });
+        for (var index = 0; index < 5; index++)
+        {
+            await using var failed = await policy.AcquireAsync("half-open-priority", 4, CancellationToken.None);
+            await failed.CompleteAsync(ProviderExecutionResult.Failed, null, CancellationToken.None);
+        }
+        var background = AcquireWithPriorityAsync(policy, "half-open-priority", 4, () => ProviderWorkPriority.Warmup);
+        var foreground = AcquireWithPriorityAsync(policy, "half-open-priority", 4, () => ProviderWorkPriority.Foreground);
+        Assert.False(background.IsCompleted);
+        Assert.False(foreground.IsCompleted);
+        _time.Advance(TimeSpan.FromSeconds(60));
+
+        await using var probe = await foreground.WaitAsync(TimeSpan.FromSeconds(5));
+        var halfOpen = Assert.Single(policy.GetSnapshots());
+        Assert.Equal(ProviderCircuitState.HalfOpen, halfOpen.CircuitState);
+        Assert.Equal(1, halfOpen.ActiveRequests);
+        Assert.False(background.IsCompleted);
+        await probe.CompleteAsync(ProviderExecutionResult.Success, null, CancellationToken.None);
+        await using var backgroundLease = await background.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ActiveRequests);
+        await CompleteCancelledAsync(backgroundLease);
+    }
+
+    private static Task<ProviderExecutionLease> AcquireWithPriorityAsync(AdaptiveProviderPolicy policy,
+        string provider, int concurrency, Func<ProviderWorkPriority> priority, CancellationToken cancellationToken = default)
+    {
+        using var scope = ProviderExecutionContext.Push(priority);
+        return policy.AcquireAsync(provider, concurrency, cancellationToken);
+    }
+
+    private static Task CompleteCancelledAsync(ProviderExecutionLease lease)
+        => lease.CompleteAsync(ProviderExecutionResult.Cancelled, null, CancellationToken.None);
+
+    [Fact]
     public async Task CallerCancellationStormReleasesSlotsWithoutDamagingProviderHealth()
     {
         var policy = CreatePolicy();

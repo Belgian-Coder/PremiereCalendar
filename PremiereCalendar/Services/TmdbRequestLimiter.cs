@@ -7,12 +7,19 @@ namespace PremiereCalendar.Services;
 public sealed class TmdbRequestLimiter : IDisposable
 {
     private readonly TokenBucketRateLimiter _limiter;
-    private readonly SemaphoreSlim _concurrentRequests;
+    private readonly object _gate = new();
+    private readonly ProviderAdmissionQueue<TaskCompletionSource<TmdbRequestLease>> _admissions = new();
+    private readonly CancellationTokenSource _stopping = new();
+    private readonly int _maximumConcurrency;
+    private int _activeRequests;
+    private CancellationTokenSource? _rateWaitCancellation;
+    private bool _processing;
+    private bool _disposed;
 
     public TmdbRequestLimiter(IOptions<TmdbOptions> options)
     {
         var requestsPerSecond = Math.Clamp(options.Value.MaxRequestsPerSecond, 1, 40);
-        var maxConcurrentRequests = Math.Clamp(options.Value.MaxConcurrentRequests, 1, 40);
+        _maximumConcurrency = Math.Clamp(options.Value.MaxConcurrentRequests, 1, 40);
         _limiter = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
         {
             TokenLimit = requestsPerSecond,
@@ -22,48 +29,149 @@ public sealed class TmdbRequestLimiter : IDisposable
             QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
             AutoReplenishment = true
         });
-        _concurrentRequests = new SemaphoreSlim(maxConcurrentRequests, maxConcurrentRequests);
     }
 
     public async ValueTask<TmdbRequestLease> AcquireAsync(CancellationToken cancellationToken)
     {
-        await _concurrentRequests.WaitAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var completion = new TaskCompletionSource<TmdbRequestLease>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ProviderAdmissionQueue<TaskCompletionSource<TmdbRequestLease>>.Entry waiter;
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            waiter = _admissions.Enqueue(completion, ProviderExecutionContext.CapturePriorityAccessor(), cancellationToken);
+        }
+        using var registration = cancellationToken.Register(() =>
+        {
+            lock (_gate)
+            {
+                if (_admissions.Remove(waiter)) completion.TrySetCanceled(cancellationToken);
+                if (_admissions.PeekNext() is null) _rateWaitCancellation?.Cancel();
+            }
+        });
+        StartProcessing();
+        return await completion.Task;
+    }
 
-        RateLimitLease? rateLease = null;
+    private void StartProcessing()
+    {
+        lock (_gate)
+        {
+            if (_disposed || _processing || _activeRequests >= _maximumConcurrency || _admissions.PeekNext() is null) return;
+            _processing = true;
+        }
+        _ = ProcessQueueAsync();
+    }
+
+    private async Task ProcessQueueAsync()
+    {
         try
         {
-            rateLease = await _limiter.AcquireAsync(1, cancellationToken);
-            if (!rateLease.IsAcquired)
+            while (true)
             {
-                _concurrentRequests.Release();
-                return new TmdbRequestLease(null, rateLease, IsAcquired: false);
+                CancellationTokenSource rateWait;
+                lock (_gate)
+                {
+                    if (_disposed || _activeRequests >= _maximumConcurrency || _admissions.PeekNext() is null)
+                    {
+                        _processing = false;
+                        return;
+                    }
+                    rateWait = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+                    _rateWaitCancellation = rateWait;
+                }
+                // Only one token acquisition is pending. Requests retain their
+                // live priority until that token is available, instead of taking
+                // all concurrency slots while queued in the FIFO token bucket.
+                RateLimitLease rateLease;
+                try
+                {
+                    rateLease = await _limiter.AcquireAsync(1, rateWait.Token);
+                }
+                catch (OperationCanceledException) when (!_stopping.IsCancellationRequested)
+                {
+                    // All pending callers cancelled. A new arrival may already
+                    // be queued, so recheck before stopping the admission pump.
+                    continue;
+                }
+                finally
+                {
+                    lock (_gate)
+                    {
+                        _rateWaitCancellation = null;
+                        rateWait.Dispose();
+                    }
+                }
+                lock (_gate)
+                {
+                    var next = _disposed ? null : _admissions.PeekNext();
+                    if (next is null)
+                    {
+                        rateLease.Dispose();
+                        _processing = false;
+                        return;
+                    }
+                    _admissions.Admit(next);
+                    if (rateLease.IsAcquired)
+                    {
+                        _activeRequests++;
+                        next.Value.TrySetResult(new TmdbRequestLease(Release, rateLease, true));
+                    }
+                    else
+                    {
+                        next.Value.TrySetResult(new TmdbRequestLease((Action?)null, rateLease, false));
+                    }
+                    if (_activeRequests >= _maximumConcurrency || _admissions.PeekNext() is null)
+                    {
+                        _processing = false;
+                        return;
+                    }
+                }
             }
-
-            return new TmdbRequestLease(_concurrentRequests, rateLease, IsAcquired: true);
         }
-        catch
+        catch (Exception exception)
         {
-            rateLease?.Dispose();
-            _concurrentRequests.Release();
-            throw;
+            lock (_gate)
+            {
+                _processing = false;
+                foreach (var pending in _admissions.Drain()) pending.Value.TrySetException(exception);
+            }
         }
+    }
+
+    private void Release()
+    {
+        lock (_gate) _activeRequests--;
+        StartProcessing();
     }
 
     public void Dispose()
     {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            foreach (var pending in _admissions.Drain()) pending.Value.TrySetException(new ObjectDisposedException(nameof(TmdbRequestLimiter)));
+        }
+        _stopping.Cancel();
         _limiter.Dispose();
-        _concurrentRequests.Dispose();
+        _stopping.Dispose();
     }
 }
 
 public sealed class TmdbRequestLease : IDisposable
 {
-    private SemaphoreSlim? _concurrentRequests;
+    private Action? _release;
     private RateLimitLease? _rateLease;
 
     public TmdbRequestLease(SemaphoreSlim? concurrentRequests, RateLimitLease? rateLease, bool IsAcquired)
+        : this(concurrentRequests is null ? null : () => concurrentRequests.Release(), rateLease, IsAcquired)
     {
-        _concurrentRequests = concurrentRequests;
+    }
+
+    internal TmdbRequestLease(Action? release, RateLimitLease? rateLease, bool IsAcquired)
+    {
+        _release = release;
         _rateLease = rateLease;
         this.IsAcquired = IsAcquired;
     }
@@ -73,6 +181,6 @@ public sealed class TmdbRequestLease : IDisposable
     public void Dispose()
     {
         Interlocked.Exchange(ref _rateLease, null)?.Dispose();
-        Interlocked.Exchange(ref _concurrentRequests, null)?.Release();
+        Interlocked.Exchange(ref _release, null)?.Invoke();
     }
 }

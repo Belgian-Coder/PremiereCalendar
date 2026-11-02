@@ -44,7 +44,38 @@ public sealed partial class PremiereService
     public IAsyncEnumerable<PremiereLoadProgress> StreamCoreAsync(
         DateOnly start, DateOnly end, bool forceRefresh = false, CalendarFilters? filters = null,
         ProviderWorkResumeState? resumeState = null, CancellationToken cancellationToken = default)
-        => TraceCalendarStream(start, end, forceRefresh, filters, resumeState, true, cancellationToken);
+        => WithRefreshScope(TraceCalendarStream(start, end, forceRefresh, filters, resumeState, true, cancellationToken),
+            cancellationToken);
+
+    private static async IAsyncEnumerable<T> WithRefreshScope<T>(
+        IAsyncEnumerable<T> source, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var scope = ProviderRefreshScope.Create();
+        IAsyncEnumerator<T> enumerator;
+        using (ProviderRefreshScope.Use(scope)) enumerator = source.GetAsyncEnumerator(cancellationToken);
+        try
+        {
+            while (true)
+            {
+                bool moved;
+                T current = default!;
+                // Async iterator callers restore their execution context after every yield.
+                // Re-enter the same refresh generation for every continuation and cleanup.
+                using (ProviderRefreshScope.Use(scope))
+                {
+                    moved = await enumerator.MoveNextAsync();
+                    if (moved) current = enumerator.Current;
+                }
+
+                if (!moved) yield break;
+                yield return current;
+            }
+        }
+        finally
+        {
+            using (ProviderRefreshScope.Use(scope)) await enumerator.DisposeAsync();
+        }
+    }
 
     private IAsyncEnumerable<PremiereLoadProgress> TraceCalendarStream(
         DateOnly start, DateOnly end, bool forceRefresh, CalendarFilters? filters,

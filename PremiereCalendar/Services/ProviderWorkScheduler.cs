@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
@@ -117,10 +116,6 @@ internal sealed class ProviderWorkLeaseLostException(string jobId)
 
 public sealed class ProviderWorkScheduler : IProviderWorkScheduler
 {
-    private static readonly JsonSerializerOptions CheckpointJsonOptions = new()
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
     private readonly ProviderWorkStore _store;
     private readonly TimeProvider _timeProvider;
     private readonly ProviderSchedulerOptions _options;
@@ -131,8 +126,9 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     private readonly object _broadcastGate = new();
     private readonly HashSet<string> _detachedJobs = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _signal = new(0);
-    private readonly object _preemptionGate = new();
-    private CancellationTokenSource? _activeBackgroundCancellation;
+    // Keep dispatch and claim registration ordered across the database await.
+    // Provider execution never holds this gate; both workers still run concurrently.
+    private readonly SemaphoreSlim _dispatchGate = new(1, 1);
     private readonly Random _jitter = new();
 
     public ProviderWorkScheduler(
@@ -159,17 +155,37 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }
 
         var enqueueStarted = _timeProvider.GetTimestamp();
-        var result = await _store.EnqueueAsync(request, _timeProvider.GetUtcNow(), cancellationToken);
+        ProviderWorkHandle result;
+        await _dispatchGate.WaitAsync(cancellationToken);
+        try
+        {
+            result = await _store.EnqueueAsync(request, _timeProvider.GetUtcNow(), cancellationToken);
+            if (request.Priority <= ProviderWorkPriority.ActiveWeek)
+            {
+                lock (_broadcastGate)
+                {
+                    // An enqueue establishes fresh foreground demand even if its
+                    // watcher has not subscribed yet. Retire an older detach.
+                    _detachedJobs.Remove(result.JobId);
+                    foreach (var execution in _executions.Values)
+                    {
+                        if (execution.JobId == result.JobId)
+                            execution.Promote(request.Priority);
+                        else if (execution.Priority > ProviderWorkPriority.ActiveWeek)
+                        {
+                            execution.PreemptionRequested = true;
+                            execution.Cancellation?.Cancel();
+                        }
+                    }
+                }
+            }
+        }
+        finally { _dispatchGate.Release(); }
         _telemetry.RecordDiagnostic("scheduler.enqueue.completed", JobContext(result.JobId), new()
         {
             Stage = "enqueue", JobKind = request.Kind.ToString(), Outcome = result.Created ? "created" : "attached",
             DurationMilliseconds = _timeProvider.GetElapsedTime(enqueueStarted).TotalMilliseconds
         });
-        if (request.Priority <= ProviderWorkPriority.ActiveWeek)
-        {
-            lock (_preemptionGate) _activeBackgroundCancellation?.Cancel();
-        }
-
         if (result.Created) _signal.Release();
         if (result.Created) await RefreshCountsAsync(cancellationToken);
         return result;
@@ -187,6 +203,8 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             broadcast = _broadcasts.GetOrAdd(handle.JobId, _ => new JobBroadcast(_timeProvider));
             reader = broadcast.Subscribe();
             _detachedJobs.Remove(handle.JobId);
+            foreach (var execution in _executions.Values.Where(value => value.JobId == handle.JobId))
+                if (execution.Kind == ProviderWorkKind.CalendarForeground) execution.Promote(ProviderWorkPriority.Foreground);
         }
         try
         {
@@ -243,15 +261,35 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     internal async Task<ProviderWorkSnapshot?> ClaimNextAsync(bool foregroundOnly, string leaseOwner, CancellationToken cancellationToken)
     {
         var claimStarted = _timeProvider.GetTimestamp();
-        var job = await _store.ClaimNextAsync(
-            foregroundOnly,
-            leaseOwner,
-            _timeProvider.GetUtcNow(),
-            TimeSpan.FromSeconds(Math.Clamp(_options.LeaseSeconds, 30, 900)),
-            cancellationToken);
+        ProviderWorkSnapshot? job;
+        ExecutionCheckpoint? claimedExecution = null;
+        await _dispatchGate.WaitAsync(cancellationToken);
+        try
+        {
+            job = await _store.ClaimNextAsync(
+                foregroundOnly,
+                leaseOwner,
+                _timeProvider.GetUtcNow(),
+                TimeSpan.FromSeconds(Math.Clamp(_options.LeaseSeconds, 30, 900)),
+                cancellationToken);
+            if (job is not null)
+            {
+                claimedExecution = new ExecutionCheckpoint(job, null);
+                lock (_broadcastGate)
+                {
+                    if (job.Kind == ProviderWorkKind.CalendarForeground
+                        && _broadcasts.TryGetValue(job.JobId, out var broadcast) && broadcast.SubscriberCount > 0)
+                        claimedExecution.Promote(ProviderWorkPriority.Foreground);
+                    _executions[job.LeaseOwner!] = claimedExecution;
+                }
+            }
+        }
+        finally { _dispatchGate.Release(); }
         if (job is not null)
         {
-            _executions[job.LeaseOwner!] = new ExecutionCheckpoint(job, ReadResumeCheckpoint(job));
+            // Registration is now visible to enqueue/promotion, so checkpoint
+            // decoding need not delay another short dispatch transaction.
+            claimedExecution!.Restore(ReadResumeCheckpoint(job));
             RecordDiagnostic(job, "scheduler.claim.completed", new()
             {
                 Stage = "claim", Outcome = "claimed",
@@ -272,27 +310,17 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         lock (_broadcastGate)
         {
             checkpoint.Cancellation = linked;
-            if (_detachedJobs.Remove(job.JobId) && job.Kind == ProviderWorkKind.CalendarForeground
-                && job.Priority <= ProviderWorkPriority.ActiveWeek) linked.Cancel();
+            if (checkpoint.PreemptionRequested
+                || _detachedJobs.Remove(job.JobId) && job.Kind == ProviderWorkKind.CalendarForeground
+                && checkpoint.Priority <= ProviderWorkPriority.ActiveWeek) linked.Cancel();
         }
         checkpoint.StartedTimestamp = _timeProvider.GetTimestamp();
         RecordDiagnostic(job, "scheduler.execution.started", new() { Stage = "execution", Outcome = "started" });
-        if (job.Priority > ProviderWorkPriority.ActiveWeek)
-        {
-            lock (_preemptionGate) _activeBackgroundCancellation = linked;
-        }
         return linked;
     }
 
     internal void EndExecution(ProviderWorkSnapshot job, CancellationTokenSource execution)
     {
-        if (job.Priority > ProviderWorkPriority.ActiveWeek)
-        {
-            lock (_preemptionGate)
-            {
-                if (ReferenceEquals(_activeBackgroundCancellation, execution)) _activeBackgroundCancellation = null;
-            }
-        }
         lock (_broadcastGate)
         {
             if (job.LeaseOwner is { } owner) _executions.TryRemove(owner, out _);
@@ -562,7 +590,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     {
         if (!execution.Dirty || execution.Latest is not { } latest) return;
         var checkpointStarted = _timeProvider.GetTimestamp();
-        var checkpoint = JsonSerializer.Serialize(new ProviderWorkCheckpoint(
+        var checkpoint = ProviderWorkCheckpointCodec.Encode(new ProviderWorkCheckpoint(
             latest.Message, latest.CompletedWork, latest.TotalWork,
             latest.CalendarProgress is { } calendar ? calendar with { SourceItems = [] } : null,
             execution.CompletedSources)
@@ -578,8 +606,9 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
                     CalendarProgress = pair.Value.CalendarProgress is { } summary
                         ? summary with { Items = [], SourceItems = [] } : null
                 }, StringComparer.Ordinal)
-        }, CheckpointJsonOptions);
-        if (!await _store.UpdateProgressAsync(job.JobId, RequireOwner(job), checkpoint, _timeProvider.GetUtcNow(), cancellationToken))
+        });
+        var storeStarted = _timeProvider.GetTimestamp();
+        if (!await _store.UpdateProgressAsync(job.JobId, RequireOwner(job), checkpoint.Json, _timeProvider.GetUtcNow(), cancellationToken))
         {
             RecordLeaseLost(job, "checkpoint");
             execution.Cancellation?.Cancel();
@@ -591,12 +620,21 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         {
             Stage = "checkpoint", Outcome = "persisted", Count = latest.CompletedWork, Total = latest.TotalWork,
             IsFinal = latest.CalendarProgress?.IsFinal,
+            Reason = checkpoint.Encoding, RawBytes = checkpoint.RawBytes, StoredBytes = checkpoint.StoredBytes,
+            SerializeMilliseconds = checkpoint.SerializeMilliseconds, EncodeMilliseconds = checkpoint.EncodeMilliseconds,
+            StoreMilliseconds = _timeProvider.GetElapsedTime(storeStarted).TotalMilliseconds,
             DurationMilliseconds = _timeProvider.GetElapsedTime(checkpointStarted).TotalMilliseconds
         });
     }
 
     internal IDisposable UseJobDiagnosticContext(ProviderWorkSnapshot job)
         => _telemetry.UseDiagnosticContext(JobContext(job.JobId));
+
+    internal IDisposable UseProviderExecutionContext(ProviderWorkSnapshot job)
+    {
+        var execution = GetExecution(job);
+        return ProviderExecutionContext.Push(() => execution.Priority);
+    }
 
     internal void RecordExecutionFinished(ProviderWorkSnapshot job, string outcome, string? reason = null)
     {
@@ -665,7 +703,14 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     {
         public string JobId { get; } = job.JobId;
         public ProviderWorkKind Kind { get; } = job.Kind;
-        public ProviderWorkPriority Priority { get; } = job.Priority;
+        private int _priority = (int)job.Priority;
+        public ProviderWorkPriority Priority => (ProviderWorkPriority)Volatile.Read(ref _priority);
+        // Promotion and cancellation registration share the scheduler broadcast gate.
+        public void Promote(ProviderWorkPriority priority)
+        {
+            if (priority < Priority) Volatile.Write(ref _priority, (int)priority);
+        }
+        public bool PreemptionRequested { get; set; }
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public Dictionary<string, IReadOnlyList<PremiereItem>> CompletedSources { get; } = checkpoint?.CompletedSources is { } sources
             ? new(sources, StringComparer.Ordinal) : new(StringComparer.Ordinal);
@@ -680,6 +725,16 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         public CancellationTokenSource? Cancellation { get; set; }
         public long? StartedTimestamp { get; set; }
         public int FinishedDiagnostic;
+
+        public void Restore(ProviderWorkCheckpoint? restored)
+        {
+            if (restored is null) return;
+            foreach (var pair in restored.CompletedSources) CompletedSources[pair.Key] = pair.Value;
+            foreach (var pair in restored.SourceCompletedUtc) SourceCompletedUtc[pair.Key] = pair.Value;
+            foreach (var pair in restored.SourceSummaries) SourceSummaries[pair.Key] = pair.Value;
+            Latest = new(string.Empty, ProviderWorkState.Running, restored.Message,
+                restored.CompletedWork, restored.TotalWork, restored.CalendarProgress);
+        }
     }
 
     private static bool IsTerminal(ProviderWorkState state)
@@ -713,9 +768,15 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         if (string.IsNullOrWhiteSpace(json)) return null;
         try
         {
-            using var document = JsonDocument.Parse(json);
-            var checkpoint = JsonSerializer.Deserialize<ProviderWorkCheckpoint>(json);
-            if (checkpoint is null) return null;
+            using var document = ProviderWorkCheckpointCodec.Decode(json);
+            var checkpoint = document.RootElement.Deserialize<ProviderWorkCheckpoint>();
+            if (checkpoint is null || checkpoint.Message is null || checkpoint.CompletedSources is null
+                || checkpoint.SourceCompletedUtc is null || checkpoint.SourceSummaries is null
+                || checkpoint.CompletedSources.Any(pair => pair.Value is null || pair.Value.Any(item => item is null))
+                || !ValidProgress(checkpoint.CalendarProgress)
+                || checkpoint.SourceSummaries.Any(pair => pair.Value is null || !ValidProgress(pair.Value.CalendarProgress))) return null;
+            if (document.RootElement.TryGetProperty("Version", out var declaredVersion)
+                && declaredVersion.GetInt32() is < 1 or > 3) return null;
             // Version 2 distinguishes successful outcomes but has no source age.
             // It remains useful for display; only dated version 3 sources can skip
             // fetching on a later claim.
@@ -754,6 +815,11 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }
         catch (JsonException) { return null; }
     }
+
+    private static bool ValidProgress(PremiereLoadProgress? progress)
+        => progress is null || progress.Items is not null && progress.SourceItems is not null
+            && progress.FailedSourceNames is not null && progress.Items.All(item => item is not null)
+            && progress.SourceItems.All(item => item is not null);
 
     private static PremiereLoadProgress? NormalizeDeferredProgress(
         PremiereLoadProgress? progress, ProviderWorkSnapshot snapshot, DateTimeOffset now)
@@ -1050,6 +1116,7 @@ public sealed class ProviderWorkSchedulerHostedService(
 
                 using var diagnosticContext = scheduler.UseJobDiagnosticContext(job);
                 var execution = scheduler.BeginExecution(job, stoppingToken);
+                using var providerContext = scheduler.UseProviderExecutionContext(job);
                 var heartbeat = scheduler.MaintainLeaseAsync(job, execution);
                 try
                 {
@@ -1225,6 +1292,18 @@ public sealed class ProviderWorkStore(
             var existingId = Convert.ToString(await existing.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
             if (!string.IsNullOrWhiteSpace(existingId))
             {
+                if (request.Priority <= ProviderWorkPriority.ActiveWeek)
+                {
+                    await using var promote = connection.CreateCommand();
+                    promote.Transaction = transaction;
+                    promote.CommandText = """
+                        UPDATE ProviderWorkJobs SET Priority = @priority
+                        WHERE JobId = @id AND State IN ('Queued', 'RetryWaiting') AND Priority > @priority
+                        """;
+                    DatabaseParameters.Add(promote, "@priority", (int)request.Priority);
+                    DatabaseParameters.Add(promote, "@id", existingId);
+                    await promote.ExecuteNonQueryAsync(cancellationToken);
+                }
                 await transaction.CommitAsync(cancellationToken);
                 return new ProviderWorkHandle(existingId, false);
             }

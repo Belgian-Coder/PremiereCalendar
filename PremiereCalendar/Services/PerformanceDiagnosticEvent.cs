@@ -31,6 +31,11 @@ public sealed record PerformanceDiagnosticDetails
     public long? Sequence { get; init; }
     public double? DurationMilliseconds { get; init; }
     public double? WaitMilliseconds { get; init; }
+    public double? SerializeMilliseconds { get; init; }
+    public double? EncodeMilliseconds { get; init; }
+    public double? StoreMilliseconds { get; init; }
+    public int? RawBytes { get; init; }
+    public int? StoredBytes { get; init; }
     public int? Active { get; init; }
     public int? Limit { get; init; }
     public bool? IsFinal { get; init; }
@@ -42,7 +47,9 @@ public sealed record PerformanceDiagnosticDetails
         Outcome = DiagnosticIdentifier.Code(Outcome), Reason = DiagnosticIdentifier.Code(Reason),
         Cache = DiagnosticIdentifier.Code(Cache), JobKind = DiagnosticIdentifier.Code(JobKind),
         SourceKey = DiagnosticIdentifier.Code(SourceKey), CacheKey = DiagnosticIdentifier.CacheKey(CacheKey),
-        DurationMilliseconds = Finite(DurationMilliseconds), WaitMilliseconds = Finite(WaitMilliseconds)
+        DurationMilliseconds = Finite(DurationMilliseconds), WaitMilliseconds = Finite(WaitMilliseconds),
+        SerializeMilliseconds = Finite(SerializeMilliseconds), EncodeMilliseconds = Finite(EncodeMilliseconds),
+        StoreMilliseconds = Finite(StoreMilliseconds)
     };
 
     private static double? Finite(double? value) => value is { } number && double.IsFinite(number) ? Math.Max(0, number) : null;

@@ -155,6 +155,7 @@ public sealed partial class ProviderWorkSchedulerTests
         private readonly ConcurrentDictionary<DateOnly, TaskCompletionSource> _released = new();
         private readonly ConcurrentDictionary<DateOnly, int> _fetches = new();
         private readonly ConcurrentDictionary<DateOnly, int> _cancellations = new();
+        private readonly ConcurrentDictionary<DateOnly, Func<ProviderWorkPriority>> _priorities = new();
         public TaskCompletionSource Cancelled { get; } = NewSignal();
         public TaskCompletionSource Resumed { get; } = NewSignal();
         public ProviderWorkResumeState? AbandonedResume { get; private set; }
@@ -162,12 +163,14 @@ public sealed partial class ProviderWorkSchedulerTests
         public void Release(DateOnly start) => _released.GetOrAdd(start, _ => NewSignal()).TrySetResult();
         public int SourceFetchCount(DateOnly start) => _fetches.GetValueOrDefault(start);
         public int CancellationCount(DateOnly start) => _cancellations.GetValueOrDefault(start);
+        public ProviderWorkPriority CurrentPriority(DateOnly start) => _priorities[start]();
         private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public async IAsyncEnumerable<PremiereLoadProgress> StreamCoreAsync(DateOnly start, DateOnly end, bool forceRefresh,
             CalendarFilters? filters, ProviderWorkResumeState? resumeState,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
+            _priorities[start] = ProviderExecutionContext.CapturePriorityAccessor();
             if (resumeState?.CompletedSources.ContainsKey("completed-source") != true)
             {
                 _fetches.AddOrUpdate(start, 1, (_, count) => count + 1);

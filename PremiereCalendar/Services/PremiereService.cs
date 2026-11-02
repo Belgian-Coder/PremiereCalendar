@@ -1229,6 +1229,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         CancellationToken cancellationToken,
         bool allowRemote = true)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (items.Count == 0 || (_imdbRatingsStore is null && _rottenTomatoesClient is null))
         {
             return items;
@@ -1253,9 +1254,10 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 _logger.LogWarning(ex, "Skipping cached IMDb dataset batch lookup for {Count} IMDb IDs.", imdbIds.Length);
             }
         }
-        var rottenTomatoesByItemKey = new Dictionary<string, RottenTomatoesScores>(StringComparer.Ordinal);
+        var rottenTomatoesByItemKey = await HydrateCachedRottenTomatoesAsync(items, filters, cancellationToken, allowRemote);
         for (var index = 0; index < items.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var item = items[index];
             var hydratedItem = item;
             if (_imdbRatingsStore is not null && HasCachedImdbId(item))
@@ -1277,37 +1279,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             if ((hydratedItem.RottenTomatoesScore is null || hydratedItem.RottenTomatoesAudienceScore is null)
                 && _rottenTomatoesClient is not null)
             {
-                var rottenTomatoesKey = RottenTomatoesHydrationKey(hydratedItem);
-                if (!rottenTomatoesByItemKey.TryGetValue(rottenTomatoesKey, out var rottenTomatoesScores))
-                {
-                    if (_rottenTomatoesClient.TryGetCachedScores(
-                        hydratedItem.MediaType,
-                        hydratedItem.Title,
-                        hydratedItem.PremiereDate.Year,
-                        hydratedItem.WikidataId,
-                        out var cachedScores))
-                    {
-                        rottenTomatoesScores = cachedScores;
-                    }
-                    else if (allowRemote && filters?.ScoreSource == ScoreSource.RottenTomatoes)
-                    {
-                        rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
-                            hydratedItem.MediaType,
-                            hydratedItem.Title,
-                            hydratedItem.PremiereDate.Year,
-                            hydratedItem.WikidataId,
-                            cancellationToken,
-                            forceRefresh: false);
-                    }
-                    else
-                    {
-                        rottenTomatoesScores = RottenTomatoesScores.Empty;
-                    }
-
-                    rottenTomatoesByItemKey[rottenTomatoesKey] = rottenTomatoesScores;
-                }
-
-                if (rottenTomatoesScores.HasAnyScore)
+                if (rottenTomatoesByItemKey.TryGetValue(RottenTomatoesHydrationKey(hydratedItem), out var rottenTomatoesScores)
+                    && rottenTomatoesScores.HasAnyScore)
                 {
                     hydratedItem = hydratedItem with
                     {
@@ -1336,12 +1309,75 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         return hydratedItems ?? items;
     }
 
-    private static string RottenTomatoesHydrationKey(PremiereItem item)
+    private async Task<IReadOnlyDictionary<CachedRottenTomatoesKey, RottenTomatoesScores>> HydrateCachedRottenTomatoesAsync(
+        IReadOnlyList<PremiereItem> items,
+        CalendarFilters? filters,
+        CancellationToken cancellationToken,
+        bool allowRemote)
     {
-        return string.Create(
-            CultureInfo.InvariantCulture,
-            $"{item.MediaType}:{item.Title}:{item.PremiereDate.Year}:{item.WikidataId}");
+        if (_rottenTomatoesClient is null) return new Dictionary<CachedRottenTomatoesKey, RottenTomatoesScores>();
+
+        var work = items
+            .Where(item => item.RottenTomatoesScore is null || item.RottenTomatoesAudienceScore is null)
+            .Select(RottenTomatoesHydrationKey)
+            .Distinct()
+            .ToArray();
+        var results = new RottenTomatoesScores[work.Length];
+        using var hydrationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var nextIndex = -1;
+        var workers = Enumerable.Range(0, Math.Min(2, work.Length)).Select(_ => RunWorkerAsync()).ToArray();
+        await Task.WhenAll(workers);
+        return work.Select((key, index) => (key, scores: results[index]))
+            .ToDictionary(entry => entry.key, entry => entry.scores);
+
+        async Task RunWorkerAsync()
+        {
+            try
+            {
+                while (true)
+                {
+                    hydrationCts.Token.ThrowIfCancellationRequested();
+                    var index = Interlocked.Increment(ref nextIndex);
+                    if (index >= work.Length) return;
+                    var key = work[index];
+                    RottenTomatoesScores? cachedScores = null;
+                    try
+                    {
+                        if (filters?.ScoreSource == ScoreSource.RottenTomatoes)
+                        {
+                            cachedScores = await _rottenTomatoesClient.TryGetCachedScoresAsync(
+                                key.MediaType, key.Title, key.Year, key.WikidataId, hydrationCts.Token);
+                        }
+                        else if (_rottenTomatoesClient.TryGetCachedScores(key.MediaType, key.Title, key.Year, key.WikidataId, out var memoryScores))
+                        {
+                            // Other score selections retain their memory-only optional hydration.
+                            cachedScores = memoryScores;
+                        }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Skipping cached Rotten Tomatoes lookup for {Title}.", key.Title);
+                    }
+
+                    results[index] = cachedScores ?? (allowRemote && filters?.ScoreSource == ScoreSource.RottenTomatoes
+                        ? await GetRottenTomatoesScoresAsync(key.MediaType, key.Title, key.Year, key.WikidataId,
+                            hydrationCts.Token, forceRefresh: false)
+                        : RottenTomatoesScores.Empty);
+                }
+            }
+            catch
+            {
+                // Join every worker after canceling siblings, including an in-flight cache read.
+                await hydrationCts.CancelAsync();
+                throw;
+            }
+        }
     }
+
+    private static CachedRottenTomatoesKey RottenTomatoesHydrationKey(PremiereItem item)
+        => new(item.MediaType, item.Title, item.PremiereDate.Year, item.WikidataId);
+
+    private readonly record struct CachedRottenTomatoesKey(PremiereMediaType MediaType, string Title, int Year, string? WikidataId);
 
     private static bool HasCachedImdbId(PremiereItem item)
     {

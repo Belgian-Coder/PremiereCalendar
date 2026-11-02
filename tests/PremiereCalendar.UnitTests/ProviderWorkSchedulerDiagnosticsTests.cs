@@ -72,6 +72,11 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
         var checkpoint = Assert.Single(events, e => Name(e) == "scheduler.checkpoint.completed").GetProperty("details");
         Assert.Equal(1, checkpoint.GetProperty("count").GetInt32());
         Assert.Equal(2, checkpoint.GetProperty("total").GetInt32());
+        Assert.True(checkpoint.GetProperty("rawBytes").GetInt32() > 0);
+        Assert.True(checkpoint.GetProperty("storedBytes").GetInt32() > 0);
+        Assert.True(checkpoint.GetProperty("serializeMilliseconds").GetDouble() >= 0);
+        Assert.True(checkpoint.GetProperty("encodeMilliseconds").GetDouble() >= 0);
+        Assert.True(checkpoint.GetProperty("storeMilliseconds").GetDouble() >= 0);
         Assert.Contains(events, e => Name(e) == "scheduler.progress.published");
         var raw = string.Join("\n", events.Select(e => e.GetRawText()));
         foreach (var secret in new[] { "secret-dedupe", "secret-title", "secret-message", "PayloadJson", "CompletedSources", "LastError" })

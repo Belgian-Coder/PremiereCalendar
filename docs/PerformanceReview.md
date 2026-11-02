@@ -1,6 +1,6 @@
 # Performance Review
 
-Last reviewed: 2026-10-27.
+Last reviewed: 2026-11-02.
 
 ## Calendar loading and recovery
 
@@ -12,7 +12,13 @@ Provider cancellation caused by navigation, background preemption, or shutdown r
 
 Scheduler checkpoints retain the union of successfully completed sources and their completion times. Failed sources remain retryable, and legacy checkpoints conservatively rerun uncertain source states. Successful sources older than `WeekCacheHours` are fetched again after long deferrals. Source completion means iterator exhaustion: processing counters reaching their current total do not establish completion. Source completion and final snapshots persist immediately; other progress persists at most once every two seconds. Dense source snapshots coalesce at 250 ms, retaining every row and always flushing errors and completion. Diagnostics retain the latest update per source instead of every growing snapshot.
 
-Claims use unique ownership tokens, independently renewed leases, transactional lease/job updates, and fenced persistence. Calendar file publication holds the owned job lock, so an expired worker cannot overwrite a reclaimed job's cache. Recovery checks run every five seconds and terminal retention cleanup runs daily. Queued jobs without watchers yield priority; running foreground jobs finish and warm caches. Progress subscriptions retain bounded source summaries and the latest canonical snapshot, and late subscribers replay durable state.
+Claims use unique ownership tokens, independently renewed leases, transactional lease/job updates, and fenced persistence. Calendar file publication holds the owned job lock, so an expired worker cannot overwrite a reclaimed job's cache. Recovery checks run every five seconds and terminal retention cleanup runs daily. Queued jobs without watchers yield priority; detached foreground execution checkpoints and requeues. Returning to that running job promotes it without cancelling its own execution. Progress subscriptions retain bounded source summaries and the latest canonical snapshot, and late subscribers replay durable state.
+
+Watched demand flows through shared provider admission, including a single-flight request shared with background work. Provider queues retain FIFO order within foreground/background lanes and admit an oldest background waiter after eight foreground admissions during contention. TMDb's configured token bucket/concurrency and adaptive provider cooldown, circuit and capacity limits remain unchanged. In-flight background requests finish normally.
+
+One refresh generation reuses verified successful provider outcomes for exact lookup identities, including successful absence, across mapping and final backfill. Different identities and a later explicit refresh remain independent. Transient failures, malformed responses and stale fallback do not become successful generation memos. Cached RT-selected scores hydrate in two bounded lanes with deduplicated lookup identities; input order, existing non-null score precedence and batched local IMDb reads are retained.
+
+Checkpoint storage can use a bounded Brotli envelope containing the complete version 3 JSON, without dropping canonical progress, source summaries or completion times. Small/unhelpful or very large payloads stay raw. The two-second progress durability interval and immediate source/final/preempt persistence are unchanged. Older checkpoints remain readable. Before downgrading to an older binary that cannot read the envelope, stop workers and run the new binary's transactional `database prepare-legacy-checkpoints` command; see [speed implementation and validation](SpeedImprovements.md).
 
 Calendar metadata reads use an optional item-count header; older envelopes retain their full-parse fallback. All-view warmup checks both media keys. Images share decode and staging limits across cache instances, reject oversized decoded images, use content-based ETags, and retain short-lived stale fallback. Cache readers allow atomic replacement while an existing reader finishes its original file.
 
@@ -36,7 +42,7 @@ The calendar does not use fixed-height `Virtualize` for rich cards. Poster, desc
 
 Top-level All/Series/Movies navigation resets the desktop calendar to its command bar before replacing the measured day window. This prevents a new media route from briefly mounting cards for the previous route's scroll offset and then jumping to its first batch.
 
-All streamed calendar loads preserve existing card positions, update matching cards in place, and append newly discovered cards within their day as provider batches arrive. Because intermediate provider snapshots are not necessarily cumulative, a card already shown during a load is retained even when a later snapshot temporarily omits it. All, Series, Movies, and week/filter route changes first perform one stable reconciliation against the new criteria; Update and Refresh sources retain the current presentation. This avoids blank pages and repeated full-grid reshuffling, while an explicit sort change still applies a clean full sort.
+All streamed calendar loads preserve existing card positions, update matching cards in place, and append newly discovered cards within their day as provider batches arrive. Because intermediate provider snapshots are not necessarily cumulative, a card already shown during a load is retained even when a later snapshot temporarily omits it. Mode/week/discovery-criteria changes clear the previous scope's cards, counts, progress and freshness before asynchronous navigation; same-view Update and Refresh sources retain the current presentation. An explicit sort change still applies a clean full sort. The November speed work deliberately leaves first-result render throttling unchanged.
 
 All days use the bounded measured card window instead of fixed-height row virtualization. Rendering ten cards initially and revealing explicit batches preserves card identity and prevents flashing without materializing an entire dense day. The 40-card ceiling applies even after long downward scrolling; the earlier implementation bounded each increment but could eventually mount every card.
 

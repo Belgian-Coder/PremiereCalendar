@@ -70,17 +70,34 @@ public sealed class OmdbClient : IOmdbClient
             return null;
         }
 
-        var cacheKey = $"omdb:imdb:{imdbId}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out OmdbItem? cached))
+        if (ProviderRefreshScope.Current is { } refresh)
         {
-            return cached;
+            var cacheKey = $"omdb:imdb:{imdbId}";
+            return await refresh.RunAsync($"omdb:{_httpClient.BaseAddress}:{imdbId}", forceRefresh,
+                token => GetByImdbIdCoreAsync(imdbId, settings, token, forceRefresh), cancellationToken,
+                value => value is not null && IsVerifiedResponse(value)
+                    && _cache.TryGetValue(cacheKey, out OmdbItem? latest) && ReferenceEquals(latest, value));
+        }
+        return (await GetByImdbIdCoreAsync(imdbId, settings, cancellationToken, forceRefresh)).Value;
+    }
+
+    private async Task<ProviderRefreshResult<OmdbItem?>> GetByImdbIdCoreAsync(
+        string imdbId, OmdbSourceSettings settings, CancellationToken cancellationToken, bool forceRefresh)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var cacheKey = $"omdb:imdb:{imdbId}";
+        if (!forceRefresh && _cache.TryGetValue(cacheKey, out OmdbItem? cached)
+            && (ProviderRefreshScope.Current is null || cached is not null && IsVerifiedResponse(cached)))
+        {
+            return new(cached, cached is not null && IsVerifiedResponse(cached));
         }
 
         var persisted = await GetPersistedAsync(imdbId, cancellationToken);
-        if (!forceRefresh && IsFresh(persisted))
+        if (!forceRefresh && IsFresh(persisted)
+            && (ProviderRefreshScope.Current is null || IsVerifiedResponse(persisted!.Item)))
         {
             _cache.Set(cacheKey, persisted!.Item, CacheDuration(persisted.Item));
-            return persisted.Item;
+            return new(persisted.Item, IsVerifiedResponse(persisted.Item));
         }
 
         var state = _cacheStore is null
@@ -89,23 +106,25 @@ public sealed class OmdbClient : IOmdbClient
         if (state.RateLimitedUntilUtc is { } rateLimitedUntil
             && rateLimitedUntil > _timeProvider.GetUtcNow())
         {
-            return persisted?.Item;
+            return new(persisted?.Item, false);
         }
 
         return await _singleFlight.RunAsync(
             forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}",
             async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out OmdbItem? flightCached))
+                if (!forceRefresh && _cache.TryGetValue(cacheKey, out OmdbItem? flightCached)
+                    && (ProviderRefreshScope.Current is null || flightCached is not null && IsVerifiedResponse(flightCached)))
                 {
-                    return flightCached;
+                    return new ProviderRefreshResult<OmdbItem?>(flightCached, flightCached is not null && IsVerifiedResponse(flightCached));
                 }
 
                 var flightPersisted = persisted ?? await GetPersistedAsync(imdbId, token);
-                if (!forceRefresh && IsFresh(flightPersisted))
+                if (!forceRefresh && IsFresh(flightPersisted)
+                    && (ProviderRefreshScope.Current is null || IsVerifiedResponse(flightPersisted!.Item)))
                 {
                     _cache.Set(cacheKey, flightPersisted!.Item, CacheDuration(flightPersisted.Item));
-                    return flightPersisted.Item;
+                    return new ProviderRefreshResult<OmdbItem?>(flightPersisted.Item, IsVerifiedResponse(flightPersisted.Item));
                 }
 
                 try
@@ -123,7 +142,7 @@ public sealed class OmdbClient : IOmdbClient
                         await RecordFailureAsync(response, error, token);
                         if (flightPersisted is not null)
                         {
-                            return flightPersisted.Item;
+                            return new ProviderRefreshResult<OmdbItem?>(flightPersisted.Item, false);
                         }
 
                         throw new ExternalApiException(
@@ -138,7 +157,7 @@ public sealed class OmdbClient : IOmdbClient
                             await RecordOmdbPayloadFailureAsync(item.Error!, flightPersisted, token);
                             if (flightPersisted is not null)
                             {
-                                return flightPersisted.Item;
+                                return new ProviderRefreshResult<OmdbItem?>(flightPersisted.Item, false);
                             }
 
                             throw new ExternalApiException($"OMDb lookup for {imdbId} failed: {item.Error}");
@@ -151,11 +170,11 @@ public sealed class OmdbClient : IOmdbClient
                         }
                     }
 
-                    return item;
+                    return new ProviderRefreshResult<OmdbItem?>(item, item is not null && IsVerifiedResponse(item));
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    return flightPersisted?.Item;
+                    return new ProviderRefreshResult<OmdbItem?>(flightPersisted?.Item, false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -165,25 +184,31 @@ public sealed class OmdbClient : IOmdbClient
                 {
                     if (flightPersisted is not null)
                     {
-                        return flightPersisted.Item;
+                        return new ProviderRefreshResult<OmdbItem?>(flightPersisted.Item, false);
                     }
 
                     await MarkFailureAsync("OMDb HTTP request failed.", token);
-                    return null;
+                    return new ProviderRefreshResult<OmdbItem?>(null, false);
                 }
                 catch (JsonException)
                 {
                     if (flightPersisted is not null)
                     {
-                        return flightPersisted.Item;
+                        return new ProviderRefreshResult<OmdbItem?>(flightPersisted.Item, false);
                     }
 
                     await MarkFailureAsync("OMDb returned invalid JSON.", token);
-                    return null;
+                    return new ProviderRefreshResult<OmdbItem?>(null, false);
                 }
             },
             cancellationToken);
     }
+
+    private static bool IsVerifiedResponse(OmdbItem item)
+        => string.Equals(item.Response, "False", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(item.Error?.Trim(), "Movie not found!", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(item.Response, "True", StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(item.Error);
 
     private async Task<OmdbCacheEntry?> GetPersistedAsync(string imdbId, CancellationToken cancellationToken)
     {

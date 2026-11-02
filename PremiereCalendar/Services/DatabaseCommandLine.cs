@@ -31,6 +31,25 @@ public static class DatabaseCommandLine
 
         try
         {
+            if (args.Length == 2 && string.Equals(args[1], "prepare-legacy-checkpoints", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var maintenance = new ProviderWorkCheckpointMaintenance(
+                        Microsoft.Extensions.Options.Options.Create(databaseOptions), environment, TimeProvider.System);
+                    var result = await maintenance.PrepareLegacyCheckpointsAsync(cancellationToken);
+                    Console.WriteLine(JsonSerializer.Serialize(result));
+                    return 0;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    // The rollback command must not print database exception text,
+                    // connection strings, checkpoint contents or credentials.
+                    Console.Error.WriteLine("Legacy checkpoint preparation failed. Keep the application stopped and verify its database and checkpoints before retrying.");
+                    return 2;
+                }
+            }
+
             if (args.Length == 4
                 && string.Equals(args[1], "migrate-postgres", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(args[2], "--source", StringComparison.OrdinalIgnoreCase))
@@ -98,7 +117,7 @@ public static class DatabaseCommandLine
                 return result.IsHealthy ? 0 : 2;
             }
 
-            Console.Error.WriteLine("Usage: PremiereCalendar.exe database verify | database snapshot --output <absolute-path> | database restore --backup <absolute-path> | database migrate-postgres --source <absolute-sqlite-snapshot>");
+            Console.Error.WriteLine("Usage: PremiereCalendar.exe database verify | database prepare-legacy-checkpoints | database snapshot --output <absolute-path> | database restore --backup <absolute-path> | database migrate-postgres --source <absolute-sqlite-snapshot>");
             return 64;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or Microsoft.Data.Sqlite.SqliteException)
