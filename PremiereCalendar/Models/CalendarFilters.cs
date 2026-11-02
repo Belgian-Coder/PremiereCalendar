@@ -49,7 +49,7 @@ public enum SortDirection
 
 public sealed class MediaFilterSet
 {
-    public SeriesDateMode SeriesDateMode { get; set; } = SeriesDateMode.AllEpisodes;
+    public SeriesDateMode SeriesDateMode { get; set; } = SeriesDateMode.NewSeriesOnly;
     public List<string> OriginalLanguages { get; set; } = [];
     public List<string> OriginCountries { get; set; } = [];
     public List<int> GenreIds { get; set; } = [];
@@ -68,8 +68,7 @@ public sealed class MediaFilterSet
     public string SearchText { get; set; } = "";
 
     public bool HasCriteria =>
-        SeriesDateMode != SeriesDateMode.AllEpisodes
-        || OriginalLanguages.Count > 0
+        OriginalLanguages.Count > 0
         || OriginCountries.Count > 0
         || GenreIds.Count > 0
         || SelectedSources.Count > 0
@@ -116,6 +115,15 @@ public sealed class CalendarFilters
 
     public MediaFilterSet SeriesFilters { get; set; } = new();
     public MediaFilterSet MovieFilters { get; set; } = new();
+
+    public static CalendarFilters CreateDefault()
+    {
+        return new CalendarFilters
+        {
+            SeriesFilters = { OriginalLanguages = ["en", "nl"] },
+            MovieFilters = { OriginalLanguages = ["en", "nl"], RuntimeMinMinutes = 45 }
+        };
+    }
 
     public static DateOnly StartOfWeek(DateOnly date)
     {

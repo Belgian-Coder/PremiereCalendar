@@ -97,6 +97,13 @@ public static class CalendarFilterState
         Normalize(filters.MovieFilters);
     }
 
+    public static void NormalizeForCalendar(CalendarFilters filters)
+    {
+        Normalize(filters);
+        // Old links, saved filters, and warmup profiles may still request episodes.
+        filters.SeriesFilters.SeriesDateMode = SeriesDateMode.NewSeriesOnly;
+    }
+
     public static void NormalizeVisibleFilterState(CalendarFilters filters)
     {
         filters.IncludeUnknownScores = true;

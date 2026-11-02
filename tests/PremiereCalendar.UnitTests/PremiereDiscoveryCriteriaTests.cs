@@ -7,6 +7,23 @@ namespace PremiereCalendar.UnitTests;
 public sealed class PremiereDiscoveryCriteriaTests
 {
     [Fact]
+    public void Defaults_UseFirstAirDateAndCannotReuseHistoricalEpisodeDefaultCache()
+    {
+        var implicitCriteria = PremiereDiscoveryCriteria.FromFilters(null);
+        var explicitCriteria = PremiereDiscoveryCriteria.FromFilters(CalendarFilters.CreateDefault());
+        var legacyCriteria = PremiereDiscoveryCriteria.FromFilters(new CalendarFilters
+        {
+            SeriesFilters = { SeriesDateMode = SeriesDateMode.AllEpisodes }
+        });
+
+        Assert.Equal(SeriesDateMode.NewSeriesOnly, implicitCriteria.Series.SeriesDateMode);
+        Assert.False(implicitCriteria.ToTmdbFilters(PremiereMediaType.Series, []).UseEpisodeAirDate);
+        Assert.Equal(implicitCriteria.CacheKey(), explicitCriteria.CacheKey());
+        Assert.NotEqual("default", implicitCriteria.CacheKey());
+        Assert.NotEqual(legacyCriteria.CacheKey(), implicitCriteria.CacheKey());
+    }
+
+    [Fact]
     public void CacheKey_IncludesRawMediaSpecificSourceSelections()
     {
         var streamz = PremiereDiscoveryCriteria.FromFilters(new CalendarFilters

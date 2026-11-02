@@ -294,7 +294,7 @@ public sealed class CalendarPageDiagnosticsTests
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var item = new PremiereItem { CanonicalId = "movie:1", TmdbId = 1, Title = first ? "PRIVATE_TITLE" : "Next week",
-                MediaType = PremiereMediaType.Movie, Type = PremiereItemType.MovieFirstRelease, PremiereDate = start, OriginalLanguage = "en" };
+                MediaType = PremiereMediaType.Movie, Type = PremiereItemType.MovieFirstRelease, PremiereDate = start, OriginalLanguage = "en", RuntimeMinutes = 105 };
             if (first)
             {
                 if (EmitEmptyFirst) yield return new PremiereLoadProgress("Started", 0, 0, []);

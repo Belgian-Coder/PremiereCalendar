@@ -13,7 +13,7 @@ namespace PremiereCalendar.Components.Pages;
 public partial class Calendar
 {
     private CalendarPageMode _pageMode;
-    private CalendarFilters _filters = new();
+    private CalendarFilters _filters = CalendarFilters.CreateDefault();
     private FilterCatalog _filterCatalog = new();
     private IReadOnlyList<PremiereItem> _items = [];
     private IReadOnlyList<PremiereItem> _visibleItems = [];
@@ -1289,7 +1289,7 @@ public partial class Calendar
     {
         var filters = CalendarFilterState.Clone(_filters);
         CalendarFilterState.ApplyPageMode(filters, mode);
-        CalendarFilterState.Normalize(filters);
+        CalendarFilterState.NormalizeForCalendar(filters);
         return filters;
     }
 
@@ -2088,7 +2088,7 @@ public partial class Calendar
         var filters = CalendarFilterState.Clone(preset.Filters);
         filters.WeekStart = weekStart;
         CalendarFilterState.ApplyPageMode(filters, _pageMode);
-        CalendarFilterState.Normalize(filters);
+        CalendarFilterState.NormalizeForCalendar(filters);
         _filters = filters;
         _selectedDay = selectedDay;
         _selectedPresetId = preset.Id;
@@ -2179,7 +2179,7 @@ public partial class Calendar
     {
         var weekStart = _filters.WeekStart;
         var previousCriteriaKey = PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey();
-        CalendarFilterState.Normalize(savedFilters);
+        CalendarFilterState.NormalizeForCalendar(savedFilters);
         CalendarFilterState.ApplyPageMode(savedFilters, _pageMode);
         _filters = CalendarFilterState.Clone(savedFilters);
         _filters.WeekStart = weekStart;
@@ -2254,7 +2254,6 @@ public partial class Calendar
     private static int MediaFilterCount(PremiereMediaType mediaType, MediaFilterSet filters, CalendarFilters globalFilters)
     {
         var count = 0;
-        count += CountCriteria(mediaType == PremiereMediaType.Series && filters.SeriesDateMode != SeriesDateMode.AllEpisodes);
         count += CountCriteria(
             filters.OriginalLanguages.Count > 0
             && !MatchesGlobalLanguageFilter(filters, globalFilters));
@@ -2419,10 +2418,9 @@ public partial class Calendar
     private void ApplyQueryParameters(string uri)
     {
         var query = QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(uri).Query);
-        _filters = new CalendarFilters
-        {
-            WeekStart = _filters.WeekStart
-        };
+        var previousWeek = _filters.WeekStart;
+        _filters = CalendarFilters.CreateDefault();
+        _filters.WeekStart = previousWeek;
         _filters.ShowSeries = true;
         _filters.ShowMovies = true;
 
@@ -2525,7 +2523,7 @@ public partial class Calendar
         ApplyMediaFilterQuery(query, PremiereMediaType.Movie, "movie", _filters.MovieFilters);
         ApplyLegacyMediaQuery(query);
         MirrorSingleMediaLanguageQueryForAllView(query);
-        CalendarFilterState.Normalize(_filters);
+        CalendarFilterState.NormalizeForCalendar(_filters);
     }
 
     private void ApplyMediaFilterQuery(
@@ -2534,16 +2532,11 @@ public partial class Calendar
         string prefix,
         MediaFilterSet filters)
     {
-        if (mediaType == PremiereMediaType.Series && TryGet(query, $"{prefix}Scope", out var scope))
-        {
-            filters.SeriesDateMode = ParseSeriesDateMode(scope);
-        }
-
         if (TryGet(query, $"{prefix}Lang", out var language))
         {
             filters.OriginalLanguages = language
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Where(value => !string.IsNullOrWhiteSpace(value) && !value.Equals("all", StringComparison.OrdinalIgnoreCase))
                 .Select(value => value.Trim().ToLowerInvariant())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
@@ -2581,30 +2574,54 @@ public partial class Calendar
     {
         var targets = _pageMode switch
         {
-            CalendarPageMode.Series => new[] { _filters.SeriesFilters },
-            CalendarPageMode.Movies => new[] { _filters.MovieFilters },
-            _ => new[] { _filters.SeriesFilters, _filters.MovieFilters }
+            CalendarPageMode.Series => new[] { (Prefix: "series", Filters: _filters.SeriesFilters) },
+            CalendarPageMode.Movies => new[] { (Prefix: "movie", Filters: _filters.MovieFilters) },
+            _ => new[] { (Prefix: "series", Filters: _filters.SeriesFilters), (Prefix: "movie", Filters: _filters.MovieFilters) }
         };
 
-        foreach (var target in targets)
+        foreach (var (prefix, target) in targets)
         {
-            if (target.HasCriteria)
+            if (TryGet(query, "lang", out _) && !TryGet(query, $"{prefix}Lang", out _))
+            {
+                target.OriginalLanguages = LanguageValue(_filters.Language) == "both"
+                    ? []
+                    : [LanguageValue(_filters.Language)];
+            }
+            if (TryGet(query, "runtimeMin", out _) && !TryGet(query, $"{prefix}RuntimeMin", out _))
+            {
+                target.RuntimeMinMinutes = _filters.RuntimeMinMinutes;
+            }
+            if (TryGet(query, "runtimeMax", out _) && !TryGet(query, $"{prefix}RuntimeMax", out _))
+            {
+                target.RuntimeMaxMinutes = _filters.RuntimeMaxMinutes;
+            }
+            if (HasMediaFilterQuery(query, prefix))
             {
                 continue;
             }
 
-            target.OriginalLanguages = LanguageValue(_filters.Language) == "both"
-                ? []
-                : [LanguageValue(_filters.Language)];
             target.OriginCountries = OriginCountryValues(_filters.OriginGroup);
             target.GenreIds = [.. _filters.GenreIds];
             target.SelectedSources = [.. _filters.SelectedSources];
             target.SourceText = _filters.NetworkText;
-            target.RuntimeMinMinutes = _filters.RuntimeMinMinutes;
-            target.RuntimeMaxMinutes = _filters.RuntimeMaxMinutes;
             target.KeywordText = _filters.KeywordText;
             target.SearchText = _filters.SearchText;
         }
+    }
+
+    private static bool HasMediaFilterQuery(
+        IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query,
+        string prefix)
+    {
+        return query.Keys.Any(key => key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            && (key[prefix.Length..].ToLowerInvariant() switch
+            {
+                "lang" or "origins" or "genres" or "sources" or "watchregion" or "sourcetext"
+                    or "availabilities" or "runtimemin" or "runtimemax" or "keywords" or "q" => true,
+                "releasetypes" or "certifications" or "certificationcountry" => prefix == "movie",
+                "statuses" or "types" => prefix == "series",
+                _ => false
+            }));
     }
 
     private void MirrorSingleMediaLanguageQueryForAllView(IDictionary<string, Microsoft.Extensions.Primitives.StringValues> query)
@@ -2617,17 +2634,11 @@ public partial class Calendar
         var hasSeriesLanguageQuery = TryGet(query, "seriesLang", out _);
         var hasMovieLanguageQuery = TryGet(query, "movieLang", out _);
 
-        if (hasSeriesLanguageQuery
-            && !hasMovieLanguageQuery
-            && _filters.SeriesFilters.OriginalLanguages.Count > 0
-            && _filters.MovieFilters.OriginalLanguages.Count == 0)
+        if (hasSeriesLanguageQuery && !hasMovieLanguageQuery)
         {
             _filters.MovieFilters.OriginalLanguages = [.. _filters.SeriesFilters.OriginalLanguages];
         }
-        else if (hasMovieLanguageQuery
-            && !hasSeriesLanguageQuery
-            && _filters.MovieFilters.OriginalLanguages.Count > 0
-            && _filters.SeriesFilters.OriginalLanguages.Count == 0)
+        else if (hasMovieLanguageQuery && !hasSeriesLanguageQuery)
         {
             _filters.SeriesFilters.OriginalLanguages = [.. _filters.MovieFilters.OriginalLanguages];
         }
@@ -2909,12 +2920,19 @@ public partial class Calendar
 
         if (mode is CalendarPageMode.All or CalendarPageMode.Series)
         {
-            AddMediaFilterParameters(parameters, PremiereMediaType.Series, "series", filters.SeriesFilters);
+            AddMediaFilterParameters(parameters, PremiereMediaType.Series, "series", filters.SeriesFilters, filters);
         }
 
         if (mode is CalendarPageMode.All or CalendarPageMode.Movies)
         {
-            AddMediaFilterParameters(parameters, PremiereMediaType.Movie, "movie", filters.MovieFilters);
+            AddMediaFilterParameters(parameters, PremiereMediaType.Movie, "movie", filters.MovieFilters, filters);
+        }
+
+        if (mode == CalendarPageMode.All
+            && !filters.SeriesFilters.OriginalLanguages.SequenceEqual(filters.MovieFilters.OriginalLanguages, StringComparer.OrdinalIgnoreCase))
+        {
+            parameters["seriesLang"] = filters.SeriesFilters.OriginalLanguages.Count == 0 ? "all" : string.Join(',', filters.SeriesFilters.OriginalLanguages);
+            parameters["movieLang"] = filters.MovieFilters.OriginalLanguages.Count == 0 ? "all" : string.Join(',', filters.MovieFilters.OriginalLanguages);
         }
 
         return parameters;
@@ -2924,14 +2942,16 @@ public partial class Calendar
         IDictionary<string, string?> parameters,
         PremiereMediaType mediaType,
         string prefix,
-        MediaFilterSet filters)
+        MediaFilterSet filters,
+        CalendarFilters globalFilters)
     {
-        if (mediaType == PremiereMediaType.Series && filters.SeriesDateMode != SeriesDateMode.AllEpisodes)
+        var defaults = CalendarFilters.CreateDefault();
+        var mediaDefaults = mediaType == PremiereMediaType.Series ? defaults.SeriesFilters : defaults.MovieFilters;
+        if (globalFilters.Language != LanguageFilter.Both
+            || !filters.OriginalLanguages.SequenceEqual(mediaDefaults.OriginalLanguages, StringComparer.OrdinalIgnoreCase))
         {
-            parameters[$"{prefix}Scope"] = SeriesDateModeValue(filters.SeriesDateMode);
+            parameters[$"{prefix}Lang"] = filters.OriginalLanguages.Count == 0 ? "all" : string.Join(',', filters.OriginalLanguages);
         }
-
-        AddIfNotEmpty(parameters, $"{prefix}Lang", filters.OriginalLanguages, ',');
         AddIfNotEmpty(parameters, $"{prefix}Origins", filters.OriginCountries, ',');
         AddIfNotEmpty(parameters, $"{prefix}Genres", filters.GenreIds, ',');
         AddIfNotEmpty(parameters, $"{prefix}Sources", filters.SelectedSources, '|');
@@ -2951,12 +2971,14 @@ public partial class Calendar
             AddIfNotEmpty(parameters, $"{prefix}Types", filters.TvTypes, '|');
         }
 
-        if (filters.RuntimeMinMinutes > 0)
+        if (filters.RuntimeMinMinutes != mediaDefaults.RuntimeMinMinutes
+            || (globalFilters.RuntimeMinMinutes > 0 && filters.RuntimeMinMinutes != globalFilters.RuntimeMinMinutes))
         {
             parameters[$"{prefix}RuntimeMin"] = filters.RuntimeMinMinutes.ToString(CultureInfo.InvariantCulture);
         }
 
-        if (filters.RuntimeMaxMinutes < 360)
+        if (filters.RuntimeMaxMinutes < 360
+            || (globalFilters.RuntimeMaxMinutes < 360 && filters.RuntimeMaxMinutes != globalFilters.RuntimeMaxMinutes))
         {
             parameters[$"{prefix}RuntimeMax"] = filters.RuntimeMaxMinutes.ToString(CultureInfo.InvariantCulture);
         }
@@ -3053,18 +3075,6 @@ public partial class Calendar
             ScoreSource.Metacritic => "meta",
             _ => "tmdb"
         };
-    }
-
-    private static SeriesDateMode ParseSeriesDateMode(string value)
-    {
-        return value.Equals("new", StringComparison.OrdinalIgnoreCase)
-            ? SeriesDateMode.NewSeriesOnly
-            : SeriesDateMode.AllEpisodes;
-    }
-
-    private static string SeriesDateModeValue(SeriesDateMode value)
-    {
-        return value == SeriesDateMode.NewSeriesOnly ? "new" : "episodes";
     }
 
     private static string LanguageValue(LanguageFilter value)

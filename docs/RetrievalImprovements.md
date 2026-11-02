@@ -2,6 +2,8 @@
 
 This follows the [installed v1.2.9 profile](ProviderRetrievalProfile.md). Exact-image and installed acceptance are recorded in the [v1.2.10 release record](releases/1.2.10.md).
 
+The [saved-filter timing report](SavedFilterTimingResults-20261102.md) measures the owner's English/Dutch new-series view: 49 complete premieres and 449 responses in 15.689 seconds on installed v1.2.10. The [unrestricted legacy episode rerun](SeriesRerunResults-20261102.md) separately records the foreground observation cutoff, checkpoint resume and final score-backfill interval. Neither establishes a controlled cold-cache code speedup.
+
 ## Request reduction and throughput
 
 Concurrent Wikidata entity requests coalesce briefly, then fetch claims for up to 50 distinct entities in one `wbgetentities` request. Rotten Tomatoes identifiers and image claims share this path. At most two batches run concurrently, with a bounded pending queue. Each caller retains its cancellation and correlation context; cancelling one caller does not cancel others that still need the batch. A fully cancelled batch stops. Missing, malformed or failed entity responses remain retryable rather than becoming verified negative cache entries. Later forced requests fetch again and obsolete normal results cannot overwrite a newer force result.

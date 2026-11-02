@@ -110,6 +110,7 @@ public static class FilterStorageQueryComposer
     private static bool IsUnsupportedMediaSpecificKey(string key)
     {
         return key.Equals("movieScope", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("seriesScope", StringComparison.OrdinalIgnoreCase)
             || key.Equals("seriesReleaseTypes", StringComparison.OrdinalIgnoreCase)
             || key.Equals("seriesCertifications", StringComparison.OrdinalIgnoreCase)
             || key.Equals("seriesCertificationCountry", StringComparison.OrdinalIgnoreCase)
@@ -160,7 +161,7 @@ public static class FilterStorageQueryComposer
 
         if (key.Equals("lang", StringComparison.OrdinalIgnoreCase))
         {
-            return normalized.Equals("both", StringComparison.OrdinalIgnoreCase);
+            return false;
         }
 
         if (key.Equals("origin", StringComparison.OrdinalIgnoreCase))
@@ -174,7 +175,13 @@ public static class FilterStorageQueryComposer
             return true;
         }
 
-        if (key is "minVotes" or "runtimeMin"
+        if (key.Equals("runtimeMin", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("movieRuntimeMin", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (key is "minVotes"
             || key.EndsWith("RuntimeMin", StringComparison.Ordinal))
         {
             return normalized is "0" or "0.0";

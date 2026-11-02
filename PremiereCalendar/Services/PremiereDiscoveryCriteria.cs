@@ -22,7 +22,7 @@ public sealed record PremiereDiscoveryCriteria
     public MediaDiscoveryCriteria Movies { get; init; } = new();
     public string GlobalFilterKey { get; init; } = DefaultGlobalFilterKey;
 
-    public static PremiereDiscoveryCriteria None { get; } = new();
+    public static PremiereDiscoveryCriteria None { get; } = FromFilters(CalendarFilters.CreateDefault());
 
     public string CacheKey()
     {
@@ -40,7 +40,8 @@ public sealed record PremiereDiscoveryCriteria
 
         if (normalized == None.CacheKeyUnhashed())
         {
-            return "default";
+            // The historical "default" cache contains returning episodes.
+            return "premieres-v1";
         }
 
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
@@ -176,7 +177,7 @@ public sealed record PremiereDiscoveryCriteria
 
 public sealed record MediaDiscoveryCriteria
 {
-    public SeriesDateMode SeriesDateMode { get; init; } = SeriesDateMode.AllEpisodes;
+    public SeriesDateMode SeriesDateMode { get; init; } = SeriesDateMode.NewSeriesOnly;
     public string[] OriginalLanguages { get; init; } = [];
     public string[] OriginCountries { get; init; } = [];
     public int[] GenreIds { get; init; } = [];

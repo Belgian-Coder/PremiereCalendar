@@ -52,6 +52,10 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         }
 
         var filtersSnapshot = filters is null ? null : CloneFilters(filters);
+        if (filtersSnapshot is not null)
+        {
+            CalendarFilterState.NormalizeForCalendar(filtersSnapshot);
+        }
         var generation = Interlocked.Increment(ref _nextGeneration);
         var rank = 0;
         if (_workScheduler is not null)

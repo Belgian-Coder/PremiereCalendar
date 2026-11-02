@@ -436,18 +436,16 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var repairedItems = items;
         if (_missingExternalIdRepairService is not null)
         {
-            repairedItems = (await _missingExternalIdRepairService.RepairItemsAsync(
-                repairedItems,
-                cancellationToken,
-                forceRefresh)).Items;
+            repairedItems = (await TraceEnrichmentStageAsync("refresh.external_id_repair",
+                () => _missingExternalIdRepairService.RepairItemsAsync(
+                    repairedItems, cancellationToken, forceRefresh))).Items;
         }
 
         if (_scoreBackfillService is not null)
         {
-            repairedItems = (await _scoreBackfillService.BackfillItemsAsync(
-                repairedItems,
-                cancellationToken,
-                forceRefresh)).Items;
+            repairedItems = (await TraceEnrichmentStageAsync("refresh.score_backfill",
+                () => _scoreBackfillService.BackfillItemsAsync(
+                    repairedItems, cancellationToken, forceRefresh))).Items;
         }
 
         return repairedItems;
@@ -687,7 +685,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
     private static CalendarFilters FiltersForPageMode(CalendarFilters? filters, CalendarPageMode pageMode)
     {
         var pageFilters = filters is null
-            ? new CalendarFilters()
+            ? CalendarFilters.CreateDefault()
             : CalendarFilterState.Clone(filters);
         CalendarFilterState.ApplyPageMode(pageFilters, pageMode);
         CalendarFilterState.Normalize(pageFilters);
@@ -1220,7 +1218,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         IReadOnlyList<PremiereItem> items,
         CalendarFilters? filters)
     {
-        return filters is null ? items : PremiereFilter.Apply(items, filters);
+        return PremiereFilter.Apply(items, filters ?? CalendarFilters.CreateDefault());
     }
 
     private async Task<IReadOnlyList<PremiereItem>> HydrateCachedImdbRatingsAsync(

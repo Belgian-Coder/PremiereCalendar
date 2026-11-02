@@ -193,7 +193,9 @@ public sealed class PremiereServiceIntegrationTests
                     MediaType = PremiereMediaType.Movie,
                     TmdbId = 1,
                     Title = "Cached Premiere",
-                    PremiereDate = new DateOnly(2026, 5, 4)
+                    PremiereDate = new DateOnly(2026, 5, 4),
+                    OriginalLanguage = "en",
+                    RuntimeMinutes = 100
                 }
             ]
         };
@@ -228,7 +230,8 @@ public sealed class PremiereServiceIntegrationTests
                     MediaType = PremiereMediaType.Series,
                     TmdbId = 300,
                     Title = "Cached Fallback",
-                    PremiereDate = new DateOnly(2026, 5, 4)
+                    PremiereDate = new DateOnly(2026, 5, 4),
+                    OriginalLanguage = "en"
                 }
             ]
         };

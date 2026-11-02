@@ -28,7 +28,9 @@ Premiere Calendar is a .NET 11 Blazor Web App using interactive server rendering
 
 ## TMDb Query Rules
 
-Series discovery has two modes. Every-episode mode uses `air_date.gte` and `air_date.lte` and runs one request per day so the card date matches the selected day. New-series-only mode uses `first_air_date.gte` and `first_air_date.lte`.
+The interactive calendar discovers new series with `first_air_date.gte` and `first_air_date.lte`, then checks the canonical season-one/episode-one debut when available. It does not schedule returning-season or later-episode discovery. Calendar URL, preset, warmup and prefetch entry points normalize legacy episode scope before querying. Internal explicit legacy episode support remains readable for compatibility; its `air_date` per-day path is not a calendar UI choice. Enum values and stored history remain unchanged.
+
+`CalendarFilters.CreateDefault()` supplies English/Dutch, a 45-minute movie minimum and no series runtime minimum. Explicit filter objects can still represent unrestricted language/runtime choices. Null service filters and final projection use the same factory defaults. The new `premieres-v1` default cache partition prevents reuse of the historical all-episodes `default` partition; existing explicit criteria retain their distinct hashes.
 
 Movie discovery uses `primary_release_date.gte` and `primary_release_date.lte`; it does not apply runtime or release-type filtering. Fresh week orchestration runs movie discovery as day-sized batches for incremental progress. Live TMDb Discover Movie result rows expose the mapped date as `release_date`, so normalization reads `release_date` first and falls back to `primary_release_date` for fixtures or future response variants.
 

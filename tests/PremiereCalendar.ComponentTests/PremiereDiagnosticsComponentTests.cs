@@ -94,8 +94,8 @@ public sealed class PremiereDiagnosticsComponentTests : BunitContext
 
         var review = component.Find("[data-testid='mobile-filter-review']");
         Assert.Contains("Active filters", review.TextContent);
-        Assert.Contains("2 filters", review.TextContent);
-        Assert.Contains("New only", review.TextContent);
+        Assert.Contains("1 filter", review.TextContent);
+        Assert.DoesNotContain("New only", review.TextContent);
         Assert.Contains("EN, NL", review.TextContent);
     }
 }

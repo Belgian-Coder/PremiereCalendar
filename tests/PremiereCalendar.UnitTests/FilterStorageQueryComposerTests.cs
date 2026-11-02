@@ -59,7 +59,7 @@ public sealed class FilterStorageQueryComposerTests
     public void HasMeaningfulFilterQuery_IgnoresWeekAndOldDefaultValues()
     {
         var result = FilterStorageQueryComposer.HasMeaningfulFilterQuery(
-            "?week=2026-05-04&sort=date&dir=asc&score=tmdb&unknown=1&min=0.0&max=10.0&minVotes=0&lang=both&origin=all&runtimeMin=0&runtimeMax=360&seriesScope=episodes");
+            "?week=2026-05-04&sort=date&dir=asc&score=tmdb&unknown=1&min=0.0&max=10.0&minVotes=0&origin=all&runtimeMax=360&seriesScope=episodes");
 
         Assert.False(result);
     }
@@ -69,7 +69,12 @@ public sealed class FilterStorageQueryComposerTests
     {
         Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?seriesLang=en,nl"));
         Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?movieRuntimeMin=45"));
-        Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?seriesScope=new"));
+        Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?seriesLang=all"));
+        Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?lang=both"));
+        Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?runtimeMin=0"));
+        Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?movieRuntimeMin=0"));
+        Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?MovieRuntimeMin=0"));
+        Assert.False(FilterStorageQueryComposer.HasMeaningfulFilterQuery("?seriesScope=new"));
     }
 
     [Fact]

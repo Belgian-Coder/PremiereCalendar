@@ -2,6 +2,8 @@
 
 Premiere Calendar is a web page you run yourself. It shows upcoming movie and series premieres by week.
 
+The calendar focuses on first-debut series and new movies. New sessions default to English/Dutch, with a 45-minute movie minimum and no series runtime minimum. Changing the date keeps the selected filters; explicit language and runtime overrides remain available.
+
 Use it to:
 
 - Browse new movies and series.
@@ -201,5 +203,6 @@ Technical references:
 - [How It Works](docs/HowItWorks.md)
 - [Architecture](docs/Architecture.md)
 - [Performance Notes](docs/PerformanceReview.md)
+- [Measured refresh with saved filters](docs/SavedFilterTimingResults-20261102.md)
 - [Testing](docs/Testing.md)
 - [Docker and PostgreSQL](docs/DockerAndPostgres.md)

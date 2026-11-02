@@ -9,6 +9,7 @@ using PremiereCalendar.Components.Shared;
 using PremiereCalendar.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Services;
+using System.Text.Json;
 
 namespace PremiereCalendar.ComponentTests;
 
@@ -268,6 +269,56 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() => Assert.Equal(2, service.Calls.Count));
         Assert.Equal(firstStart.AddDays(7), service.Calls[1].Start);
         Assert.Equal(firstStart.AddDays(13), service.Calls[1].End);
+    }
+
+    [Theory]
+    [InlineData("series", "en,nl", 0)]
+    [InlineData("movies", "en,nl", 45)]
+    [InlineData("movies", "fr", 0)]
+    [InlineData("series", "all", 0)]
+    public void CalendarPage_ChangingOnlyTheWeekPreservesTheCompleteFilterProfile(string route, string languages, int runtimeMin)
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var prefix = route == "series" ? "series" : "movie";
+        var navigation = Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo($"/{route}?week=2026-05-04&{prefix}Lang={languages}&{prefix}RuntimeMin={runtimeMin}&{prefix}Genres=18&minVotes=25");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+        var initialFilters = service.FilterSnapshots.Single()!;
+
+        component.Find("button[title='Next week']").Click();
+
+        component.WaitForAssertion(() => Assert.Equal(2, service.Calls.Count));
+        var nextFilters = service.FilterSnapshots.Last()!;
+        var mediaFilters = route == "series" ? nextFilters.SeriesFilters : nextFilters.MovieFilters;
+        Assert.Equal(new DateOnly(2026, 5, 11), nextFilters.WeekStart);
+        Assert.Equal(PremiereDiscoveryCriteria.FromFilters(initialFilters).CacheKey(), PremiereDiscoveryCriteria.FromFilters(nextFilters).CacheKey());
+        Assert.Equal(languages == "all" ? [] : languages.Split(','), mediaFilters.OriginalLanguages);
+        Assert.Equal(runtimeMin, mediaFilters.RuntimeMinMinutes);
+        Assert.Equal([18], mediaFilters.GenreIds);
+        Assert.Equal(25, nextFilters.MinVoteCount);
+        Assert.Equal(SeriesDateMode.NewSeriesOnly, nextFilters.SeriesFilters.SeriesDateMode);
+    }
+
+    [Theory]
+    [InlineData("lang=fr&movieLang=en,nl")]
+    [InlineData("runtimeMin=80&movieRuntimeMin=45")]
+    [InlineData("runtimeMax=120&movieRuntimeMax=360")]
+    public void CalendarPage_WeekNavigationPreservesMediaDefaultsThatOverrideLegacyGlobalFilters(string query)
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo($"/movies?week=2026-05-04&{query}");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.FilterSnapshots));
+        var initialFilters = service.FilterSnapshots.Single()!;
+
+        component.Find("button[title='Next week']").Click();
+
+        component.WaitForAssertion(() => Assert.Equal(2, service.FilterSnapshots.Count));
+        Assert.Equal(PremiereDiscoveryCriteria.FromFilters(initialFilters).CacheKey(),
+            PremiereDiscoveryCriteria.FromFilters(service.FilterSnapshots.Last()).CacheKey());
     }
 
     [Fact]
@@ -586,9 +637,62 @@ public sealed class CalendarPageTests : BunitContext
         component.WaitForAssertion(() =>
         {
             Assert.Single(service.Calls);
-            Assert.DoesNotContain("sort=date", navigation.Uri);
+            Assert.Empty(Assert.Single(service.FilterSnapshots)!.SeriesFilters.OriginalLanguages);
+            Assert.Equal(SeriesDateMode.NewSeriesOnly, Assert.Single(service.FilterSnapshots)!.SeriesFilters.SeriesDateMode);
             Assert.Single(component.FindAll("[data-testid='calendar-week']"));
         });
+    }
+
+    [Theory]
+    [InlineData("movies", "movieRuntimeMin=0")]
+    [InlineData("movies", "MovieRuntimeMin=0")]
+    [InlineData("movies", "runtimeMin=0")]
+    [InlineData("series", "lang=both")]
+    [InlineData("series", "seriesLang=all")]
+    public void CalendarPage_ExplicitUnrestrictedQueryIsNotReplacedBySavedFilters(string route, string query)
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        JSInterop.Setup<string?>("premiereFilterStorage.get", $"premiere-calendar:filters:v2:{route}")
+            .SetResult(route == "movies" ? "movieLang=fr&movieRuntimeMin=120" : "seriesLang=fr&seriesQ=saved");
+        Services.GetRequiredService<NavigationManager>().NavigateTo($"/{route}?week=2026-05-04&{query}");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.FilterSnapshots));
+        var filters = service.FilterSnapshots.Single()!;
+        if (route == "movies")
+        {
+            Assert.Equal(0, filters.MovieFilters.RuntimeMinMinutes);
+            Assert.Equal(["en", "nl"], filters.MovieFilters.OriginalLanguages);
+        }
+        else
+        {
+            Assert.Empty(filters.SeriesFilters.OriginalLanguages);
+            Assert.Empty(filters.SeriesFilters.SearchText);
+        }
+        component.Find("button[title='Next week']").Click();
+        component.WaitForAssertion(() => Assert.Equal(2, service.FilterSnapshots.Count));
+        Assert.Equal(PremiereDiscoveryCriteria.FromFilters(filters).CacheKey(),
+            PremiereDiscoveryCriteria.FromFilters(service.FilterSnapshots.Last()).CacheKey());
+    }
+
+    [Theory]
+    [InlineData("lang=fr&movieGenres=18", "fr", 45)]
+    [InlineData("runtimeMin=0&movieGenres=18", "en,nl", 0)]
+    public void CalendarPage_GlobalOverridesRemainEffectiveAlongsideOtherMediaFilters(string query, string languages, int runtimeMin)
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        Services.GetRequiredService<NavigationManager>().NavigateTo($"/movies?week=2026-05-04&{query}");
+
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+
+        component.WaitForAssertion(() => Assert.Single(service.FilterSnapshots));
+        var filters = service.FilterSnapshots.Single()!;
+        Assert.Equal(languages.Split(','), filters.MovieFilters.OriginalLanguages);
+        Assert.Equal(runtimeMin, filters.MovieFilters.RuntimeMinMinutes);
+        Assert.Equal([18], filters.MovieFilters.GenreIds);
     }
 
     [Fact]
@@ -1365,7 +1469,7 @@ public sealed class CalendarPageTests : BunitContext
         };
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/series?week=2026-05-04");
+        navigation.NavigateTo("/series?week=2026-05-04&seriesLang=all");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1385,39 +1489,36 @@ public sealed class CalendarPageTests : BunitContext
         });
 
         var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
-        Assert.Equal("en,nl", query["seriesLang"].ToString());
+        Assert.False(query.ContainsKey("seriesLang"));
     }
 
-    [Fact]
-    public void CalendarPage_SeriesDateModeRadioUsesBrowserChangeValue()
+    [Theory]
+    [InlineData("")]
+    [InlineData("&seriesScope=episodes")]
+    [InlineData("&seriesScope=new")]
+    public void CalendarPage_AlwaysRequestsNewSeriesAndOffersNoEpisodeScope(string legacyScope)
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/series?week=2026-05-04");
+        navigation.NavigateTo($"/series?week=2026-05-04{legacyScope}");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
-        component.WaitForAssertion(() => Assert.Single(component.FindAll("[data-testid='premiere-card']")));
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(SeriesDateMode.NewSeriesOnly, Assert.Single(service.FilterSnapshots)!.SeriesFilters.SeriesDateMode);
+            Assert.Equal("1", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+        });
 
         component.Find("button[title='Open filters']").Click();
-        component.Find("input[aria-label='Use New series only']").Change("on");
-
-        component.WaitForAssertion(() =>
-        {
-            var panel = component.Find("[data-testid='series-date-mode-filter']");
-            Assert.Equal("New series only", panel.QuerySelector("summary strong")?.TextContent.Trim());
-        });
-
+        Assert.Empty(component.FindAll("[data-testid='series-date-mode-filter']"));
+        Assert.DoesNotContain("Every episode", component.Find("[data-testid='filter-pane']").TextContent);
         component.Find("button[title='Save filters']").Click();
 
-        component.WaitForAssertion(() =>
-        {
-            var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
-            Assert.Equal("new", query["seriesScope"].ToString());
-        });
+        Assert.False(QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query).ContainsKey("seriesScope"));
+        Assert.All(service.FilterSnapshots, filters => Assert.Equal(SeriesDateMode.NewSeriesOnly, filters!.SeriesFilters.SeriesDateMode));
     }
-
     [Fact]
     public void CalendarPage_LanguageDropdownAllowsDeselectingOneSelectedLanguage()
     {
@@ -1512,7 +1613,7 @@ public sealed class CalendarPageTests : BunitContext
                     TmdbId = 201,
                     Title = "Dutch Movie",
                     PremiereDate = new DateOnly(2026, 5, 4),
-                    OriginalLanguage = "nl"
+                    OriginalLanguage = "nl", RuntimeMinutes = 105
                 },
                 new PremiereItem
                 {
@@ -1562,7 +1663,7 @@ public sealed class CalendarPageTests : BunitContext
                 new PremiereItem
                 {
                     CanonicalId = "tv:be",
-                    Type = PremiereItemType.SeriesEpisode,
+                    Type = PremiereItemType.SeriesPremiere,
                     MediaType = PremiereMediaType.Series,
                     TmdbId = 201,
                     Title = "Belgian Episode",
@@ -1573,7 +1674,7 @@ public sealed class CalendarPageTests : BunitContext
                 new PremiereItem
                 {
                     CanonicalId = "tv:us",
-                    Type = PremiereItemType.SeriesEpisode,
+                    Type = PremiereItemType.SeriesPremiere,
                     MediaType = PremiereMediaType.Series,
                     TmdbId = 202,
                     Title = "American Episode",
@@ -1668,7 +1769,7 @@ public sealed class CalendarPageTests : BunitContext
         Assert.Equal("4.2", roundTrip["min"].ToString());
         Assert.Equal("9.1", roundTrip["max"].ToString());
         Assert.Equal("25", roundTrip["minVotes"].ToString());
-        Assert.Equal("new", roundTrip["seriesScope"].ToString());
+        Assert.False(roundTrip.ContainsKey("seriesScope"));
         Assert.Equal("en,nl", roundTrip["seriesLang"].ToString());
         Assert.Equal("BE,US", roundTrip["seriesOrigins"].ToString());
         Assert.Equal("18", roundTrip["seriesGenres"].ToString());
@@ -1726,7 +1827,7 @@ public sealed class CalendarPageTests : BunitContext
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/?week=2026-05-04&runtimeMin=80&runtimeMax=150&seriesWatchRegion=BE&movieCertifications=US%3APG-13&movieCertificationCountry=US");
+        navigation.NavigateTo("/?week=2026-05-04&runtimeMin=80&runtimeMax=150&seriesWatchRegion=BE&movieCertifications=US%3APG-13&movieCertificationCountry=US&seriesLang=all&movieLang=all");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1758,7 +1859,7 @@ public sealed class CalendarPageTests : BunitContext
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/movies?week=2026-05-04&movieSources=Netflix&movieWatchRegion=BE&movieCertifications=US%3APG-13&movieCertificationCountry=US");
+        navigation.NavigateTo("/movies?week=2026-05-04&movieSources=Netflix&movieWatchRegion=BE&movieCertifications=US%3APG-13&movieCertificationCountry=US&movieLang=all&movieRuntimeMin=0");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1774,7 +1875,7 @@ public sealed class CalendarPageTests : BunitContext
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/series?week=2026-05-04&q=north&runtimeMin=80&runtimeMax=150");
+        navigation.NavigateTo("/series?week=2026-05-04&q=north&runtimeMin=80&runtimeMax=150&lang=both");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1790,7 +1891,7 @@ public sealed class CalendarPageTests : BunitContext
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/series?week=2026-05-04&sort=title&dir=desc&score=imdb");
+        navigation.NavigateTo("/series?week=2026-05-04&sort=title&dir=desc&score=imdb&lang=both");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1801,7 +1902,7 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
-    public void CalendarPage_FilterButtonCountIncludesSeriesScope()
+    public void CalendarPage_FilterButtonCountIgnoresFixedPremiereScope()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
@@ -1812,7 +1913,7 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
         {
-            Assert.Equal("2", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
+            Assert.Equal("1", component.Find("[data-testid='active-filter-count']").TextContent.Trim());
         });
     }
 
@@ -1838,7 +1939,7 @@ public sealed class CalendarPageTests : BunitContext
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/movies?week=2026-05-11&movieScope=new&movieLang=en");
+        navigation.NavigateTo("/movies?week=2026-05-11&movieScope=new&movieLang=en&movieRuntimeMin=0");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1870,7 +1971,7 @@ public sealed class CalendarPageTests : BunitContext
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/movies?week=2026-05-11&movieLang=en&movieStatuses=Returning%20Series&movieTypes=Scripted");
+        navigation.NavigateTo("/movies?week=2026-05-11&movieLang=en&movieStatuses=Returning%20Series&movieTypes=Scripted&movieRuntimeMin=0");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1886,7 +1987,7 @@ public sealed class CalendarPageTests : BunitContext
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/series?week=2026-05-04&q=north&seriesWatchRegion=BE");
+        navigation.NavigateTo("/series?week=2026-05-04&q=north&seriesWatchRegion=BE&seriesLang=all");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -1903,7 +2004,7 @@ public sealed class CalendarPageTests : BunitContext
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/?week=2026-05-04&seriesOrigins=BE,US&seriesAvailabilities=flatrate,free&seriesStatuses=Returning%20Series%7CEnded");
+        navigation.NavigateTo("/?week=2026-05-04&seriesOrigins=BE,US&seriesAvailabilities=flatrate,free&seriesStatuses=Returning%20Series%7CEnded&seriesLang=all&movieLang=all&movieRuntimeMin=0");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -2074,13 +2175,13 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
-    public void CalendarPage_ClearFiltersRemovesSeriesScopeFromUrl()
+    public void CalendarPage_ClearFiltersKeepsPremiereScopeAndRemovesLegacyScopeFromUrl()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
         var navigation = Services.GetRequiredService<NavigationManager>();
         navigation.NavigateTo(
-            "/series?week=2026-04-20&sort=date&dir=asc&min=0.0&max=10.0&minVotes=0&lang=both&origin=all&runtimeMin=0&runtimeMax=360&seriesScope=new");
+            "/series?week=2026-04-20&sort=date&dir=asc&min=0.0&max=10.0&minVotes=0&lang=both&origin=all&runtimeMin=0&runtimeMax=360&seriesScope=episodes&seriesLang=en");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -2275,7 +2376,7 @@ public sealed class CalendarPageTests : BunitContext
             ]
         };
         Services.AddSingleton<IPremiereService>(service);
-        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04&movieLang=all&movieRuntimeMin=0");
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
@@ -2572,6 +2673,37 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
             Assert.Contains("Belgian movies", component.Find("select[aria-label='Saved filter presets']").TextContent));
+    }
+
+    [Fact]
+    public async Task CalendarPage_ApplyingLegacyPresetUsesPremieresAndPreservesItsSavedData()
+    {
+        var service = new FakePremiereService();
+        Services.AddSingleton<IPremiereService>(service);
+        var preset = new CalendarFilterPreset(
+            "legacy", "Dutch series", CalendarPageMode.Series,
+            new CalendarFilters
+            {
+                ShowMovies = false,
+                SeriesFilters = { SeriesDateMode = SeriesDateMode.AllEpisodes, OriginalLanguages = ["nl"] }
+            }, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        var storedJson = JsonSerializer.Serialize(new[] { preset }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        await _appStateStore.SetValueAsync("Calendar.FilterPresets", storedJson, CancellationToken.None);
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/series?week=2026-05-04");
+        var component = Render<PremiereCalendar.Components.Pages.Calendar>();
+        component.WaitForAssertion(() => Assert.Single(service.Calls));
+
+        component.Find("button[title='Open tools and actions (Ctrl+K)']").Click();
+        component.Find("select[aria-label='Saved filter presets']").Change("legacy");
+        component.Find("button[title='Apply saved filter preset']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            var applied = service.FilterSnapshots.Last()!;
+            Assert.Equal(SeriesDateMode.NewSeriesOnly, applied.SeriesFilters.SeriesDateMode);
+            Assert.Equal(["nl"], applied.SeriesFilters.OriginalLanguages);
+        });
+        Assert.Equal(storedJson, await _appStateStore.GetValueAsync("Calendar.FilterPresets", CancellationToken.None));
     }
 
     [Fact]
@@ -2999,7 +3131,8 @@ public sealed class CalendarPageTests : BunitContext
         TmdbId = int.Parse(canonicalId.AsSpan(canonicalId.LastIndexOf(':') + 1), System.Globalization.CultureInfo.InvariantCulture),
         Title = title,
         PremiereDate = date,
-        OriginalLanguage = "en"
+        OriginalLanguage = "en",
+        RuntimeMinutes = 105
     };
 
     private sealed class GatedBackgroundPremiereService : IPremiereService
@@ -3081,6 +3214,8 @@ public sealed class CalendarPageTests : BunitContext
     {
         public List<(DateOnly Start, DateOnly End, bool ForceRefresh, DateOnly? PriorityDate)> Calls { get; } = [];
 
+        public List<CalendarFilters?> FilterSnapshots { get; } = [];
+
         public IReadOnlyList<PremiereItem>? Items { get; set; }
 
         public bool FinalHasSourceErrors { get; set; }
@@ -3124,6 +3259,7 @@ public sealed class CalendarPageTests : BunitContext
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             Calls.Add((start, end, forceRefresh, filters?.PriorityDate));
+            FilterSnapshots.Add(filters is null ? null : CalendarFilterState.Clone(filters));
             var items = BuildItems(start);
 
             if (ReportStaleCacheProgress)
@@ -3411,7 +3547,8 @@ public sealed class CalendarPageTests : BunitContext
             TmdbId = canonicalId == "movie:alpha" ? 201 : 202,
             Title = title,
             PremiereDate = date,
-            OriginalLanguage = "en"
+            OriginalLanguage = "en",
+            RuntimeMinutes = 105
         };
     }
 

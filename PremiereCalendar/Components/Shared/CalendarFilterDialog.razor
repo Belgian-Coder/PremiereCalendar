@@ -193,7 +193,7 @@
         _draftFilters = CalendarFilterState.Clone(Filters);
         CalendarFilterState.ApplyPageMode(_draftFilters, PageMode);
         _normalizedDraftFilters = CalendarFilterState.Clone(_draftFilters);
-        CalendarFilterState.Normalize(_normalizedDraftFilters);
+        CalendarFilterState.NormalizeForCalendar(_normalizedDraftFilters);
         _draftFilterSignature = _savedFilterSignature;
         _draftSignatureDirty = false;
     }
@@ -206,7 +206,7 @@
 
     private async Task SaveAsync()
     {
-        CalendarFilterState.Normalize(_draftFilters);
+        CalendarFilterState.NormalizeForCalendar(_draftFilters);
         CalendarFilterState.ApplyPageMode(_draftFilters, PageMode);
         await OnSave.InvokeAsync(CalendarFilterState.Clone(_draftFilters));
     }
@@ -219,10 +219,8 @@
     private Task ClearDraftFilters()
     {
         var weekStart = _draftFilters.WeekStart;
-        _draftFilters = new CalendarFilters
-        {
-            WeekStart = weekStart
-        };
+        _draftFilters = CalendarFilters.CreateDefault();
+        _draftFilters.WeekStart = weekStart;
         CalendarFilterState.ApplyPageMode(_draftFilters, PageMode);
         return NotifyDraftChanged();
     }
@@ -269,12 +267,6 @@
         if (PageMode == CalendarPageMode.All && (!_draftFilters.ShowSeries || !_draftFilters.ShowMovies))
         {
             summary.Add(MediaSummary(_draftFilters));
-        }
-
-        if (PageMode is CalendarPageMode.All or CalendarPageMode.Series
-            && _draftFilters.SeriesFilters.SeriesDateMode == SeriesDateMode.NewSeriesOnly)
-        {
-            summary.Add("New only");
         }
 
         if (PageMode is CalendarPageMode.All or CalendarPageMode.Series
@@ -347,7 +339,7 @@
 
         _normalizedDraftFilters = CalendarFilterState.Clone(_draftFilters);
         CalendarFilterState.ApplyPageMode(_normalizedDraftFilters, PageMode);
-        CalendarFilterState.Normalize(_normalizedDraftFilters);
+        CalendarFilterState.NormalizeForCalendar(_normalizedDraftFilters);
         _draftFilterSignature = NormalizedFilterSignature(_normalizedDraftFilters);
         _draftSignatureDirty = false;
         return _draftFilterSignature;
@@ -357,7 +349,7 @@
     {
         var clone = CalendarFilterState.Clone(filters);
         CalendarFilterState.ApplyPageMode(clone, PageMode);
-        CalendarFilterState.Normalize(clone);
+        CalendarFilterState.NormalizeForCalendar(clone);
         return NormalizedFilterSignature(clone);
     }
 

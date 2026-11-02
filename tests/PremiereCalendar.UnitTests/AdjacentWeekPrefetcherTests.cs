@@ -44,6 +44,43 @@ public sealed class AdjacentWeekPrefetcherTests
                 new DateOnly(2026, 4, 20)
             ],
             service.Calls.Select(call => call.Start).ToArray());
+        Assert.All(service.Calls, call => Assert.Equal(
+            SeriesDateMode.NewSeriesOnly,
+            PremiereDiscoveryCriteria.FromFilters(call.Filters).Series.SeriesDateMode));
+    }
+
+    [Fact]
+    public async Task PrefetchAdjacentWeeks_MigratesLegacyScopeWithoutChangingTheCallerFilters()
+    {
+        using var lifetime = new FakeHostApplicationLifetime();
+        var service = new RecordingPremiereService();
+        await using var provider = new ServiceCollection()
+            .AddSingleton<IPremiereService>(service)
+            .BuildServiceProvider();
+        using var prefetcher = new AdjacentWeekPrefetcher(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            lifetime,
+            Microsoft.Extensions.Options.Options.Create(new CalendarCacheOptions
+            {
+                Enabled = true,
+                AdjacentWeekPrefetchEnabled = true,
+                FuturePrefetchWeeks = 1,
+                PastPrefetchWeeks = 0
+            }),
+            NullLogger<AdjacentWeekPrefetcher>.Instance);
+        var filters = new CalendarFilters
+        {
+            ShowMovies = false,
+            SeriesFilters = { SeriesDateMode = SeriesDateMode.AllEpisodes, OriginalLanguages = ["nl"] }
+        };
+
+        prefetcher.PrefetchAdjacentWeeks(new DateOnly(2026, 5, 4), filters);
+        await WaitForAsync(() => service.Calls.Count >= 1);
+
+        var prefetchedFilters = Assert.Single(service.Calls).Filters!;
+        Assert.Equal(SeriesDateMode.NewSeriesOnly, prefetchedFilters.SeriesFilters.SeriesDateMode);
+        Assert.Equal(["nl"], prefetchedFilters.SeriesFilters.OriginalLanguages);
+        Assert.Equal(SeriesDateMode.AllEpisodes, filters.SeriesFilters.SeriesDateMode);
     }
 
     [Fact]

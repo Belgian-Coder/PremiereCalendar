@@ -99,7 +99,7 @@ public sealed class CalendarPresetService
         snapshot.WeekStart = DateOnly.MinValue;
         snapshot.PriorityDate = null;
         CalendarFilterState.ApplyPageMode(snapshot, pageMode);
-        CalendarFilterState.Normalize(snapshot);
+        CalendarFilterState.NormalizeForCalendar(snapshot);
         return snapshot;
     }
 

@@ -313,7 +313,30 @@ public sealed partial class PremiereService
         candidate = canonicalCandidate;
         if (TryReuseCachedExternalCandidate(cachedEnrichment, candidate, criteria, out var cachedCandidateItem))
         {
-            return await HydrateExternalCandidateRatingsAsync(cachedCandidateItem, candidate, cancellationToken, forceRefresh);
+            if (candidate.MediaType == PremiereMediaType.Series
+                && criteria.Series.SeriesDateMode == SeriesDateMode.NewSeriesOnly
+                && candidate.TmdbId is not > 0
+                && cachedCandidateItem.TmdbId > 0)
+            {
+                canonicalCandidate = await CanonicalizeExternalSeriesPremiereCandidateAsync(
+                    candidate with { TmdbId = cachedCandidateItem.TmdbId }, criteria,
+                    requestStart, requestEnd, cancellationToken, forceRefresh);
+                if (canonicalCandidate is null)
+                {
+                    return null;
+                }
+                if (canonicalCandidate.PremiereDate == candidate.PremiereDate)
+                {
+                    return await HydrateExternalCandidateRatingsAsync(
+                        cachedCandidateItem, canonicalCandidate, cancellationToken, forceRefresh);
+                }
+                candidate = canonicalCandidate;
+            }
+            else
+            {
+                return await HydrateExternalCandidateRatingsAsync(
+                    cachedCandidateItem, candidate, cancellationToken, forceRefresh);
+            }
         }
 
         var tmdbId = await ResolveCandidateTmdbIdAsync(candidate, cancellationToken, forceRefresh);
@@ -325,6 +348,22 @@ public sealed partial class PremiereService
         if (tmdbId is not > 0)
         {
             return CreateUnverifiedPremiereItem(candidate, criteria);
+        }
+
+        if (candidate.MediaType == PremiereMediaType.Series
+            && criteria.Series.SeriesDateMode == SeriesDateMode.NewSeriesOnly
+            && candidate.TmdbId is not > 0)
+        {
+            // External-ID resolution must receive the same debut-date validation
+            // as candidates that supplied their TMDb ID in the original feed.
+            canonicalCandidate = await CanonicalizeExternalSeriesPremiereCandidateAsync(
+                candidate with { TmdbId = tmdbId }, criteria, requestStart, requestEnd,
+                cancellationToken, forceRefresh);
+            if (canonicalCandidate is null)
+            {
+                return null;
+            }
+            candidate = canonicalCandidate;
         }
 
         var title = candidate.Title;
@@ -637,14 +676,17 @@ public sealed partial class PremiereService
         PremiereDiscoveryCriteria criteria)
     {
         if (candidate.MediaType != PremiereMediaType.Series
-            || criteria.Series.SeriesDateMode == SeriesDateMode.AllEpisodes
-            || !candidate.IsSeriesEpisode)
+            || criteria.Series.SeriesDateMode == SeriesDateMode.AllEpisodes)
         {
             return true;
         }
 
-        return IsSeasonOneEpisodeOne(candidate)
-            && (candidate.SeriesPremiereDate is null || candidate.SeriesPremiereDate == candidate.PremiereDate);
+        if (candidate.SeriesPremiereDate is { } firstDebut && firstDebut != candidate.PremiereDate)
+        {
+            return false;
+        }
+
+        return !candidate.IsSeriesEpisode || IsSeasonOneEpisodeOne(candidate);
     }
 
     private static bool IsSeasonOneEpisodeOne(ExternalPremiereCandidate candidate)

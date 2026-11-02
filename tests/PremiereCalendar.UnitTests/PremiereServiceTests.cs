@@ -9,6 +9,48 @@ namespace PremiereCalendar.UnitTests;
 
 public sealed partial class PremiereServiceTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetPremieresAsync_NullAndFactoryDefaultsApplyTheSameLanguageRuntimeAndDebutFilters(bool explicitDefaults)
+    {
+        var date = new DateOnly(2026, 5, 4);
+        PremiereItem Movie(int id, string language, int runtime) => new()
+        {
+            CanonicalId = $"movie:{id}", TmdbId = id, Title = $"Movie {id}",
+            MediaType = PremiereMediaType.Movie, Type = PremiereItemType.MovieFirstRelease,
+            PremiereDate = date, OriginalLanguage = language, RuntimeMinutes = runtime
+        };
+        var cache = new FakeCalendarCache
+        {
+            Items =
+            [
+                Movie(1, "en", 90), Movie(2, "fr", 90), Movie(3, "en", 20),
+                new PremiereItem
+                {
+                    CanonicalId = "tv:4", TmdbId = 4, Title = "New Dutch Series",
+                    MediaType = PremiereMediaType.Series, Type = PremiereItemType.SeriesPremiere,
+                    PremiereDate = date, OriginalLanguage = "nl"
+                },
+                new PremiereItem
+                {
+                    CanonicalId = "tv:5:s02e01", TmdbId = 5, Title = "Returning Series",
+                    MediaType = PremiereMediaType.Series, Type = PremiereItemType.SeriesEpisode,
+                    PremiereDate = date, OriginalLanguage = "en", SeasonNumber = 2, EpisodeNumber = 1
+                }
+            ]
+        };
+        var tmdb = new FakeTmdbClient();
+        var service = CreateService(tmdb, calendarCache: cache);
+
+        var items = await service.GetPremieresAsync(date, date.AddDays(6), CancellationToken.None,
+            filters: explicitDefaults ? CalendarFilters.CreateDefault() : null);
+
+        Assert.Equal(["movie:1", "tv:4"], items.Select(item => item.CanonicalId).Order().ToArray());
+        Assert.Empty(tmdb.TvCalls);
+        Assert.Empty(tmdb.MovieCalls);
+    }
+
     [Fact]
     public async Task GetPremieresAsync_DeduplicatesSameMediaTypeAndTmdbIdAcrossQueries()
     {
@@ -47,7 +89,7 @@ public sealed partial class PremiereServiceTests
     }
 
     [Fact]
-    public async Task GetPremieresAsync_DefaultsToSeriesEpisodeDiscoveryByDay()
+    public async Task GetPremieresAsync_DefaultsToNewSeriesDiscoveryForTheWholeWindow()
     {
         var tmdb = new FakeTmdbClient
         {
@@ -56,7 +98,7 @@ public sealed partial class PremiereServiceTests
                 new TmdbTvDiscoverItem
                 {
                     Id = 15,
-                    Name = "Daily Episode",
+                    Name = "New Series",
                     FirstAirDate = "2026-05-06",
                     OriginalLanguage = "en",
                     OriginCountry = ["US"]
@@ -71,16 +113,15 @@ public sealed partial class PremiereServiceTests
             CancellationToken.None);
 
         var item = Assert.Single(items);
-        Assert.Equal("tv:15:air:20260506", item.CanonicalId);
-        Assert.Equal(PremiereItemType.SeriesEpisode, item.Type);
+        Assert.Equal("tv:15", item.CanonicalId);
+        Assert.Equal(PremiereItemType.SeriesPremiere, item.Type);
         Assert.Equal(new DateOnly(2026, 5, 6), item.PremiereDate);
-        Assert.Equal("TMDb air date", item.EpisodeSource);
-        Assert.Equal(7, tmdb.TvCalls.Count);
-        Assert.All(tmdb.TvCalls, call => Assert.True(call.Filters.UseEpisodeAirDate));
+        Assert.Equal(2, tmdb.TvCalls.Count);
+        Assert.All(tmdb.TvCalls, call => Assert.False(call.Filters.UseEpisodeAirDate));
     }
 
     [Fact]
-    public async Task GetPremieresAsync_UsesUnfilteredTmdbDiscoveryForSeriesAndMovies()
+    public async Task GetPremieresAsync_UsesEstablishedEnglishDutchDefaultsForSeriesAndMovies()
     {
         var tmdb = new FakeTmdbClient();
         var service = CreateService(tmdb);
@@ -90,19 +131,20 @@ public sealed partial class PremiereServiceTests
             new DateOnly(2026, 5, 10),
             CancellationToken.None);
 
-        Assert.Equal(7, tmdb.TvCalls.Count);
+        Assert.Equal(2, tmdb.TvCalls.Count);
         Assert.All(tmdb.TvCalls, tvCall =>
         {
-            Assert.True(tvCall.Filters.UseEpisodeAirDate);
-            Assert.Empty(tvCall.Filters.OriginalLanguage);
+            Assert.False(tvCall.Filters.UseEpisodeAirDate);
+            Assert.Contains(tvCall.Filters.OriginalLanguage, new[] { "en", "nl" });
             Assert.Empty(tvCall.Filters.OriginCountries);
         });
         Assert.Empty(tmdb.TvNetworkCalls);
 
-        Assert.Equal(7, tmdb.MovieCalls.Count);
+        Assert.Equal(14, tmdb.MovieCalls.Count);
         Assert.All(tmdb.MovieCalls, movieCall =>
         {
-            Assert.Empty(movieCall.Filters.OriginalLanguage);
+            Assert.Contains(movieCall.Filters.OriginalLanguage, new[] { "en", "nl" });
+            Assert.Equal(45, movieCall.Filters.RuntimeMinMinutes);
             Assert.Empty(movieCall.Filters.OriginCountries);
         });
     }
@@ -138,7 +180,8 @@ public sealed partial class PremiereServiceTests
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
             CancellationToken.None,
-            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
+            filters: new CalendarFilters());
 
         Assert.Equal(2, items.Count);
         Assert.Contains(reports, report => report.SourceName.StartsWith("TMDb series", StringComparison.Ordinal) && report.SourceItemCount == 1);
@@ -628,7 +671,8 @@ public sealed partial class PremiereServiceTests
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
             CancellationToken.None,
-            forceRefresh: true);
+            forceRefresh: true,
+            filters: new CalendarFilters { SeriesFilters = { SeriesDateMode = SeriesDateMode.AllEpisodes } });
 
         var item = Assert.Single(items);
         Assert.Equal("tv:120:s01e01", item.CanonicalId);
@@ -680,7 +724,8 @@ public sealed partial class PremiereServiceTests
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
             CancellationToken.None,
-            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
+            filters: new CalendarFilters());
 
         Assert.Equal(2, items.Count);
         var externalUpdates = reports
@@ -1383,7 +1428,8 @@ public sealed partial class PremiereServiceTests
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
             CancellationToken.None,
-            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
+            filters: new CalendarFilters());
 
         Assert.Equal("Fast Show", Assert.Single(items).Title);
         Assert.Contains(reports, report => report.SourceName.StartsWith("TMDb movies", StringComparison.Ordinal)
@@ -1415,7 +1461,8 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters());
 
         Assert.Equal("Fast Show", Assert.Single(items).Title);
         Assert.Empty(cache.SetCalls);
@@ -2018,10 +2065,10 @@ public sealed partial class PremiereServiceTests
             CancellationToken.None,
             filters: filters);
 
-        Assert.Equal(7, tmdb.TvCalls.Count);
+        Assert.Single(tmdb.TvCalls);
         var call = tmdb.TvCalls.First();
         Assert.Empty(tmdb.MovieCalls);
-        Assert.True(call.Filters.UseEpisodeAirDate);
+        Assert.False(call.Filters.UseEpisodeAirDate);
         Assert.Equal("nl", call.Filters.OriginalLanguage);
         Assert.Equal("first_air_date.asc", call.Filters.SortBy);
         Assert.Equal([18], call.Filters.GenreIds);
@@ -2722,11 +2769,12 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters());
 
         var item = Assert.Single(items);
-        Assert.Equal("tv:50:air:20260504", item.CanonicalId);
-        Assert.Equal(PremiereItemType.SeriesEpisode, item.Type);
+        Assert.Equal("tv:50", item.CanonicalId);
+        Assert.Equal(PremiereItemType.SeriesPremiere, item.Type);
         Assert.Equal("Shared TMDb Show", item.Title);
         Assert.Contains("Fake", item.SourceNames);
         Assert.Contains(item.Sources, source => source.Name == "Fake" && source.Kind == "schedule");
@@ -2771,7 +2819,8 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters());
 
         var item = Assert.Single(items);
         Assert.Equal("movie:60", item.CanonicalId);
@@ -2828,7 +2877,8 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters());
 
         var item = Assert.Single(items);
         Assert.Equal("movie:61", item.CanonicalId);
@@ -2938,7 +2988,8 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters { SeriesFilters = { SeriesDateMode = SeriesDateMode.AllEpisodes } });
 
         var item = Assert.Single(items);
         Assert.Equal("tv:51:s01e09", item.CanonicalId);
@@ -2983,7 +3034,8 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters { SeriesFilters = { SeriesDateMode = SeriesDateMode.AllEpisodes } });
 
         var item = Assert.Single(items);
         Assert.Equal("tv:52:s01e09", item.CanonicalId);
@@ -3902,7 +3954,8 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters());
 
         var item = Assert.Single(items);
         Assert.Equal(
@@ -4002,7 +4055,8 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters());
 
         var item = Assert.Single(items);
         Assert.Equal(["TMDb Stream"], item.SourceNames);
@@ -4218,7 +4272,8 @@ public sealed partial class PremiereServiceTests
         var items = await service.GetPremieresAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None,
+            filters: new CalendarFilters());
 
         var item = Assert.Single(items);
         Assert.Equal("tv:42", item.CanonicalId);

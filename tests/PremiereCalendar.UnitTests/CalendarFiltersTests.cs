@@ -5,6 +5,49 @@ namespace PremiereCalendar.UnitTests;
 
 public sealed class CalendarFiltersTests
 {
+    [Fact]
+    public void Defaults_UseNewSeriesPremieresWithoutAddingAnActiveFilter()
+    {
+        var filters = new CalendarFilters();
+
+        Assert.Equal(SeriesDateMode.NewSeriesOnly, filters.SeriesFilters.SeriesDateMode);
+        Assert.False(filters.SeriesFilters.HasCriteria);
+        Assert.False(filters.MovieFilters.HasCriteria);
+    }
+
+    [Fact]
+    public void CreateDefault_MatchesTheEstablishedEnglishDutchCalendarProfiles()
+    {
+        var filters = CalendarFilters.CreateDefault();
+
+        Assert.Equal(SeriesDateMode.NewSeriesOnly, filters.SeriesFilters.SeriesDateMode);
+        Assert.Equal(["en", "nl"], filters.SeriesFilters.OriginalLanguages);
+        Assert.Equal(["en", "nl"], filters.MovieFilters.OriginalLanguages);
+        Assert.Equal(0, filters.SeriesFilters.RuntimeMinMinutes);
+        Assert.Equal(45, filters.MovieFilters.RuntimeMinMinutes);
+        Assert.Equal(360, filters.MovieFilters.RuntimeMaxMinutes);
+        Assert.Empty(filters.GenreIds);
+        Assert.Empty(filters.SeriesFilters.OriginCountries);
+        Assert.Empty(filters.MovieFilters.OriginCountries);
+    }
+
+    [Fact]
+    public void NormalizeForCalendar_MigratesLegacyEpisodeScopeAndPreservesOtherFilters()
+    {
+        var filters = new CalendarFilters
+        {
+            SeriesFilters = { SeriesDateMode = SeriesDateMode.AllEpisodes, OriginalLanguages = ["nl"], SearchText = "launch" },
+            MovieFilters = { GenreIds = [18] }
+        };
+
+        CalendarFilterState.NormalizeForCalendar(filters);
+
+        Assert.Equal(SeriesDateMode.NewSeriesOnly, filters.SeriesFilters.SeriesDateMode);
+        Assert.Equal(["nl"], filters.SeriesFilters.OriginalLanguages);
+        Assert.Equal("launch", filters.SeriesFilters.SearchText);
+        Assert.Equal([18], filters.MovieFilters.GenreIds);
+    }
+
     [Theory]
     [InlineData("2026-05-04", "2026-05-04")]
     [InlineData("2026-05-10", "2026-05-04")]

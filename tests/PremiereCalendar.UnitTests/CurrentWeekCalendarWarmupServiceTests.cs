@@ -40,6 +40,7 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
         {
             Assert.False(call.ForceRefresh);
             Assert.Equal(call.Start, call.Filters.WeekStart);
+            Assert.Equal(SeriesDateMode.NewSeriesOnly, call.Filters.SeriesFilters.SeriesDateMode);
         });
         Assert.Equal(new DateOnly(2026, 5, 8), premiereService.Calls[0].Filters.PriorityDate);
         Assert.Equal(new DateOnly(2026, 5, 11), premiereService.Calls[1].Filters.PriorityDate);
@@ -75,6 +76,7 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
                         WeekStart = new DateOnly(2026, 3, 2),
                         ShowSeries = false,
                         ShowMovies = true,
+                        SeriesFilters = { SeriesDateMode = SeriesDateMode.AllEpisodes },
                         PriorityDate = new DateOnly(2026, 3, 4),
                         MovieFilters =
                         {
@@ -112,6 +114,7 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
         Assert.Equal(new DateOnly(2026, 5, 8), hotCall.Filters.PriorityDate);
         Assert.False(hotCall.Filters.ShowSeries);
         Assert.True(hotCall.Filters.ShowMovies);
+        Assert.Equal(SeriesDateMode.NewSeriesOnly, hotCall.Filters.SeriesFilters.SeriesDateMode);
     }
 
     [Fact]

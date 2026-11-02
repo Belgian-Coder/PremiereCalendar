@@ -393,7 +393,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
         filters.WeekStart = rangeStart;
         filters.PriorityDate = priorityDate;
         CalendarFilterState.ApplyPageMode(filters, pageMode);
-        CalendarFilterState.Normalize(filters);
+        CalendarFilterState.NormalizeForCalendar(filters);
         return filters;
     }
 
@@ -415,7 +415,7 @@ public sealed class CurrentWeekCalendarWarmupRunner
     private static CalendarFilters FiltersForPageMode(CalendarFilters? filters, CalendarPageMode pageMode)
     {
         var pageFilters = filters is null
-            ? new CalendarFilters()
+            ? CalendarFilters.CreateDefault()
             : CalendarFilterState.Clone(filters);
         pageFilters.WeekStart = filters?.WeekStart ?? pageFilters.WeekStart;
         CalendarFilterState.ApplyPageMode(pageFilters, pageMode);
@@ -430,16 +430,23 @@ public sealed class CurrentWeekCalendarWarmupRunner
             new WarmupProfile(
                 "default:series",
                 CalendarPageMode.Series,
-                new CalendarFilters { ShowSeries = true, ShowMovies = false },
+                DefaultProfileFilters(CalendarPageMode.Series),
                 LastWarmedUtc: null,
                 IsDefault: true),
             new WarmupProfile(
                 "default:movies",
                 CalendarPageMode.Movies,
-                new CalendarFilters { ShowSeries = false, ShowMovies = true },
+                DefaultProfileFilters(CalendarPageMode.Movies),
                 LastWarmedUtc: null,
                 IsDefault: true)
         ];
+    }
+
+    private static CalendarFilters DefaultProfileFilters(CalendarPageMode pageMode)
+    {
+        var filters = CalendarFilters.CreateDefault();
+        CalendarFilterState.ApplyPageMode(filters, pageMode);
+        return filters;
     }
 
     private sealed record WarmupProfile(

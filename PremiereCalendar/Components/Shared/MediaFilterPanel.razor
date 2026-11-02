@@ -87,29 +87,6 @@
         </div>
     </details>
 
-    @if (MediaType == PremiereMediaType.Series)
-    {
-        <details class="filter-dropdown" data-testid="series-date-mode-filter">
-            <summary>
-                <span>Calendar rows</span>
-                <strong>@SeriesDateModeSummary()</strong>
-            </summary>
-            <div class="filter-dropdown-menu">
-                @foreach (var option in SeriesDateModeOptions)
-                {
-                    <label @key="option.Value" class="dropdown-check-option">
-                        <input type="radio"
-                               name="series-date-mode"
-                               checked="@(Filters.SeriesDateMode == option.Value)"
-                               aria-label="@($"Use {option.Label}")"
-                               @onchange="_ => ChangeSeriesDateMode(option.Value)" />
-                        <span>@option.Label</span>
-                    </label>
-                }
-            </div>
-        </details>
-    }
-
     <details class="filter-dropdown" data-testid="@($"{MediaSlug}-availability-filter")">
         <summary>
             <span>Availabilities</span>
@@ -662,8 +639,10 @@
 
     private Task ClearFilterSet()
     {
-        Filters.SeriesDateMode = SeriesDateMode.AllEpisodes;
-        Filters.OriginalLanguages.Clear();
+        var defaults = CalendarFilters.CreateDefault();
+        var mediaDefaults = MediaType == PremiereMediaType.Series ? defaults.SeriesFilters : defaults.MovieFilters;
+        Filters.SeriesDateMode = SeriesDateMode.NewSeriesOnly;
+        Filters.OriginalLanguages = [.. mediaDefaults.OriginalLanguages];
         Filters.OriginCountries.Clear();
         Filters.GenreIds.Clear();
         Filters.SelectedSources.Clear();
@@ -675,17 +654,11 @@
         Filters.CertificationCountry = "";
         Filters.TvStatuses.Clear();
         Filters.TvTypes.Clear();
-        Filters.RuntimeMinMinutes = 0;
+        Filters.RuntimeMinMinutes = mediaDefaults.RuntimeMinMinutes;
         Filters.RuntimeMaxMinutes = 360;
         Filters.KeywordText = "";
         Filters.SearchText = "";
 
-        return NotifyChanged();
-    }
-
-    private Task ChangeSeriesDateMode(SeriesDateMode value)
-    {
-        Filters.SeriesDateMode = value;
         return NotifyChanged();
     }
 
@@ -783,11 +756,6 @@
         };
     }
 
-    private string SeriesDateModeSummary()
-    {
-        return SeriesDateModeOptions.First(option => option.Value == Filters.SeriesDateMode).Label;
-    }
-
     private string SelectedTvStatusSummary()
     {
         return SelectedStringSummary(Filters.TvStatuses, "All statuses");
@@ -877,12 +845,6 @@
         (4, "Digital"),
         (5, "Physical"),
         (6, "TV")
-    ];
-
-    private static readonly (SeriesDateMode Value, string Label)[] SeriesDateModeOptions =
-    [
-        (SeriesDateMode.AllEpisodes, "Every episode"),
-        (SeriesDateMode.NewSeriesOnly, "New series only")
     ];
 
     private static readonly FilterOption[] TvStatusOptions =

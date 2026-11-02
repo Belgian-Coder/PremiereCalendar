@@ -158,6 +158,11 @@ public static class PremiereFilter
 
     private static bool PassesMediaFilterSet(PremiereItem item, MediaFilterSet filters)
     {
+        if (!PassesSeriesDateModeFilter(item, filters.SeriesDateMode))
+        {
+            return false;
+        }
+
         if (!filters.HasCriteria)
         {
             return true;
