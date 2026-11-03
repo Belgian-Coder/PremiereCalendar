@@ -41,7 +41,7 @@
     <link rel="stylesheet" href="@Assets["PremiereCalendar.styles.css"]" />
     <ImportMap />
     <link rel="icon" type="image/svg+xml" href="@Assets["favicon.svg"]" />
-    <HeadOutlet />
+    <HeadOutlet @rendermode="PageHeadRenderMode" />
 </head>
 
 <body>
@@ -72,6 +72,17 @@
 </html>
 
 @code {
+    private IComponentRenderMode? PageHeadRenderMode
+    {
+        get
+        {
+            var page = HttpContextAccessor.HttpContext?.GetEndpoint()?.Metadata
+                .GetMetadata<Microsoft.AspNetCore.Components.Endpoints.ComponentTypeMetadata>()?.Type;
+            return page?.GetCustomAttributes(typeof(RenderModeAttribute), inherit: true)
+                .OfType<RenderModeAttribute>().FirstOrDefault()?.Mode;
+        }
+    }
+
     private string InitialTheme
     {
         get

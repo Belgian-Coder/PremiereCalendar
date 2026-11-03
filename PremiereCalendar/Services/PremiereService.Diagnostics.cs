@@ -32,7 +32,7 @@ public sealed partial class PremiereService
         var context = (_telemetry.CaptureDiagnosticContext() ?? _telemetry.CreateDiagnosticContext())
             with { OperationId = Guid.NewGuid().ToString("N") };
         using var scope = _telemetry.UseDiagnosticContext(context);
-        _telemetry.RecordDiagnostic("enrichment.item.started", details: new() { Stage = media, ItemId = id });
+        _telemetry.RecordDiagnostic("enrichment.item.started", details: new() { Stage = media, MediaType = media, ItemId = id });
         return await TraceEnrichmentStageAsync(media + ".item", operation);
     }
 
@@ -130,7 +130,12 @@ public sealed partial class PremiereService
                         Outcome = update.HasSourceErrors ? "partial" : "success"
                     });
                     first = false;
-                    if (update.IsFinal) outcome = update.HasSourceErrors ? "partial" : "complete";
+                    if (update.IsFinal)
+                    {
+                        outcome = update.HasSourceErrors ? "partial" : "complete";
+                        if (update.HasSourceErrors) reason = update.FailedSourceNames.Contains("Item cache validation", StringComparer.OrdinalIgnoreCase)
+                            ? "item_cache_validation" : "source_failure";
+                    }
                     yield return update;
                 }
                 if (outcome == "abandoned") outcome = "ended_without_final";
@@ -165,7 +170,8 @@ public sealed partial class PremiereService
                 IsComplete = snapshot.IsComplete && reconciled.DirtyMedia.Count == 0,
                 HasFreshSeries = snapshot.HasFreshSeries && !reconciled.DirtyMedia.Contains(PremiereMediaType.Series),
                 HasFreshMovies = snapshot.HasFreshMovies && !reconciled.DirtyMedia.Contains(PremiereMediaType.Movie),
-                HasPartialCache = snapshot.HasPartialCache || reconciled.DirtyMedia.Count > 0
+                HasPartialCache = snapshot.HasPartialCache || reconciled.DirtyMedia.Count > 0,
+                CanReuseDegraded = snapshot.CanReuseDegraded && reconciled.DirtyMedia.Count == 0
             };
             session.ForceDiscoveryRefresh |= reconciled.DirtyMedia.Count > 0;
         }
@@ -205,11 +211,13 @@ public sealed partial class PremiereService
                 if (!moved) break;
                 var batch = enumerator.Current;
                 count = batch.Items.Count;
-                outcome = batch.Error is null ? "success" : "failed";
-                reason = batch.Error?.GetType().Name;
+                var unavailable = batch.Error is null ? null : OptionalAccessDenial(batch.Name, batch.Error);
+                outcome = unavailable is not null ? "unavailable" : batch.Error is null ? "success" : "failed";
+                reason = unavailable?.Reason ?? batch.Error?.GetType().Name;
                 _telemetry.RecordDiagnostic("source.progress", context, new()
                 {
                     Provider = provider, Count = count, Outcome = outcome, Reason = reason, IsFinal = batch.IsComplete,
+                    StatusCode = unavailable?.StatusCode, RetryAtUtc = unavailable?.RetryAtUtc,
                     DurationMilliseconds = Stopwatch.GetElapsedTime(timer).TotalMilliseconds
                 });
                 yield return batch;
@@ -227,16 +235,22 @@ public sealed partial class PremiereService
 
     private async Task SavePartialCalendarCacheAsync(
         DateOnly start, DateOnly end, CalendarFilters? filters, PremiereDiscoveryCriteria criteria,
-        IReadOnlyList<PremiereItem> items, ProviderWorkResumeState? resumeState, CancellationToken cancellationToken)
+        IReadOnlyList<PremiereItem> items, ProviderWorkResumeState? resumeState, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string?>? baselines = null, DateTimeOffset? refreshStartedUtc = null)
     {
         var timer = Stopwatch.GetTimestamp();
+        var exact = baselines is not null && refreshStartedUtc.HasValue;
+        var saved = true;
         try
         {
             await PublishCalendarCacheAsync(resumeState, async token =>
             {
                 if (!ShouldUseSharedMediaCache(criteria))
                 {
-                    await _cacheOrchestrator.WritePartialAsync(start, end, criteria.CacheKey(), items, token);
+                    if (exact)
+                        saved = await _cacheOrchestrator.WriteValidatedPartialAsync(start, end, criteria.CacheKey(), items,
+                            refreshStartedUtc!.Value, token, baselines!.GetValueOrDefault(criteria.CacheKey()));
+                    else await _cacheOrchestrator.WritePartialAsync(start, end, criteria.CacheKey(), items, token);
                     return;
                 }
                 foreach (var mode in new[] { CalendarPageMode.Series, CalendarPageMode.Movies })
@@ -244,21 +258,26 @@ public sealed partial class PremiereService
                     var mediaFilters = FiltersForPageMode(filters, mode);
                     var media = mode == CalendarPageMode.Series ? PremiereMediaType.Series : PremiereMediaType.Movie;
                     var mediaItems = ApplyRequestedFilters(MergePremiereItems(items.Where(item => item.MediaType == media)), mediaFilters);
-                    if (mediaItems.Count > 0)
+                    var key = PremiereDiscoveryCriteria.FromFilters(mediaFilters).CacheKey();
+                    if (exact)
+                        saved &= await _cacheOrchestrator.WriteValidatedPartialAsync(start, end, key, mediaItems,
+                            refreshStartedUtc!.Value, token, baselines!.GetValueOrDefault(key));
+                    else if (mediaItems.Count > 0)
                         await _cacheOrchestrator.WritePartialAsync(start, end,
-                            PremiereDiscoveryCriteria.FromFilters(mediaFilters).CacheKey(), mediaItems, token);
+                            key, mediaItems, token);
                 }
             }, cancellationToken);
-            _telemetry.RecordDiagnostic("calendar.cache.partial_publication", details: new()
+            _telemetry.RecordDiagnostic(exact ? "calendar.cache.validated_partial" : "calendar.cache.partial_publication", details: new()
             {
-                Outcome = "attempted", Count = items.Count, DurationMilliseconds = Stopwatch.GetElapsedTime(timer).TotalMilliseconds,
+                Outcome = exact ? saved ? "success" : "rejected" : "attempted", Count = items.Count,
+                DurationMilliseconds = Stopwatch.GetElapsedTime(timer).TotalMilliseconds,
                 CacheKey = criteria.CacheKey(), WeekStart = start, WeekEnd = end
             });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Could not retain partial calendar cache for {StartDate} through {EndDate}.", start, end);
-            _telemetry.RecordDiagnostic("calendar.cache.partial_publication", details: new()
+            _telemetry.RecordDiagnostic(exact ? "calendar.cache.validated_partial" : "calendar.cache.partial_publication", details: new()
             {
                 Outcome = "failed", Reason = ex.GetType().Name, DurationMilliseconds = Stopwatch.GetElapsedTime(timer).TotalMilliseconds
             });

@@ -204,7 +204,8 @@ public sealed partial class PremiereServiceTests
         Assert.False(Assert.Single(updates, update => update.IsFinal).HasSourceErrors);
         Assert.Equal(112, Assert.Single(updates.Last().Items).RuntimeMinutes);
         Assert.Single(cache.SetCalls);
-        Assert.Null(Assert.Single(store.Records.Values).MetadataFetchedUtc);
+        Assert.Equal(clock.GetUtcNow(), Assert.Single(store.Records.Values).MetadataFetchedUtc);
+        var coreMetadataClock = Assert.Single(store.Records.Values).MetadataFetchedUtc;
         Assert.Single(tmdb.MovieDetailCalls);
         Assert.Single(watchmode.SourceCalls);
         await CreateService(tmdb, omdb: omdb, watchmode: watchmode, calendarCache: cache, itemEnrichmentCache: coordinator)
@@ -215,14 +216,14 @@ public sealed partial class PremiereServiceTests
         var retried = await CreateService(tmdb, omdb: omdb, watchmode: watchmode, calendarCache: cache, itemEnrichmentCache: coordinator)
             .GetPremieresAsync(date, date, CancellationToken.None, filters: new CalendarFilters { ShowSeries = false });
         Assert.Single(retried);
-        Assert.Equal(2, tmdb.MovieDetailCalls.Count);
+        Assert.Single(tmdb.MovieDetailCalls);
         Assert.Equal(2, watchmode.SourceCalls.Count);
         Assert.Single(tmdb.MovieCalls);
-        Assert.Null(Assert.Single(store.Records.Values).MetadataFetchedUtc);
+        Assert.Equal(coreMetadataClock, Assert.Single(store.Records.Values).MetadataFetchedUtc);
     }
 
     [Fact]
-    public async Task OptionalFailureCannotAssociateNewIdentityRatingsWithRetainedOldMetadata()
+    public async Task OptionalFailureAcceptsMatchingNewIdentityMetadataAndRatingsTogether()
     {
         var date = new DateOnly(2026, 11, 2);
         var clock = new ItemCacheClock();
@@ -241,14 +242,14 @@ public sealed partial class PremiereServiceTests
             watchmode: new FakeWatchmodeClient { SourcesOutcomeSuccessful = false }, itemEnrichmentCache: coordinator)
             .GetPremieresAsync(date.AddDays(7), date.AddDays(7), CancellationToken.None, filters: new CalendarFilters { ShowSeries = false }));
 
-        Assert.Equal("tt0000901", result.ImdbId);
-        Assert.Equal(8.0, result.ImdbScore);
+        Assert.Equal("tt0000902", result.ImdbId);
+        Assert.Equal(9.5, result.ImdbScore);
         Assert.Equal("tt0000902", Assert.Single(omdb.Calls));
         var after = Assert.Single(store.Records.Values);
-        Assert.Equal(before.MetadataJson, after.MetadataJson);
-        Assert.Equal(before.RatingsJson, after.RatingsJson);
-        Assert.Equal(before.MetadataFetchedUtc, after.MetadataFetchedUtc);
-        Assert.Equal(before.RatingsFetchedUtc, after.RatingsFetchedUtc);
+        Assert.Equal("tt0000902", JsonSerializer.Deserialize<ItemEnrichmentMetadata>(after.MetadataJson!)?.ImdbId);
+        Assert.Equal("tt0000902", JsonSerializer.Deserialize<ItemEnrichmentRatings>(after.RatingsJson!)?.ImdbId);
+        Assert.Equal(clock.GetUtcNow(), after.MetadataFetchedUtc);
+        Assert.Equal(clock.GetUtcNow(), after.RatingsFetchedUtc);
     }
 
     [Fact]
@@ -305,7 +306,7 @@ public sealed partial class PremiereServiceTests
             filters: new CalendarFilters { ShowMovies = false }));
 
         var after = Assert.Single(store.Records.Values);
-        Assert.Equal(fail ? before.MetadataFetchedUtc : clock.GetUtcNow(), after.MetadataFetchedUtc);
+        Assert.Equal(clock.GetUtcNow(), after.MetadataFetchedUtc);
         if (fail)
         {
             Assert.Equal("Previous network", result.NetworkName);
@@ -313,13 +314,26 @@ public sealed partial class PremiereServiceTests
             Assert.Equal("https://previous.example/", result.OfficialSiteUrl);
             Assert.Equal("https://previous.example/poster.jpg", result.PosterUrl);
             Assert.Contains("Previous network", result.SourceNames);
-            Assert.Equal(before.MetadataJson, after.MetadataJson);
+            Assert.False(JsonSerializer.Deserialize<ItemEnrichmentMetadata>(after.MetadataJson!)?.OptionalMetadataComplete);
+            Assert.Equal(JsonSerializer.Deserialize<ItemEnrichmentMetadata>(before.MetadataJson!)?.TvmazeFetchedUtc,
+                JsonSerializer.Deserialize<ItemEnrichmentMetadata>(after.MetadataJson!)?.TvmazeFetchedUtc);
+            Assert.Equal(before.MetadataFetchedUtc, result.LastUpdatedUtc);
+            clock.Advance(TimeSpan.FromMinutes(6));
+            var retryTmdb = Tmdb();
+            var retried = Assert.Single(await CreateService(retryTmdb, tvmaze: new FakeTvmazeClient { LookupResult = new TvmazeShow
+                { Id = 91, Network = new TvmazeChannel { Name = "Recovered network" }, AverageRuntime = 52 } },
+                omdb: ItemCacheOmdb("8.4"), itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, CancellationToken.None,
+                filters: new CalendarFilters { ShowMovies = false }));
+            Assert.Empty(retryTmdb.TvDetailCalls);
+            Assert.Equal("Recovered network", retried.NetworkName);
+            Assert.Equal(52, retried.RuntimeMinutes);
+            Assert.Equal(after.MetadataFetchedUtc, Assert.Single(store.Records.Values).MetadataFetchedUtc);
         }
         else Assert.Null(result.NetworkName);
     }
 
     [Fact]
-    public async Task OptionalWatchmodeFailurePreservesPriorAvailabilityAndMetadataClock()
+    public async Task OptionalWatchmodeFailurePreservesAvailabilityAndAcceptsIndependentMetadataCorrections()
     {
         var date = new DateOnly(2026, 11, 2);
         var clock = new ItemCacheClock();
@@ -338,9 +352,13 @@ public sealed partial class PremiereServiceTests
             .GetPremieresAsync(date.AddDays(7), date.AddDays(7), CancellationToken.None, filters: new CalendarFilters { ShowSeries = false }));
 
         Assert.Contains("Prior streaming", result.SourceNames);
-        Assert.Equal(112, result.RuntimeMinutes);
-        Assert.Equal(before.MetadataFetchedUtc, Assert.Single(store.Records.Values).MetadataFetchedUtc);
-        Assert.Equal(before.MetadataJson, Assert.Single(store.Records.Values).MetadataJson);
+        Assert.Equal(144, result.RuntimeMinutes);
+        Assert.Equal(clock.GetUtcNow(), Assert.Single(store.Records.Values).MetadataFetchedUtc);
+        var metadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(Assert.Single(store.Records.Values).MetadataJson!);
+        Assert.False(metadata?.AvailabilityComplete);
+        Assert.Equal(144, metadata?.RuntimeMinutes);
+        Assert.Equal(JsonSerializer.Deserialize<ItemEnrichmentMetadata>(before.MetadataJson!)?.AvailabilityFetchedUtc, metadata?.AvailabilityFetchedUtc);
+        Assert.Equal(before.MetadataFetchedUtc, result.LastUpdatedUtc);
     }
 
     [Fact]
@@ -1057,9 +1075,10 @@ public sealed partial class PremiereServiceTests
     }
 
     private static ItemEnrichmentCacheCoordinator ItemCacheCoordinator(MemoryItemEnrichmentStore store, ItemCacheClock clock,
-        IIntegrationSettingsStore? settings = null, IAppStateStore? state = null) => new(store, Microsoft.Extensions.Options.Options.Create(new ItemEnrichmentCacheOptions()),
+        IIntegrationSettingsStore? settings = null, IAppStateStore? state = null, PremiereTelemetry? telemetry = null,
+        ItemEnrichmentCacheOptions? cacheOptions = null) => new(store, Microsoft.Extensions.Options.Options.Create(cacheOptions ?? new ItemEnrichmentCacheOptions()),
         Microsoft.Extensions.Options.Options.Create(new TmdbOptions()), NullLogger<ItemEnrichmentCacheCoordinator>.Instance, timeProvider: clock,
-        integrationSettingsStore: settings, appStateStore: state);
+        integrationSettingsStore: settings, appStateStore: state, telemetry: telemetry);
 
     private sealed class ItemCacheClock : TimeProvider
     {
@@ -1086,7 +1105,7 @@ public sealed partial class PremiereServiceTests
             Task.FromResult<IReadOnlyDictionary<string, string>>(_values.Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal)).ToDictionary());
     }
 
-    private sealed class MemoryItemEnrichmentStore(ItemCacheClock clock) : IItemEnrichmentStore
+    private sealed class MemoryItemEnrichmentStore(TimeProvider clock) : IItemEnrichmentStore
     {
         public ConcurrentDictionary<(string Partition, ItemEnrichmentIdentity Identity), ItemEnrichmentRecord> Records { get; } = new();
         public ConcurrentBag<ItemEnrichmentIdentity[]> ReadBatches { get; } = [];
@@ -1121,10 +1140,12 @@ public sealed partial class PremiereServiceTests
             var updated = 0;
             lock (_gate)
             {
-                foreach (var write in writes)
+                foreach (var requestedWrite in writes)
                 {
+                    var write = requestedWrite;
                     var key = (partition, write.Identity);
                     if (!Records.TryGetValue(key, out var record) || record.Generation != write.ExpectedGeneration) continue;
+                    write = ItemEnrichmentRatingsMerger.Merge(record, write, out var providerRevisionAuthorized);
                     var metadata = write.MetadataJson is not null && write.MetadataFetchedUtc is { } metadataUtc
                         && (record.MetadataFetchedUtc is null || metadataUtc >= record.MetadataFetchedUtc)
                         && (record.TmdbObservedUtc is null || write.TmdbObservedUtc >= record.TmdbObservedUtc)
@@ -1132,7 +1153,7 @@ public sealed partial class PremiereServiceTests
                             : record.MetadataFetchedUtc is null || metadataUtc > record.MetadataFetchedUtc);
                     var ratings = write.RatingsJson is not null && write.RatingsFetchedUtc is { } ratingsUtc
                         && (record.RatingsFetchedUtc is null || ratingsUtc >= record.RatingsFetchedUtc)
-                        && (write.ExpectedMetadataRevision is null || write.ExpectedMetadataRevision == record.MetadataRevision);
+                        && (providerRevisionAuthorized || write.ExpectedMetadataRevision is null || write.ExpectedMetadataRevision == record.MetadataRevision);
                     if (!metadata && !ratings) continue;
                     Records[key] = record with
                     {

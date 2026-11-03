@@ -675,6 +675,11 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal(StartUtc.AddMilliseconds(attempts * 100), deferred.RetryAtUtc);
         Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, deferred.StatusCode);
+        Assert.True(deferred.ResponseObserved);
+        var failure = ProviderFailure.FromException(deferred);
+        Assert.Equal("rate_limited", failure.Reason);
+        Assert.False(failure.IsLocal);
+        Assert.Equal(deferred.RetryAtUtc, failure.RetryAtUtc);
         Assert.Equal(attempts, inner.SendCount);
         var state = Assert.Single(policy.GetSnapshots());
         Assert.Equal(0, state.ActiveRequests);
@@ -745,7 +750,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         var error = await Assert.ThrowsAsync<ExternalApiException>(() => lookup);
         Assert.Contains("Request limit reached", error.Message);
         Assert.Equal(_time.GetUtcNow().AddSeconds(30), store.State.RateLimitedUntilUtc);
-        Assert.Contains("Request limit reached", store.State.LastError);
+        Assert.Equal("rate_limited", store.State.LastError);
         Assert.Null(await client.GetByImdbIdAsync("tt002", CancellationToken.None));
         Assert.Equal(3, inner.SendCount);
     }
@@ -762,9 +767,102 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         { Enabled = true, ApiKey = "test", EnableReleaseDiscovery = true }));
         var lookup = client.GetReleaseCandidatesAsync(new(2026, 10, 26), new(2026, 11, 1), CancellationToken.None);
         await AdvanceClientRetryDelaysAsync();
-        Assert.Empty(await lookup);
-        Assert.Empty(await client.GetReleaseCandidatesAsync(new(2026, 11, 2), new(2026, 11, 8), CancellationToken.None));
+        var first = await Assert.ThrowsAsync<ProviderRequestException>(() => lookup);
+        var second = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetReleaseCandidatesAsync(new(2026, 11, 2), new(2026, 11, 8), CancellationToken.None));
+        Assert.Equal("rate_limited", first.Failure.Reason);
+        Assert.Equal("local_backoff", second.Failure.Reason);
         Assert.Equal(3, inner.SendCount);
+    }
+
+    [Theory]
+    [InlineData(System.Net.HttpStatusCode.Unauthorized)]
+    [InlineData(System.Net.HttpStatusCode.Forbidden)]
+    public async Task AccessDenialOpensDurableCircuitImmediatelyAcrossClientsAndRecoversWithOneProbe(System.Net.HttpStatusCode denied)
+    {
+        var policy = CreatePolicy();
+        var inner = new ScriptedHandler(_ => new HttpResponseMessage(denied));
+        using var first = new HttpClient(new AdaptiveProviderHandler("denied", 2, policy) { InnerHandler = inner });
+        using var denial = await first.GetAsync("https://example.test/title1");
+        Assert.Equal(denied, denial.StatusCode);
+        Assert.Equal(1, inner.SendCount);
+        var state = Assert.Single(policy.GetSnapshots());
+        Assert.Equal(ProviderCircuitState.Open, state.CircuitState);
+        Assert.Equal(StartUtc.AddMinutes(15), state.CooldownUntilUtc);
+        var restartedPolicy = CreatePolicy();
+        var nextInner = new ScriptedHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.NoContent));
+        using var second = new HttpClient(new AdaptiveProviderHandler("denied", 2, restartedPolicy) { InnerHandler = nextInner });
+        var deferred = await Assert.ThrowsAsync<ProviderCircuitOpenException>(() => second.GetAsync("https://example.test/title2"));
+        Assert.Equal(state.CooldownUntilUtc, deferred.RetryAtUtc);
+        Assert.Equal(denied, deferred.StatusCode);
+        Assert.Equal((int)denied, ProviderFailure.FromException(deferred).StatusCode);
+        Assert.Equal((int)denied, state.AccessDenialStatusCode);
+        Assert.Equal(0, nextInner.SendCount);
+        _time.Advance(TimeSpan.FromMinutes(15));
+        using var recovered = await second.GetAsync("https://example.test/title3");
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, recovered.StatusCode);
+        Assert.Equal(1, nextInner.SendCount);
+        Assert.Equal(ProviderCircuitState.Closed, Assert.Single(restartedPolicy.GetSnapshots()).CircuitState);
+        Assert.Null((await _store.GetAsync("denied", CancellationToken.None))!.AccessDenialStatusCode);
+    }
+
+    [Fact]
+    public async Task FixedClockVersionsRejectLateOpenSnapshotAndResumeAbovePersistedVersion()
+    {
+        var policy = CreatePolicy();
+        await using var first = await policy.AcquireAsync("fixed-clock-order", 2, CancellationToken.None);
+        await using var second = await policy.AcquireAsync("fixed-clock-order", 2, CancellationToken.None);
+        await first.CompleteAsync(ProviderExecutionResult.AccessDenied, null, CancellationToken.None, 403);
+        var delayedOpen = Assert.Single(policy.GetSnapshots());
+        await second.CompleteAsync(ProviderExecutionResult.Cancelled, null, CancellationToken.None);
+        var later = Assert.Single(policy.GetSnapshots());
+        Assert.True(later.UpdatedUtc > delayedOpen.UpdatedUtc);
+        Assert.Equal(StartUtc, _time.GetUtcNow());
+
+        // Force the arrival order that asynchronous response persistence permits:
+        // publish a newer recovery, then let an older open-state save arrive late.
+        var recovery = later with
+        {
+            CircuitState = ProviderCircuitState.Closed,
+            CooldownUntilUtc = null,
+            AccessDenialStatusCode = null,
+            ConsecutiveFailures = 0,
+            WindowFailureCount = 0
+        };
+        await _store.SaveAsync(recovery, CancellationToken.None);
+        await _store.SaveAsync(delayedOpen, CancellationToken.None);
+        var durable = await _store.GetAsync("fixed-clock-order", CancellationToken.None);
+        Assert.Equal(recovery.UpdatedUtc, durable!.UpdatedUtc);
+        Assert.Equal(ProviderCircuitState.Closed, durable.CircuitState);
+        Assert.Null(durable.AccessDenialStatusCode);
+
+        var restarted = CreatePolicy();
+        await using var probe = await restarted.AcquireAsync("fixed-clock-order", 2, CancellationToken.None);
+        await probe.CompleteAsync(ProviderExecutionResult.Success, null, CancellationToken.None);
+        var accepted = await _store.GetAsync("fixed-clock-order", CancellationToken.None);
+        Assert.True(accepted!.UpdatedUtc > recovery.UpdatedUtc);
+        Assert.Equal(StartUtc, _time.GetUtcNow());
+    }
+
+    [Fact]
+    public async Task TvdbExpiredTokenCanRefreshBeforeAccessDenialCircuitIsApplied()
+    {
+        var policy = CreatePolicy();
+        var inner = new ScriptedHandler(attempt => attempt switch
+        {
+            1 => new(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"data\":{\"token\":\"stale\"}}") },
+            2 => new(System.Net.HttpStatusCode.Unauthorized),
+            3 => new(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"data\":{\"token\":\"fresh\"}}") },
+            _ => new(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"data\":[]}") }
+        });
+        using var http = new HttpClient(new AdaptiveProviderHandler("thetvdb", 2, policy) { InnerHandler = inner })
+        { BaseAddress = new Uri("https://example.test/") };
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var client = new TheTvdbClient(http, cache, Microsoft.Extensions.Options.Options.Create(new TheTvdbOptions { Enabled = true, ApiKey = "test" }));
+        var result = await client.GetSeriesArtworkWithStatusAsync(42, CancellationToken.None, true);
+        Assert.True(result.Successful);
+        Assert.Empty(result.Value);
+        Assert.Equal(4, inner.SendCount);
+        Assert.Equal(ProviderCircuitState.Closed, Assert.Single(policy.GetSnapshots()).CircuitState);
     }
 
     private static ScriptedHandler RateLimitedClientHandler()

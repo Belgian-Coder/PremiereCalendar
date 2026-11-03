@@ -159,6 +159,7 @@ internal sealed class WikimediaClaimBatcher(
         var requestId = batch.RequestId;
         var primaryContext = waiters.FirstOrDefault()?.Context;
         var outcome = "failed";
+        ProviderFailure? failure = null;
         IReadOnlyDictionary<string, WikimediaEntityClaims> results = new Dictionary<string, WikimediaEntityClaims>();
         try
         {
@@ -172,9 +173,9 @@ internal sealed class WikimediaClaimBatcher(
             }
             else outcome = "cancelled";
         }
-        catch (OperationCanceledException) { outcome = batch.Cancellation.IsCancellationRequested ? "cancelled" : "timeout"; }
-        catch (HttpRequestException) { outcome = "http_error"; }
-        catch (System.Text.Json.JsonException) { outcome = "malformed"; }
+        catch (OperationCanceledException exception) { outcome = batch.Cancellation.IsCancellationRequested ? "cancelled" : "timeout"; failure = ProviderFailure.FromException(exception); }
+        catch (HttpRequestException exception) { outcome = "http_error"; failure = ProviderFailure.FromException(exception); }
+        catch (System.Text.Json.JsonException) { outcome = "malformed"; failure = new("invalid_response"); }
         finally
         {
             lock (_gate)
@@ -197,7 +198,7 @@ internal sealed class WikimediaClaimBatcher(
                 foreach (var work in batch.Work)
                 {
                     var result = results.TryGetValue(work.Id, out var entity) ? entity : WikimediaEntityClaims.Failed;
-                    work.Completion.TrySetResult(result with { RequestId = requestId });
+                    work.Completion.TrySetResult(result with { RequestId = requestId, Failure = failure ?? result.Failure });
                 }
             }
             batch.Dispose();
@@ -273,7 +274,7 @@ internal sealed class WikimediaClaimBatcher(
 }
 
 internal readonly record struct WikimediaClaimValue(string? Value, bool IsSuccess);
-internal sealed record WikimediaEntityClaims(WikimediaClaimValue Image, WikimediaClaimValue Identifier, string? RequestId = null)
+internal sealed record WikimediaEntityClaims(WikimediaClaimValue Image, WikimediaClaimValue Identifier, string? RequestId = null, ProviderFailure? Failure = null)
 {
-    internal static WikimediaEntityClaims Failed { get; } = new(new(null, false), new(null, false));
+    internal static WikimediaEntityClaims Failed { get; } = new(new(null, false), new(null, false), Failure: new("invalid_response"));
 }

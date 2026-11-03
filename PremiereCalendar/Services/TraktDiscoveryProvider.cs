@@ -44,6 +44,7 @@ public sealed class TraktDiscoveryProvider : IStreamingPremiereDiscoveryProvider
             MapShowCalendarAsync(showTask)
         };
 
+        var failures = new List<Exception>();
         while (active.Count > 0)
         {
             var completed = await Task.WhenAny(active);
@@ -58,12 +59,9 @@ public sealed class TraktDiscoveryProvider : IStreamingPremiereDiscoveryProvider
             {
                 throw;
             }
-            catch (OperationCanceledException)
+            catch (Exception exception)
             {
-                candidates = [];
-            }
-            catch (Exception)
-            {
+                failures.Add(exception);
                 candidates = [];
             }
 
@@ -72,6 +70,8 @@ public sealed class TraktDiscoveryProvider : IStreamingPremiereDiscoveryProvider
                 yield return candidates;
             }
         }
+        if (failures.Count == 1) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        if (failures.Count > 1) throw new AggregateException("Trakt calendar branches failed.", failures);
     }
 
     private Task<IReadOnlyList<TraktMovieCalendarItem>> TryStartMovieCalendarAsync(

@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -77,7 +78,7 @@ public sealed class AdaptiveProviderPolicy(
                                 if (exceedsRequestBudget) callerCancellationToken.ThrowIfCancellationRequested();
                                 if (remaining > MaximumInlineWait() || exceedsRequestBudget)
                                 {
-                                    throw new ProviderCircuitOpenException(provider, cooldown);
+                                    throw new ProviderCircuitOpenException(provider, cooldown, state.AccessDenialStatusCode);
                                 }
                                 waitTask = state.GetOrStartCooldownWait(cooldown, remaining, timeProvider);
                             }
@@ -155,7 +156,8 @@ public sealed class AdaptiveProviderPolicy(
         long startedTimestamp,
         ProviderExecutionResult result,
         TimeSpan? retryAfter,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? statusCode = null)
     {
         ProviderAdaptiveSnapshot snapshot;
         var elapsed = timeProvider.GetElapsedTime(startedTimestamp);
@@ -182,6 +184,7 @@ public sealed class AdaptiveProviderPolicy(
                 if (state.CircuitState == ProviderCircuitState.HalfOpen)
                 {
                     state.CircuitState = ProviderCircuitState.Closed;
+                    state.AccessDenialStatusCode = null;
                     state.CooldownUntilUtc = null;
                     state.ClearCooldownWait();
                 }
@@ -206,11 +209,23 @@ public sealed class AdaptiveProviderPolicy(
                     state.WindowFailureCount = 0;
                 }
                 state.WindowFailureCount++;
-                if (result == ProviderExecutionResult.Throttled)
+                if (state.CircuitState == ProviderCircuitState.HalfOpen && result != ProviderExecutionResult.AccessDenied)
+                    state.AccessDenialStatusCode = null;
+                if (result == ProviderExecutionResult.AccessDenied)
+                {
+                    state.CurrentConcurrency = 1;
+                    state.CircuitState = ProviderCircuitState.Open;
+                    state.AccessDenialStatusCode = statusCode is 401 or 403 ? statusCode : state.AccessDenialStatusCode;
+                    var deniedUntil = AddDelay(now, TimeSpan.FromMinutes(15));
+                    state.CooldownUntilUtc = state.CooldownUntilUtc is { } existing && existing > deniedUntil ? existing : deniedUntil;
+                    state.ClearCooldownWait();
+                }
+                else if (result == ProviderExecutionResult.Throttled)
                 {
                     state.CurrentConcurrency = Math.Max(1, state.CurrentConcurrency / 2);
                     state.LastThrottledUtc = now;
-                    state.CooldownUntilUtc = AddDelay(now, GetThrottleDelay(retryAfter));
+                    var throttledUntil = AddDelay(now, GetThrottleDelay(retryAfter));
+                    state.CooldownUntilUtc = state.CooldownUntilUtc is { } existing && existing > throttledUntil ? existing : throttledUntil;
                     state.ClearCooldownWait();
                 }
                 else if (state.ConsecutiveFailures >= 2)
@@ -229,6 +244,9 @@ public sealed class AdaptiveProviderPolicy(
                 }
             }
 
+            // A coarse or adjusted clock must not let an older asynchronous save
+            // share the version of a later state transition.
+            state.UpdatedUtc = now > state.UpdatedUtc ? now : state.UpdatedUtc.AddTicks(1);
             snapshot = state.ToSnapshot(now);
             state.Pulse();
         }
@@ -268,7 +286,7 @@ public sealed class AdaptiveProviderPolicy(
     }
 
     internal async Task DelayBeforeRetryAsync(string provider, int attempt, TimeSpan? retryAfter, CancellationToken cancellationToken,
-        ProviderAttemptDiagnostics? diagnostics = null, string reason = "transient")
+        ProviderAttemptDiagnostics? diagnostics = null, string reason = "transient", HttpStatusCode? responseStatusCode = null)
     {
         telemetry.RecordProviderRetry(provider, retryAfter is null ? "transient" : "retry_after");
         var maximum = MaximumInlineWait();
@@ -286,7 +304,7 @@ public sealed class AdaptiveProviderPolicy(
                 {
                     Stage = "retry", Outcome = "deferred", Reason = "retry_after", WaitMilliseconds = delay.TotalMilliseconds
                 });
-                throw new ProviderRetryAfterException(provider, AddDelay(timeProvider.GetUtcNow(), delay));
+                throw new ProviderRetryAfterException(provider, AddDelay(timeProvider.GetUtcNow(), delay), responseStatusCode);
             }
             delay = maximum;
         }
@@ -349,6 +367,8 @@ public sealed class AdaptiveProviderPolicy(
         public DateTimeOffset? FailureWindowStartedUtc { get; set; }
         public double? EwmaLatencyMilliseconds { get; set; }
         public ProviderCircuitState CircuitState { get; set; }
+        public int? AccessDenialStatusCode { get; set; }
+        public DateTimeOffset UpdatedUtc { get; set; } = DateTimeOffset.MinValue;
         public DateTimeOffset? CooldownUntilUtc { get; set; }
         public DateTimeOffset? LastThrottledUtc { get; set; }
         public ProviderAdmissionQueue<byte> Admissions { get; } = new();
@@ -387,6 +407,8 @@ public sealed class AdaptiveProviderPolicy(
                         FailureWindowStartedUtc = persisted.FailureWindowStartedUtc;
                         EwmaLatencyMilliseconds = persisted.EwmaLatencyMilliseconds;
                         CircuitState = persisted.CircuitState;
+                        AccessDenialStatusCode = persisted.AccessDenialStatusCode;
+                        UpdatedUtc = persisted.UpdatedUtc;
                         CooldownUntilUtc = persisted.CooldownUntilUtc;
                         LastThrottledUtc = persisted.LastThrottledUtc;
                     }
@@ -439,7 +461,8 @@ public sealed class AdaptiveProviderPolicy(
                     CircuitState,
                     CooldownUntilUtc,
                     LastThrottledUtc,
-                    now);
+                    UpdatedUtc == DateTimeOffset.MinValue ? now : UpdatedUtc)
+                { AccessDenialStatusCode = this.AccessDenialStatusCode };
             }
         }
 
@@ -466,10 +489,11 @@ public sealed class ProviderExecutionLease : IAsyncDisposable
     public Task CompleteAsync(
         ProviderExecutionResult result,
         TimeSpan? retryAfter,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? statusCode = null)
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return Task.CompletedTask;
-        return _policy.ReleaseAsync(_state, _startedTimestamp, result, retryAfter, cancellationToken);
+        return _policy.ReleaseAsync(_state, _startedTimestamp, result, retryAfter, cancellationToken, statusCode);
     }
 
     public async ValueTask DisposeAsync()
@@ -478,7 +502,7 @@ public sealed class ProviderExecutionLease : IAsyncDisposable
     }
 }
 
-public enum ProviderExecutionResult { Success, Failed, Throttled, Cancelled }
+public enum ProviderExecutionResult { Success, Failed, Throttled, Cancelled, AccessDenied }
 public enum ProviderCircuitState { Closed, Open, HalfOpen }
 
 public sealed record ProviderAdaptiveSnapshot(
@@ -493,18 +517,23 @@ public sealed record ProviderAdaptiveSnapshot(
     ProviderCircuitState CircuitState,
     DateTimeOffset? CooldownUntilUtc,
     DateTimeOffset? LastThrottledUtc,
-    DateTimeOffset UpdatedUtc);
+    DateTimeOffset UpdatedUtc)
+{
+    public int? AccessDenialStatusCode { get; init; }
+}
 
-public sealed class ProviderCircuitOpenException(string provider, DateTimeOffset retryUtc)
-    : HttpRequestException($"{provider} provider circuit is open until {retryUtc:O}.")
+public sealed class ProviderCircuitOpenException(string provider, DateTimeOffset retryUtc, int? denialStatusCode = null)
+    : HttpRequestException($"{provider} provider circuit is open until {retryUtc:O}.", null,
+        denialStatusCode is 401 or 403 ? (HttpStatusCode)denialStatusCode.Value : null)
 {
     public DateTimeOffset RetryAtUtc { get; } = retryUtc;
 }
 
-public sealed class ProviderRetryAfterException(string provider, DateTimeOffset retryUtc)
-    : HttpRequestException($"{provider} provider is throttled until {retryUtc:O}.", null, HttpStatusCode.TooManyRequests)
+public sealed class ProviderRetryAfterException(string provider, DateTimeOffset retryUtc, HttpStatusCode? responseStatusCode = null)
+    : HttpRequestException($"{provider} provider is deferred until {retryUtc:O}.", null, responseStatusCode ?? HttpStatusCode.TooManyRequests)
 {
     public DateTimeOffset RetryAtUtc { get; } = retryUtc;
+    public bool ResponseObserved { get; } = responseStatusCode is not null;
 }
 
 public sealed class AdaptiveProviderHandler(
@@ -579,8 +608,12 @@ public sealed class AdaptiveProviderHandler(
                         continue;
                     }
 
+                    var mayRefreshAuthentication = response.StatusCode == HttpStatusCode.Unauthorized
+                        && request.Options.TryGetValue(ProviderRequestOptions.AllowAuthenticationRefresh, out var allowRefresh) && allowRefresh;
                     var result = response.StatusCode == HttpStatusCode.TooManyRequests
                         ? ProviderExecutionResult.Throttled
+                        : response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                            ? mayRefreshAuthentication ? ProviderExecutionResult.Failed : ProviderExecutionResult.AccessDenied
                         : (int)response.StatusCode >= 500
                             ? ProviderExecutionResult.Failed
                             : ProviderExecutionResult.Success;
@@ -589,7 +622,7 @@ public sealed class AdaptiveProviderHandler(
                     // remains active until its body has been consumed or abandoned.
                     if (result != ProviderExecutionResult.Success)
                     {
-                        await lease.CompleteAsync(result, retryAfter, CancellationToken.None);
+                        await lease.CompleteAsync(result, retryAfter, CancellationToken.None, (int)response.StatusCode);
                     }
                     if (deferFinalThrottle && result == ProviderExecutionResult.Throttled && attempt == maximumAttempts)
                     {
@@ -598,9 +631,9 @@ public sealed class AdaptiveProviderHandler(
                         response.Dispose();
                         attemptDiagnostics.BodyAbandonedForRetry(result, "retry_exhausted", true);
                         cancellationToken.ThrowIfCancellationRequested();
-                        throw new ProviderRetryAfterException(provider, policy.GetCooldownUntilUtc(provider) ?? policy.GetUtcNow());
+                        throw new ProviderRetryAfterException(provider, policy.GetCooldownUntilUtc(provider) ?? policy.GetUtcNow(), response.StatusCode);
                     }
-                    if (attempt == maximumAttempts || result == ProviderExecutionResult.Success)
+                    if (attempt == maximumAttempts || mayRefreshAuthentication || result is ProviderExecutionResult.Success or ProviderExecutionResult.AccessDenied)
                     {
                         if (request.Method == HttpMethod.Head
                             || response.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotModified
@@ -632,13 +665,19 @@ public sealed class AdaptiveProviderHandler(
                     }
                     if (result != ProviderExecutionResult.Throttled)
                     {
-                        await policy.DelayBeforeRetryAsync(provider, attempt, retryAfter, requestToken, attemptDiagnostics, "http5xx");
+                        await policy.DelayBeforeRetryAsync(provider, attempt, retryAfter, requestToken, attemptDiagnostics, "http5xx", response.StatusCode);
                     }
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
                     var result = cancellationToken.IsCancellationRequested ? ProviderExecutionResult.Cancelled : ProviderExecutionResult.Failed;
-                    attemptDiagnostics.Complete(result, timeoutSource?.IsCancellationRequested == true ? "timeout" : "failed", true);
+                    var failure = ProviderFailure.FromException(exception);
+                    if (failure.IsLocal) attemptDiagnostics.Record("provider.admission.deferred", new()
+                    {
+                        Stage = "acquire", Outcome = "deferred",
+                        Reason = failure.Reason, RetryAtUtc = failure.RetryAtUtc, StatusCode = failure.StatusCode
+                    });
+                    attemptDiagnostics.Complete(result, failure.IsLocal ? failure.Reason : timeoutSource?.IsCancellationRequested == true ? "timeout" : "failed", true);
                     throw;
                 }
                 finally
@@ -803,34 +842,32 @@ public sealed class ProviderAdaptiveStateStore(
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT CurrentConcurrency, ConsecutiveSuccesses, ConsecutiveFailures,
-                   WindowFailureCount, FailureWindowStartedUtc, EwmaLatencyMilliseconds,
-                   CircuitState, CooldownUntilUtc, LastThrottledUtc, UpdatedUtc
-            FROM ProviderAdaptiveState WHERE Provider = @provider
+            SELECT adaptive.CurrentConcurrency, adaptive.ConsecutiveSuccesses, adaptive.ConsecutiveFailures,
+                   adaptive.WindowFailureCount, adaptive.FailureWindowStartedUtc, adaptive.EwmaLatencyMilliseconds,
+                   adaptive.CircuitState, adaptive.CooldownUntilUtc, adaptive.LastThrottledUtc, adaptive.UpdatedUtc,
+                   cause.MetadataJson
+            FROM ProviderAdaptiveState adaptive
+            LEFT JOIN ProviderCacheState cause ON cause.Provider = 'adaptive-status' AND cause.Scope = 'Global'
+                AND cause.CacheKey = adaptive.Provider AND cause.LastCheckedUtc = adaptive.UpdatedUtc
+            WHERE adaptive.Provider = @provider
             """;
         DatabaseParameters.Add(command, "@provider", provider);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
-        return new ProviderAdaptiveSnapshot(
-            provider,
-            reader.GetInt32(0),
-            0,
-            reader.GetInt32(1),
-            reader.GetInt32(2),
-            reader.GetInt32(3),
-            ReadDate(reader, 4),
-            reader.IsDBNull(5) ? null : reader.GetDouble(5),
-            Enum.Parse<ProviderCircuitState>(reader.GetString(6), true),
-            ReadDate(reader, 7),
-            ReadDate(reader, 8),
-            ReadDate(reader, 9) ?? DateTimeOffset.MinValue);
+        return new ProviderAdaptiveSnapshot(provider, reader.GetInt32(0), 0, reader.GetInt32(1), reader.GetInt32(2),
+            reader.GetInt32(3), ReadDate(reader, 4), reader.IsDBNull(5) ? null : reader.GetDouble(5),
+            Enum.Parse<ProviderCircuitState>(reader.GetString(6), true), ReadDate(reader, 7), ReadDate(reader, 8),
+            ReadDate(reader, 9) ?? DateTimeOffset.MinValue)
+        { AccessDenialStatusCode = reader.IsDBNull(10) ? null : ReadDenialStatus(reader.GetString(10)) };
     }
 
     public async Task SaveAsync(ProviderAdaptiveSnapshot state, CancellationToken cancellationToken)
     {
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO ProviderAdaptiveState (
                 Provider, CurrentConcurrency, ConsecutiveSuccesses, ConsecutiveFailures,
@@ -862,7 +899,40 @@ public sealed class ProviderAdaptiveStateStore(
         DatabaseParameters.Add(command, "@cooldown", DbDate(state.CooldownUntilUtc));
         DatabaseParameters.Add(command, "@throttled", DbDate(state.LastThrottledUtc));
         DatabaseParameters.Add(command, "@updated", state.UpdatedUtc.ToString("O", CultureInfo.InvariantCulture));
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        if (await command.ExecuteNonQueryAsync(cancellationToken) > 0)
+        {
+            // Keep the cause alongside the legacy-compatible circuit row. The shared
+            // timestamp and transaction prevent a stale cause from describing a new circuit.
+            await using var metadata = connection.CreateCommand();
+            metadata.Transaction = transaction;
+            metadata.CommandText = """
+                INSERT INTO ProviderCacheState (Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark, ItemCount, MetadataJson)
+                SELECT 'adaptive-status', 'Global', @provider, @updated, @updated, '', NULL, @metadata
+                WHERE @hasCause = 1 OR EXISTS (SELECT 1 FROM ProviderCacheState
+                    WHERE Provider = 'adaptive-status' AND Scope = 'Global' AND CacheKey = @provider)
+                ON CONFLICT(Provider, Scope, CacheKey) DO UPDATE SET
+                    LastCheckedUtc = excluded.LastCheckedUtc, LastChangedUtc = excluded.LastChangedUtc, MetadataJson = excluded.MetadataJson
+                WHERE excluded.LastCheckedUtc >= ProviderCacheState.LastCheckedUtc
+                """;
+            DatabaseParameters.Add(metadata, "@provider", state.Provider);
+            DatabaseParameters.Add(metadata, "@updated", state.UpdatedUtc.ToString("O", CultureInfo.InvariantCulture));
+            DatabaseParameters.Add(metadata, "@metadata", JsonSerializer.Serialize(new { denialStatusCode = state.AccessDenialStatusCode }));
+            DatabaseParameters.Add(metadata, "@hasCause", state.AccessDenialStatusCode is 401 or 403 ? 1 : 0);
+            await metadata.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static int? ReadDenialStatus(string metadata)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(metadata);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("denialStatusCode", out var value)
+                && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var status) && status is 401 or 403 ? status : null;
+        }
+        catch (JsonException) { return null; }
     }
 
     private DbConnection CreateConnection()

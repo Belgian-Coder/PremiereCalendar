@@ -2,6 +2,7 @@ namespace PremiereCalendar.Services;
 
 public sealed class WikimediaArtworkProvider : IArtworkProvider
 {
+    public string OwnedSource => ArtworkSources.Wikimedia;
     private readonly IWikimediaClient _client;
 
     public WikimediaArtworkProvider(IWikimediaClient client)
@@ -13,15 +14,16 @@ public sealed class WikimediaArtworkProvider : IArtworkProvider
         ArtworkRequest request,
         CancellationToken cancellationToken,
         bool forceRefresh = false)
+        => (await GetArtworkWithStatusAsync(request, cancellationToken, forceRefresh)).Value;
+
+    public async Task<ProviderRefreshResult<ArtworkCandidate?>> GetArtworkWithStatusAsync(ArtworkRequest request, CancellationToken cancellationToken, bool forceRefresh = false)
     {
         if (string.IsNullOrWhiteSpace(request.WikidataId))
         {
-            return null;
+            return new(null, true, new("not_applicable"));
         }
 
-        var imageUrl = await _client.GetReusableImageUrlAsync(request.WikidataId, cancellationToken, forceRefresh);
-        return string.IsNullOrWhiteSpace(imageUrl)
-            ? null
-            : new ArtworkCandidate(imageUrl, ArtworkSources.Wikimedia);
+        var result = await _client.GetReusableImageWithStatusAsync(request.WikidataId, cancellationToken, forceRefresh);
+        return new(string.IsNullOrWhiteSpace(result.Value) ? null : new ArtworkCandidate(result.Value, ArtworkSources.Wikimedia), result.Successful, result.Failure);
     }
 }

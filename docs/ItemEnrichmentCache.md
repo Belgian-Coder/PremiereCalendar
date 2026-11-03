@@ -17,7 +17,11 @@ Defaults in `ItemEnrichmentCache` are:
 
 Metadata and ratings have separate successful-fetch timestamps. A failed provider request does not advance its component's timestamp. Successful empty results, such as a confirmed not-found response or a valid empty list, remain distinct from rate limits, invalid payloads, and transient failures.
 
+External ratings also track each provider's successful clock and owned values in their JSON projection. A successful provider can update or withdraw its own scores while another provider fails; the failed provider retains only its matching last-good values and original clock. Verified absence clears withdrawn values. Disabled or inapplicable providers are recorded separately. Metadata tracks core TMDb, availability, TVmaze and artwork success independently; optional-only retries reuse current core metadata. The displayed item age remains conservative when retained fields are older than a successful partial refresh.
+
 Failure cooldowns are bounded in-memory deadlines, separate from successful-fetch timestamps. A completed discovery can still be displayed during an optional provider outage. Explicit provider refresh bypasses these cooldowns; restart permits a new attempt. Provider rate limits and circuit breakers remain in effect.
+
+Core metadata, availability and optional metadata use separate retry gates; a new metadata invalidation does not inherit an unrelated optional-provider cooldown. Shared provider access-denial and quota circuits can survive restart. Explicit refresh respects those provider-wide limits and uses a separate item flight from ordinary refresh work. Service errors and unrecognized responses never count as verified absence.
 
 The file-based calendar cache defaults to 30 hours of freshness. That setting controls whether a saved week snapshot is fresh; it is not the database item-record retention period. Expired week files can be rebuilt while their shared item metadata remains available for reuse.
 
@@ -38,3 +42,11 @@ At 02:00 Europe/Brussels, nightly warmup prepares the current and next calendar 
 Schema 4 adds the item table and indexes while preserving existing tables and migration history. Verify a pre-upgrade database backup and an isolated migration before deployment. A schema-4-capable image can use `ItemEnrichmentCache__Enabled=false` to fall back to the existing per-load enrichment path while retaining the stored records. The former schema-3-only image requires a separately planned database recovery; disabling the feature does not undo the migration. Never restore over live data automatically.
 
 Manual score backfill and external-ID repair update the shared item projection after their week-file changes are accepted. These narrow repairs preserve unrelated metadata and the original component success clocks. Cache prepare/read, item hit/due decisions, writes, reconciliation, import, provider checks and job durations are recorded in the existing operational/performance logs.
+
+## Temporarily unavailable discovery sources
+
+An access-denied optional Trakt or Simkl source leaves the week explicitly partial, with persisted provider/status/retry notices and a visible incomplete-coverage warning. If all other discovery sources succeed and item validation passes, those results can be reused until the notice deadline. The durable job finishes as degraded rather than repeatedly requeueing itself. A later visit or normal warmup can probe after expiry; successful recovery replaces the partial snapshot and clears the warning.
+
+This shortcut does not apply to primary-provider failures, ordinary throttles, unrelated source errors or item-validation conflicts. Known prior rows are retained provisionally because source failure cannot prove removal. Incoming validated occurrences retain their versions, and generation fences prevent a degraded writer from replacing concurrent discovery or metadata maintenance. The week is never labeled complete merely because the unavailable source was skipped.
+
+See [cache freshness diagnostics](CacheFreshnessDiagnostics.md) for reusable audit commands and the distinction between a provider fetch and an accepted database projection.

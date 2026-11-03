@@ -39,6 +39,7 @@ public partial class Calendar
     private bool _refreshImageCache;
     private string? _imageCacheVersion;
     private string? _error;
+    private IReadOnlyList<SourceUnavailableNotice> _unavailableSources = [];
     private string? _sourceProgressFilter;
     private DateOnly? _selectedDay;
     private bool _isLoading = true;
@@ -781,6 +782,7 @@ public partial class Calendar
         _isLoading = true;
         _isRefreshingStaleCache = false;
         _error = null;
+        _unavailableSources = [];
         _visitChangeSummary = null;
         _loadProgress.Clear();
         InvalidateLoadProgressCache();
@@ -904,8 +906,9 @@ public partial class Calendar
                         if (update.IsFinal)
                         {
                             hasFinalResult = true;
+                            _unavailableSources = update.UnavailableSources;
                             hasAuthoritativeResult = !update.HasSourceErrors && !update.IsStaleCache;
-                            loadOutcome = update.RetryAfterUtc > DateTimeOffset.UtcNow ? "cooldown"
+                            loadOutcome = update.IsDegradedResult ? "degraded" : update.RetryAfterUtc > DateTimeOffset.UtcNow ? "cooldown"
                                 : update.HasSourceErrors ? "partial" : update.IsStaleCache ? "stale" : "complete";
                             RecordPageDiagnostic(diagnostic, "result_completed", new()
                             {

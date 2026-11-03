@@ -11,10 +11,11 @@ public sealed class UiCssRegressionTests
         Assert.DoesNotContain("animation: premiere-card-enter", css, StringComparison.Ordinal);
     }
 
-    private static string FindRepositoryRoot()
+    private static string FindRepositoryRoot([System.Runtime.CompilerServices.CallerFilePath] string sourceFilePath = "")
     {
-        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory, Path.GetDirectoryName(sourceFilePath) })
         {
+            if (string.IsNullOrWhiteSpace(start)) continue;
             var directory = new DirectoryInfo(start);
             while (directory is not null)
             {

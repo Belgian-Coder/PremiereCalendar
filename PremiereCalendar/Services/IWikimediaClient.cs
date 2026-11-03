@@ -2,6 +2,9 @@ namespace PremiereCalendar.Services;
 
 public interface IWikimediaClient
 {
+    async Task<ProviderRefreshResult<string?>> GetReusableImageWithStatusAsync(string wikidataId, CancellationToken cancellationToken, bool forceRefresh = false)
+        => new(await GetReusableImageUrlAsync(wikidataId, cancellationToken, forceRefresh), true);
+
     Task<string?> GetReusableImageUrlAsync(
         string wikidataId,
         CancellationToken cancellationToken,
@@ -22,4 +25,4 @@ public interface IWikimediaClient
     }
 }
 
-public sealed record WikimediaIdentifierResult(string? Value, bool IsSuccess);
+public sealed record WikimediaIdentifierResult(string? Value, bool IsSuccess, ProviderFailure? Failure = null);

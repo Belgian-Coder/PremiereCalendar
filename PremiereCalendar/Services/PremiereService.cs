@@ -145,6 +145,17 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 var hydrated = await TraceEnrichmentStageAsync("cache.local_hydration",
                     () => HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken, allowRemote: false));
                 var items = ApplyRequestedFilters(hydrated, filters);
+                if (snapshot.CanReuseDegraded)
+                {
+                    _telemetry.RecordDiagnostic("calendar.cache.decision", details: new()
+                    {
+                        Outcome = "direct_degraded", Count = items.Count, FromCache = true, IsFinal = true,
+                        Reason = "optional_source_access_denied", RetryAtUtc = snapshot.UnavailableSources.Min(source => source.RetryAtUtc),
+                        DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+                    });
+                    yield return WithDegradedCoverage(CreateProgress("Week cache", items, items, isFinal: true, fromCache: true), snapshot.UnavailableSources, true);
+                    yield break;
+                }
                 var isFinal = snapshot.IsComplete && !await NeedsRemoteCachedHydrationAsync(hydrated, filters, cancellationToken);
                 _telemetry.RecordDiagnostic("calendar.cache.decision", details: new()
                 {
@@ -211,6 +222,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
         var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
         var cacheKey = criteria.CacheKey();
+        var refreshStartedUtc = DateTimeOffset.UtcNow;
+        var refreshStarted = Stopwatch.GetTimestamp();
         var fetchCriteria = criteria;
         var cachedEnrichment = new Dictionary<string, PremiereItem>(StringComparer.Ordinal);
         IReadOnlyList<PremiereItem> seededItems = [];
@@ -221,6 +234,18 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             var snapshot = await ReadCalendarCacheAsync(start, end, filters, cancellationToken);
             if (snapshot.Items is { } cached)
             {
+                if (snapshot.CanReuseDegraded && resumeState?.RefreshCalendarSnapshot != true)
+                {
+                    var filtered = ApplyRequestedFilters(cached, filters);
+                    _telemetry.RecordDiagnostic("calendar.cache.decision", details: new()
+                    {
+                        Outcome = "direct_degraded", Reason = "optional_source_access_denied", Count = filtered.Count,
+                        FromCache = true, IsFinal = true, RetryAtUtc = snapshot.UnavailableSources.Min(source => source.RetryAtUtc),
+                        DurationMilliseconds = Stopwatch.GetElapsedTime(refreshStarted).TotalMilliseconds
+                    });
+                    yield return WithDegradedCoverage(CreateProgress("Week cache", filtered, filtered, isFinal: true, fromCache: true), snapshot.UnavailableSources, true);
+                    yield break;
+                }
                 var metadataHydration = await HydrateSharedItemMetadataAsync(cached, start, end, cancellationToken);
                 var hydrated = await TraceEnrichmentStageAsync("cache.hydration",
                     () => HydrateCachedImdbRatingsAsync(metadataHydration.Items, filters, cancellationToken));
@@ -292,7 +317,10 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
 
         IReadOnlyList<PremiereItem> finalItems = [];
+        var degradedBaselines = await CaptureDegradedBaselinesAsync(start, end, filters, criteria, cancellationToken);
         PremiereLoadProgress? finalUpdate = null;
+        var itemCacheValidationFailed = false;
+        var sourceAndItemCacheValidationFailed = false;
         var progressHistory = new Dictionary<string, PremiereLoadProgress>(StringComparer.Ordinal);
         Exception? refreshError = null;
         // The seed is immutable for this execution; avoid rebuilding it for every provider update.
@@ -326,7 +354,12 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     : provisionalSeed;
                 if (progressSeed.Count > 0)
                 {
-                    update = MergeProgressWithSeed(update, progressSeed);
+                    if (update.IsFinal && update.UnavailableSources.Count > 0)
+                    {
+                        var rows = PreserveUndiscoveredRows(update.Items, progressSeed);
+                        update = update with { Items = rows, SourceItems = rows, TotalItemCount = rows.Count };
+                    }
+                    else update = MergeProgressWithSeed(update, progressSeed);
                 }
 
                 progressHistory[update.CheckpointKey ?? update.SourceName] = update;
@@ -382,9 +415,19 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 {
                     HasSourceErrors = true,
                     FailedSourceNames = finalUpdate.FailedSourceNames,
-                    RetryAfterUtc = finalUpdate.RetryAfterUtc
+                    RetryAfterUtc = finalUpdate.RetryAfterUtc,
+                    IsDegradedResult = finalUpdate.IsDegradedResult,
+                    UnavailableSources = finalUpdate.UnavailableSources
                 };
             }
+        }
+
+        if (finalUpdate?.HasSourceErrors == true)
+        {
+            // An unavailable source cannot prove removals, including on explicit refresh.
+            var prior = await ReadCalendarCacheCoreAsync(start, end, filters, cancellationToken);
+            finalItems = ApplyRequestedFilters(PreserveUndiscoveredRows(finalItems, prior.Items ?? []), filters);
+            finalUpdate = finalUpdate with { Items = finalItems, SourceItems = finalItems, TotalItemCount = finalItems.Count };
         }
 
         if (finalUpdate is not null && forceRefresh && !finalUpdate.HasSourceErrors)
@@ -407,11 +450,24 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         if (finalUpdate is not null && _itemCacheSession.Value is { } validationSession)
         {
             await validationSession.FlushAsync(cancellationToken);
-            var validation = await validationSession.ReconcileAsync(finalItems, includeConsumed: true, cancellationToken);
+            var validation = await validationSession.ReconcileAsync(finalItems, includeConsumed: true, cancellationToken,
+                windowStart: start, windowEnd: end);
+            itemCacheValidationFailed = validation.DirtyMedia.Count > 0;
+            sourceAndItemCacheValidationFailed = itemCacheValidationFailed && finalUpdate.HasSourceErrors;
+            var denialCannotDeferInvalidItems = finalUpdate.IsDegradedResult && itemCacheValidationFailed;
+            if (denialCannotDeferInvalidItems)
+                _telemetry.RecordDiagnostic("source.retry.policy", details: new()
+                {
+                    Outcome = "terminal_partial", Reason = "optional_denial_with_item_cache_validation",
+                    Count = validation.DirtyMedia.Count, WeekStart = start, WeekEnd = end, CacheKey = cacheKey,
+                    DurationMilliseconds = Stopwatch.GetElapsedTime(refreshStarted).TotalMilliseconds
+                });
             finalItems = ApplyRequestedFilters(validation.Items, filters);
             finalUpdate = finalUpdate with
             {
                 Items = finalItems, SourceItems = finalItems, TotalItemCount = finalItems.Count,
+                IsDegradedResult = finalUpdate.IsDegradedResult && validation.DirtyMedia.Count == 0,
+                RetryAfterUtc = denialCannotDeferInvalidItems ? null : finalUpdate.RetryAfterUtc,
                 HasSourceErrors = finalUpdate.HasSourceErrors || validation.DirtyMedia.Count > 0,
                 FailedSourceNames = validation.DirtyMedia.Count == 0 ? finalUpdate.FailedSourceNames
                     : finalUpdate.FailedSourceNames.Append("Item cache validation").Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
@@ -456,13 +512,22 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
         else if (finalUpdate?.HasSourceErrors == true)
         {
-            if (finalItems.Count > 0)
+            if (!itemCacheValidationFailed && finalUpdate.IsDegradedResult && finalUpdate.UnavailableSources.Count > 0)
             {
-                await SavePartialCalendarCacheAsync(start, end, filters, criteria, finalItems, resumeState, cancellationToken);
+                var saved = await SaveDegradedCalendarCacheAsync(start, end, filters, criteria, finalItems,
+                    finalUpdate.UnavailableSources, degradedBaselines, refreshStartedUtc, resumeState, cancellationToken);
+                finalUpdate = WithDegradedCoverage(finalUpdate with { IsDegradedResult = true }, finalUpdate.UnavailableSources, saved);
+            }
+            else
+            {
+                await SavePartialCalendarCacheAsync(start, end, filters, criteria, finalItems, resumeState, cancellationToken,
+                    degradedBaselines, refreshStartedUtc);
             }
             _telemetry.RecordDiagnostic("calendar.cache.incomplete", details: new()
             {
-                Reason = "source_failure", Count = finalItems.Count, CacheKey = cacheKey,
+                Reason = sourceAndItemCacheValidationFailed ? "source_and_item_cache_validation"
+                    : itemCacheValidationFailed ? "item_cache_validation"
+                    : finalUpdate.IsReusableDegraded ? "optional_source_access_denied" : "source_failure", Count = finalItems.Count, CacheKey = cacheKey,
                 WeekStart = start, WeekEnd = end, Outcome = finalItems.Count > 0 ? "partial_retained" : "no_rows"
             });
         }
@@ -525,7 +590,11 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         bool IsComplete,
         bool HasFreshSeries,
         bool HasFreshMovies,
-        bool HasPartialCache = false);
+        bool HasPartialCache = false)
+    {
+        public IReadOnlyList<SourceUnavailableNotice> UnavailableSources { get; init; } = [];
+        public bool CanReuseDegraded { get; init; }
+    }
 
     private async Task<CalendarCacheSnapshot> ReadCalendarCacheCoreAsync(
         DateOnly start, DateOnly end, CalendarFilters? filters, CancellationToken cancellationToken)
@@ -538,7 +607,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             var fresh = envelope?.IsComplete == true ? items : null;
             return new CalendarCacheSnapshot(items is null ? null : MergePremiereItems(items), fresh ?? [],
                 fresh is not null, criteria.IncludeSeries && fresh is not null, criteria.IncludeMovies && fresh is not null,
-                envelope?.Metadata.Completeness == CalendarCacheCompleteness.Partial);
+                envelope?.Metadata.Completeness == CalendarCacheCompleteness.Partial)
+            { UnavailableSources = envelope?.UnavailableSources ?? [], CanReuseDegraded = envelope?.CanReuseDegraded(DateTimeOffset.UtcNow) == true };
         }
 
         var seriesKey = PremiereDiscoveryCriteria.FromFilters(FiltersForPageMode(filters, CalendarPageMode.Series)).CacheKey();
@@ -552,7 +622,13 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         return new CalendarCacheSnapshot(series is null && movies is null ? null : MergePremiereItems((series ?? []).Concat(movies ?? [])),
             snapshot.Items, snapshot.HasSeries && snapshot.HasMovies, snapshot.HasSeries, snapshot.HasMovies,
             seriesEnvelope?.Metadata.Completeness == CalendarCacheCompleteness.Partial
-                || movieEnvelope?.Metadata.Completeness == CalendarCacheCompleteness.Partial);
+                || movieEnvelope?.Metadata.Completeness == CalendarCacheCompleteness.Partial)
+        {
+            UnavailableSources = (seriesEnvelope?.UnavailableSources ?? []).Concat(movieEnvelope?.UnavailableSources ?? []).Distinct().ToArray(),
+            CanReuseDegraded = (seriesEnvelope?.IsComplete == true || seriesEnvelope?.CanReuseDegraded(DateTimeOffset.UtcNow) == true)
+                && (movieEnvelope?.IsComplete == true || movieEnvelope?.CanReuseDegraded(DateTimeOffset.UtcNow) == true)
+                && (seriesEnvelope?.UnavailableSources.Count > 0 || movieEnvelope?.UnavailableSources.Count > 0)
+        };
     }
 
     private bool NeedsRemoteCachedHydration(IReadOnlyList<PremiereItem> items, CalendarFilters? filters)
@@ -793,6 +869,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         ProviderWorkResumeState? resumeState,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        var fetchStarted = Stopwatch.GetTimestamp();
         using var sourceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var sourceToken = sourceCancellation.Token;
         var sources = new List<PremiereSourceFactory>();
@@ -904,11 +981,15 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var pendingSources = orderedSources.ToList();
         if (resumeState is { CompletedSources.Count: > 0 })
         {
-            foreach (var completedSource in resumeState.CompletedSources)
+            var sourceKeys = orderedSources.Select(source => source.Key).ToHashSet(StringComparer.Ordinal);
+            var checkpoints = resumeState.CompletedSources.Where(source => sourceKeys.Contains(source.Key))
+                .ToDictionary(source => source.Key, source => source.Value, StringComparer.Ordinal);
+            var reusable = await ValidateSourceCheckpointsAsync(checkpoints, cancellationToken);
+            foreach (var completedSource in reusable)
             {
                 currentItemsAccumulator.ReplaceSource(completedSource.Key, completedSource.Value);
             }
-            pendingSources.RemoveAll(source => resumeState.CompletedSources.ContainsKey(source.Key));
+            pendingSources.RemoveAll(source => reusable.ContainsKey(source.Key));
         }
         var sourceConcurrency = Math.Clamp(_options.SourceFetchConcurrency, 1, Math.Max(1, orderedSources.Length));
 
@@ -993,26 +1074,47 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
 
         var items = currentItemsAccumulator.ToMergedItems();
+        var failedBatches = latestBatchesByKey.Values.Where(batch => batch.Error is not null).ToArray();
+        var failures = failedBatches.SelectMany(batch => Unwrap(batch.Error!).Select(error =>
+            (Error: error, Notice: OptionalAccessDenial(batch.Name, error)))).ToArray();
         var retryDeadline = errors.Select(RetryDeadline).Where(deadline => deadline is not null).Min();
-        if (items.Count == 0 && errors.Count > 0 && retryDeadline is null)
+        var deadlineFailures = failures.Where(failure => RetryDeadline(failure.Error) is not null).ToArray();
+        // Optional access-denial deadlines must not keep an unrelated, non-deferred
+        // failure alive indefinitely without spending a scheduler retry attempt.
+        var terminalMixedDenial = failures.Any(failure => failure.Notice is null)
+            && deadlineFailures.Length > 0 && deadlineFailures.All(failure => failure.Notice is not null);
+        if (terminalMixedDenial)
+        {
+            retryDeadline = null;
+            _telemetry.RecordDiagnostic("source.retry.policy", details: new()
+            {
+                Outcome = "terminal_partial", Reason = "optional_denial_with_non_deferred_failure", Count = failures.Length,
+                WeekStart = start, WeekEnd = end, CacheKey = criteria.CacheKey(),
+                DurationMilliseconds = Stopwatch.GetElapsedTime(fetchStarted).TotalMilliseconds
+            });
+        }
+        if (items.Count == 0 && errors.Count > 0 && retryDeadline is null && !terminalMixedDenial)
         {
             throw new AggregateException("Premiere discovery failed before any source returned items.", errors);
         }
 
-        yield return CreateProgress(
-            "Complete",
-            items,
-            items,
-            isFinal: true,
-            hasSourceErrors: errors.Count > 0,
-            failedSourceNames: failedSourceNames.ToArray(),
-            retryAfterUtc: retryDeadline);
+        var finalProgress = CreateProgress("Complete", items, items, isFinal: true,
+            hasSourceErrors: errors.Count > 0, failedSourceNames: failedSourceNames.ToArray(), retryAfterUtc: retryDeadline);
+        if (errors.Count > 0)
+        {
+            var notices = failures.Where(failure => failure.Notice is not null).Select(failure => failure.Notice!).Distinct().ToArray();
+            finalProgress = finalProgress with { UnavailableSources = notices };
+            if (failedBatches.Length > 0 && failures.All(failure => failure.Notice is not null) && failedBatches.Length == errors.Count)
+                finalProgress = WithDegradedCoverage(finalProgress with { IsDegradedResult = true }, notices, false);
+        }
+        yield return finalProgress;
     }
 
     private static DateTimeOffset? RetryDeadline(Exception? error)
     {
         if (error is ProviderRetryAfterException throttled) return throttled.RetryAtUtc;
         if (error is ProviderCircuitOpenException circuit) return circuit.RetryAtUtc;
+        if (error is ProviderRequestException request && request.Failure.RetryAtUtc is { } retryAtUtc) return retryAtUtc;
         if (error is AggregateException aggregate)
             return aggregate.InnerExceptions.Select(RetryDeadline).Where(value => value is not null).Min();
         return error?.InnerException is { } inner ? RetryDeadline(inner) : null;
@@ -2060,6 +2162,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
     private static string ProviderKeyForSource(string sourceName)
     {
+        if (sourceName.Equals("Watchmode releases", StringComparison.OrdinalIgnoreCase)) return "watchmode";
         if (sourceName.StartsWith("TMDb series", StringComparison.Ordinal))
         {
             return "tmdb-series";

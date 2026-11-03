@@ -264,20 +264,53 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task CachedAbsenceIsRevalidatedByForceAndConcurrentForcesSharePendingFetch()
+    public async Task CachedAbsenceIsRevalidatedByForceAndQueuedForcesSharePendingFetch()
     {
+        var firstWarmupStarted = Signal();
+        var secondWarmupStarted = Signal();
+        var releaseWarmups = Signal();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var calls = 0;
-        var handler = new AsyncHandler((request, _) => Task.FromResult(Interlocked.Increment(ref calls) == 1
-            ? StubHttpMessageHandler.Json("{\"entities\":{\"Q1\":{\"claims\":{}}}}") : Identifiers(request)));
+        var handler = new AsyncHandler(async (request, token) =>
+        {
+            var id = EntityIds(request.RequestUri!)[0];
+            if (id is "Q9000001" or "Q9000002")
+            {
+                (id == "Q9000001" ? firstWarmupStarted : secondWarmupStarted).TrySetResult();
+                await releaseWarmups.Task.WaitAsync(token);
+                return Identifiers(request);
+            }
+            return Interlocked.Increment(ref calls) == 1
+                ? StubHttpMessageHandler.Json("{\"entities\":{\"Q1\":{\"claims\":{}}}}") : Identifiers(request);
+        });
         var client = CreateClient(handler);
-        Assert.Null(await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None));
-        Assert.Null(await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None));
+        Assert.Null(await client.GetRottenTomatoesIdAsync("Q1", cancellation.Token));
+        Assert.Null(await client.GetRottenTomatoesIdAsync("Q1", cancellation.Token));
 
-        var refreshed = await Task.WhenAll(Enumerable.Range(0, 5)
-            .Select(_ => client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None, forceRefresh: true)));
+        try
+        {
+            var firstWarmup = client.GetRottenTomatoesIdAsync("Q9000001", cancellation.Token);
+            await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var secondWarmup = client.GetRottenTomatoesIdAsync("Q9000002", cancellation.Token);
+            await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.All(refreshed, value => Assert.Equal("m/Q1", value));
-        Assert.Equal(2, handler.Requests.Count);
+            // Both HTTP slots stay occupied until every forced generation is queued.
+            // This tests queued coalescing without relying on the 10ms dispatch window.
+            var forces = Enumerable.Range(0, 5)
+                .Select(_ => client.GetRottenTomatoesIdAsync("Q1", cancellation.Token, forceRefresh: true)).ToArray();
+            releaseWarmups.TrySetResult();
+            var refreshed = await Task.WhenAll(forces);
+            await Task.WhenAll(firstWarmup, secondWarmup);
+
+            Assert.All(refreshed, value => Assert.Equal("m/Q1", value));
+            Assert.Equal(2, handler.Requests.Count(uri => EntityIds(uri).Contains("Q1")));
+            Assert.Equal(4, handler.Requests.Count);
+        }
+        finally
+        {
+            releaseWarmups.TrySetResult();
+            cancellation.Cancel();
+        }
     }
 
     [Fact]

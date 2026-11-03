@@ -17,17 +17,20 @@ public sealed class TraktClient : ITraktClient
     private readonly IMemoryCache _cache;
     private readonly TraktOptions _options;
     private readonly IIntegrationSettingsStore? _settingsStore;
+    private readonly PremiereTelemetry? _telemetry;
 
     public TraktClient(
         HttpClient httpClient,
         IMemoryCache cache,
         IOptions<TraktOptions> options,
-        IIntegrationSettingsStore? settingsStore = null)
+        IIntegrationSettingsStore? settingsStore = null,
+        PremiereTelemetry? telemetry = null)
     {
         _httpClient = httpClient;
         _cache = cache;
         _options = options.Value;
         _settingsStore = settingsStore;
+        _telemetry = telemetry;
     }
 
     public Task<IReadOnlyList<TraktMovieCalendarItem>> GetMovieCalendarAsync(
@@ -65,20 +68,26 @@ public sealed class TraktClient : ITraktClient
         var settings = await GetEffectiveSettingsAsync(cancellationToken);
         if (!IsConfigured(settings))
         {
+            ProviderOutcomeDiagnostics.Record(_telemetry, "trakt", "skipped", settings.Enabled ? "not_configured" : "disabled");
             return [];
         }
 
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<T>? cached) && cached is not null)
         {
+            ProviderOutcomeDiagnostics.Record(_telemetry, "trakt", cached.Count == 0 ? "absent" : "completed", "cached_response", true);
             return cached;
         }
 
+        var failures = new ProviderFailureCache(_cache, "trakt", _httpClient.BaseAddress, settings.ClientId);
+        if (failures.Get(DateTimeOffset.UtcNow) is { } deferred) throw Failure(deferred);
         try
         {
             using var response = await SendCalendarRequestWithRetryAsync(path, settings, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                return [];
+                var failure = ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow);
+                failures.Remember(failure, DateTimeOffset.UtcNow);
+                throw Failure(failure);
             }
 
             var values = await response.Content.ReadFromJsonAsync<IReadOnlyList<T>>(
@@ -86,24 +95,27 @@ public sealed class TraktClient : ITraktClient
                 cancellationToken) ?? [];
 
             _cache.Set(cacheKey, values, TimeSpan.FromHours(6));
+            ProviderOutcomeDiagnostics.Record(_telemetry, "trakt", values.Count == 0 ? "absent" : "completed", "verified_response");
             return values;
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (ProviderRequestException) { throw; }
+        catch (Exception exception) when (exception is OperationCanceledException or HttpRequestException or JsonException)
         {
-            return [];
+            var failure = ProviderFailure.FromException(exception);
+            failures.Remember(failure, DateTimeOffset.UtcNow);
+            throw Failure(failure);
         }
-        catch (OperationCanceledException)
+    }
+
+    private ProviderRequestException Failure(ProviderFailure failure)
+    {
+        _telemetry?.RecordDiagnostic("provider.outcome", _telemetry.CaptureDiagnosticContext(), new()
         {
-            throw;
-        }
-        catch (HttpRequestException)
-        {
-            return [];
-        }
-        catch (JsonException)
-        {
-            return [];
-        }
+            Provider = "trakt", Outcome = "failed", Reason = failure.Reason,
+            StatusCode = failure.StatusCode, RetryAtUtc = failure.RetryAtUtc, FromCache = failure.IsLocal
+        });
+        return new("trakt", failure);
     }
 
     private async Task<HttpResponseMessage> SendCalendarRequestWithRetryAsync(

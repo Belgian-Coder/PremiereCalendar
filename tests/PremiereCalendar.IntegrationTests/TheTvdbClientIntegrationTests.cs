@@ -88,7 +88,93 @@ public sealed class TheTvdbClientIntegrationTests
         Assert.Equal(4, handler.Requests.Count);
     }
 
-    private static TheTvdbClient CreateClient(StubHttpMessageHandler handler)
+    [Theory]
+    [InlineData(System.Net.HttpStatusCode.Forbidden, "authentication_denied")]
+    [InlineData(System.Net.HttpStatusCode.TooManyRequests, "rate_limited")]
+    [InlineData(System.Net.HttpStatusCode.ServiceUnavailable, "http_failure")]
+    public async Task ArtworkFailuresDoNotBecomeVerifiedEmptyThroughAdapter(System.Net.HttpStatusCode status, string reason)
+    {
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath.EndsWith("/login")
+            ? StubHttpMessageHandler.Json("{\"data\":{\"token\":\"test-token\"}}") : new HttpResponseMessage(status));
+        var adapter = new TheTvdbArtworkProvider(CreateClient(handler), Microsoft.Extensions.Options.Options.Create(new TheTvdbOptions()));
+        var result = await adapter.GetArtworkWithStatusAsync(new(PremiereCalendar.Models.PremiereMediaType.Series, 42, null, 420, null, "Example"), CancellationToken.None, true);
+        Assert.False(result.Successful);
+        Assert.Null(result.Value);
+        Assert.Equal(reason, result.Failure?.Reason);
+    }
+
+    [Theory]
+    [InlineData(System.Net.HttpStatusCode.Unauthorized)]
+    [InlineData(System.Net.HttpStatusCode.Forbidden)]
+    public async Task LoginDenialIsSharedAcrossDistinctTitlesAndNeverVerifiedAsAbsence(System.Net.HttpStatusCode status)
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(status));
+        var client = CreateClient(handler);
+        var first = await client.GetSeriesArtworkWithStatusAsync(42, CancellationToken.None);
+        var second = await client.GetSeriesArtworkWithStatusAsync(43, CancellationToken.None, true);
+        Assert.False(first.Successful);
+        Assert.Equal("authentication_denied", first.Failure?.Reason);
+        Assert.False(second.Successful);
+        Assert.Equal("local_backoff", second.Failure?.Reason);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Verified404IsReusedWhileMalformedPayloadAndTimeoutStayFailures()
+    {
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath.EndsWith("/login")
+            ? StubHttpMessageHandler.Json("{\"data\":{\"token\":\"test-token\"}}") : new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
+        var client = CreateClient(handler);
+        Assert.True((await client.GetSeriesArtworkWithStatusAsync(42, CancellationToken.None)).Successful);
+        Assert.True((await client.GetSeriesArtworkWithStatusAsync(42, CancellationToken.None)).Successful);
+        Assert.Equal(2, handler.Requests.Count);
+        var malformed = CreateClient(new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath.EndsWith("/login")
+            ? StubHttpMessageHandler.Json("{\"data\":{\"token\":\"test-token\"}}") : StubHttpMessageHandler.Json("{}")));
+        Assert.False((await malformed.GetSeriesArtworkWithStatusAsync(42, CancellationToken.None)).Successful);
+        var timeout = CreateClient(new StubHttpMessageHandler(_ => throw new TaskCanceledException()));
+        Assert.Equal("timeout", (await timeout.GetSeriesArtworkWithStatusAsync(42, CancellationToken.None)).Failure?.Reason);
+    }
+
+    [Theory]
+    [InlineData("{\"id\":82,\"artworks\":[]}", 0)]
+    [InlineData("{\"id\":82,\"artworks\":[{\"image\":\"series/poster.jpg\",\"type\":2}]}", 1)]
+    public async Task OfficialSeriesExtendedArtworkEnvelopeIsVerifiedAndCached(string data, int count)
+    {
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath.EndsWith("/login")
+            ? StubHttpMessageHandler.Json("{\"data\":{\"token\":\"fixture\"}}") : StubHttpMessageHandler.Json("{\"status\":\"success\",\"data\":" + data + "}"));
+        var client = CreateClient(handler);
+        var first = await client.GetSeriesArtworkWithStatusAsync(82, CancellationToken.None);
+        var second = await client.GetSeriesArtworkWithStatusAsync(82, CancellationToken.None);
+        Assert.True(first.Successful);
+        Assert.True(second.Successful);
+        Assert.Equal(count, first.Value.Count);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task EnabledBlankKeyIsSkippedWithoutRetryDeadlineOrHttp()
+    {
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("Unconfigured provider must not send."));
+        var result = await CreateClient(handler, " ").GetSeriesArtworkWithStatusAsync(82, CancellationToken.None, true);
+        Assert.True(result.Successful);
+        Assert.Equal("not_configured", result.Failure?.Reason);
+        Assert.Null(result.Failure?.RetryAtUtc);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task NullArtworkCollectionIsUnverifiedAndCannotConfirmPosterAbsence()
+    {
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath.EndsWith("/login")
+            ? StubHttpMessageHandler.Json("{\"data\":{\"token\":\"fixture\"}}")
+            : StubHttpMessageHandler.Json("{\"status\":\"success\",\"data\":{\"id\":82,\"artworks\":null}}"));
+        var result = await CreateClient(handler).GetSeriesArtworkWithStatusAsync(82, CancellationToken.None);
+        Assert.False(result.Successful);
+        Assert.Equal("invalid_response", result.Failure?.Reason);
+        Assert.Empty(result.Value);
+    }
+
+    private static TheTvdbClient CreateClient(StubHttpMessageHandler handler, string apiKey = "test-key")
     {
         return new TheTvdbClient(
             new HttpClient(handler) { BaseAddress = new Uri("https://api4.thetvdb.com/v4/") },
@@ -96,7 +182,7 @@ public sealed class TheTvdbClientIntegrationTests
             Microsoft.Extensions.Options.Options.Create(new TheTvdbOptions
             {
                 Enabled = true,
-                ApiKey = "test-key"
+                ApiKey = apiKey
             }));
     }
 }

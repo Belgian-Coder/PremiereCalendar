@@ -159,7 +159,19 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
             await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
-            await UpsertStateAsync(connection, transaction, RateLimitedUntilUtcKey, state.RateLimitedUntilUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "", cancellationToken);
+            // An unrelated in-flight failure must not erase an accepted quota deadline.
+            if (state.RateLimitedUntilUtc is { } until)
+            {
+                await using var readDeadline = connection.CreateCommand();
+                readDeadline.Transaction = transaction;
+                readDeadline.CommandText = "SELECT Value FROM OmdbProviderState WHERE Key = @key";
+                DatabaseParameters.Add(readDeadline, "@key", RateLimitedUntilUtcKey);
+                if (await readDeadline.ExecuteScalarAsync(cancellationToken) is string value
+                    && DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var existing)
+                    && existing > until)
+                    until = existing;
+                await UpsertStateAsync(connection, transaction, RateLimitedUntilUtcKey, until.ToString("O", CultureInfo.InvariantCulture), cancellationToken);
+            }
             await UpsertStateAsync(connection, transaction, LastErrorKey, state.LastError ?? "", cancellationToken);
             await UpsertStateAsync(connection, transaction, LastFailureUtcKey, state.LastFailureUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "", cancellationToken);
             await transaction.CommitAsync(cancellationToken);

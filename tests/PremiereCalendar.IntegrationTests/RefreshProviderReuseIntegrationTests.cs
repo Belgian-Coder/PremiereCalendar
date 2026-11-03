@@ -15,7 +15,7 @@ public sealed class RefreshProviderReuseIntegrationTests
     public async Task ForcedVerifiedAbsentRatingsAreFetchedOncePerGeneration()
     {
         using var rtCache = new MemoryCache(new MemoryCacheOptions());
-        var rtHandler = new StubHttpMessageHandler(_ => Html("<html></html>"));
+        var rtHandler = new StubHttpMessageHandler(_ => Html("<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>"));
         var rt = RottenTomatoes(rtHandler, rtCache);
         using var omdbCache = new MemoryCache(new MemoryCacheOptions());
         var omdbHandler = new StubHttpMessageHandler(_ =>
@@ -44,7 +44,7 @@ public sealed class RefreshProviderReuseIntegrationTests
         var calls = 0;
         var handler = new StubHttpMessageHandler(_ => ++calls == 1
             ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
-            : Html("<html></html>"));
+            : Html("<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>"));
         var client = RottenTomatoes(handler, cache);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
         await client.GetScoresAsync(PremiereMediaType.Movie, "Missing", 2026, null, CancellationToken.None, force);

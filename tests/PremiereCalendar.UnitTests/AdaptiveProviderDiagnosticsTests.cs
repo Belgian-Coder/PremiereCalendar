@@ -109,6 +109,89 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AuthenticationDenialAndLocalCircuitDeferralAreDistinctFromTimeoutWithoutSensitiveData()
+    {
+        var sends = 0;
+        using var client = CreateClient(_ =>
+        {
+            sends++;
+            return new(HttpStatusCode.Forbidden) { Content = new StringContent("private-denial-body") };
+        });
+        using var first = await client.GetAsync("https://example.test/first?apikey=secret-key");
+        await Assert.ThrowsAsync<ProviderCircuitOpenException>(() => client.GetAsync("https://example.test/second?apikey=secret-key"));
+        Assert.Equal(1, sends);
+        var events = Events();
+        var denied = Assert.Single(events, e => EventName(e) == "provider.attempt.completed"
+            && e.GetProperty("details").GetProperty("outcome").GetString() == "accessdenied");
+        Assert.Equal(403, denied.GetProperty("details").GetProperty("statusCode").GetInt32());
+        var deferred = Assert.Single(events, e => EventName(e) == "provider.admission.deferred").GetProperty("details");
+        Assert.Equal("local_circuit", deferred.GetProperty("reason").GetString());
+        Assert.Equal(_time.GetUtcNow().AddMinutes(15), deferred.GetProperty("retryAtUtc").GetDateTimeOffset());
+        Assert.DoesNotContain(events, e => e.GetProperty("details").TryGetProperty("reason", out var reason)
+            && reason.GetString() == "timeout");
+        var raw = string.Join("\n", events.Select(e => e.GetRawText()));
+        foreach (var secret in new[] { "example.test", "apikey", "secret-key", "private-denial-body" })
+            Assert.DoesNotContain(secret, raw, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task FinalHttp429IsObservedRateLimitAndOnlyNextPreSendRejectionIsAdmissionDeferral()
+    {
+        var sends = 0;
+        using var client = new HttpClient(new AdaptiveProviderHandler("test", 1, _policy, deferFinalThrottle: true)
+        {
+            InnerHandler = new ResponseHandler(_ =>
+            {
+                sends++;
+                var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new StringContent("private-quota-body") };
+                response.Headers.RetryAfter = new(TimeSpan.FromSeconds(30));
+                return response;
+            })
+        });
+        var observed = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.PostAsync("https://example.test/?key=private-key", new StringContent("")));
+        var responseFailure = ProviderFailure.FromException(observed);
+        Assert.True(observed.ResponseObserved);
+        Assert.False(responseFailure.IsLocal);
+        Assert.Equal("rate_limited", responseFailure.Reason);
+        Assert.Equal(429, responseFailure.StatusCode);
+        Assert.DoesNotContain(Events(), item => EventName(item) == "provider.admission.deferred");
+        var local = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/?key=private-key"));
+        var localFailure = ProviderFailure.FromException(local);
+        Assert.False(local.ResponseObserved);
+        Assert.True(localFailure.IsLocal);
+        Assert.Equal("local_backoff", localFailure.Reason);
+        Assert.Equal(observed.RetryAtUtc, local.RetryAtUtc);
+        Assert.Equal(1, sends);
+        var events = Events();
+        Assert.Single(events, item => EventName(item) == "provider.headers.completed");
+        var deferred = Assert.Single(events, item => EventName(item) == "provider.admission.deferred").GetProperty("details");
+        Assert.Equal("local_backoff", deferred.GetProperty("reason").GetString());
+        Assert.Equal(observed.RetryAtUtc, deferred.GetProperty("retryAtUtc").GetDateTimeOffset());
+        var raw = string.Join("\n", events.Select(item => item.GetRawText()));
+        Assert.DoesNotContain("private-", raw);
+        Assert.DoesNotContain("example.test", raw);
+    }
+
+    [Fact]
+    public async Task ObservedServerRetryAfterRetainsItsRealStatusWithoutLocalAdmissionEvent()
+    {
+        using var client = CreateClient(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            response.Headers.RetryAfter = new(TimeSpan.FromSeconds(30));
+            return response;
+        });
+        var exception = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/"));
+        var failure = ProviderFailure.FromException(exception);
+        Assert.True(exception.ResponseObserved);
+        Assert.False(failure.IsLocal);
+        Assert.Equal("http_failure", failure.Reason);
+        Assert.Equal(503, failure.StatusCode);
+        Assert.Equal(_time.GetUtcNow().AddSeconds(30), exception.RetryAtUtc);
+        Assert.DoesNotContain(Events(), item => EventName(item) == "provider.admission.deferred");
+    }
+
+    [Fact]
     public async Task ServerFailureRecordsPlannedAndActualRetryDelaySeparately()
     {
         var sends = 0;

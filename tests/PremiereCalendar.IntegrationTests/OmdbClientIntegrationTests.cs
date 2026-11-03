@@ -230,6 +230,74 @@ public sealed class OmdbClientIntegrationTests
         }
     }
 
+    [Theory]
+    [InlineData("Invalid API key!", "authentication_denied")]
+    [InlineData("Request limit reached!", "rate_limited")]
+    public async Task PayloadDenialIsSharedAcrossDistinctTitlesAndNeverVerifiedAsAbsence(string error, string reason)
+    {
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(
+            System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })));
+        var client = CreateOmdbClient(handler, enabled: true);
+        var first = await client.GetByImdbIdWithStatusAsync("tt1", CancellationToken.None);
+        var second = await client.GetByImdbIdWithStatusAsync("tt2", CancellationToken.None, forceRefresh: true);
+        Assert.False(first.Successful);
+        Assert.Null(first.Value);
+        Assert.Equal(reason, first.Failure?.Reason);
+        Assert.False(second.Successful);
+        Assert.Equal("local_backoff", second.Failure?.Reason);
+        Assert.Equal(first.Failure?.RetryAtUtc, second.Failure?.RetryAtUtc);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task UnknownFalsePayloadIsRetriedInsteadOfCachedAsVerifiedAbsence()
+    {
+        var calls = 0;
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls == 1
+            ? "{\"Response\":\"False\",\"Error\":\"Error getting data.\"}"
+            : Fixture.Read("omdb/by-imdb-id-success.json")));
+        var client = CreateOmdbClient(handler, enabled: true);
+        var failed = await client.GetByImdbIdWithStatusAsync("tt1", CancellationToken.None);
+        var recovered = await client.GetByImdbIdWithStatusAsync("tt1", CancellationToken.None);
+        Assert.False(failed.Successful);
+        Assert.Equal("invalid_response", failed.Failure?.Reason);
+        Assert.True(recovered.Successful);
+        Assert.Equal("8.2", recovered.Value?.ImdbRating);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task PersistedQuotaDeadlineSurvivesAnUnrelatedRequestFailure()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var store = CreateCacheStore(root);
+            var until = DateTimeOffset.UtcNow.AddHours(2);
+            await store.MarkRateLimitedAsync(until, "rate_limited", CancellationToken.None);
+            await store.MarkFailureAsync("http_failure", CancellationToken.None);
+            await store.MarkRateLimitedAsync(until.AddMinutes(-30), "authentication_denied", CancellationToken.None);
+            var restarted = CreateCacheStore(root);
+            var state = await restarted.GetProviderStateAsync(CancellationToken.None);
+            Assert.Equal(until, state.RateLimitedUntilUtc);
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Fact]
+    public async Task EnabledBlankKeyIsIntentionalSkipWithoutHttpOrFailureCooldown()
+    {
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("Unconfigured OMDb must not send requests."));
+        var client = new OmdbClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") },
+            new MemoryCache(new MemoryCacheOptions()), Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = " " }));
+        var result = await client.GetByImdbIdWithStatusAsync("tt0000042", CancellationToken.None, true);
+        Assert.True(result.Successful);
+        Assert.Null(result.Value);
+        Assert.Equal("not_configured", result.Failure?.Reason);
+        Assert.Null(result.Failure?.RetryAtUtc);
+        Assert.Empty(handler.Requests);
+    }
+
     private static OmdbClient CreateOmdbClient(
         HttpMessageHandler handler,
         bool enabled,

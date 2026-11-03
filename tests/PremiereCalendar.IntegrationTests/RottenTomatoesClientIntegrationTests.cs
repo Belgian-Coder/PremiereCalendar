@@ -137,14 +137,15 @@ public sealed class RottenTomatoesClientIntegrationTests
         });
         var client = CreateClient(handler);
 
-        var score = await client.GetTomatometerScoreAsync(
+        var outcome = await client.GetScoresWithStatusAsync(
             PremiereMediaType.Series,
             "The Boroughs",
             2026,
             wikidataId: null,
             CancellationToken.None);
 
-        Assert.Equal(95, score);
+        Assert.True(outcome.Successful);
+        Assert.Equal(95, outcome.Value.CriticScore);
         Assert.Equal(["/search", "/tv/the_boroughs"], handler.Requests.Select(request => request.Uri.AbsolutePath));
     }
 
@@ -202,14 +203,15 @@ public sealed class RottenTomatoesClientIntegrationTests
         });
         var client = CreateClient(handler);
 
-        var score = await client.GetTomatometerScoreAsync(
+        var outcome = await client.GetScoresWithStatusAsync(
             PremiereMediaType.Movie,
             "Saccharine",
             2026,
             wikidataId: null,
             CancellationToken.None);
 
-        Assert.Equal(72, score);
+        Assert.True(outcome.Successful);
+        Assert.Equal(72, outcome.Value.CriticScore);
         Assert.Equal(["/search", "/m/saccharine"], handler.Requests.Select(request => request.Uri.AbsolutePath));
     }
 
@@ -271,6 +273,123 @@ public sealed class RottenTomatoesClientIntegrationTests
 
         Assert.Null(score);
         Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task AccessDenialIsReusedAcrossTitlesAndForcedRequests()
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Forbidden));
+        var identifiers = new CountingWikimediaClient();
+        var client = new RottenTomatoesClient(
+            new HttpClient(handler) { BaseAddress = new Uri("https://www.rottentomatoes.com/") },
+            new MemoryCache(new MemoryCacheOptions()), Microsoft.Extensions.Options.Options.Create(new RottenTomatoesOptions()),
+            NullLogger<RottenTomatoesClient>.Instance, identifiers);
+        var first = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "First", 2026, "QFirst", CancellationToken.None);
+        var second = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Second", 2026, "QSecond", CancellationToken.None, forceRefresh: true);
+        Assert.False(first.Successful);
+        Assert.Equal("authentication_denied", first.Failure?.Reason);
+        Assert.False(second.Successful);
+        Assert.Equal("local_backoff", second.Failure?.Reason);
+        Assert.Single(handler.Requests);
+        Assert.Equal(1, identifiers.Calls);
+    }
+
+    [Fact]
+    public async Task FailedSearchIsNotMemoizedForTheFullRatingCacheLifetime()
+    {
+        var calls = 0;
+        var handler = new StubHttpMessageHandler(_ => ++calls == 1
+            ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            : Html("<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>"));
+        var client = CreateClient(handler);
+        var first = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "First", 2026, null, CancellationToken.None);
+        var second = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "First", 2026, null, CancellationToken.None);
+        Assert.False(first.Successful);
+        Assert.Equal("http_failure", first.Failure?.Reason);
+        Assert.True(second.Successful);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("<html><title>Just a moment...</title>Verify you are human</html>")]
+    [InlineData("<html>Something went wrong</html>")]
+    [InlineData("<search-page-media-row></search-page-media-row>")]
+    [InlineData("<search-page-result type=\"movie\"></search-page-result>")]
+    public async Task UnrecognizedSearch200IsFailureWhileRecognizedEmptySearchIsVerified(string document)
+    {
+        var calls = 0;
+        var handler = new StubHttpMessageHandler(_ => Html(++calls == 1 ? document
+            : "<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>"));
+        var client = CreateClient(handler);
+        var failed = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, CancellationToken.None);
+        var verified = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, CancellationToken.None);
+        Assert.False(failed.Successful);
+        Assert.Equal("invalid_response", failed.Failure?.Reason);
+        Assert.True(verified.Successful);
+        Assert.False(verified.Value.HasAnyScore);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task CurrentPublicNoResultMarkupIsVerifiedAndNonLatinLookupIsNotApplicable()
+    {
+        // Minimal structure observed on the public RT search page on 3 November 2026.
+        var handler = new StubHttpMessageHandler(_ => Html("<div class=\"js-search-no-results search__no-results\"><rt-text>Sorry, no results found for &quot;Example&quot;</rt-text></div>"));
+        var client = CreateClient(handler);
+        var absent = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, CancellationToken.None);
+        Assert.True(absent.Successful);
+        Assert.False(absent.Value.HasAnyScore);
+        var skipped = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "\u65e5\u672c\u8a9e", 2026, null, CancellationToken.None);
+        Assert.True(skipped.Successful);
+        Assert.Equal("not_applicable", skipped.Failure?.Reason);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task ScoreRefreshCanKeepStableIdentifierCacheWhileExplicitIdentityRefreshBypassesIt()
+    {
+        var identifiers = new CountingWikimediaClient();
+        var client = new RottenTomatoesClient(
+            new HttpClient(new StubHttpMessageHandler(_ => Html("<script id=\"media-scorecard-json\">{\"criticsScore\":{\"score\":83}}</script>")))
+                { BaseAddress = new Uri("https://www.rottentomatoes.com/") },
+            new MemoryCache(new MemoryCacheOptions()), Microsoft.Extensions.Options.Options.Create(new RottenTomatoesOptions()),
+            NullLogger<RottenTomatoesClient>.Instance, identifiers);
+        Assert.True((await client.GetScoresWithRefreshPolicyAsync(PremiereMediaType.Movie, "Example", 2026, "QExample", CancellationToken.None, true, false)).Successful);
+        Assert.True((await client.GetScoresWithRefreshPolicyAsync(PremiereMediaType.Movie, "Example", 2026, "QExample", CancellationToken.None, true, true)).Successful);
+        Assert.Equal([false, true], identifiers.Forced);
+    }
+
+    [Fact]
+    public async Task DisabledIdentifierProviderDoesNotBlockVerifiedTitleSearchRatings()
+    {
+        var identifierHandler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("Disabled Wikimedia must not send requests."));
+        var identifiers = new WikimediaClient(new HttpClient(identifierHandler), new MemoryCache(new MemoryCacheOptions()),
+            Microsoft.Extensions.Options.Options.Create(new WikimediaOptions { Enabled = false }));
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath == "/search"
+            ? Html("<search-page-media-row release-year=\"2026\" tomatometer-score=\"83\"><a href=\"/m/example\" data-qa=\"info-name\">Example</a></search-page-media-row>")
+            : Html("<script id=\"media-scorecard-json\">{}</script>"));
+        var client = new RottenTomatoesClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.rottentomatoes.com/") },
+            new MemoryCache(new MemoryCacheOptions()), Microsoft.Extensions.Options.Options.Create(new RottenTomatoesOptions()),
+            NullLogger<RottenTomatoesClient>.Instance, identifiers);
+        var result = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, "QExample", CancellationToken.None);
+        Assert.True(result.Successful);
+        Assert.Equal(83, result.Value.CriticScore);
+        Assert.Empty(identifierHandler.Requests);
+    }
+
+    private sealed class CountingWikimediaClient : IWikimediaClient
+    {
+        public int Calls { get; private set; }
+        public List<bool> Forced { get; } = [];
+        public Task<string?> GetReusableImageUrlAsync(string id, CancellationToken token, bool forceRefresh = false)
+            => Task.FromResult<string?>(null);
+        public Task<string?> GetRottenTomatoesIdAsync(string id, CancellationToken token, bool forceRefresh = false)
+        {
+            Calls++;
+            Forced.Add(forceRefresh);
+            return Task.FromResult<string?>("m/example");
+        }
     }
 
     private static RottenTomatoesClient CreateClient(StubHttpMessageHandler handler)

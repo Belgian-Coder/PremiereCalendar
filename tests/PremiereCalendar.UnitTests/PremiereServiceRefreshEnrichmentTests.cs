@@ -84,7 +84,7 @@ public sealed partial class PremiereServiceTests
             Content = new StringContent(hasScores
                 ? "<search-page-media-row releaseyear=\"2026\" tomatometer-score=\"89\"><a data-qa=\"info-name\" href=\"/m/cached_hydration\">Cached hydration 00</a></search-page-media-row>" +
                   "<script id=\"media-scorecard-json\">{\"criticsScore\":{\"score\":89},\"audienceScore\":{\"score\":91}}</script>"
-                : "<html>No matching titles</html>")
+                : "<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>")
         });
         using var http = new HttpClient(handler) { BaseAddress = new Uri("https://tomatoes.example/") };
         using (var warmMemory = new MemoryCache(new MemoryCacheOptions()))
@@ -143,7 +143,7 @@ public sealed partial class PremiereServiceTests
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "fixture" }));
         using var tomatoesHandler = new EnrichmentHttpHandler((_, call) => new HttpResponseMessage(
             call <= transientFailures ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK)
-            { Content = new StringContent("<html>No matching titles</html>") });
+            { Content = new StringContent("<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>") });
         using var tomatoesHttp = new HttpClient(tomatoesHandler) { BaseAddress = new Uri("https://tomatoes.example/") };
         using var tomatoesMemory = new MemoryCache(new MemoryCacheOptions());
         var tomatoes = NewEnrichmentTomatoes(tomatoesHttp, tomatoesMemory);
@@ -198,7 +198,7 @@ public sealed partial class PremiereServiceTests
         var omdb = new OmdbClient(omdbHttp, omdbMemory,
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "fixture" }));
         using var tomatoesHandler = new EnrichmentHttpHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
-            { Content = new StringContent("<html>No matching titles</html>") });
+            { Content = new StringContent("<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>") });
         using var tomatoesHttp = new HttpClient(tomatoesHandler) { BaseAddress = new Uri("https://tomatoes.example/") };
         using var tomatoesMemory = new MemoryCache(new MemoryCacheOptions());
         var tomatoes = NewEnrichmentTomatoes(tomatoesHttp, tomatoesMemory);

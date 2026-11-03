@@ -26,18 +26,29 @@ public sealed class TraktDiscoveryProviderTests
         });
 
         var batches = new List<IReadOnlyList<ExternalPremiereCandidate>>();
-        await foreach (var batch in provider.StreamCandidatesAsync(
-            new DateOnly(2026, 5, 4),
-            new DateOnly(2026, 5, 10),
-            cancellationToken: CancellationToken.None))
+        await Assert.ThrowsAsync<ExternalApiException>(async () =>
         {
-            batches.Add(batch);
-        }
+            await foreach (var batch in provider.StreamCandidatesAsync(
+                new DateOnly(2026, 5, 4), new DateOnly(2026, 5, 10),
+                cancellationToken: CancellationToken.None))
+                batches.Add(batch);
+        });
 
         var candidate = Assert.Single(batches.SelectMany(batch => batch));
         Assert.Equal(PremiereMediaType.Movie, candidate.MediaType);
         Assert.Equal("Trakt", candidate.Source);
         Assert.Equal(123, candidate.TmdbId);
+    }
+
+    [Fact]
+    public async Task BothCalendarBranchFailuresArePreserved()
+    {
+        var provider = new TraktDiscoveryProvider(new FakeTraktClient { ThrowMovies = true, ThrowShows = true });
+        var failure = await Assert.ThrowsAsync<AggregateException>(() => provider.GetCandidatesAsync(
+            new(2026, 5, 4), new(2026, 5, 10), CancellationToken.None));
+        Assert.Equal(2, failure.InnerExceptions.Count);
+        Assert.Contains(failure.InnerExceptions, error => error.Message == "Movie calendar failed.");
+        Assert.Contains(failure.InnerExceptions, error => error.Message == "Show calendar failed.");
     }
 
     private sealed class FakeTraktClient : ITraktClient

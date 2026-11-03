@@ -5,6 +5,16 @@ namespace PremiereCalendar.Services;
 /// <summary>Owns normalized calendar cache IO so the compatibility facade does not own persistence details.</summary>
 public sealed class CalendarLoadCacheOrchestrator(ICalendarCache cache)
 {
+    public Task<bool> WriteValidatedPartialAsync(DateOnly start, DateOnly end, string cacheKey,
+        IReadOnlyList<PremiereItem> items, DateTimeOffset refreshStartedUtc,
+        CancellationToken cancellationToken, string? expectedGeneration = null)
+        => cache.SetValidatedPartialWeekAsync(start, end, cacheKey, items, refreshStartedUtc, cancellationToken, expectedGeneration);
+
+    public Task<bool> WriteDegradedAsync(DateOnly start, DateOnly end, string cacheKey,
+        IReadOnlyList<PremiereItem> items, IReadOnlyList<SourceUnavailableNotice> unavailableSources,
+        DateTimeOffset refreshStartedUtc, CancellationToken cancellationToken, string? expectedGeneration = null)
+        => cache.SetDegradedWeekAsync(start, end, cacheKey, items, unavailableSources, refreshStartedUtc, cancellationToken, expectedGeneration);
+
     public Task WritePartialAsync(
         DateOnly start, DateOnly end, string cacheKey, IReadOnlyList<PremiereItem> items, CancellationToken cancellationToken)
         => cache.SetPartialWeekAsync(start, end, cacheKey, items, cancellationToken);

@@ -4,6 +4,7 @@ namespace PremiereCalendar.Services;
 
 public sealed class FanartArtworkProvider : IArtworkProvider
 {
+    public string OwnedSource => ArtworkSources.Fanart;
     private readonly IFanartClient _client;
 
     public FanartArtworkProvider(IFanartClient client)
@@ -15,23 +16,25 @@ public sealed class FanartArtworkProvider : IArtworkProvider
         ArtworkRequest request,
         CancellationToken cancellationToken,
         bool forceRefresh = false)
+        => (await GetArtworkWithStatusAsync(request, cancellationToken, forceRefresh)).Value;
+
+    public async Task<ProviderRefreshResult<ArtworkCandidate?>> GetArtworkWithStatusAsync(ArtworkRequest request, CancellationToken cancellationToken, bool forceRefresh = false)
     {
         if (request.MediaType == PremiereMediaType.Movie)
         {
-            var movie = await _client.GetMovieArtworkAsync(request.TmdbId, cancellationToken, forceRefresh);
-            return SelectBest(movie?.MoviePosters)
-                ?? SelectBest(movie?.MovieBackgrounds);
+            var result = await _client.GetMovieArtworkWithStatusAsync(request.TmdbId, cancellationToken, forceRefresh);
+            var movie = result.Value;
+            return new(SelectBest(movie?.MoviePosters) ?? SelectBest(movie?.MovieBackgrounds), result.Successful, result.Failure);
         }
 
         if (request.TvdbId is not > 0)
         {
-            return null;
+            return new(null, true, new("not_applicable"));
         }
 
-        var tv = await _client.GetTvArtworkAsync(request.TvdbId.Value, cancellationToken, forceRefresh);
-        return SelectBest(tv?.TvPosters)
-            ?? SelectBest(tv?.ShowBackgrounds)
-            ?? SelectBest(tv?.TvThumbs);
+        var tvResult = await _client.GetTvArtworkWithStatusAsync(request.TvdbId.Value, cancellationToken, forceRefresh);
+        var tv = tvResult.Value;
+        return new(SelectBest(tv?.TvPosters) ?? SelectBest(tv?.ShowBackgrounds) ?? SelectBest(tv?.TvThumbs), tvResult.Successful, tvResult.Failure);
     }
 
     public static ArtworkCandidate? SelectBest(IEnumerable<FanartImage>? images)

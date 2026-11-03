@@ -19,8 +19,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly ISingleFlightCoordinator _singleFlight;
     private readonly ProviderRequestThrottler _requestThrottler;
-    private readonly object _rateLimitLock = new();
-    private DateTimeOffset _rateLimitedUntilUtc = DateTimeOffset.MinValue;
+    private readonly PremiereTelemetry? _telemetry;
 
     public WatchmodeClient(
         HttpClient httpClient,
@@ -28,7 +27,8 @@ public sealed class WatchmodeClient : IWatchmodeClient
         IOptions<WatchmodeOptions> options,
         IIntegrationSettingsStore? settingsStore = null,
         ISingleFlightCoordinator? singleFlight = null,
-        ProviderRequestThrottler? requestThrottler = null)
+        ProviderRequestThrottler? requestThrottler = null,
+        PremiereTelemetry? telemetry = null)
     {
         _httpClient = httpClient;
         _cache = cache;
@@ -36,6 +36,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
         _settingsStore = settingsStore;
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
         _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
+        _telemetry = telemetry;
     }
 
     public async Task<IReadOnlyList<PremiereSource>> GetTitleSourcesAsync(
@@ -47,21 +48,25 @@ public sealed class WatchmodeClient : IWatchmodeClient
         bool forceRefresh = false)
         => (await GetTitleSourcesWithStatusAsync(mediaType, tmdbId, imdbId, regions, cancellationToken, forceRefresh)).Value;
 
-    public async Task<ProviderRefreshResult<IReadOnlyList<PremiereSource>>> GetTitleSourcesWithStatusAsync(
-        PremiereMediaType mediaType,
-        int tmdbId,
-        string? imdbId,
-        IReadOnlyList<string> regions,
-        CancellationToken cancellationToken,
-        bool forceRefresh = false)
+    public Task<ProviderRefreshResult<IReadOnlyList<PremiereSource>>> GetTitleSourcesWithStatusAsync(
+        PremiereMediaType mediaType, int tmdbId, string? imdbId, IReadOnlyList<string> regions,
+        CancellationToken cancellationToken, bool forceRefresh = false)
+        => GetTitleSourcesWithRefreshPolicyAsync(mediaType, tmdbId, imdbId, regions, cancellationToken, forceRefresh, forceIdentityRefresh: forceRefresh);
+
+    public async Task<ProviderRefreshResult<IReadOnlyList<PremiereSource>>> GetTitleSourcesWithRefreshPolicyAsync(
+        PremiereMediaType mediaType, int tmdbId, string? imdbId, IReadOnlyList<string> regions,
+        CancellationToken cancellationToken, bool forceRefresh = false, bool forceIdentityRefresh = false)
     {
         var settings = await GetEffectiveSettingsAsync(cancellationToken);
-        if (!settings.Enabled
-            || !settings.EnableAvailabilityEnrichment
-            || string.IsNullOrWhiteSpace(settings.ApiKey)
-            || tmdbId <= 0)
+        if (!settings.Enabled || !settings.EnableAvailabilityEnrichment || tmdbId <= 0)
         {
-            return new([], true);
+            ProviderOutcomeDiagnostics.Record(_telemetry, "watchmode", "skipped", "disabled");
+            return new([], true, new("disabled"));
+        }
+        if (string.IsNullOrWhiteSpace(settings.ApiKey))
+        {
+            ProviderOutcomeDiagnostics.Record(_telemetry, "watchmode", "skipped", "not_configured");
+            return new([], true, new("not_configured"));
         }
 
         using var enrichmentBudget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -71,11 +76,11 @@ public sealed class WatchmodeClient : IWatchmodeClient
             Math.Max(1, _options.RequestTimeoutSeconds))));
         var enrichmentToken = enrichmentBudget.Token;
 
-        var resolution = await FindTitleIdAsync(mediaType, tmdbId, imdbId, settings, enrichmentToken, forceRefresh);
+        var resolution = await FindTitleIdAsync(mediaType, tmdbId, imdbId, settings, enrichmentToken, forceIdentityRefresh);
         var titleId = resolution.Value;
         if (titleId is not > 0)
         {
-            return new([], resolution.Successful);
+            return new([], resolution.Successful, resolution.Failure);
         }
 
         var sourceRegions = NormalizeRegions(regions.Count > 0 ? regions : settings.Regions);
@@ -98,7 +103,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
                 var sources = await GetTitleSourceDtosAsync(titleId.Value, settings.ApiKey.Trim(), sourceRegions, token);
                 if (!sources.IsSuccess && sources.Value is not { Count: > 0 })
                 {
-                    return new([], false);
+                    return new([], false, sources.Failure);
                 }
 
                 var mapped = (sources.Value ?? [])
@@ -109,7 +114,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
                     .ToArray();
 
                 if (sources.IsSuccess) _cache.Set(cacheKey, mapped, CacheDuration(settings));
-                return new(mapped, resolution.Successful && sources.IsSuccess);
+                return new(mapped, resolution.Successful && sources.IsSuccess, sources.Failure ?? resolution.Failure);
             },
             enrichmentToken);
     }
@@ -156,7 +161,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
                     token);
                 if (!response.IsSuccess)
                 {
-                    return [];
+                    throw new ProviderRequestException("watchmode", response.Failure ?? new("invalid_response"));
                 }
 
                 var candidates = (response.Value?.Releases ?? [])
@@ -189,7 +194,8 @@ public sealed class WatchmodeClient : IWatchmodeClient
             $"title/{titleId.ToString(CultureInfo.InvariantCulture)}/sources/{ToQueryString(query)}",
             apiKey,
             cancellationToken);
-        if (combined.IsSuccess || sourceRegions.Length <= 1)
+        if (combined.IsSuccess || sourceRegions.Length <= 1
+            || combined.Failure is { StatusCode: 401 or 403 or 429 } or { IsLocal: true })
         {
             return combined;
         }
@@ -203,14 +209,15 @@ public sealed class WatchmodeClient : IWatchmodeClient
             .ToArray();
         if (successfulRegionResults.Length == 0)
         {
-            return new JsonFetchResult<IReadOnlyList<WatchmodeTitleSource>>([], IsSuccess: false);
+            return new JsonFetchResult<IReadOnlyList<WatchmodeTitleSource>>([], IsSuccess: false, regionResults.Select(result => result.Failure).FirstOrDefault(failure => failure is not null));
         }
 
         return new JsonFetchResult<IReadOnlyList<WatchmodeTitleSource>>(
             successfulRegionResults
                 .SelectMany(result => result.Value ?? [])
                 .ToArray(),
-            IsSuccess: successfulRegionResults.Length == sourceRegions.Length);
+            IsSuccess: successfulRegionResults.Length == sourceRegions.Length,
+            regionResults.Select(result => result.Failure).FirstOrDefault(failure => failure is not null));
     }
 
     private async Task<JsonFetchResult<IReadOnlyList<WatchmodeTitleSource>>> GetTitleSourcesForRegionAsync(
@@ -250,9 +257,9 @@ public sealed class WatchmodeClient : IWatchmodeClient
             return tmdbMatch;
         }
 
-        if (string.IsNullOrWhiteSpace(imdbId)) return tmdbMatch;
+        if (!tmdbMatch.Successful || string.IsNullOrWhiteSpace(imdbId)) return tmdbMatch;
         var imdbMatch = await SearchTitleIdAsync("imdb_id", imdbId, mediaType, settings, cancellationToken, forceRefresh);
-        return new(imdbMatch.Value, tmdbMatch.Successful && imdbMatch.Successful);
+        return new(imdbMatch.Value, tmdbMatch.Successful && imdbMatch.Successful, imdbMatch.Failure ?? tmdbMatch.Failure);
     }
 
     private async Task<ProviderRefreshResult<int?>> SearchTitleIdAsync(
@@ -264,8 +271,9 @@ public sealed class WatchmodeClient : IWatchmodeClient
         bool forceRefresh)
     {
         var cacheKey = $"watchmode:search:{field}:{value}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out int? cached) && cached is > 0)
+        if (!forceRefresh && _cache.TryGetValue(cacheKey, out int? cached))
         {
+            ProviderOutcomeDiagnostics.Record(_telemetry, "watchmode", cached is null ? "absent" : "completed", "cached_response", true);
             return new(cached, true);
         }
 
@@ -273,7 +281,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
             FlightKey(cacheKey, forceRefresh),
             async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out int? flightCached) && flightCached is > 0)
+                if (!forceRefresh && _cache.TryGetValue(cacheKey, out int? flightCached))
                 {
                     return new(flightCached, true);
                 }
@@ -287,89 +295,58 @@ public sealed class WatchmodeClient : IWatchmodeClient
                 });
                 var response = await GetJsonWithRetryResultAsync<WatchmodeSearchResponse>($"search/{query}", apiKey, token);
                 if (!response.IsSuccess || response.Value is not { HasTitleResults: true, TitleResults: not null })
-                    return new(null, false);
+                    return new(null, false, response.Failure ?? new("invalid_response"));
                 var titleId = response.Value?.TitleResults
                     .Where(result => result.Id > 0)
                     .Select(result => (int?)result.Id)
                     .FirstOrDefault();
 
-                if (titleId is > 0)
-                {
-                    _cache.Set(cacheKey, titleId, CacheDuration(settings));
-                }
+                // A valid empty title_results array confirms absence. Reuse it just like a match.
+                _cache.Set(cacheKey, titleId, CacheDuration(settings));
+                ProviderOutcomeDiagnostics.Record(_telemetry, "watchmode", titleId is null ? "absent" : "completed", "verified_response");
 
                 return new(titleId, response.IsSuccess && response.Value is not null);
             },
             cancellationToken);
     }
 
-    private async Task<T?> GetJsonWithRetryAsync<T>(
-        string path,
-        string apiKey,
-        CancellationToken cancellationToken)
-    {
-        return (await GetJsonWithRetryResultAsync<T>(path, apiKey, cancellationToken)).Value;
-    }
-
     private async Task<JsonFetchResult<T>> GetJsonWithRetryResultAsync<T>(
-        string path,
-        string apiKey,
-        CancellationToken cancellationToken)
+        string path, string apiKey, CancellationToken cancellationToken)
     {
-        if (IsRateLimited())
-        {
-            return new JsonFetchResult<T>(default, IsSuccess: false);
-        }
-
+        var failures = new ProviderFailureCache(_cache, "watchmode", _httpClient.BaseAddress, apiKey);
+        if (failures.Get(DateTimeOffset.UtcNow) is { } deferred) return Failed<T>(deferred);
         try
         {
             using var response = await GetAsync(path, apiKey, cancellationToken);
-            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            if (!response.IsSuccessStatusCode)
             {
-                if (RetryAfterDelay(response) is { } retryAfter) MarkRateLimited(retryAfter);
-                return new JsonFetchResult<T>(default, IsSuccess: false);
+                var failure = ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow);
+                failures.Remember(failure, DateTimeOffset.UtcNow);
+                return Failed<T>(failure);
             }
-            if (!response.IsSuccessStatusCode) return new JsonFetchResult<T>(default, IsSuccess: false);
             var value = await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
-            return new JsonFetchResult<T>(value, IsSuccess: value is not null);
+            return value is null ? Failed<T>(new("invalid_response")) : new(value, true);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return new(default, false); }
-        catch (OperationCanceledException) { throw; }
-        catch (HttpRequestException) { return new(default, false); }
-        catch (JsonException) { return new(default, false); }
-    }
-
-    private readonly record struct JsonFetchResult<T>(T? Value, bool IsSuccess);
-
-    private bool IsRateLimited()
-    {
-        lock (_rateLimitLock)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception) when (exception is OperationCanceledException or HttpRequestException or JsonException)
         {
-            return _rateLimitedUntilUtc > DateTimeOffset.UtcNow;
+            var failure = ProviderFailure.FromException(exception);
+            failures.Remember(failure, DateTimeOffset.UtcNow);
+            return Failed<T>(failure);
         }
     }
 
-    private void MarkRateLimited(TimeSpan delay)
+    private JsonFetchResult<T> Failed<T>(ProviderFailure failure)
     {
-        if (delay <= TimeSpan.Zero)
+        _telemetry?.RecordDiagnostic("provider.outcome", _telemetry.CaptureDiagnosticContext(), new()
         {
-            return;
-        }
-
-        var limitedUntilUtc = DateTimeOffset.UtcNow.Add(delay);
-        lock (_rateLimitLock)
-        {
-            if (limitedUntilUtc > _rateLimitedUntilUtc)
-            {
-                _rateLimitedUntilUtc = limitedUntilUtc;
-            }
-        }
+            Provider = "watchmode", Outcome = "failed", Reason = failure.Reason,
+            StatusCode = failure.StatusCode, RetryAtUtc = failure.RetryAtUtc, FromCache = failure.IsLocal
+        });
+        return new(default, false, failure);
     }
 
-    private TimeSpan MaxRetryAfterDelay()
-    {
-        return TimeSpan.FromSeconds(Math.Clamp(_options.MaxRetryAfterDelaySeconds, 0, 60));
-    }
+    private readonly record struct JsonFetchResult<T>(T? Value, bool IsSuccess, ProviderFailure? Failure = null);
 
     private async Task<HttpResponseMessage> GetAsync(
         string path,
@@ -499,20 +476,4 @@ public sealed class WatchmodeClient : IWatchmodeClient
         return "?" + string.Join('&', parameters);
     }
 
-    private static TimeSpan? RetryAfterDelay(HttpResponseMessage response)
-    {
-        var retryAfter = response.Headers.RetryAfter;
-        if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
-        {
-            return delta;
-        }
-
-        if (retryAfter?.Date is { } date)
-        {
-            var delay = date - DateTimeOffset.UtcNow;
-            return delay > TimeSpan.Zero ? delay : null;
-        }
-
-        return null;
-    }
 }

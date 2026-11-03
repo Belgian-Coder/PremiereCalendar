@@ -71,6 +71,7 @@ public sealed partial class PremiereService
             Type = itemType,
             MediaType = PremiereMediaType.Series,
             TmdbId = item.Id,
+            EnrichmentVersion = _itemCacheSession.Value?.Find(new ItemEnrichmentIdentity(PremiereMediaType.Series, item.Id))?.Version,
             Title = item.Name,
             OriginalTitle = item.OriginalName,
             PremiereDate = premiereDate,
@@ -100,6 +101,9 @@ public sealed partial class PremiereService
         DateOnly requestedStart,
         DateOnly requestedEnd)
     {
+        // Keep the reservation that preceded the awaited date validation. A later
+        // flush can accept a new generation; stamping that version would hide a race.
+        var reservedVersion = _itemCacheSession.Value?.Find(new ItemEnrichmentIdentity(PremiereMediaType.Series, item.Id))?.Version;
         var premiereDate = await GetSeasonOneEpisodeOneDateAsync(item.Id, cancellationToken, forceRefresh);
         if (premiereDate is { } canonicalDate
             && (canonicalDate < requestedStart || canonicalDate > requestedEnd))
@@ -107,7 +111,8 @@ public sealed partial class PremiereService
             return null;
         }
 
-        return MapSeriesMetadata(item, premiereDateOverride: premiereDate);
+        var mapped = MapSeriesMetadata(item, premiereDateOverride: premiereDate);
+        return mapped is null ? null : mapped with { EnrichmentVersion = reservedVersion };
     }
 
     private PremiereItem? MapMovieMetadata(TmdbMovieDiscoverItem item)
@@ -129,6 +134,7 @@ public sealed partial class PremiereService
             Type = PremiereIdentity.ItemType(PremiereMediaType.Movie),
             MediaType = PremiereMediaType.Movie,
             TmdbId = item.Id,
+            EnrichmentVersion = _itemCacheSession.Value?.Find(new ItemEnrichmentIdentity(PremiereMediaType.Movie, item.Id))?.Version,
             Title = item.Title,
             OriginalTitle = item.OriginalTitle,
             PremiereDate = premiereDate,
@@ -243,7 +249,12 @@ public sealed partial class PremiereService
         var tmdbPosterUrl = BuildImageUrl(
             _options.PosterSize,
             CoalesceText(item.PosterPath, details?.PosterPath, SelectBestImagePath(details?.Images?.Posters)));
-        var tmdbBackdropUrl = BuildImageUrl(_options.BackdropSize, bestBackdropPath) ?? _itemEnrichmentAttempt.Value?.PreviousMetadata?.BackdropUrl;
+        var tmdbBackdropUrl = BuildImageUrl(_options.BackdropSize, bestBackdropPath);
+        if (details is null && tmdbBackdropUrl is null && _itemEnrichmentAttempt.Value is { PreviousMetadata.BackdropUrl: { } previousBackdrop } backdropAttempt)
+        {
+            tmdbBackdropUrl = previousBackdrop;
+            backdropAttempt.BackdropReused = true;
+        }
         var artwork = await ResolveArtworkAsync(
             tmdbPosterUrl,
             ratings.PosterUrl,
@@ -258,7 +269,7 @@ public sealed partial class PremiereService
                 item.Name),
             cancellationToken,
             forceRefresh);
-        var baseSources = SourceEntries(details, _options.SourceRegions, tvmaze.NetworkName, tvmaze.WebChannelName);
+        var baseSources = EnrichmentSourceEntries(details, _options.SourceRegions, tvmaze.NetworkName, tvmaze.WebChannelName);
         var sources = allowWatchmodeAvailabilityFallback
             ? await SourceEntriesWithWatchmodeFallbackAsync(
                 baseSources,
@@ -269,6 +280,7 @@ public sealed partial class PremiereService
                 forceRefresh)
             : baseSources;
         var tmdbRuntime = details?.EpisodeRunTime.FirstOrDefault(runtime => runtime > 0);
+        if (_itemEnrichmentAttempt.Value is { } runtimeAttempt) runtimeAttempt.RuntimeFromTvmaze = tmdbRuntime is not > 0;
         var dateSemantics = BuildSeriesDateSemantics(
             itemType,
             premiereDate,
@@ -407,13 +419,13 @@ public sealed partial class PremiereService
             startedTasks.Add(rottenTomatoesTask);
             var sourcesTask = allowWatchmodeAvailabilityFallback
                 ? SourceEntriesWithWatchmodeFallbackAsync(
-                    SourceEntries(details, _options.SourceRegions),
+                    EnrichmentSourceEntries(details, _options.SourceRegions),
                     PremiereMediaType.Movie,
                     item.Id,
                     details?.ExternalIds?.ImdbId,
                     cancellationToken,
                     forceRefresh)
-                : Task.FromResult(SourceEntries(details, _options.SourceRegions));
+                : Task.FromResult(EnrichmentSourceEntries(details, _options.SourceRegions));
             startedTasks.Add(sourcesTask);
 
             // Rotten Tomatoes and availability are independent of OMDb ratings. Start
@@ -426,7 +438,12 @@ public sealed partial class PremiereService
             var tmdbPosterUrl = BuildImageUrl(
                 _options.PosterSize,
                 CoalesceText(item.PosterPath, details?.PosterPath, SelectBestImagePath(details?.Images?.Posters)));
-            var tmdbBackdropUrl = BuildImageUrl(_options.BackdropSize, bestBackdropPath) ?? _itemEnrichmentAttempt.Value?.PreviousMetadata?.BackdropUrl;
+            var tmdbBackdropUrl = BuildImageUrl(_options.BackdropSize, bestBackdropPath);
+            if (details is null && tmdbBackdropUrl is null && _itemEnrichmentAttempt.Value is { PreviousMetadata.BackdropUrl: { } previousBackdrop } backdropAttempt)
+            {
+                tmdbBackdropUrl = previousBackdrop;
+                backdropAttempt.BackdropReused = true;
+            }
             var artworkTask = TraceEnrichmentStageAsync("movie.artwork", () => ResolveArtworkAsync(
                 tmdbPosterUrl,
                 ratings.PosterUrl,
@@ -564,23 +581,28 @@ public sealed partial class PremiereService
         int tmdbId,
         CancellationToken cancellationToken)
     {
+        var started = Stopwatch.GetTimestamp();
         try
         {
             var details = await getDetails();
             if (details is not null && details.Id == tmdbId && _itemEnrichmentAttempt.Value is { } attempt)
                 attempt.MetadataSucceeded = true;
             else if (_itemEnrichmentAttempt.Value is { } failed) failed.MetadataFailed = true;
+            RecordItemComponent("tmdb", "metadata", details is not null && details.Id == tmdbId ? "provider_fetch_success" : "preserved_failed",
+                started, itemId: tmdbId, mediaType: mediaType);
             return details;
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
             if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
+            RecordItemComponent("tmdb", "metadata", "preserved_failed", started, "timeout", itemId: tmdbId, mediaType: mediaType);
             _logger.LogWarning(ex, "Skipping TMDb detail enrichment for {MediaType} {TmdbId} after a request timeout.", mediaType, tmdbId);
             return null;
         }
         catch (ExternalApiException ex)
         {
             if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
+            RecordItemComponent("tmdb", "metadata", "preserved_failed", started, "request_failed", itemId: tmdbId, mediaType: mediaType);
             _logger.LogWarning(ex, "Skipping TMDb detail enrichment for {MediaType} {TmdbId}.", mediaType, tmdbId);
             return null;
         }
@@ -591,6 +613,7 @@ public sealed partial class PremiereService
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
+        var started = Stopwatch.GetTimestamp();
         if (_itemCacheSession.Value is { } session)
         {
             var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, tmdbId);
@@ -599,15 +622,70 @@ public sealed partial class PremiereService
                 && (cached.Record.MetadataFetchedUtc is null || cached.Record.MetadataFetchedUtc < invalidated);
             if (!forceRefresh && !pendingInvalidation && (session.MetadataFresh(identity) || !session.MetadataRefreshNeeded(identity))
                 && cached?.Metadata is { FirstEpisodeDateChecked: true } metadata)
+            {
+                RecordItemComponent("tmdb", "canonical_date", "reused", started, "checked_date",
+                    itemId: tmdbId, mediaType: PremiereMediaType.Series);
                 return metadata.FirstEpisodeDate;
-            var validation = await session.FirstEpisodeDates.GetOrAdd(tmdbId, _ => new Lazy<Task<FirstEpisodeValidation>>(
-                () => ValidateFirstEpisodeDateAsync(tmdbId, cancellationToken, forceRefresh || !session.MetadataFresh(identity))))
-                .Value;
-            session.RememberFirstEpisodeDate(identity, validation);
+            }
+            var key = (TmdbId: tmdbId, Generation: cached?.Record.Generation ?? -1);
+            var baselineMetadataRevision = cached?.Record.MetadataRevision;
+            var baselineMetadataFetchedUtc = cached?.Record.MetadataFetchedUtc;
+            var validationTask = session.FirstEpisodeDates.GetOrAdd(key, _ =>
+            {
+                Lazy<Task<FirstEpisodeValidation>>? flight = null;
+                flight = new Lazy<Task<FirstEpisodeValidation>>(async () =>
+                {
+                    try
+                    {
+                        var validation = await ValidateFirstEpisodeDateAsync(tmdbId, session.LifetimeToken,
+                            forceRefresh || !session.MetadataFresh(identity));
+                        return validation with
+                        {
+                            BaselineMetadataRevision = baselineMetadataRevision,
+                            BaselineMetadataFetchedUtc = baselineMetadataFetchedUtc
+                        };
+                    }
+                    catch
+                    {
+                        // A source can abandon its wait without canceling the session's
+                        // provider request. Remove only this failed flight, never its replacement.
+                        ((ICollection<KeyValuePair<(int TmdbId, long Generation), Lazy<Task<FirstEpisodeValidation>>>>)session.FirstEpisodeDates)
+                            .Remove(new(key, flight!));
+                        throw;
+                    }
+                });
+                return flight;
+            });
+            var joined = validationTask.IsValueCreated;
+            FirstEpisodeValidation validation;
+            try { validation = await validationTask.Value.WaitAsync(cancellationToken); }
+            catch (OperationCanceledException)
+            {
+                RecordItemComponent("tmdb", "canonical_date", "deferred", started, "canceled",
+                    itemId: tmdbId, mediaType: PremiereMediaType.Series);
+                throw;
+            }
+            catch
+            {
+                RecordItemComponent("tmdb", "canonical_date", "preserved_failed", started, "validation_failed",
+                    itemId: tmdbId, mediaType: PremiereMediaType.Series);
+                throw;
+            }
+            var generationChanged = session.Find(identity)?.Record.Generation != key.Generation;
+            if (generationChanged)
+                session.MarkDiscoveryUnverified(PremiereMediaType.Series);
+            RecordItemComponent("tmdb", "canonical_date", generationChanged ? "deferred"
+                    : !validation.Successful ? "preserved_failed" : joined ? "reused" : "provider_fetch_success",
+                started, generationChanged ? "metadata_generation_changed" : !validation.Successful ? "validation_unverified" : "checked_date",
+                itemId: tmdbId, mediaType: PremiereMediaType.Series);
+            session.RememberFirstEpisodeDate(identity, key.Generation, validation);
             if (!validation.Successful && pendingInvalidation) session.MarkDiscoveryUnverified(PremiereMediaType.Series);
             return validation.Date ?? (validation.Successful ? null : cached?.Metadata?.FirstEpisodeDate);
         }
-        return (await ValidateFirstEpisodeDateAsync(tmdbId, cancellationToken, forceRefresh)).Date;
+        var uncached = await ValidateFirstEpisodeDateAsync(tmdbId, cancellationToken, forceRefresh);
+        RecordItemComponent("tmdb", "canonical_date", uncached.Successful ? "provider_fetch_success" : "preserved_failed",
+            started, uncached.Successful ? "checked_date" : "validation_unverified", itemId: tmdbId, mediaType: PremiereMediaType.Series);
+        return uncached.Date;
     }
 
     private async Task<FirstEpisodeValidation> ValidateFirstEpisodeDateAsync(int tmdbId, CancellationToken cancellationToken, bool forceRefresh)
@@ -646,54 +724,105 @@ public sealed partial class PremiereService
     private async Task<ExternalRatings> GetExternalRatingsAsync(string? imdbId, CancellationToken cancellationToken, bool forceRefresh)
     {
         var attempt = _itemEnrichmentAttempt.Value;
-        if (attempt is { RefreshRatings: false } && attempt.PreviousRatings?.MatchesImdb(imdbId) != true)
-            attempt.RefreshRatings = true;
-        if (attempt is { RefreshRatings: false })
-        {
-            var cached = attempt.PreviousRatings;
-            return new ExternalRatings(cached?.ImdbScore, cached?.RottenTomatoesScore,
-                ImdbVoteCount: cached?.ImdbVoteCount, MetacriticScore: cached?.MetacriticScore,
-                RottenTomatoesAudienceScore: cached?.RottenTomatoesAudienceScore);
-        }
-        forceRefresh |= attempt?.ForceRatings == true;
+        var started = Stopwatch.GetTimestamp();
         if (string.IsNullOrWhiteSpace(imdbId))
         {
-            if (_rottenTomatoesClient is null && attempt is not null && (!attempt.ForceMetadata || attempt.MetadataSucceeded))
-                attempt.RatingsSucceeded = true;
+            if (attempt is not null)
+            {
+                attempt.ExternalNotRequired = true;
+                attempt.DatasetRequired = false;
+            }
+            RecordItemComponent("omdb", "external_ratings", "reused", started, "no_external_identity");
             return new ExternalRatings(null, null);
         }
-
-        ImdbRatingRecord? imdbRating = null;
-        if (_imdbRatingsStore is not null)
+        var externalNeeded = attempt?.ExternalNeeded(imdbId) ?? true;
+        var dataset = attempt?.PreviousRatings?.Dataset is { } previousDataset
+            && string.Equals(previousDataset.ImdbId, imdbId, StringComparison.OrdinalIgnoreCase) ? previousDataset : null;
+        if (_imdbRatingsStore is not null && (attempt?.DatasetNeeded(imdbId) ?? true))
         {
+            var datasetStarted = Stopwatch.GetTimestamp();
             try
             {
-                imdbRating = await _imdbRatingsStore.GetByImdbIdAsync(imdbId, cancellationToken);
-                if (imdbRating is not null && attempt is not null) attempt.RatingsSucceeded = true;
+                var rating = await _imdbRatingsStore.GetByImdbIdAsync(imdbId, cancellationToken);
+                dataset = new(imdbId, rating?.AverageRating, rating?.VoteCount, attempt?.CurrentUtc ?? DateTimeOffset.UtcNow);
+                if (attempt is not null)
+                {
+                    attempt.DatasetSucceeded = true;
+                    attempt.DatasetResult = dataset;
+                }
+                RecordItemComponent("imdb_dataset", "dataset", rating is null ? "provider_verified_empty" : "provider_fetch_success", datasetStarted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                if (attempt is not null) attempt.RatingsFailed = true;
+                RecordItemComponent("imdb_dataset", "dataset", "preserved_failed", datasetStarted, "lookup_failed");
                 _logger.LogWarning(ex, "Skipping IMDb dataset rating lookup for IMDb ID {ImdbId}.", imdbId);
             }
         }
+        else if (_imdbRatingsStore is not null)
+            RecordItemComponent("imdb_dataset", "dataset", attempt?.RatingsRetryAllowed == false ? "deferred" : "reused", started,
+                attempt?.RatingsRetryAllowed == false ? "failure_retry_pending" : null);
+        if (!externalNeeded && attempt is not null)
+        {
+            RecordItemComponent("omdb", "external_ratings", attempt.RatingsRetryAllowed ? "reused" : "deferred", started,
+                attempt.RatingsRetryAllowed ? null : "failure_retry_pending");
+            var cached = attempt.PreviousRatings;
+            var matches = cached?.MatchesImdb(imdbId) == true;
+            var values = matches ? cached!.ProviderFreshnessTracked ? cached.ExternalValues
+                : new ItemEnrichmentRatingValues(cached.ImdbScore, cached.ImdbVoteCount, cached.RottenTomatoesScore,
+                    cached.RottenTomatoesAudienceScore, cached.MetacriticScore) : null;
+            var reused = new ExternalRatings(values?.ImdbScore, values?.RottenTomatoesScore,
+                PosterUrl: matches ? attempt.PreviousMetadata?.OmdbPosterUrl
+                    ?? (attempt.PreviousMetadata?.ImageSource == "OMDb poster" ? attempt.PreviousMetadata.PosterUrl : null) : null,
+                Plot: matches ? attempt.PreviousMetadata?.OmdbPlot ?? attempt.PreviousMetadata?.Overview : null,
+                ImdbVoteCount: values?.ImdbVoteCount, MetacriticScore: values?.MetacriticScore,
+                RottenTomatoesAudienceScore: values?.RottenTomatoesAudienceScore);
+            attempt.ExternalReused = matches;
+            var merged = MergeExternalRatings(dataset, reused);
+            attempt.ExternalResult = merged;
+            return merged;
+        }
+        if (attempt is not null) attempt.ExternalNotRequired = false;
+        forceRefresh = attempt is null ? forceRefresh : true;
 
         try
         {
             var outcome = await _omdbClient.GetByImdbIdWithStatusAsync(imdbId, cancellationToken, forceRefresh);
             var omdbItem = outcome.Value;
+            if (outcome.Successful && (outcome.Failure?.Reason is "disabled" or "not_configured" or "not_applicable") && attempt is not null)
+            {
+                attempt.ExternalNotRequired = true;
+                RecordItemComponent("omdb", "external_ratings", "reused", started, "disabled");
+                var datasetOnly = MergeExternalRatings(dataset, new ExternalRatings(null, null));
+                attempt.ExternalResult = datasetOnly;
+                return datasetOnly;
+            }
             if (attempt is not null)
             {
-                if (outcome.Successful) attempt.RatingsSucceeded = true;
+                if (outcome.Successful) attempt.ExternalSucceeded = true;
                 else attempt.RatingsFailed = true;
             }
             var omdbRatings = _ratingMapper.Map(omdbItem);
-            return MergeExternalRatings(imdbRating, omdbRatings);
+            var merged = MergeExternalRatings(dataset, omdbRatings);
+            if (attempt is not null)
+            {
+                attempt.ExternalProviderResult = omdbRatings;
+                attempt.ExternalResult = merged;
+            }
+            RecordItemComponent("omdb", "external_ratings", !outcome.Successful ? "preserved_failed"
+                : omdbRatings.ImdbScore is null && omdbRatings.ImdbVoteCount is null && omdbRatings.RottenTomatoesScore is null
+                    && omdbRatings.RottenTomatoesAudienceScore is null && omdbRatings.MetacriticScore is null ? "provider_verified_empty" : "provider_fetch_success",
+                started, outcome.Failure?.Reason, outcome.Failure?.StatusCode, outcome.Failure?.RetryAtUtc);
+            return merged;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             if (attempt is not null) attempt.RatingsFailed = true;
+            RecordItemComponent("omdb", "external_ratings", "preserved_failed", started, "request_failed");
             _logger.LogWarning(ex, "Skipping OMDb ratings enrichment for IMDb ID {ImdbId}.", imdbId);
-            return MergeExternalRatings(imdbRating, new ExternalRatings(null, null));
+            var fallback = MergeExternalRatings(dataset, new ExternalRatings(null, null));
+            if (attempt is not null) attempt.ExternalResult = fallback;
+            return fallback;
         }
     }
 
@@ -706,35 +835,63 @@ public sealed partial class PremiereService
         bool forceRefresh)
     {
         var attempt = _itemEnrichmentAttempt.Value;
-        if (attempt is { RefreshRatings: false } && attempt.PreviousRatings?.MatchesTomatoes(wikidataId, title, year) != true)
-            attempt.RefreshRatings = true;
-        if (attempt is { RefreshRatings: false })
+        var started = Stopwatch.GetTimestamp();
+        if (_rottenTomatoesClient is null && attempt is not null)
+        {
+            attempt.TomatoesNotRequired = true;
+            RecordItemComponent("rottentomatoes", "tomatoes", "reused", started, "disabled");
+            return RottenTomatoesScores.Empty;
+        }
+        if (attempt is not null && !attempt.TomatoesNeeded(wikidataId, title, year))
+        {
+            RecordItemComponent("rottentomatoes", "tomatoes", attempt.RatingsRetryAllowed ? "reused" : "deferred", started,
+                attempt.RatingsRetryAllowed ? null : "failure_retry_pending");
+            if (attempt.PreviousRatings?.MatchesTomatoes(wikidataId, title, year) != true) return RottenTomatoesScores.Empty;
+            attempt.TomatoesReused = true;
             return new(attempt.PreviousRatings?.RottenTomatoesScore, attempt.PreviousRatings?.RottenTomatoesAudienceScore);
-        forceRefresh |= attempt?.ForceRatings == true;
+        }
+        if (attempt is not null) attempt.TomatoesNotRequired = false;
+        forceRefresh = attempt is null ? forceRefresh : true;
         if (_rottenTomatoesClient is null || string.IsNullOrWhiteSpace(title))
         {
+            if (attempt is not null)
+            {
+                attempt.TomatoesSucceeded = true;
+                attempt.TomatoesResult = RottenTomatoesScores.Empty;
+            }
             return RottenTomatoesScores.Empty;
         }
 
         try
         {
-            var outcome = await _rottenTomatoesClient.GetScoresWithStatusAsync(
+            var outcome = await _rottenTomatoesClient.GetScoresWithRefreshPolicyAsync(
                 mediaType,
                 title,
                 year,
                 wikidataId,
                 cancellationToken,
-                forceRefresh);
+                forceRefresh, attempt?.ForceIdentifierRefresh ?? forceRefresh);
+            if (outcome.Failure?.Reason is "disabled" or "not_applicable" && attempt is not null)
+            {
+                attempt.TomatoesNotRequired = true;
+                RecordItemComponent("rottentomatoes", "tomatoes", "reused", started, outcome.Failure.Reason);
+                return RottenTomatoesScores.Empty;
+            }
             if (attempt is not null)
             {
-                if (outcome.Successful) attempt.RatingsSucceeded = true;
+                if (outcome.Successful) attempt.TomatoesSucceeded = true;
                 else attempt.RatingsFailed = true;
+                attempt.TomatoesResult = outcome.Value;
             }
+            RecordItemComponent("rottentomatoes", "tomatoes", !outcome.Successful ? "preserved_failed"
+                : outcome.Value.CriticScore is null && outcome.Value.AudienceScore is null ? "provider_verified_empty" : "provider_fetch_success",
+                started, outcome.Failure?.Reason, outcome.Failure?.StatusCode, outcome.Failure?.RetryAtUtc);
             return outcome.Value;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             if (attempt is not null) attempt.RatingsFailed = true;
+            RecordItemComponent("rottentomatoes", "tomatoes", "preserved_failed", started, "timeout");
             // Optional HTTP deadlines must not discard an otherwise valid discovery
             // batch. Cancellation of the source or caller still propagates unchanged.
             _telemetry.RecordDiagnostic("enrichment.optional.timeout", details: new()
@@ -747,20 +904,36 @@ public sealed partial class PremiereService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             if (attempt is not null) attempt.RatingsFailed = true;
+            RecordItemComponent("rottentomatoes", "tomatoes", "preserved_failed", started, "request_failed");
             _logger.LogWarning(ex, "Skipping Rotten Tomatoes enrichment for {MediaType} {Title}.", mediaType, title);
             return RottenTomatoesScores.Empty;
         }
     }
 
-    private static ExternalRatings MergeExternalRatings(ImdbRatingRecord? imdbRating, ExternalRatings omdbRatings)
+    private static ExternalRatings MergeExternalRatings(ItemEnrichmentDatasetRating? imdbRating, ExternalRatings omdbRatings)
     {
-        return imdbRating is null
+        return imdbRating?.ImdbScore is null
             ? omdbRatings
             : omdbRatings with
             {
-                ImdbScore = imdbRating.AverageRating,
-                ImdbVoteCount = imdbRating.VoteCount
+                ImdbScore = imdbRating.ImdbScore,
+                ImdbVoteCount = imdbRating.ImdbVoteCount
             };
+    }
+
+    private void RecordItemComponent(string provider, string stage, string outcome, long started,
+        string? reason = null, int? statusCode = null, DateTimeOffset? retryAtUtc = null, int? itemId = null, PremiereMediaType? mediaType = null)
+    {
+        var details = new PerformanceDiagnosticDetails
+        {
+            ItemId = itemId ?? _itemEnrichmentAttempt.Value?.ItemId, Provider = provider, Stage = stage, Outcome = outcome,
+            MediaType = (mediaType ?? _itemEnrichmentAttempt.Value?.MediaType)?.ToString(),
+            Reason = reason, StatusCode = statusCode, RetryAtUtc = retryAtUtc,
+            DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+        };
+        _telemetry.RecordDiagnostic("item_cache.component", details: details);
+        if (outcome == "preserved_failed" && (retryAtUtc > DateTimeOffset.UtcNow || reason is "local_backoff" or "local_circuit"))
+            _telemetry.RecordDiagnostic("item_cache.component.deferred", details: details with { Outcome = "deferred" });
     }
 
     private async Task<ArtworkCandidate?> ResolveArtworkAsync(
@@ -772,44 +945,122 @@ public sealed partial class PremiereService
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
+        forceRefresh |= _itemEnrichmentAttempt.Value?.ForceMetadata == true;
+        var started = Stopwatch.GetTimestamp();
+        var currentAttempt = _itemEnrichmentAttempt.Value;
+        if (currentAttempt?.PreviousMetadata is { PosterUrl: not null } owned)
+        {
+            if (owned.ImageSource == "TMDb poster" && currentAttempt.MetadataSucceeded)
+                currentAttempt.PosterOwnerVerifiedEmpty = string.IsNullOrWhiteSpace(tmdbPosterUrl);
+            else if (owned.ImageSource == "TMDb backdrop" && currentAttempt.MetadataSucceeded)
+                currentAttempt.PosterOwnerVerifiedEmpty = string.IsNullOrWhiteSpace(tmdbBackdropUrl);
+            else if (owned.ImageSource == "OMDb poster" && currentAttempt.ExternalSucceeded)
+                currentAttempt.PosterOwnerVerifiedEmpty = string.IsNullOrWhiteSpace(omdbPosterUrl);
+            else if (owned.ImageSource == ArtworkSources.TvmazeImage && currentAttempt.TvmazeSucceeded)
+                currentAttempt.PosterOwnerVerifiedEmpty = string.IsNullOrWhiteSpace(tvmazeEnrichmentImageUrl);
+        }
+        var refreshedBackdropPoster = currentAttempt is { MetadataSucceeded: true } && !string.IsNullOrWhiteSpace(tmdbBackdropUrl)
+            && (currentAttempt.PreviousMetadata?.ImageSource == "TMDb backdrop" || currentAttempt.PosterOwnerVerifiedEmpty);
+        if (currentAttempt is { } retry && (retry.PreviousMetadata?.ArtworkComplete == false || retry.PosterOwnerVerifiedEmpty))
+        {
+            forceRefresh = true;
+            if (!retry.MetadataSucceeded) tmdbPosterUrl = null;
+            if (!retry.ExternalSucceeded) omdbPosterUrl = null;
+            if (!retry.TvmazeSucceeded) tvmazeEnrichmentImageUrl = null;
+        }
         var knownCover = ArtworkResolver.ResolveKnownCover(
             tmdbPosterUrl,
             omdbPosterUrl,
             tvmazeEnrichmentImageUrl);
         if (knownCover is not null)
         {
+            if (currentAttempt is not null) currentAttempt.PosterOwnerVerifiedEmpty = false;
+            if (_itemEnrichmentAttempt.Value is { } attempt
+                && (knownCover.Source == "OMDb poster" && attempt.ExternalReused
+                    || knownCover.Source == ArtworkSources.TvmazeImage && (attempt.TvmazeFailed || attempt.TvmazeSkipped)))
+                attempt.ArtworkReused = true;
+            RecordItemComponent("known_cover", "artwork", "reused", started);
             return knownCover;
         }
-        if (_itemEnrichmentAttempt.Value?.PreviousMetadata is { PosterUrl: { } cachedPoster } metadata)
+        if (!forceRefresh && !refreshedBackdropPoster && _itemEnrichmentAttempt.Value?.PreviousMetadata is { PosterUrl: { } cachedPoster } metadata)
+        {
+            if (_itemEnrichmentAttempt.Value is { } cachedAttempt) cachedAttempt.ArtworkReused = true;
+            RecordItemComponent("cache", "artwork", "reused", started);
             return new ArtworkCandidate(cachedPoster, metadata.ImageSource ?? "Cached artwork");
+        }
 
+        var allProvidersSkipped = _artworkProviders.Count > 0;
         foreach (var provider in _artworkProviders)
         {
-            var candidate = await GetArtworkCandidateFromProviderAsync(provider, request, cancellationToken, forceRefresh);
+            var (candidate, skipped) = await GetArtworkCandidateFromProviderAsync(provider, request, cancellationToken, forceRefresh);
+            allProvidersSkipped &= skipped;
             if (candidate is not null && !string.IsNullOrWhiteSpace(candidate.Url))
             {
+                if (currentAttempt is not null) currentAttempt.PosterOwnerVerifiedEmpty = false;
                 return candidate;
             }
         }
+        if (_itemEnrichmentAttempt.Value is { } artworkAttempt) artworkAttempt.ArtworkSkipped = allProvidersSkipped;
 
-        return string.IsNullOrWhiteSpace(tmdbBackdropUrl)
-            ? null
-            : new ArtworkCandidate(tmdbBackdropUrl, "TMDb backdrop");
+        if (refreshedBackdropPoster || currentAttempt is { MetadataSucceeded: true, PosterOwnerVerifiedEmpty: true }
+            && !string.IsNullOrWhiteSpace(tmdbBackdropUrl))
+        {
+            currentAttempt!.PosterOwnerVerifiedEmpty = false;
+            currentAttempt.ArtworkReused = false;
+            currentAttempt.ArtworkSkipped = false;
+            return new ArtworkCandidate(tmdbBackdropUrl!, "TMDb backdrop");
+        }
+
+        if (_itemEnrichmentAttempt.Value is { PreviousMetadata: { PosterUrl: { } previousPoster } previous } previousAttempt
+            && (previousAttempt.ArtworkFailed || previousAttempt.ArtworkSkipped
+                || !previousAttempt.PosterOwnerVerifiedEmpty))
+        {
+            previousAttempt.ArtworkReused = true;
+            return new ArtworkCandidate(previousPoster, previous.ImageSource ?? "Cached artwork");
+        }
+
+        if (currentAttempt is not null)
+        {
+            currentAttempt.PosterOwnerVerifiedEmpty = false;
+            if (!string.IsNullOrWhiteSpace(tmdbBackdropUrl))
+            {
+                if (currentAttempt.MetadataSucceeded) currentAttempt.ArtworkSkipped = false;
+                else currentAttempt.ArtworkReused = true;
+            }
+        }
+        return string.IsNullOrWhiteSpace(tmdbBackdropUrl) ? null : new ArtworkCandidate(tmdbBackdropUrl, "TMDb backdrop");
     }
 
-    private async Task<ArtworkCandidate?> GetArtworkCandidateFromProviderAsync(
+    private async Task<(ArtworkCandidate? Candidate, bool Skipped)> GetArtworkCandidateFromProviderAsync(
         IArtworkProvider provider,
         ArtworkRequest request,
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
+        var started = Stopwatch.GetTimestamp();
         try
         {
-            return await provider.GetArtworkAsync(request, cancellationToken, forceRefresh);
+            var outcome = await provider.GetArtworkWithStatusAsync(request, cancellationToken, forceRefresh);
+            if (!outcome.Successful)
+            {
+                if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = attempt.OptionalMetadataFailed = attempt.ArtworkFailed = true;
+                RecordItemComponent(provider.GetType().Name, "artwork", "preserved_failed", started,
+                    outcome.Failure?.Reason, outcome.Failure?.StatusCode, outcome.Failure?.RetryAtUtc);
+                return (null, false);
+            }
+            var skipped = outcome.Failure?.Reason is "disabled" or "not_applicable" or "not_configured";
+            if (!skipped && outcome.Value is null && provider.OwnedSource is { } owner
+                && _itemEnrichmentAttempt.Value is { PreviousMetadata: { PosterUrl: not null } previous } owningAttempt
+                && string.Equals(owner, previous.ImageSource, StringComparison.OrdinalIgnoreCase))
+                owningAttempt.PosterOwnerVerifiedEmpty = true;
+            RecordItemComponent(provider.GetType().Name, "artwork", outcome.Failure?.Reason is "disabled" or "not_configured" ? "reused"
+                : outcome.Value is null ? "provider_verified_empty" : "provider_fetch_success", started, outcome.Failure?.Reason);
+            return (outcome.Value, skipped);
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
+            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = attempt.OptionalMetadataFailed = attempt.ArtworkFailed = true;
+            RecordItemComponent(provider.GetType().Name, "artwork", "preserved_failed", started, "timeout");
             _logger.LogWarning(
                 ex,
                 "Skipping artwork provider {ProviderType} for {MediaType} {TmdbId} after a request timeout.",
@@ -817,11 +1068,12 @@ public sealed partial class PremiereService
                 request.MediaType,
                 request.TmdbId);
 
-            return null;
+            return (null, false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
+            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = attempt.OptionalMetadataFailed = attempt.ArtworkFailed = true;
+            RecordItemComponent(provider.GetType().Name, "artwork", "preserved_failed", started, "request_failed");
             _logger.LogWarning(
                 ex,
                 "Skipping artwork provider {ProviderType} for {MediaType} {TmdbId}.",
@@ -829,7 +1081,7 @@ public sealed partial class PremiereService
                 request.MediaType,
                 request.TmdbId);
 
-            return null;
+            return (null, false);
         }
     }
 
@@ -837,27 +1089,34 @@ public sealed partial class PremiereService
         TmdbExternalIds? externalIds, string title, CancellationToken cancellationToken, bool forceRefresh)
     {
         var attempt = _itemEnrichmentAttempt.Value;
+        var started = Stopwatch.GetTimestamp();
         forceRefresh |= attempt?.ForceMetadata == true;
         TvmazeShow? show = null;
         TvmazeShow? imageShow = null;
         var failed = false;
+        ProviderFailure? failure = null;
+        var skipped = false;
         if (externalIds?.TvdbId is not null || !string.IsNullOrWhiteSpace(externalIds?.ImdbId))
         {
             try
             {
                 var outcome = await _tvmazeClient.LookupShowWithStatusAsync(externalIds.TvdbId, externalIds.ImdbId, cancellationToken, forceRefresh);
                 failed |= !outcome.Successful;
+                if (!outcome.Successful) failure = outcome.Failure;
+                skipped |= outcome.Failure?.Reason == "disabled";
                 show = outcome.Value;
                 if (show is not null && HasTvmazeImage(show)) imageShow = show;
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
                 failed = true;
+                failure = ProviderFailure.FromException(ex);
                 _logger.LogWarning(ex, "Skipping TVmaze lookup enrichment after its optional request timed out.");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 failed = true;
+                failure = ProviderFailure.FromException(ex);
                 _logger.LogWarning(ex, "Skipping TVmaze lookup enrichment for TVDB ID {TvdbId} / IMDb ID {ImdbId}.", externalIds.TvdbId, externalIds.ImdbId);
             }
         }
@@ -867,6 +1126,8 @@ public sealed partial class PremiereService
             {
                 var outcome = await _tvmazeClient.SearchShowByNameWithStatusAsync(title, cancellationToken, forceRefresh);
                 failed |= !outcome.Successful;
+                if (!outcome.Successful) failure = outcome.Failure;
+                skipped |= outcome.Failure?.Reason is "disabled" or "not_applicable";
                 var match = outcome.Value;
                 if (match is not null)
                 {
@@ -877,20 +1138,39 @@ public sealed partial class PremiereService
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
                 failed = true;
+                failure = ProviderFailure.FromException(ex);
                 _logger.LogWarning(ex, "Skipping TVmaze title enrichment after its optional request timed out.");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 failed = true;
+                failure = ProviderFailure.FromException(ex);
                 _logger.LogWarning(ex, "Skipping TVmaze title enrichment for {Title}.", title);
             }
         }
         if (failed)
         {
-            if (attempt is not null) attempt.MetadataFailed = true;
+            RecordItemComponent("tvmaze", "tvmaze", "preserved_failed", started,
+                failure?.Reason ?? "request_failed", failure?.StatusCode, failure?.RetryAtUtc);
+            if (attempt is not null) attempt.MetadataFailed = attempt.OptionalMetadataFailed = attempt.TvmazeFailed = true;
             if (attempt?.PreviousMetadata is { } previous)
                 return new(previous.NetworkName, previous.WebChannelName, previous.TvmazeAverageRuntimeMinutes,
-                    previous.TvmazeRating, previous.OfficialSiteUrl, previous.TvmazeUrl, previous.Overview, previous.PosterUrl);
+                    previous.TvmazeRating, previous.OfficialSiteUrl, previous.TvmazeUrl, previous.Overview,
+                    previous.ImageSource == ArtworkSources.TvmazeImage ? previous.PosterUrl : null);
+        }
+        else if (skipped)
+        {
+            if (attempt is not null) attempt.TvmazeSkipped = true;
+            RecordItemComponent("tvmaze", "tvmaze", "reused", started, "not_applicable");
+            if (attempt?.PreviousMetadata is { } previous)
+                return new(previous.NetworkName, previous.WebChannelName, previous.TvmazeAverageRuntimeMinutes,
+                    previous.TvmazeRating, previous.OfficialSiteUrl, previous.TvmazeUrl, previous.Overview,
+                    previous.ImageSource == ArtworkSources.TvmazeImage ? previous.PosterUrl : null);
+        }
+        else
+        {
+            if (attempt is not null) attempt.TvmazeSucceeded = true;
+            RecordItemComponent("tvmaze", "tvmaze", show is null ? "provider_verified_empty" : "provider_fetch_success", started);
         }
         if (show is null) return EmptyTvSeriesEnrichment;
         if (show.Id > 0 && attempt is not null) attempt.TvmazeShowId = show.Id;
@@ -972,6 +1252,14 @@ public sealed partial class PremiereService
             .ToArray();
     }
 
+    private PremiereSource[] EnrichmentSourceEntries(TmdbDetailsWithExtras? details,
+        IReadOnlyList<string> sourceRegions, string? tvmazeNetworkName = null, string? tvmazeWebChannelName = null)
+    {
+        if (details is not null && _itemEnrichmentAttempt.Value is { } attempt)
+            attempt.AvailabilityOwnedByWatchmode = false;
+        return SourceEntries(details, sourceRegions, tvmazeNetworkName, tvmazeWebChannelName);
+    }
+
     private static PremiereSource[] SourceEntries(
         TmdbDetailsWithExtras? details,
         IReadOnlyList<string> sourceRegions,
@@ -1004,31 +1292,45 @@ public sealed partial class PremiereService
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
+        forceRefresh |= _itemEnrichmentAttempt.Value?.ForceMetadata == true;
+        var started = Stopwatch.GetTimestamp();
         if (HasWatchProviderSource(sources))
         {
+            RecordItemComponent("tmdb", "availability", "provider_fetch_success", started, "tmdb_availability");
             return sources;
         }
 
         IReadOnlyList<PremiereSource> watchmodeSources;
         try
         {
-            var outcome = await _watchmodeClient.GetTitleSourcesWithStatusAsync(
+            var outcome = await _watchmodeClient.GetTitleSourcesWithRefreshPolicyAsync(
                 mediaType,
                 tmdbId,
                 imdbId,
                 _options.SourceRegions,
                 cancellationToken,
-                forceRefresh);
+                forceRefresh, _itemEnrichmentAttempt.Value?.ForceIdentifierRefresh ?? forceRefresh);
             if (!outcome.Successful)
             {
-                if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
+                if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = attempt.AvailabilityFailed = true;
+                RecordItemComponent("watchmode", "availability", "preserved_failed", started,
+                    outcome.Failure?.Reason, outcome.Failure?.StatusCode, outcome.Failure?.RetryAtUtc);
+                return SourcesWithPreviousAvailability(sources);
+            }
+            if (outcome.Failure?.Reason is "disabled" or "not_configured" or "not_applicable")
+            {
+                if (_itemEnrichmentAttempt.Value is { } skipped) skipped.AvailabilitySkipped = true;
+                RecordItemComponent("watchmode", "availability", "reused", started, outcome.Failure.Reason);
                 return SourcesWithPreviousAvailability(sources);
             }
             watchmodeSources = outcome.Value;
+            if (_itemEnrichmentAttempt.Value is { } successful) successful.AvailabilityOwnedByWatchmode = true;
+            RecordItemComponent("watchmode", "availability", watchmodeSources.Count == 0 ? "provider_verified_empty" : "provider_fetch_success", started);
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
+            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = attempt.AvailabilityFailed = true;
+            RecordItemComponent("watchmode", "availability", "preserved_failed", started, "timeout");
             _logger.LogWarning(
                 ex,
                 "Skipping Watchmode availability fallback for {MediaType} {TmdbId} after a request timeout.",
@@ -1038,7 +1340,8 @@ public sealed partial class PremiereService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
+            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = attempt.AvailabilityFailed = true;
+            RecordItemComponent("watchmode", "availability", "preserved_failed", started, "request_failed");
             _logger.LogWarning(
                 ex,
                 "Skipping Watchmode availability fallback for {MediaType} {TmdbId}.",

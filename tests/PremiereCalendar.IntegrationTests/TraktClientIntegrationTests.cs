@@ -136,27 +136,39 @@ public sealed class TraktClientIntegrationTests
         });
         var client = CreateClient(handler, clientId: "test-client-id");
 
-        var movies = await client.GetMovieCalendarAsync(
-            new DateOnly(2026, 5, 4),
-            new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+        var error = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetMovieCalendarAsync(
+            new DateOnly(2026, 5, 4), new DateOnly(2026, 5, 10), CancellationToken.None));
 
         Assert.Single(handler.Requests);
-        Assert.Empty(movies);
+        Assert.Equal("rate_limited", error.Failure.Reason);
     }
 
     [Fact]
-    public async Task GetMovieCalendarAsync_ReturnsEmptyWhenHttpClientTimesOutWithoutCallerCancellation()
+    public async Task GetMovieCalendarAsync_ExposesTimeoutAsSourceFailure()
     {
         var handler = new StubHttpMessageHandler(_ => throw new TaskCanceledException("Simulated HTTP timeout."));
         var client = CreateClient(handler, clientId: "test-client-id");
 
-        var movies = await client.GetMovieCalendarAsync(
-            new DateOnly(2026, 5, 4),
-            new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+        var error = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetMovieCalendarAsync(
+            new DateOnly(2026, 5, 4), new DateOnly(2026, 5, 10), CancellationToken.None));
 
-        Assert.Empty(movies);
+        Assert.Equal("timeout", error.Failure.Reason);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task AccessDeniedIsReusedAcrossCalendarTypesAndForcedWeeksWithoutCachingAbsence()
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Forbidden));
+        var client = CreateClient(handler, "test-client-id");
+        var first = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetMovieCalendarAsync(
+            new(2026, 5, 4), new(2026, 5, 10), CancellationToken.None));
+        var second = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetNewShowCalendarAsync(
+            new(2026, 5, 11), new(2026, 5, 17), CancellationToken.None, forceRefresh: true));
+        Assert.Equal("authentication_denied", first.Failure.Reason);
+        Assert.Equal("local_backoff", second.Failure.Reason);
+        Assert.Equal(403, second.Failure.StatusCode);
+        Assert.Equal(first.Failure.RetryAtUtc, second.Failure.RetryAtUtc);
         Assert.Single(handler.Requests);
     }
 

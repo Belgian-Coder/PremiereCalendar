@@ -196,5 +196,36 @@ public sealed class WikimediaClientIntegrationTests
         Assert.Null(failedImageUrl);
         Assert.Equal("https://upload.wikimedia.org/wikipedia/commons/recovered-poster.jpg", recoveredImageUrl);
         Assert.Equal(3, handler.Requests.Count);
+    }    [Theory]
+    [InlineData(HttpStatusCode.Forbidden, "authentication_denied")]
+    [InlineData(HttpStatusCode.TooManyRequests, "rate_limited")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "http_failure")]
+    public async Task ArtworkAdapterPreservesFailedWikidataOutcome(HttpStatusCode status, string reason)
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(status));
+        var client = new WikimediaClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.wikidata.org/") },
+            new MemoryCache(new MemoryCacheOptions()), Microsoft.Extensions.Options.Options.Create(new WikimediaOptions { Enabled = true }));
+        var provider = new WikimediaArtworkProvider(client);
+        var result = await provider.GetArtworkWithStatusAsync(new(PremiereCalendar.Models.PremiereMediaType.Movie, 42, null, null, "Q123", "Example"), CancellationToken.None);
+        Assert.False(result.Successful);
+        Assert.Null(result.Value);
+        Assert.Equal(reason, result.Failure?.Reason);
+        Assert.Equal((int)status, result.Failure?.StatusCode);
     }
+
+    [Fact]
+    public async Task VerifiedMissingImageClaimIsSuccessfulEmptyWhileMalformedEntityIsFailure()
+    {
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{\"entities\":{\"Q123\":{\"claims\":{}}}}"));
+        var client = new WikimediaClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.wikidata.org/") },
+            new MemoryCache(new MemoryCacheOptions()), Microsoft.Extensions.Options.Options.Create(new WikimediaOptions { Enabled = true }));
+        var absent = await client.GetReusableImageWithStatusAsync("Q123", CancellationToken.None);
+        Assert.True(absent.Successful);
+        Assert.Null(absent.Value);
+        var malformedHandler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{}"));
+        var malformed = new WikimediaClient(new HttpClient(malformedHandler) { BaseAddress = new Uri("https://www.wikidata.org/") },
+            new MemoryCache(new MemoryCacheOptions()), Microsoft.Extensions.Options.Options.Create(new WikimediaOptions { Enabled = true }));
+        Assert.False((await malformed.GetReusableImageWithStatusAsync("Q123", CancellationToken.None)).Successful);
+    }
+
 }

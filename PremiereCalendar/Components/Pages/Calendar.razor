@@ -56,6 +56,14 @@
 
         </div>
 
+        @if (_unavailableSources.Count > 0)
+        {
+            <div class="alert alert-warning" role="status" data-testid="source-coverage-warning">
+                @string.Join(", ", _unavailableSources.Select(source => source.DisplayName).Distinct()) temporarily unavailable.
+                Results may be incomplete. Next check after @_unavailableSources.Min(source => source.RetryAtUtc).ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture).
+            </div>
+        }
+
         <div class="calendar-command-actions" aria-label="Calendar controls">
             <div class="button-group command-week-nav" role="group" aria-label="Week navigation">
                 <button class="tool-button compact-command" title="Previous week" aria-label="Previous week" @onclick="PreviousWeek">

@@ -39,7 +39,8 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(partition);
-        var keys = identities.Where(IsValid).Distinct().OrderBy(identity => identity.MediaType).ThenBy(identity => identity.TmdbId).ToArray();
+        var keys = identities.Where(IsValid).Distinct().OrderBy(identity => identity.MediaType.ToString(), StringComparer.Ordinal)
+            .ThenBy(identity => identity.TmdbId).ToArray();
         var records = new Dictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>();
         if (keys.Length == 0) return records;
 
@@ -47,6 +48,10 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
         {
             var seenUtc = Format(_timeProvider.GetUtcNow());
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            // Retention touches also take row locks. Use the same global order
+            // as provider writes before their UPDATE/UPSERT statements run.
+            if (DatabaseConnectionFactory.IsPostgreSql(_options))
+                await LockWriteRowsAsync(connection, transaction, partition, keys, cancellationToken);
             foreach (var batch in keys.Chunk(ReadBatchSize))
             {
                 await using (var touch = connection.CreateCommand())
@@ -106,12 +111,15 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
         ArgumentException.ThrowIfNullOrWhiteSpace(partition);
         var validWrites = writes.Where(write => IsValid(write.Identity) &&
             (HasComponent(write.MetadataJson, write.MetadataFetchedUtc) || HasComponent(write.RatingsJson, write.RatingsFetchedUtc)))
-            .OrderBy(write => write.Identity.MediaType).ThenBy(write => write.Identity.TmdbId).ToArray();
+            .OrderBy(write => write.Identity.MediaType.ToString(), StringComparer.Ordinal).ThenBy(write => write.Identity.TmdbId).ToArray();
         if (validWrites.Length == 0) return 0;
 
         return await WithConnectionAsync(async connection =>
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            if (DatabaseConnectionFactory.IsPostgreSql(_options))
+                await LockWriteRowsAsync(connection, transaction, partition,
+                    validWrites.Select(write => write.Identity).Distinct().ToArray(), cancellationToken);
             var updated = 0;
             var batch = new List<ItemEnrichmentWrite>(WriteBatchSize);
             var identities = new HashSet<ItemEnrichmentIdentity>();
@@ -270,12 +278,19 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
         IReadOnlyList<ItemEnrichmentWrite> batch,
         CancellationToken cancellationToken)
     {
+        var current = await ReadWriteRowsAsync(connection, transaction, partition, batch.Select(write => write.Identity).ToArray(), cancellationToken);
+        var prepared = batch.Select(write =>
+        {
+            if (!current.TryGetValue(write.Identity, out var record)) return (Write: write, RatingsRevision: write.ExpectedMetadataRevision);
+            var merged = ItemEnrichmentRatingsMerger.Merge(record, write, out var authorized);
+            return (Write: merged, RatingsRevision: authorized ? record.MetadataRevision : write.ExpectedMetadataRevision);
+        }).ToArray();
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         Add(command, "@partition", DbType.String, partition);
         for (var index = 0; index < batch.Count; index++)
         {
-            var write = batch[index];
+            var write = prepared[index].Write;
             var metadata = HasComponent(write.MetadataJson, write.MetadataFetchedUtc);
             var ratings = HasComponent(write.RatingsJson, write.RatingsFetchedUtc);
             Add(command, $"@media{index}", DbType.String, write.Identity.MediaType.ToString());
@@ -288,6 +303,7 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
             Add(command, $"@tvmaze{index}", DbType.Int32, write.TvmazeShowId);
             Add(command, $"@tmdbObservedUtc{index}", DbType.String, metadata && write.TmdbObservedUtc.HasValue ? Format(write.TmdbObservedUtc.Value) : null);
             Add(command, $"@metadataRevision{index}", DbType.Int64, write.ExpectedMetadataRevision);
+            Add(command, $"@ratingsRevision{index}", DbType.Int64, prepared[index].RatingsRevision);
         }
         const string metadataAccepted = """
             incoming.MetadataJson IS NOT NULL AND incoming.MetadataFetchedUtc IS NOT NULL
@@ -300,13 +316,13 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
             """;
         const string ratingsAccepted = """
             incoming.RatingsJson IS NOT NULL AND incoming.RatingsFetchedUtc IS NOT NULL
-            AND (incoming.ExpectedMetadataRevision IS NULL OR target.MetadataRevision = incoming.ExpectedMetadataRevision)
+            AND (incoming.ExpectedRatingsMetadataRevision IS NULL OR target.MetadataRevision = incoming.ExpectedRatingsMetadataRevision)
             AND (target.RatingsFetchedUtc IS NULL OR target.RatingsFetchedUtc <= incoming.RatingsFetchedUtc)
             """;
         command.CommandText = $"""
             WITH IncomingWrites (MediaType, TmdbId, ExpectedGeneration, MetadataJson,
-                MetadataFetchedUtc, RatingsJson, RatingsFetchedUtc, TvmazeShowId, TmdbObservedUtc, ExpectedMetadataRevision) AS (
-                VALUES {string.Join(", ", batch.Select((_, index) => $"(@media{index}, @id{index}, @generation{index}, @metadata{index}, @metadataUtc{index}, @ratings{index}, @ratingsUtc{index}, @tvmaze{index}, @tmdbObservedUtc{index}, @metadataRevision{index})"))}
+                MetadataFetchedUtc, RatingsJson, RatingsFetchedUtc, TvmazeShowId, TmdbObservedUtc, ExpectedMetadataRevision, ExpectedRatingsMetadataRevision) AS (
+                VALUES {string.Join(", ", batch.Select((_, index) => $"(@media{index}, @id{index}, @generation{index}, @metadata{index}, @metadataUtc{index}, @ratings{index}, @ratingsUtc{index}, @tvmaze{index}, @tmdbObservedUtc{index}, @metadataRevision{index}, @ratingsRevision{index})"))}
             )
             UPDATE ItemEnrichments AS target SET
                 MetadataJson = CASE WHEN {metadataAccepted} THEN incoming.MetadataJson ELSE target.MetadataJson END,
@@ -324,6 +340,49 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
                 AND (({metadataAccepted}) OR ({ratingsAccepted}))
             """;
         return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task LockWriteRowsAsync(DbConnection connection, DbTransaction transaction, string partition,
+        IReadOnlyList<ItemEnrichmentIdentity> identities, CancellationToken cancellationToken)
+    {
+        // Every transaction acquires all of its keys in the same global order,
+        // including across chunks and repeated writes for the same identity.
+        foreach (var batch in identities.Chunk(ReadBatchSize))
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            Add(command, "@partition", DbType.String, partition);
+            var predicate = AddIdentities(command, batch);
+            command.CommandText = $"SELECT MediaType, TmdbId FROM ItemEnrichments WHERE PartitionKey = @partition AND {predicate} ORDER BY MediaType, TmdbId FOR UPDATE";
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken)) { }
+        }
+    }
+
+    private static async Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>> ReadWriteRowsAsync(
+        DbConnection connection, DbTransaction transaction, string partition, IReadOnlyList<ItemEnrichmentIdentity> identities,
+        CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>();
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        Add(command, "@partition", DbType.String, partition);
+        var predicate = AddIdentities(command, identities);
+        command.CommandText = $"""
+            SELECT MediaType, TmdbId, MetadataJson, RatingsJson, MetadataFetchedUtc,
+                RatingsFetchedUtc, LastSeenUtc, Generation, TvmazeShowId, MetadataInvalidatedUtc,
+                TmdbObservedUtc, MetadataRevision
+            FROM ItemEnrichments WHERE PartitionKey = @partition AND {predicate}
+            """;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var identity = new ItemEnrichmentIdentity(Enum.Parse<PremiereMediaType>(reader.GetString(0)), reader.GetInt32(1));
+            result.Add(identity, new(identity, ReadString(reader, 2), ReadString(reader, 3), ReadDate(reader, 4),
+                ReadDate(reader, 5), ReadDate(reader, 6)!.Value, reader.GetInt64(7), reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                ReadDate(reader, 9), ReadDate(reader, 10), reader.GetInt64(11)));
+        }
+        return result;
     }
 
     private async Task<int> WithConnectionAsync(Func<DbConnection, Task<int>> operation, CancellationToken cancellationToken)

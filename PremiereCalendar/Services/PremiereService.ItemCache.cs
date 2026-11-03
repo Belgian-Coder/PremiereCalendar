@@ -17,7 +17,12 @@ public sealed partial class PremiereService
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, item.Id);
         var outcome = await session.GetAsync(identity, forceRefresh, async (previous, metadataDue, ratingsDue, token) =>
         {
-            var attempt = new ItemEnrichmentAttempt(metadataDue, ratingsDue, previous.Ratings, previous.Metadata);
+            var attempt = new ItemEnrichmentAttempt(metadataDue, ratingsDue, previous.Ratings, previous.Metadata,
+                previous.Record.RatingsFetchedUtc, session.Now, session.RatingsCutoffUtc, forceRefresh,
+                forceRefresh || previous.Record.MetadataInvalidatedUtc is { } invalidated
+                    && (previous.Record.MetadataFetchedUtc is null || invalidated > previous.Record.MetadataFetchedUtc), previous.Record.MetadataFetchedUtc,
+                session.RatingsRefreshAllowed(identity), _imdbRatingsStore is not null)
+                { ItemId = item.Id, MediaType = PremiereMediaType.Movie };
             var oldAttempt = _itemEnrichmentAttempt.Value;
             _itemEnrichmentAttempt.Value = attempt;
             try
@@ -25,20 +30,23 @@ public sealed partial class PremiereService
                 if (metadataDue)
                 {
                     // Every producer of the shared entry checks the same availability providers.
-                    var mapped = await MapMovieUncachedCoreAsync(item, token, false, null, allowWatchmodeAvailabilityFallback: true);
+                    var mapped = await MapMovieUncachedCoreAsync(item, token, attempt.ForceMetadata, null, allowWatchmodeAvailabilityFallback: true);
                     var metadata = mapped is not null && attempt.MetadataSucceeded
-                        ? attempt.MetadataFailed && previous.Metadata is not null ? previous.Metadata
-                            : ItemEnrichmentMetadata.FromItem(mapped) with { AvailabilityComplete = !attempt.MetadataFailed } : null;
-                    return new(metadata, mapped is not null && attempt.RatingsSucceeded && !attempt.RatingsFailed ? ItemEnrichmentRatings.FromItem(mapped) : null,
-                        RefreshMetadataClock: !attempt.MetadataFailed, MetadataFailed: attempt.MetadataFailed, RatingsFailed: attempt.RatingsFailed);
+                        ? attempt.CaptureMetadata(mapped) with { AvailabilityComplete = !attempt.AvailabilityFailed,
+                            OptionalMetadataComplete = !attempt.OptionalMetadataFailed, ArtworkComplete = !attempt.ArtworkFailed } : null;
+                    return new(metadata, mapped is null ? null : attempt.CaptureRatings(mapped),
+                        RefreshMetadataClock: attempt.MetadataSucceeded, MetadataFailed: !attempt.MetadataSucceeded, RatingsFailed: attempt.RatingsFailed,
+                        AvailabilityFailed: attempt.AvailabilityFailed, OptionalMetadataFailed: attempt.OptionalMetadataFailed, RefreshRatingsClock: attempt.RatingsSucceeded);
                 }
-                var availability = await CompleteCachedAvailabilityAsync(previous, discovered, token);
+                var availability = await CompleteCachedOptionalMetadataAsync(previous, discovered, token,
+                    session.AvailabilityRefreshNeeded(identity), session.OptionalMetadataRefreshNeeded(identity));
                 var ratingsItem = await RefreshItemRatingsAsync(previous.Apply(discovered), token);
-                return new(availability, attempt.RatingsSucceeded && !attempt.RatingsFailed ? ItemEnrichmentRatings.FromItem(ratingsItem) : null,
-                    RefreshMetadataClock: false, MetadataFailed: attempt.MetadataFailed, RatingsFailed: attempt.RatingsFailed);
+                return new(availability, attempt.CaptureRatings(ratingsItem),
+                    RefreshMetadataClock: false, RatingsFailed: attempt.RatingsFailed,
+                    AvailabilityFailed: attempt.AvailabilityFailed, OptionalMetadataFailed: attempt.OptionalMetadataFailed, RefreshRatingsClock: attempt.RatingsSucceeded);
             }
             finally { _itemEnrichmentAttempt.Value = oldAttempt; }
-        }, cancellationToken, ratingsInputs: discovered);
+        }, cancellationToken, ratingsInputs: discovered, requireDataset: _imdbRatingsStore is not null);
         var result = outcome.Apply(discovered);
         return MovieMatchesKnownCriteria(result, requestedMovieCriteria) ? result : null;
     }
@@ -71,40 +79,54 @@ public sealed partial class PremiereService
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, item.Id);
         var outcome = await session.GetAsync(identity, forceRefresh, async (previous, metadataDue, ratingsDue, token) =>
         {
-            var attempt = new ItemEnrichmentAttempt(metadataDue, ratingsDue, previous.Ratings, previous.Metadata);
+            var attempt = new ItemEnrichmentAttempt(metadataDue, ratingsDue, previous.Ratings, previous.Metadata,
+                previous.Record.RatingsFetchedUtc, session.Now, session.RatingsCutoffUtc, forceRefresh,
+                forceRefresh || previous.Record.MetadataInvalidatedUtc is { } invalidated
+                    && (previous.Record.MetadataFetchedUtc is null || invalidated > previous.Record.MetadataFetchedUtc), previous.Record.MetadataFetchedUtc,
+                session.RatingsRefreshAllowed(identity), _imdbRatingsStore is not null)
+                { ItemId = item.Id, MediaType = PremiereMediaType.Series };
             var oldAttempt = _itemEnrichmentAttempt.Value;
             _itemEnrichmentAttempt.Value = attempt;
             try
             {
                 if (metadataDue)
                 {
-                    var mapped = await MapSeriesUncachedCoreAsync(item, token, false, null, discovered.PremiereDate,
+                    var mapped = await MapSeriesUncachedCoreAsync(item, token, attempt.ForceMetadata, null, discovered.PremiereDate,
                         discovered.Type, episodeTitle, seasonNumber, episodeNumber, episodeSource, allowWatchmodeAvailabilityFallback: true);
                     ItemEnrichmentMetadata? metadata = null;
                     if (mapped is not null && attempt.MetadataSucceeded)
                     {
-                        metadata = attempt.MetadataFailed && previous.Metadata is not null ? previous.Metadata
-                            : ItemEnrichmentMetadata.FromItem(mapped) with { TvmazeShowId = attempt.TvmazeShowId, AvailabilityComplete = !attempt.MetadataFailed };
-                        if (!attempt.MetadataFailed && session.FirstEpisodeDates.TryGetValue(item.Id, out var validationTask))
+                        metadata = attempt.CaptureMetadata(mapped) with { TvmazeShowId = attempt.TvmazeShowId ?? previous.Metadata?.TvmazeShowId,
+                            AvailabilityComplete = !attempt.AvailabilityFailed, OptionalMetadataComplete = !attempt.OptionalMetadataFailed,
+                            TvmazeComplete = !attempt.TvmazeFailed, ArtworkComplete = !attempt.ArtworkFailed,
+                            RuntimeFromTvmaze = attempt.RuntimeFromTvmaze };
+                        var canonicalInvalidationPending = previous.Record.MetadataInvalidatedUtc is { } canonicalInvalidated
+                            && (previous.Record.MetadataFetchedUtc is null || previous.Record.MetadataFetchedUtc < canonicalInvalidated);
+                        if (session.FirstEpisodeDates.TryGetValue((item.Id, previous.Record.Generation), out var validationTask))
                         {
-                            var validation = await validationTask.Value;
-                            metadata = metadata with { FirstEpisodeDateChecked = validation.Successful, FirstEpisodeDate = validation.Date };
+                            var validation = await validationTask.Value.WaitAsync(token);
+                            if (validation.Successful)
+                                metadata = metadata with { FirstEpisodeDateChecked = true, FirstEpisodeDate = validation.Date };
+                            else if (!canonicalInvalidationPending && previous.Metadata is { FirstEpisodeDateChecked: true } priorCanonical)
+                                metadata = metadata with { FirstEpisodeDateChecked = true, FirstEpisodeDate = priorCanonical.FirstEpisodeDate };
                         }
-                        else if (!attempt.MetadataFailed && previous.Metadata is { FirstEpisodeDateChecked: true } oldMetadata
-                            && previous.Record.MetadataInvalidatedUtc is null)
+                        else if (previous.Metadata is { FirstEpisodeDateChecked: true } oldMetadata
+                            && !canonicalInvalidationPending)
                             metadata = metadata with { FirstEpisodeDateChecked = true, FirstEpisodeDate = oldMetadata.FirstEpisodeDate };
                     }
-                    return new(metadata, mapped is not null && attempt.RatingsSucceeded && !attempt.RatingsFailed
-                        ? ItemEnrichmentRatings.FromItem(mapped) : null,
-                        RefreshMetadataClock: !attempt.MetadataFailed, MetadataFailed: attempt.MetadataFailed, RatingsFailed: attempt.RatingsFailed);
+                    return new(metadata, mapped is null ? null : attempt.CaptureRatings(mapped),
+                        RefreshMetadataClock: attempt.MetadataSucceeded, MetadataFailed: !attempt.MetadataSucceeded, RatingsFailed: attempt.RatingsFailed,
+                        AvailabilityFailed: attempt.AvailabilityFailed, OptionalMetadataFailed: attempt.OptionalMetadataFailed, RefreshRatingsClock: attempt.RatingsSucceeded);
                 }
-                var availability = await CompleteCachedAvailabilityAsync(previous, discovered, token);
+                var availability = await CompleteCachedOptionalMetadataAsync(previous, discovered, token,
+                    session.AvailabilityRefreshNeeded(identity), session.OptionalMetadataRefreshNeeded(identity));
                 var ratingsItem = await RefreshItemRatingsAsync(previous.Apply(discovered), token);
-                return new(availability, attempt.RatingsSucceeded && !attempt.RatingsFailed ? ItemEnrichmentRatings.FromItem(ratingsItem) : null,
-                    RefreshMetadataClock: false, MetadataFailed: attempt.MetadataFailed, RatingsFailed: attempt.RatingsFailed);
+                return new(availability, attempt.CaptureRatings(ratingsItem),
+                    RefreshMetadataClock: false, RatingsFailed: attempt.RatingsFailed,
+                    AvailabilityFailed: attempt.AvailabilityFailed, OptionalMetadataFailed: attempt.OptionalMetadataFailed, RefreshRatingsClock: attempt.RatingsSucceeded);
             }
             finally { _itemEnrichmentAttempt.Value = oldAttempt; }
-        }, cancellationToken, ratingsInputs: discovered);
+        }, cancellationToken, ratingsInputs: discovered, requireDataset: _imdbRatingsStore is not null);
         return outcome.Apply(discovered);
     }
 
@@ -120,20 +142,92 @@ public sealed partial class PremiereService
         // This path changes scores only. It never requests metadata or artwork.
         return item with
         {
-            ImdbScore = ratings.ImdbScore ?? item.ImdbScore, ImdbVoteCount = ratings.ImdbVoteCount ?? item.ImdbVoteCount,
-            RottenTomatoesScore = ratings.RottenTomatoesScore ?? tomatoes.CriticScore ?? item.RottenTomatoesScore,
-            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? tomatoes.AudienceScore ?? item.RottenTomatoesAudienceScore,
-            MetacriticScore = ratings.MetacriticScore ?? item.MetacriticScore
+            ImdbScore = ratings.ImdbScore, ImdbVoteCount = ratings.ImdbVoteCount,
+            RottenTomatoesScore = ratings.RottenTomatoesScore ?? tomatoes.CriticScore,
+            RottenTomatoesAudienceScore = ratings.RottenTomatoesAudienceScore ?? tomatoes.AudienceScore,
+            MetacriticScore = ratings.MetacriticScore
         };
     }
 
-    private async Task<ItemEnrichmentMetadata?> CompleteCachedAvailabilityAsync(ItemEnrichmentSnapshot previous,
-        PremiereItem discovered, CancellationToken cancellationToken)
+    private async Task<ItemEnrichmentMetadata?> CompleteCachedOptionalMetadataAsync(ItemEnrichmentSnapshot previous,
+        PremiereItem discovered, CancellationToken cancellationToken, bool refreshAvailability, bool refreshOptionalMetadata)
     {
-        if (previous.Metadata is not { AvailabilityComplete: false } metadata) return null;
-        var sources = await SourceEntriesWithWatchmodeFallbackAsync(metadata.Sources, discovered.MediaType,
-            discovered.TmdbId, metadata.ImdbId, cancellationToken, false);
-        return _itemEnrichmentAttempt.Value?.MetadataFailed == true ? null : metadata with { Sources = sources, AvailabilityComplete = true };
+        if ((!refreshAvailability && !refreshOptionalMetadata) || previous.Metadata is not { } metadata || _itemEnrichmentAttempt.Value is not { } attempt) return null;
+        string? fetchedTvmazePoster = null;
+        var updated = metadata.OptionalFreshnessTracked ? metadata : metadata with
+        {
+            OptionalFreshnessTracked = true, AvailabilityFetchedUtc = previous.Record.MetadataFetchedUtc,
+            TvmazeFetchedUtc = discovered.MediaType == PremiereMediaType.Series ? previous.Record.MetadataFetchedUtc : null,
+            ArtworkFetchedUtc = previous.Record.MetadataFetchedUtc
+        };
+        if (refreshAvailability && !metadata.AvailabilityComplete)
+        {
+            var availabilityStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            var baseSources = metadata.AvailabilityOwnedByWatchmode
+                ? metadata.Sources.Where(source => !HasWatchProviderSource([source])).ToArray() : metadata.Sources;
+            PremiereSource[] sources;
+            if (!metadata.AvailabilityOwnedByWatchmode && HasWatchProviderSource(baseSources))
+            {
+                sources = baseSources;
+                attempt.AvailabilitySkipped = true;
+                RecordItemComponent("cache", "availability", "reused", availabilityStarted, "legacy_provenance",
+                    itemId: discovered.TmdbId, mediaType: discovered.MediaType);
+            }
+            else sources = await SourceEntriesWithWatchmodeFallbackAsync(baseSources, discovered.MediaType,
+                discovered.TmdbId, metadata.ImdbId, cancellationToken, true);
+            updated = updated with { Sources = sources, AvailabilityComplete = !attempt.AvailabilityFailed,
+                AvailabilityOwnedByWatchmode = !attempt.AvailabilityFailed && !attempt.AvailabilitySkipped
+                    ? attempt.AvailabilityOwnedByWatchmode ?? metadata.AvailabilityOwnedByWatchmode : metadata.AvailabilityOwnedByWatchmode,
+                AvailabilityFetchedUtc = !attempt.AvailabilityFailed && !attempt.AvailabilitySkipped ? attempt.CurrentUtc : updated.AvailabilityFetchedUtc };
+        }
+        if (refreshOptionalMetadata && !metadata.TvmazeComplete && discovered.MediaType == PremiereMediaType.Series)
+        {
+            var tvmaze = await GetTvSeriesEnrichmentAsync(new TmdbExternalIds { ImdbId = metadata.ImdbId, TvdbId = metadata.TvdbId },
+                discovered.Title, cancellationToken, true);
+            if (!attempt.TvmazeFailed)
+            {
+                if (!attempt.TvmazeSkipped) fetchedTvmazePoster = tvmaze.ImageUrl;
+                var sources = updated.Sources.Where(source => !(source.Id is null && source.Kind.Equals("network", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(source.Name, metadata.NetworkName, StringComparison.OrdinalIgnoreCase))
+                    && !(source.Id is null && source.Kind.Equals("web", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(source.Name, metadata.WebChannelName, StringComparison.OrdinalIgnoreCase))).ToList();
+                AddSource(sources, tvmaze.NetworkName, null, "network");
+                AddSource(sources, tvmaze.WebChannelName, null, "web");
+                updated = updated with { NetworkName = tvmaze.NetworkName, WebChannelName = tvmaze.WebChannelName,
+                    TvmazeAverageRuntimeMinutes = tvmaze.AverageRuntimeMinutes, TvmazeRating = tvmaze.TvmazeRating,
+                    OfficialSiteUrl = tvmaze.OfficialSiteUrl, TvmazeUrl = tvmaze.TvmazeUrl,
+                    TvmazeShowId = attempt.TvmazeSkipped ? updated.TvmazeShowId : attempt.TvmazeShowId,
+                    Sources = sources.ToArray(), TvmazeComplete = true,
+                    TvmazeFetchedUtc = attempt.TvmazeSkipped ? updated.TvmazeFetchedUtc : attempt.CurrentUtc,
+                    RuntimeMinutes = metadata.RuntimeFromTvmaze ? tvmaze.AverageRuntimeMinutes : metadata.RuntimeMinutes };
+                if (attempt.TvmazeSucceeded && (metadata.ImageSource == ArtworkSources.TvmazeImage || metadata.PosterUrl is null))
+                {
+                    if (attempt.TvmazeSucceeded && tvmaze.ImageUrl is not null) attempt.PosterOwnerVerifiedEmpty = false;
+                    updated = updated with { PosterUrl = tvmaze.ImageUrl, ImageSource = tvmaze.ImageUrl is null ? null : ArtworkSources.TvmazeImage,
+                        PosterOwnerVerifiedEmpty = tvmaze.ImageUrl is not null && attempt.PosterOwnerVerifiedEmpty,
+                        ArtworkFetchedUtc = tvmaze.ImageUrl is not null ? attempt.CurrentUtc : updated.ArtworkFetchedUtc,
+                        ArtworkComplete = metadata.ImageSource == ArtworkSources.TvmazeImage && tvmaze.ImageUrl is null && !attempt.TvmazeSkipped
+                            ? false : updated.ArtworkComplete };
+                }
+            }
+        }
+        if (refreshOptionalMetadata && !updated.ArtworkComplete)
+        {
+            // A retained fallback is not a newly verified known cover. Retry the
+            // failed provider unless this attempt just recovered an owning source.
+            var artwork = await ResolveArtworkAsync(null,
+                attempt.ExternalSucceeded ? attempt.ExternalProviderResult?.PosterUrl : null,
+                fetchedTvmazePoster, updated.BackdropUrl,
+                new ArtworkRequest(discovered.MediaType, discovered.TmdbId, metadata.ImdbId, metadata.TvdbId, metadata.WikidataId, discovered.Title),
+                cancellationToken, true);
+            if (artwork is not null || !attempt.ArtworkFailed)
+                updated = updated with { PosterUrl = artwork?.Url, ImageSource = artwork?.Source, ArtworkComplete = !attempt.ArtworkFailed,
+                    PosterOwnerVerifiedEmpty = artwork is not null && attempt.PosterOwnerVerifiedEmpty,
+                    ArtworkFetchedUtc = !attempt.ArtworkFailed && !attempt.ArtworkSkipped && !attempt.ArtworkReused
+                        ? attempt.CurrentUtc : updated.ArtworkFetchedUtc };
+        }
+        updated = updated with { OptionalMetadataComplete = updated.TvmazeComplete && updated.ArtworkComplete };
+        return updated == metadata ? null : updated;
     }
 
     private static bool MovieMatchesKnownCriteria(PremiereItem item, MediaDiscoveryCriteria? criteria)
@@ -154,7 +248,12 @@ public sealed partial class PremiereService
             .Select(item => new ItemEnrichmentIdentity(item.MediaType, item.TmdbId)).Distinct().ToArray();
         await session.PrepareAsync(identities, items, cancellationToken);
         await session.FlushAsync(cancellationToken, rejectGenerationConflicts: false);
-        return identities.Any(identity => session.MetadataRefreshNeeded(identity) || session.RatingsRefreshNeeded(identity));
+        return items.Where(item => item.TmdbId > 0 && item.VerificationState == PremiereVerificationState.Verified)
+            .Any(item =>
+            {
+                var identity = new ItemEnrichmentIdentity(item.MediaType, item.TmdbId);
+                return session.MetadataRefreshNeeded(identity) || session.RatingsRefreshNeeded(identity, item, _imdbRatingsStore is not null);
+            });
     }
 
     private async Task<IReadOnlyList<PremiereItem>> HydrateSharedItemRatingsAsync(IReadOnlyList<PremiereItem> items,
@@ -174,17 +273,20 @@ public sealed partial class PremiereService
             {
                 var outcome = await session.GetAsync(identity, false, async (previous, _, ratingsDue, token) =>
                 {
-                    var attempt = new ItemEnrichmentAttempt(false, ratingsDue, previous.Ratings, previous.Metadata);
+                    var attempt = new ItemEnrichmentAttempt(false, ratingsDue, previous.Ratings, previous.Metadata,
+                        previous.Record.RatingsFetchedUtc, session.Now, session.RatingsCutoffUtc,
+                        previousMetadataFetchedUtc: previous.Record.MetadataFetchedUtc,
+                        ratingsRetryAllowed: session.RatingsRefreshAllowed(identity), datasetEnabled: _imdbRatingsStore is not null)
+                        { ItemId = item.TmdbId, MediaType = item.MediaType };
                     var oldAttempt = _itemEnrichmentAttempt.Value;
                     _itemEnrichmentAttempt.Value = attempt;
                     try
                     {
                         var ratingsItem = await RefreshItemRatingsAsync(previous.Apply(item), token);
-                        return new ItemEnrichmentRefresh(null, attempt.RatingsSucceeded && !attempt.RatingsFailed
-                            ? ItemEnrichmentRatings.FromItem(ratingsItem) : null, RatingsFailed: attempt.RatingsFailed);
+                        return new ItemEnrichmentRefresh(null, attempt.CaptureRatings(ratingsItem), RatingsFailed: attempt.RatingsFailed, RefreshRatingsClock: attempt.RatingsSucceeded);
                     }
                     finally { _itemEnrichmentAttempt.Value = oldAttempt; }
-                }, cancellationToken, ratingsOnly: true, ratingsInputs: item);
+                }, cancellationToken, ratingsOnly: true, ratingsInputs: item, requireDataset: _imdbRatingsStore is not null);
                 return outcome.Rebase(item, metadataChanged: false);
             }
             finally { gate.Release(); }
@@ -281,17 +383,125 @@ public sealed partial class PremiereService
     }
 
     private sealed class ItemEnrichmentAttempt(bool refreshMetadata, bool refreshRatings, ItemEnrichmentRatings? previousRatings,
-        ItemEnrichmentMetadata? previousMetadata = null)
+        ItemEnrichmentMetadata? previousMetadata = null, DateTimeOffset? previousRatingsFetchedUtc = null,
+        DateTimeOffset? now = null, DateTimeOffset? ratingsCutoffUtc = null, bool explicitForceRefresh = false, bool forceIdentifierRefresh = false,
+        DateTimeOffset? previousMetadataFetchedUtc = null, bool ratingsRetryAllowed = true, bool datasetEnabled = false)
     {
         public bool ForceMetadata { get; } = refreshMetadata;
-        public bool ForceRatings => RefreshRatings;
-        public bool RefreshRatings { get; set; } = refreshRatings;
+        public bool ForceIdentifierRefresh { get; } = forceIdentifierRefresh;
+        public DateTimeOffset CurrentUtc { get; } = now ?? DateTimeOffset.UtcNow;
+        public bool RefreshRatings { get; } = refreshRatings;
+        public bool RatingsRetryAllowed { get; } = explicitForceRefresh || ratingsRetryAllowed;
         public ItemEnrichmentRatings? PreviousRatings { get; } = previousRatings;
         public ItemEnrichmentMetadata? PreviousMetadata { get; } = previousMetadata;
         public bool MetadataSucceeded;
         public bool MetadataFailed;
-        public bool RatingsSucceeded;
+        public bool AvailabilityFailed;
+        public bool OptionalMetadataFailed;
+        public bool TvmazeFailed;
+        public bool TvmazeSucceeded;
+        public bool PosterOwnerVerifiedEmpty = previousMetadata?.PosterOwnerVerifiedEmpty == true;
+        public bool ArtworkFailed;
+        public bool ArtworkSkipped;
+        public bool ArtworkReused;
+        public bool BackdropReused;
+        public bool AvailabilitySkipped;
+        public bool? AvailabilityOwnedByWatchmode;
+        public bool TvmazeSkipped;
+        public bool RuntimeFromTvmaze;
         public bool RatingsFailed;
+        public bool ExternalSucceeded;
+        public bool ExternalReused;
+        public bool DatasetSucceeded;
+        public bool DatasetRequired = datasetEnabled;
+        public ItemEnrichmentDatasetRating? DatasetResult;
+        public bool TomatoesSucceeded;
+        public bool TomatoesReused;
+        public bool RatingsSucceeded => ExternalSucceeded || TomatoesSucceeded || DatasetSucceeded;
+        public bool TomatoesNotRequired = previousRatings?.TomatoesRequired == false;
+        public bool ExternalNotRequired = previousRatings?.ExternalRequired == false;
+        public int ItemId;
+        public PremiereMediaType? MediaType;
+        public ExternalRatings? ExternalResult;
+        public ExternalRatings? ExternalProviderResult;
+        public RottenTomatoesScores? TomatoesResult;
         public int? TvmazeShowId;
+
+        private DateTimeOffset? PreviousMetadataClock(DateTimeOffset? component)
+            => PreviousMetadata?.OptionalFreshnessTracked == true ? component : previousMetadataFetchedUtc;
+
+        public ItemEnrichmentMetadata CaptureMetadata(PremiereItem item) => ItemEnrichmentMetadata.FromItem(item) with
+        {
+            PosterOwnerVerifiedEmpty = item.PosterUrl is not null && PosterOwnerVerifiedEmpty,
+            OptionalFreshnessTracked = true,
+            AvailabilityOwnedByWatchmode = !AvailabilityFailed && !AvailabilitySkipped
+                ? AvailabilityOwnedByWatchmode ?? PreviousMetadata?.AvailabilityOwnedByWatchmode ?? false
+                : PreviousMetadata?.AvailabilityOwnedByWatchmode ?? false,
+            AvailabilityFetchedUtc = !AvailabilityFailed && !AvailabilitySkipped ? CurrentUtc : PreviousMetadataClock(PreviousMetadata?.AvailabilityFetchedUtc),
+            TvmazeFetchedUtc = MediaType != PremiereMediaType.Series ? null
+                : !TvmazeFailed && !TvmazeSkipped ? CurrentUtc : PreviousMetadataClock(PreviousMetadata?.TvmazeFetchedUtc),
+            ArtworkFetchedUtc = !ArtworkFailed && !ArtworkSkipped && !ArtworkReused && !BackdropReused ? CurrentUtc
+                : PreviousMetadataClock(PreviousMetadata?.ArtworkFetchedUtc),
+            OmdbPlot = ExternalSucceeded || ExternalReused ? ExternalResult?.Plot
+                : string.Equals(item.ImdbId, PreviousMetadata?.ImdbId, StringComparison.OrdinalIgnoreCase) ? PreviousMetadata?.OmdbPlot : null,
+            OmdbPosterUrl = ExternalSucceeded || ExternalReused ? ExternalResult?.PosterUrl
+                : string.Equals(item.ImdbId, PreviousMetadata?.ImdbId, StringComparison.OrdinalIgnoreCase) ? PreviousMetadata?.OmdbPosterUrl : null
+        };
+
+        public bool ExternalNeeded(string? imdbId) => (explicitForceRefresh || ratingsRetryAllowed) && (explicitForceRefresh
+            || PreviousRatings?.MatchesImdb(imdbId) != true
+            || PreviousRatings.FreshnessVerified == false
+            || PreviousRatings.ExternalRequired && RefreshRatings && (PreviousRatings.ProviderFreshnessTracked ? PreviousRatings.ExternalFetchedUtc : previousRatingsFetchedUtc) < ratingsCutoffUtc
+            || PreviousRatings.ExternalRequired && RefreshRatings && (PreviousRatings.ProviderFreshnessTracked ? PreviousRatings.ExternalFetchedUtc : previousRatingsFetchedUtc) is null);
+
+        public bool TomatoesNeeded(string? wikidataId, string? title, int? year) => (explicitForceRefresh || ratingsRetryAllowed) && (explicitForceRefresh
+            || PreviousRatings?.MatchesTomatoes(wikidataId, title, year) != true
+            || PreviousRatings.FreshnessVerified == false
+            || PreviousRatings.TomatoesRequired && RefreshRatings && (PreviousRatings.ProviderFreshnessTracked ? PreviousRatings.TomatoesFetchedUtc : previousRatingsFetchedUtc) < ratingsCutoffUtc
+            || PreviousRatings.TomatoesRequired && RefreshRatings && (PreviousRatings.ProviderFreshnessTracked ? PreviousRatings.TomatoesFetchedUtc : previousRatingsFetchedUtc) is null);
+
+        public bool DatasetNeeded(string? imdbId) => DatasetRequired && !string.IsNullOrWhiteSpace(imdbId) && RatingsRetryAllowed
+            && (explicitForceRefresh || PreviousRatings?.DatasetRequired != true || PreviousRatings.Dataset is not { } dataset
+                || !string.Equals(dataset.ImdbId, imdbId, StringComparison.OrdinalIgnoreCase)
+                || dataset.FetchedUtc < ratingsCutoffUtc || !PreviousRatings.FreshnessVerified);
+
+        public ItemEnrichmentRatings? CaptureRatings(PremiereItem item)
+        {
+            var previous = PreviousRatings;
+            var skipChanged = previous is not null
+                && (ExternalNotRequired && (previous.ExternalRequired || !previous.MatchesImdb(item.ImdbId) && (TomatoesSucceeded || TomatoesReused))
+                    || TomatoesNotRequired && (previous.TomatoesRequired || !previous.MatchesTomatoes(item.WikidataId, item.Title, item.PremiereDate.Year)
+                        && (ExternalSucceeded || ExternalReused || DatasetSucceeded)));
+            if (!ExternalSucceeded && !TomatoesSucceeded && !DatasetSucceeded && !(ExternalNotRequired && TomatoesNotRequired) && !skipChanged) return null;
+            var external = ExternalSucceeded && ExternalProviderResult is { } result
+                ? new ItemEnrichmentRatingValues(result.ImdbScore, result.ImdbVoteCount, result.RottenTomatoesScore,
+                    result.RottenTomatoesAudienceScore, result.MetacriticScore)
+                : previous?.MatchesImdb(item.ImdbId) == true ? previous.ExternalValues
+                    ?? (previous.ProviderFreshnessTracked ? null
+                        : new(previous.ImdbScore, previous.ImdbVoteCount, MetacriticScore: previous.MetacriticScore)) : null;
+            var dataset = DatasetSucceeded ? DatasetResult
+                : previous?.Dataset is { } previousDataset && string.Equals(previousDataset.ImdbId, item.ImdbId, StringComparison.OrdinalIgnoreCase)
+                    ? previousDataset : null;
+            var tomatoes = TomatoesSucceeded && TomatoesResult is { } scores
+                ? new ItemEnrichmentRatingValues(RottenTomatoesScore: scores.CriticScore, RottenTomatoesAudienceScore: scores.AudienceScore)
+                : previous?.MatchesTomatoes(item.WikidataId, item.Title, item.PremiereDate.Year) == true
+                    ? previous.TomatoesValues ?? (TomatoesNotRequired || previous.ProviderFreshnessTracked ? null
+                        : new(RottenTomatoesScore: previous.RottenTomatoesScore, RottenTomatoesAudienceScore: previous.RottenTomatoesAudienceScore)) : null;
+            var externalFetched = ExternalSucceeded ? now : previous?.MatchesImdb(item.ImdbId) != true ? null
+                : previous.ProviderFreshnessTracked ? previous.ExternalFetchedUtc : previousRatingsFetchedUtc;
+            var tomatoesFetched = TomatoesSucceeded ? now
+                : previous?.MatchesTomatoes(item.WikidataId, item.Title, item.PremiereDate.Year) != true ? null
+                : previous.ProviderFreshnessTracked ? previous.TomatoesFetchedUtc : previousRatingsFetchedUtc;
+            var tomatoScores = ItemEnrichmentRatingsMerger.Combine(external, externalFetched, tomatoes, tomatoesFetched);
+            return new(dataset?.ImdbScore ?? external?.ImdbScore, dataset?.ImdbScore is not null ? dataset.ImdbVoteCount : external?.ImdbVoteCount,
+                tomatoScores.Critic, tomatoScores.Audience, external?.MetacriticScore,
+                item.ImdbId, item.WikidataId, item.Title, item.PremiereDate.Year)
+            {
+                ProviderFreshnessTracked = true, ExternalValues = external, TomatoesValues = tomatoes,
+                ExternalRequired = !ExternalNotRequired, TomatoesRequired = !TomatoesNotRequired,
+                DatasetRequired = DatasetRequired, Dataset = dataset,
+                ExternalFetchedUtc = externalFetched, TomatoesFetchedUtc = tomatoesFetched
+            };
+        }
     }
 }

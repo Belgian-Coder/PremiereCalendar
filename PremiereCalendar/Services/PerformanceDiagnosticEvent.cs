@@ -25,9 +25,13 @@ public sealed record PerformanceDiagnosticDetails
     public DateOnly? WeekEnd { get; init; }
     public int? Attempt { get; init; }
     public int? ItemId { get; init; }
+    public string? MediaType { get; init; }
     public int? Count { get; init; }
     public int? Total { get; init; }
     public int? StatusCode { get; init; }
+    public DateTimeOffset? RetryAtUtc { get; init; }
+    public DateTimeOffset? RequestedFetchedUtc { get; init; }
+    public DateTimeOffset? AcceptedFetchedUtc { get; init; }
     public long? Sequence { get; init; }
     public double? DurationMilliseconds { get; init; }
     public double? WaitMilliseconds { get; init; }
@@ -43,6 +47,7 @@ public sealed record PerformanceDiagnosticDetails
 
     internal PerformanceDiagnosticDetails Sanitize() => this with
     {
+        MediaType = DiagnosticIdentifier.Code(MediaType),
         Stage = DiagnosticIdentifier.Code(Stage), Provider = DiagnosticIdentifier.Code(Provider),
         Outcome = DiagnosticIdentifier.Code(Outcome), Reason = DiagnosticIdentifier.Code(Reason),
         Cache = DiagnosticIdentifier.Code(Cache), JobKind = DiagnosticIdentifier.Code(JobKind),

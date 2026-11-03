@@ -4,6 +4,11 @@ namespace PremiereCalendar.Services;
 
 public interface IArtworkProvider
 {
+    string? OwnedSource => null;
+
+    async Task<ProviderRefreshResult<ArtworkCandidate?>> GetArtworkWithStatusAsync(ArtworkRequest request, CancellationToken cancellationToken, bool forceRefresh = false)
+        => new(await GetArtworkAsync(request, cancellationToken, forceRefresh), true);
+
     Task<ArtworkCandidate?> GetArtworkAsync(
         ArtworkRequest request,
         CancellationToken cancellationToken,

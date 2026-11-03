@@ -102,14 +102,14 @@ public static class PremiereFilter
     private static bool PassesSearchFilter(PremiereItem item, string searchText)
     {
         return string.IsNullOrWhiteSpace(searchText)
-            || item.Title.Contains(searchText, StringComparison.OrdinalIgnoreCase);
+            || item.Title.Contains(searchText.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool PassesKeywordFilter(PremiereItem item, string keywordText)
     {
         return string.IsNullOrWhiteSpace(keywordText)
-            || item.Keywords.Any(keyword => keyword.Contains(keywordText, StringComparison.OrdinalIgnoreCase))
-            || (item.Overview?.Contains(keywordText, StringComparison.OrdinalIgnoreCase) ?? false);
+            || item.Keywords.Any(keyword => keyword.Contains(keywordText.Trim(), StringComparison.OrdinalIgnoreCase))
+            || (item.Overview?.Contains(keywordText.Trim(), StringComparison.OrdinalIgnoreCase) ?? false);
     }
 
     private static bool PassesGenreFilter(PremiereItem item, IReadOnlyCollection<int> genreIds)
@@ -120,7 +120,7 @@ public static class PremiereFilter
     private static bool PassesNetworkFilter(PremiereItem item, string networkText)
     {
         return string.IsNullOrWhiteSpace(networkText)
-            || SourceCandidates(item).Any(source => source.Contains(networkText, StringComparison.OrdinalIgnoreCase));
+            || SourceCandidates(item).Any(source => source.Contains(networkText.Trim(), StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool PassesSourceSelectionFilter(PremiereItem item, IReadOnlyCollection<string> selectedSources)

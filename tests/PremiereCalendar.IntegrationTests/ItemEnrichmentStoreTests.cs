@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Hosting;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -78,6 +80,475 @@ public sealed class ItemEnrichmentStoreTests
     [InlineData("calendar-month-retention")]
     [InlineData("duplicate-writes")]
     public Task PostgreSQL_StoreContract(string scenario) => WithStoreAsync(true, fixture => RunScenarioAsync(scenario, fixture));
+
+    [Theory]
+    [InlineData("external-first")]
+    [InlineData("tomatoes-first")]
+    [InlineData("equal-component-clocks")]
+    [InlineData("verified-empty")]
+    [InlineData("verified-empty-tomatoes")]
+    [InlineData("dedicated-empty-over-external-fallback")]
+    [InlineData("foreign-identities")]
+    [InlineData("imdb-identity-only")]
+    [InlineData("tomatoes-identity-only")]
+    [InlineData("generation-invalidation")]
+    [InlineData("dataset-with-omdb-failure")]
+    [InlineData("dataset-before-providers")]
+    [InlineData("dataset-after-providers")]
+    [InlineData("dataset-null-fallback")]
+    [InlineData("dataset-identity-change")]
+    [InlineData("dataset-identity-removal")]
+    [InlineData("exact-ratings-repair")]
+    [InlineData("stale-exact-ratings-repair")]
+    public Task SQLite_TrackedRatingsContract(string scenario) => WithStoreAsync(false, fixture => TrackedRatingsContractAsync(scenario, fixture));
+
+    [ConfiguredPostgresTheory]
+    [InlineData("external-first")]
+    [InlineData("tomatoes-first")]
+    [InlineData("equal-component-clocks")]
+    [InlineData("verified-empty")]
+    [InlineData("verified-empty-tomatoes")]
+    [InlineData("dedicated-empty-over-external-fallback")]
+    [InlineData("foreign-identities")]
+    [InlineData("imdb-identity-only")]
+    [InlineData("tomatoes-identity-only")]
+    [InlineData("generation-invalidation")]
+    [InlineData("dataset-with-omdb-failure")]
+    [InlineData("dataset-before-providers")]
+    [InlineData("dataset-after-providers")]
+    [InlineData("dataset-null-fallback")]
+    [InlineData("dataset-identity-change")]
+    [InlineData("dataset-identity-removal")]
+    [InlineData("exact-ratings-repair")]
+    [InlineData("stale-exact-ratings-repair")]
+    public Task PostgreSQL_TrackedRatingsContract(string scenario) => WithStoreAsync(true, fixture => TrackedRatingsContractAsync(scenario, fixture));
+
+    [ConfiguredPostgresFact]
+    public Task PostgreSQL_OverlappingTrackedWritesFromSeparateStoresPreserveIndependentSuccesses() => WithStoreAsync(true, async fixture =>
+    {
+        var seed = await SeedTrackedRatingsAsync(fixture);
+        var (external, tomatoes) = IndependentTrackedWrites(fixture, seed);
+        var otherStore = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
+        await using var blocker = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+        await blocker.OpenAsync();
+        await using var transaction = await blocker.BeginTransactionAsync();
+        await using (var hold = new NpgsqlCommand("SELECT 1 FROM ItemEnrichments WHERE PartitionKey = 'tracked' AND TmdbId = 901 FOR UPDATE", blocker, transaction))
+            await hold.ExecuteNonQueryAsync();
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var first = fixture.Store.WriteManyAsync("tracked", [external], budget.Token);
+        var second = otherStore.WriteManyAsync("tracked", [tomatoes], budget.Token);
+        try
+        {
+            await using var observer = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+            await observer.OpenAsync(budget.Token);
+            while (true)
+            {
+                await using var waiting = new NpgsqlCommand("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'", observer);
+                if (Convert.ToInt32(await waiting.ExecuteScalarAsync(budget.Token)) >= 2) break;
+                await Task.Delay(10, budget.Token);
+            }
+            Assert.False(first.IsCompleted);
+            Assert.False(second.IsCompleted);
+        }
+        finally
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            await Task.WhenAll(first, second);
+        }
+        Assert.Equal(1, await first);
+        Assert.Equal(1, await second);
+        await AssertIndependentTrackedWinnersAsync(fixture, seed);
+    });
+
+    private static async Task TrackedRatingsContractAsync(string scenario, Fixture fixture)
+    {
+        var seed = await SeedTrackedRatingsAsync(fixture, externalTomatoesFallback: scenario == "dedicated-empty-over-external-fallback",
+            omitDatasetFields: scenario.StartsWith("dataset-", StringComparison.Ordinal));
+        var now = fixture.Clock.GetUtcNow();
+        var t1 = now.AddHours(-2);
+        var t2 = now.AddHours(-1);
+        if (scenario.StartsWith("dataset-", StringComparison.Ordinal))
+        {
+            await DatasetRatingsContractAsync(scenario, fixture, seed);
+            return;
+        }
+        if (scenario is "exact-ratings-repair" or "stale-exact-ratings-repair")
+        {
+            var proposed = JsonSerializer.Deserialize<ItemEnrichmentRatings>(seed.Record.RatingsJson!)! with { ImdbScore = 8.8, ImdbVoteCount = 8800 };
+            var repair = TrackedWrite(seed, proposed, seed.T0) with { ExpectedRatingsJson = seed.Record.RatingsJson };
+            if (scenario == "stale-exact-ratings-repair")
+            {
+                await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, TrackedRatings(8.4, t1, 80, seed.T0), t1)], CancellationToken.None);
+                var winner = (await ReadTrackedRatingsAsync(fixture, seed.Key)).Record;
+                Assert.Equal(seed.Record.MetadataRevision, winner.MetadataRevision);
+                Assert.Equal(0, await fixture.Store.WriteManyAsync("tracked", [repair], CancellationToken.None));
+                var (record, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+                Assert.Equal(winner.RatingsJson, record.RatingsJson);
+                Assert.Equal(8.4, ratings.ImdbScore);
+                Assert.Equal(8.4, ratings.ExternalValues?.ImdbScore);
+                Assert.Equal(t1, ratings.ExternalFetchedUtc);
+                Assert.Equal(t1, record.RatingsFetchedUtc);
+            }
+            else
+            {
+                Assert.Equal(1, await fixture.Store.WriteManyAsync("tracked", [repair], CancellationToken.None));
+                var (record, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+                Assert.Equal(8.8, ratings.ImdbScore);
+                Assert.Equal(8800, ratings.ImdbVoteCount);
+                Assert.Equal(7.1, ratings.ExternalValues?.ImdbScore);
+                Assert.Equal(seed.T0, ratings.ExternalFetchedUtc);
+                Assert.Equal(seed.T0, record.RatingsFetchedUtc);
+                Assert.Equal(seed.Record.MetadataRevision, record.MetadataRevision);
+            }
+            return;
+        }
+        if (scenario is "external-first" or "tomatoes-first")
+        {
+            var (external, tomatoes) = IndependentTrackedWrites(fixture, seed);
+            var writes = scenario == "external-first" ? new[] { external, tomatoes } : new[] { tomatoes, external };
+            foreach (var write in writes)
+                Assert.Equal(1, await fixture.Store.WriteManyAsync("tracked", [write], CancellationToken.None));
+            await AssertIndependentTrackedWinnersAsync(fixture, seed);
+            return;
+        }
+        if (scenario == "equal-component-clocks")
+        {
+            var accepted = TrackedRatings(8.4, t1, 90, t1);
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, accepted, t1)], CancellationToken.None);
+            // A later aggregate clock cannot resolve a tie in either provider's
+            // successful-result clock in favor of the losing payload.
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, TrackedRatings(5.5, t1, 40, t1), now)], CancellationToken.None);
+            var (_, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Equal(8.4, ratings.ImdbScore);
+            Assert.Equal(90, ratings.RottenTomatoesScore);
+            Assert.Equal(8.4, ratings.ExternalValues?.ImdbScore);
+            Assert.Equal(90, ratings.TomatoesValues?.RottenTomatoesScore);
+            Assert.Equal(t1, ratings.ExternalFetchedUtc);
+            Assert.Equal(t1, ratings.TomatoesFetchedUtc);
+            return;
+        }
+        if (scenario == "verified-empty")
+        {
+            var empty = TrackedRatings(null, t2, 80, seed.T0);
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, empty, t2)], CancellationToken.None);
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, TrackedRatings(8.4, t1, 80, seed.T0), now)], CancellationToken.None);
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, TrackedRatings(9.9, t2, 80, seed.T0), now.AddMinutes(1))], CancellationToken.None);
+            var (_, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Null(ratings.ImdbScore);
+            Assert.Null(ratings.ImdbVoteCount);
+            Assert.Null(ratings.MetacriticScore);
+            Assert.NotNull(ratings.ExternalValues);
+            Assert.Null(ratings.ExternalValues.ImdbScore);
+            Assert.Equal(t2, ratings.ExternalFetchedUtc);
+            Assert.Equal(80, ratings.RottenTomatoesScore);
+            Assert.Equal(seed.T0, ratings.TomatoesFetchedUtc);
+            return;
+        }
+        if (scenario == "verified-empty-tomatoes")
+        {
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, TrackedRatings(7.1, seed.T0, null, t2), t2)], CancellationToken.None);
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, TrackedRatings(7.1, seed.T0, 90, t1), now)], CancellationToken.None);
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, TrackedRatings(7.1, seed.T0, 95, t2), now.AddMinutes(1))], CancellationToken.None);
+            var (_, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Null(ratings.RottenTomatoesScore);
+            Assert.Null(ratings.RottenTomatoesAudienceScore);
+            Assert.NotNull(ratings.TomatoesValues);
+            Assert.Null(ratings.TomatoesValues.RottenTomatoesScore);
+            Assert.Equal(t2, ratings.TomatoesFetchedUtc);
+            Assert.Equal(7.1, ratings.ImdbScore);
+            Assert.Equal(seed.T0, ratings.ExternalFetchedUtc);
+            return;
+        }
+        if (scenario == "dedicated-empty-over-external-fallback")
+        {
+            var old = JsonSerializer.Deserialize<ItemEnrichmentRatings>(seed.Record.RatingsJson!)!;
+            // A failed dedicated lookup carries its old payload/clock and keeps
+            // its previously accepted score rather than inventing a clear.
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, old, t1)], CancellationToken.None);
+            Assert.Equal(90, (await ReadTrackedRatingsAsync(fixture, seed.Key)).Ratings.RottenTomatoesScore);
+            var verifiedEmpty = old with
+            {
+                RottenTomatoesScore = null, RottenTomatoesAudienceScore = null,
+                TomatoesFetchedUtc = t2, TomatoesValues = new()
+            };
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, verifiedEmpty, t2)], CancellationToken.None);
+            // A later failed/stale operation has a newer aggregate clock but
+            // cannot bring back either its old dedicated score or OMDb fallback.
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, old, now)], CancellationToken.None);
+            var (_, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Null(ratings.RottenTomatoesScore);
+            Assert.Null(ratings.RottenTomatoesAudienceScore);
+            Assert.Equal(80, ratings.ExternalValues?.RottenTomatoesScore);
+            Assert.Equal(80, ratings.ExternalValues?.RottenTomatoesAudienceScore);
+            Assert.Equal(seed.T0, ratings.ExternalFetchedUtc);
+            Assert.NotNull(ratings.TomatoesValues);
+            Assert.Null(ratings.TomatoesValues.RottenTomatoesScore);
+            Assert.Null(ratings.TomatoesValues.RottenTomatoesAudienceScore);
+            Assert.Equal(t2, ratings.TomatoesFetchedUtc);
+            return;
+        }
+        if (scenario is "foreign-identities" or "imdb-identity-only" or "tomatoes-identity-only")
+        {
+            var imdb = scenario == "tomatoes-identity-only" ? "tt901" : "tt902";
+            var wiki = scenario == "imdb-identity-only" ? "Q901" : "Q902";
+            var winner = TrackedRatings(9.2, t1, 95, t1, imdb, wiki);
+            var metadata = seed.Metadata with { ImdbId = imdb, WikidataId = wiki };
+            Assert.Equal(1, await fixture.Store.WriteManyAsync("tracked", [new(seed.Key, 0, JsonSerializer.Serialize(metadata), t1,
+                JsonSerializer.Serialize(winner), t1, ExpectedMetadataRevision: seed.Record.MetadataRevision)], CancellationToken.None));
+            var accepted = (await ReadTrackedRatingsAsync(fixture, seed.Key)).Record;
+            var stale = TrackedRatings(8.4, t2, 90, t2);
+            // Also use the current revision in the wholly foreign case so the
+            // test proves component identity checks rather than revision CAS alone.
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, stale, t2) with
+            {
+                ExpectedMetadataRevision = scenario == "foreign-identities" ? accepted.MetadataRevision : seed.Record.MetadataRevision
+            }], CancellationToken.None);
+            var (record, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Equal(imdb, ratings.ImdbId);
+            Assert.Equal(wiki, ratings.WikidataId);
+            Assert.Equal(scenario == "tomatoes-identity-only" ? 8.4 : 9.2, ratings.ImdbScore);
+            Assert.Equal(scenario == "imdb-identity-only" ? 90 : 95, ratings.RottenTomatoesScore);
+            Assert.Equal(scenario == "tomatoes-identity-only" ? t2 : t1, ratings.ExternalFetchedUtc);
+            Assert.Equal(scenario == "imdb-identity-only" ? t2 : t1, ratings.TomatoesFetchedUtc);
+            Assert.Equal(accepted.MetadataJson, record.MetadataJson);
+            Assert.Equal(accepted.MetadataRevision, record.MetadataRevision);
+            return;
+        }
+        if (scenario == "generation-invalidation")
+        {
+            Assert.Equal(1, await fixture.Store.InvalidateTmdbAsync(PremiereMediaType.Movie, [seed.Key.TmdbId], now, CancellationToken.None));
+            var stale = new ItemEnrichmentWrite(seed.Key, seed.Record.Generation,
+                JsonSerializer.Serialize(seed.Metadata with { RuntimeMinutes = 199 }), now.AddMinutes(1),
+                JsonSerializer.Serialize(TrackedRatings(8.4, now.AddMinutes(1), 90, now.AddMinutes(1))), now.AddMinutes(1),
+                ExpectedMetadataRevision: seed.Record.MetadataRevision);
+            Assert.Equal(0, await fixture.Store.WriteManyAsync("tracked", [stale], CancellationToken.None));
+            var (record, _) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Equal(1, record.Generation);
+            Assert.Equal(now, record.MetadataInvalidatedUtc);
+            Assert.Equal(seed.Record.MetadataJson, record.MetadataJson);
+            Assert.Equal(seed.Record.RatingsJson, record.RatingsJson);
+            Assert.Equal(seed.Record.MetadataFetchedUtc, record.MetadataFetchedUtc);
+            Assert.Equal(seed.Record.RatingsFetchedUtc, record.RatingsFetchedUtc);
+            return;
+        }
+        throw new ArgumentOutOfRangeException(nameof(scenario));
+    }
+
+    private static async Task DatasetRatingsContractAsync(string scenario, Fixture fixture, TrackedSeed seed)
+    {
+        Assert.DoesNotContain("\"Dataset\"", seed.Record.RatingsJson!);
+        Assert.DoesNotContain("\"DatasetRequired\"", seed.Record.RatingsJson!);
+        var now = fixture.Clock.GetUtcNow();
+        var t1 = now.AddHours(-2);
+        var t2 = now.AddHours(-1);
+        var proposedDataset = TrackedRatings(7.1, seed.T0, 80, seed.T0) with
+        {
+            ImdbScore = 9.1, ImdbVoteCount = 2100,
+            DatasetRequired = true, Dataset = new("tt901", 9.1, 2100, t1)
+        };
+        if (scenario == "dataset-with-omdb-failure")
+        {
+            Assert.Equal(1, await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, proposedDataset, t1)], CancellationToken.None));
+            var (record, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Equal(9.1, ratings.ImdbScore);
+            Assert.Equal(2100, ratings.ImdbVoteCount);
+            Assert.True(ratings.ExternalRequired);
+            Assert.True(ratings.DatasetRequired);
+            Assert.Equal(new ItemEnrichmentDatasetRating("tt901", 9.1, 2100, t1), ratings.Dataset);
+            Assert.Equal(7.1, ratings.ExternalValues?.ImdbScore);
+            Assert.Equal(1000, ratings.ExternalValues?.ImdbVoteCount);
+            Assert.Equal(seed.T0, ratings.ExternalFetchedUtc);
+            Assert.Equal(80, ratings.RottenTomatoesScore);
+            Assert.Equal(seed.T0, ratings.TomatoesFetchedUtc);
+            Assert.Equal(t1, record.RatingsFetchedUtc);
+            return;
+        }
+        if (scenario is "dataset-before-providers" or "dataset-after-providers")
+        {
+            var external = TrackedWrite(seed, TrackedRatings(8.4, t2, 80, seed.T0), t2);
+            var tomatoes = TrackedWrite(seed, TrackedRatings(7.1, seed.T0, 90, now), now) with
+            {
+                MetadataJson = JsonSerializer.Serialize(seed.Metadata with { RuntimeMinutes = 130 }), MetadataFetchedUtc = now
+            };
+            var dataset = TrackedWrite(seed, proposedDataset, t1);
+            var writes = scenario == "dataset-before-providers" ? new[] { dataset, external, tomatoes } : new[] { external, tomatoes, dataset };
+            foreach (var write in writes)
+                Assert.Equal(1, await fixture.Store.WriteManyAsync("tracked", [write], CancellationToken.None));
+            var (record, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Equal(9.1, ratings.ImdbScore);
+            Assert.Equal(2100, ratings.ImdbVoteCount);
+            Assert.Equal(new ItemEnrichmentDatasetRating("tt901", 9.1, 2100, t1), ratings.Dataset);
+            Assert.True(ratings.DatasetRequired);
+            Assert.Equal(8.4, ratings.ExternalValues?.ImdbScore);
+            Assert.Equal(t2, ratings.ExternalFetchedUtc);
+            Assert.Equal(90, ratings.RottenTomatoesScore);
+            Assert.Equal(now, ratings.TomatoesFetchedUtc);
+            Assert.Equal(now, record.RatingsFetchedUtc);
+            Assert.Equal(seed.Record.MetadataRevision + 1, record.MetadataRevision);
+            return;
+        }
+        if (scenario == "dataset-null-fallback")
+        {
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, proposedDataset, t1)], CancellationToken.None);
+            var empty = proposedDataset with
+            {
+                ImdbScore = 7.1, ImdbVoteCount = 1000, Dataset = new("tt901", null, null, t2)
+            };
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, empty, t2)], CancellationToken.None);
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, proposedDataset, now)], CancellationToken.None);
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, proposedDataset with
+            {
+                ImdbScore = 9.9, Dataset = new("tt901", 9.9, 9999, t2)
+            }, now.AddMinutes(1))], CancellationToken.None);
+            var (_, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Equal(new ItemEnrichmentDatasetRating("tt901", null, null, t2), ratings.Dataset);
+            Assert.Equal(7.1, ratings.ImdbScore);
+            Assert.Equal(1000, ratings.ImdbVoteCount);
+            Assert.Equal(7.1, ratings.ExternalValues?.ImdbScore);
+            Assert.Equal(seed.T0, ratings.ExternalFetchedUtc);
+            return;
+        }
+        if (scenario == "dataset-identity-change")
+        {
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, proposedDataset, t1)], CancellationToken.None);
+            var winner = TrackedRatings(9.2, t2, 95, t2, imdb: "tt902") with
+            {
+                ImdbScore = 8.8, ImdbVoteCount = 2200,
+                DatasetRequired = true, Dataset = new("tt902", 8.8, 2200, t2)
+            };
+            await fixture.Store.WriteManyAsync("tracked", [new(seed.Key, seed.Record.Generation,
+                JsonSerializer.Serialize(seed.Metadata with { ImdbId = "tt902" }), t2,
+                JsonSerializer.Serialize(winner), t2, ExpectedMetadataRevision: seed.Record.MetadataRevision)], CancellationToken.None);
+            var accepted = (await ReadTrackedRatingsAsync(fixture, seed.Key)).Record;
+            // The aggregate identity matches the new title, but the nested
+            // dataset still belongs to the previous IMDb ID and must be rejected.
+            var foreignDataset = proposedDataset with { ImdbId = "tt902", Dataset = new("tt901", 9.9, 9999, now), ImdbScore = 9.9 };
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, foreignDataset, now) with
+            {
+                ExpectedMetadataRevision = accepted.MetadataRevision
+            }], CancellationToken.None);
+            var (_, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Equal("tt902", ratings.ImdbId);
+            Assert.Equal(new ItemEnrichmentDatasetRating("tt902", 8.8, 2200, t2), ratings.Dataset);
+            Assert.Equal(8.8, ratings.ImdbScore);
+            Assert.Equal(9.2, ratings.ExternalValues?.ImdbScore);
+            Assert.Equal(t2, ratings.ExternalFetchedUtc);
+            return;
+        }
+        if (scenario == "dataset-identity-removal")
+        {
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, proposedDataset, t1)], CancellationToken.None);
+            var noIdSkip = proposedDataset with
+            {
+                ImdbId = null, ImdbScore = null, ImdbVoteCount = null, MetacriticScore = null,
+                ExternalValues = null, ExternalFetchedUtc = null, ExternalRequired = false,
+                Dataset = null, DatasetRequired = false
+            };
+            Assert.Equal(1, await fixture.Store.WriteManyAsync("tracked", [new(seed.Key, seed.Record.Generation,
+                JsonSerializer.Serialize(seed.Metadata with { ImdbId = null }), t2,
+                JsonSerializer.Serialize(noIdSkip), t2, ExpectedMetadataRevision: seed.Record.MetadataRevision)], CancellationToken.None));
+            var accepted = (await ReadTrackedRatingsAsync(fixture, seed.Key)).Record;
+            // A later completion still carrying the removed ID cannot re-arm
+            // dataset work or restore its now-unbound score.
+            await fixture.Store.WriteManyAsync("tracked", [TrackedWrite(seed, proposedDataset with
+            {
+                Dataset = new("tt901", 9.9, 9999, now)
+            }, now) with { ExpectedMetadataRevision = accepted.MetadataRevision }], CancellationToken.None);
+            var (_, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+            Assert.Null(ratings.ImdbId);
+            Assert.Null(ratings.Dataset);
+            Assert.False(ratings.DatasetRequired);
+            Assert.False(ratings.ExternalRequired);
+            Assert.Null(ratings.ImdbScore);
+            Assert.Null(ratings.ImdbVoteCount);
+            return;
+        }
+        throw new ArgumentOutOfRangeException(nameof(scenario));
+    }
+
+    private static (ItemEnrichmentWrite External, ItemEnrichmentWrite Tomatoes) IndependentTrackedWrites(Fixture fixture, TrackedSeed seed)
+    {
+        var t1 = fixture.Clock.GetUtcNow().AddHours(-2);
+        var t2 = fixture.Clock.GetUtcNow().AddHours(-1);
+        var external = TrackedWrite(seed, TrackedRatings(8.4, t1, 80, seed.T0), t1);
+        var tomatoes = TrackedWrite(seed, TrackedRatings(7.1, seed.T0, 90, t2), t2) with
+        {
+            MetadataJson = JsonSerializer.Serialize(seed.Metadata with { RuntimeMinutes = 130 }), MetadataFetchedUtc = t2
+        };
+        return (external, tomatoes);
+    }
+
+    private static async Task AssertIndependentTrackedWinnersAsync(Fixture fixture, TrackedSeed seed)
+    {
+        var (record, ratings) = await ReadTrackedRatingsAsync(fixture, seed.Key);
+        Assert.True(ratings.ProviderFreshnessTracked);
+        Assert.True(ratings.FreshnessVerified);
+        Assert.Equal(8.4, ratings.ImdbScore);
+        Assert.Equal(90, ratings.RottenTomatoesScore);
+        Assert.Equal(8.4, ratings.ExternalValues?.ImdbScore);
+        Assert.Equal(90, ratings.TomatoesValues?.RottenTomatoesScore);
+        Assert.Equal(fixture.Clock.GetUtcNow().AddHours(-2), ratings.ExternalFetchedUtc);
+        Assert.Equal(fixture.Clock.GetUtcNow().AddHours(-1), ratings.TomatoesFetchedUtc);
+        Assert.Equal(fixture.Clock.GetUtcNow().AddHours(-1), record.RatingsFetchedUtc);
+        Assert.Equal(130, JsonSerializer.Deserialize<ItemEnrichmentMetadata>(record.MetadataJson!)?.RuntimeMinutes);
+        Assert.Equal(seed.Record.MetadataRevision + 1, record.MetadataRevision);
+        Assert.Equal(0, record.Generation);
+        var restarted = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
+        var persisted = (await restarted.ReadManyAsync("tracked", [seed.Key], false, CancellationToken.None))[seed.Key];
+        Assert.Equal(record.RatingsJson, persisted.RatingsJson);
+        Assert.Equal(record.RatingsFetchedUtc, persisted.RatingsFetchedUtc);
+    }
+
+    private static ItemEnrichmentWrite TrackedWrite(TrackedSeed seed, ItemEnrichmentRatings ratings, DateTimeOffset aggregateClock)
+        => new(seed.Key, seed.Record.Generation, RatingsJson: JsonSerializer.Serialize(ratings), RatingsFetchedUtc: aggregateClock,
+            ExpectedMetadataRevision: seed.Record.MetadataRevision);
+
+    private static ItemEnrichmentRatings TrackedRatings(double? external, DateTimeOffset externalClock,
+        int? tomatoes, DateTimeOffset tomatoesClock, string imdb = "tt901", string wiki = "Q901")
+    {
+        var votes = external.HasValue ? 1000 : (int?)null;
+        var metacritic = external.HasValue ? 71 : (int?)null;
+        return new(external, votes, tomatoes, tomatoes, metacritic, imdb, wiki, "Title", 2026)
+        {
+            ProviderFreshnessTracked = true, ExternalFetchedUtc = externalClock, TomatoesFetchedUtc = tomatoesClock,
+            ExternalValues = new(ImdbScore: external, ImdbVoteCount: votes, MetacriticScore: metacritic),
+            TomatoesValues = new(RottenTomatoesScore: tomatoes, RottenTomatoesAudienceScore: tomatoes)
+        };
+    }
+
+    private static async Task<TrackedSeed> SeedTrackedRatingsAsync(Fixture fixture, bool externalTomatoesFallback = false,
+        bool omitDatasetFields = false)
+    {
+        var key = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
+        var metadata = new ItemEnrichmentMetadata { ImdbId = "tt901", WikidataId = "Q901", Title = "Title", RuntimeMinutes = 112 };
+        var t0 = fixture.Clock.GetUtcNow().AddHours(-3);
+        var ratings = TrackedRatings(7.1, t0, externalTomatoesFallback ? 90 : 80, t0);
+        if (externalTomatoesFallback) ratings = ratings with
+        {
+            ExternalValues = ratings.ExternalValues! with { RottenTomatoesScore = 80, RottenTomatoesAudienceScore = 80 }
+        };
+        var ratingsJson = JsonSerializer.Serialize(ratings);
+        if (omitDatasetFields)
+        {
+            var legacy = JsonNode.Parse(ratingsJson)!.AsObject();
+            legacy.Remove("Dataset");
+            legacy.Remove("DatasetRequired");
+            ratingsJson = legacy.ToJsonString();
+        }
+        await fixture.Store.ReadManyAsync("tracked", [key], true, CancellationToken.None);
+        Assert.Equal(1, await fixture.Store.WriteManyAsync("tracked", [new(key, 0, JsonSerializer.Serialize(metadata), t0,
+            ratingsJson, t0, ExpectedMetadataRevision: 0)], CancellationToken.None));
+        var record = (await fixture.Store.ReadManyAsync("tracked", [key], false, CancellationToken.None))[key];
+        return new(key, metadata, record, t0);
+    }
+
+    private static async Task<(ItemEnrichmentRecord Record, ItemEnrichmentRatings Ratings)> ReadTrackedRatingsAsync(Fixture fixture, ItemEnrichmentIdentity key)
+    {
+        var record = (await fixture.Store.ReadManyAsync("tracked", [key], false, CancellationToken.None))[key];
+        return (record, Assert.IsType<ItemEnrichmentRatings>(JsonSerializer.Deserialize<ItemEnrichmentRatings>(record.RatingsJson!)));
+    }
+
+    private sealed record TrackedSeed(ItemEnrichmentIdentity Key, ItemEnrichmentMetadata Metadata, ItemEnrichmentRecord Record, DateTimeOffset T0);
 
     private static Task RunScenarioAsync(string scenario, Fixture fixture) => scenario switch
     {

@@ -187,6 +187,7 @@ public sealed record MediaDiscoveryCriteria
     public string[] MonetizationTypes { get; init; } = [];
     public int[] MovieReleaseTypes { get; init; } = [];
     public string[] MovieCertifications { get; init; } = [];
+    public string[] MovieCertificationSelections { get; init; } = [];
     public string MovieCertificationCountry { get; init; } = "";
     public int[] NetworkIds { get; init; } = [];
     public int[] TvStatusIds { get; init; } = [];
@@ -230,6 +231,8 @@ public sealed record MediaDiscoveryCriteria
                 .ToArray(),
             MovieReleaseTypes = filters.MovieReleaseTypes.Where(id => id is >= 1 and <= 6).Distinct().Order().ToArray(),
             MovieCertifications = ResolveMovieCertificationValues(filters.Certifications, filters.CertificationCountry),
+            MovieCertificationSelections = filters.Certifications.Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.ToUpperInvariant()).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
             MovieCertificationCountry = ResolveMovieCertificationCountry(filters.Certifications, filters.CertificationCountry),
             NetworkIds = filters.SelectedSources
                 .Select(value => SourceFilterValue.TryGetNetworkId(value, out var networkId) ? networkId : 0)
@@ -249,7 +252,7 @@ public sealed record MediaDiscoveryCriteria
 
     public string ServerKey(PremiereMediaType mediaType)
     {
-        return string.Join(
+        var key = string.Join(
             ',',
             $"lang:{Join(OriginalLanguages)}",
             $"origin:{Join(OriginCountries)}",
@@ -269,14 +272,21 @@ public sealed record MediaDiscoveryCriteria
             mediaType == PremiereMediaType.Series ? $"networks:{Join(NetworkIds)}" : "",
             mediaType == PremiereMediaType.Series ? $"status:{Join(TvStatusIds)}" : "",
             mediaType == PremiereMediaType.Series ? $"type:{Join(TvTypeIds)}" : "");
+        // Keep existing default keys, but distinguish client-side selections
+        // that cannot be pushed to TMDb's single-country certification query.
+        return mediaType == PremiereMediaType.Movie && MovieCertificationSelections.Length > 0
+            ? key + $",cert-selections:{Join(MovieCertificationSelections)}" : key;
     }
 
     private static string[] ResolveMovieCertificationValues(IEnumerable<string> certifications, string certificationCountry)
     {
         var country = ResolveMovieCertificationCountry(certifications, certificationCountry);
-        return string.IsNullOrWhiteSpace(country)
+        var selections = certifications.ToArray();
+        var hasOtherCountry = selections.Select(value => value.Split(':', 2))
+            .Any(parts => parts.Length == 2 && !string.Equals(parts[0].Trim(), country, StringComparison.OrdinalIgnoreCase));
+        return string.IsNullOrWhiteSpace(country) || hasOtherCountry
             ? []
-            : certifications
+            : selections
                 .Select(value => value.Split(':', 2))
                 .Where(parts => parts.Length == 2 && string.Equals(parts[0], country, StringComparison.OrdinalIgnoreCase))
                 .Select(parts => parts[1].Trim())

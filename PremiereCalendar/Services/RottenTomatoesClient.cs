@@ -89,27 +89,36 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         bool forceRefresh = false)
         => (await GetScoresWithStatusAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh)).Value;
 
-    public async Task<ProviderRefreshResult<RottenTomatoesScores>> GetScoresWithStatusAsync(
+    public Task<ProviderRefreshResult<RottenTomatoesScores>> GetScoresWithStatusAsync(
         PremiereMediaType mediaType, string title, int? year, string? wikidataId,
         CancellationToken cancellationToken, bool forceRefresh = false)
+        => GetScoresWithRefreshPolicyAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh, forceIdentifierRefresh: forceRefresh);
+
+    public async Task<ProviderRefreshResult<RottenTomatoesScores>> GetScoresWithRefreshPolicyAsync(
+        PremiereMediaType mediaType, string title, int? year, string? wikidataId,
+        CancellationToken cancellationToken, bool forceRefresh = false, bool forceIdentifierRefresh = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!_options.Enabled || string.IsNullOrWhiteSpace(title)) return new(RottenTomatoesScores.Empty, true);
-        var key = $"rottentomatoes:{_options.BaseUrl}:{ScoreCacheKey(mediaType, NormalizeTitle(title), year, wikidataId)}";
+        if (!_options.Enabled || string.IsNullOrWhiteSpace(title))
+        {
+            ProviderOutcomeDiagnostics.Record(_telemetry, "rottentomatoes", "skipped", "disabled");
+            return new(RottenTomatoesScores.Empty, true, new("disabled"));
+        }
+        var key = $"rottentomatoes:{_options.BaseUrl}:{ScoreCacheKey(mediaType, NormalizeTitle(title), year, wikidataId)}:{forceIdentifierRefresh}";
         if (ProviderRefreshScope.Current is { } refresh)
         {
             var cacheKey = ScoreCacheKey(mediaType, NormalizeTitle(title), year, wikidataId);
             return await refresh.RunAsync(key + ":outcome", forceRefresh,
                 async token =>
                 {
-                    var result = await GetScoresCoreAsync(mediaType, title, year, wikidataId, token, forceRefresh);
+                    var result = await GetScoresCoreAsync(mediaType, title, year, wikidataId, token, forceRefresh, forceIdentifierRefresh);
                     return new ProviderRefreshResult<ProviderRefreshResult<RottenTomatoesScores>>(result, result.Successful);
                 },
                 cancellationToken,
                 result => TryGetVerifiedMemory(cacheKey, out var latest)
                     && ReferenceEquals(latest, result.Value));
         }
-        return await GetScoresCoreAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh);
+        return await GetScoresCoreAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh, forceIdentifierRefresh);
     }
 
     public async Task<RottenTomatoesScores?> TryGetCachedScoresAsync(
@@ -148,35 +157,38 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         int? year,
         string? wikidataId,
         CancellationToken cancellationToken,
-        bool forceRefresh = false)
+        bool forceRefresh = false,
+        bool forceIdentifierRefresh = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!_options.Enabled || string.IsNullOrWhiteSpace(title))
         {
-            return new(RottenTomatoesScores.Empty, false);
+            return new(RottenTomatoesScores.Empty, true, new("disabled"));
         }
 
         var normalizedTitle = NormalizeTitle(title);
         if (string.IsNullOrWhiteSpace(normalizedTitle))
         {
-            return new(RottenTomatoesScores.Empty, false);
+            ProviderOutcomeDiagnostics.Record(_telemetry, "rottentomatoes", "skipped", "not_applicable");
+            return new(RottenTomatoesScores.Empty, true, new("not_applicable"));
         }
 
         var cacheKey = ScoreCacheKey(mediaType, normalizedTitle, year, wikidataId);
         var lifetime = TimeSpan.FromHours(Math.Clamp(_options.CacheHours, 1, 168));
         var persistentRequestKey = $"scores-v1:{_options.BaseUrl}:{cacheKey}";
         if (!forceRefresh && TryGetMemory(cacheKey, out var cachedScores, out var cacheVerified)
-            && (ProviderRefreshScope.Current is null || cacheVerified))
+            && cacheVerified)
         {
+            ProviderOutcomeDiagnostics.Record(_telemetry, "rottentomatoes", cachedScores.HasAnyScore ? "completed" : "absent", "cached_response", true);
             return new(cachedScores, cacheVerified);
         }
 
         return await _singleFlight.RunAsync(
-            forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}",
+            (forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}") + (forceIdentifierRefresh ? ":identifier_refresh" : ""),
             async token =>
             {
                 if (!forceRefresh && TryGetMemory(cacheKey, out var flightCachedScores, out var flightVerified)
-                    && (ProviderRefreshScope.Current is null || flightVerified))
+                    && flightVerified)
                 {
                     return new ProviderRefreshResult<RottenTomatoesScores>(flightCachedScores, flightVerified);
                 }
@@ -201,9 +213,14 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                 }
 
                 var fetchOutcome = new FetchOutcome();
+                if (new ProviderFailureCache(_cache, "rottentomatoes", _httpClient.BaseAddress).Get(DateTimeOffset.UtcNow) is { } deferred)
+                {
+                    RecordFailure(fetchOutcome, deferred);
+                    return new ProviderRefreshResult<RottenTomatoesScores>(RottenTomatoesScores.Empty, false, deferred);
+                }
                 var pageScope = ProviderRefreshScope.Current ?? ProviderRefreshScope.Create();
                 var hasIdentifierContext = !string.IsNullOrWhiteSpace(wikidataId);
-                var scores = await TryGetScoresByWikidataIdAsync(mediaType, wikidataId, token, forceRefresh, fetchOutcome, pageScope);
+                var scores = await TryGetScoresByWikidataIdAsync(mediaType, wikidataId, token, forceRefresh, forceIdentifierRefresh, fetchOutcome, pageScope);
                 if (!scores.HasAnyScore && ShouldSearchByTitle(mediaType, year, hasIdentifierContext))
                 {
                     var searchOutcome = new FetchOutcome();
@@ -219,9 +236,10 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                         forceRefresh), token, _ => searchOutcome.Successful,
                         result => result.HasAnyScore ? "completed" : "absent");
                     fetchOutcome.Successful &= searchOutcome.Successful;
+                    fetchOutcome.Failure ??= searchOutcome.Failure;
                 }
 
-                if (forceRefresh && !fetchOutcome.Successful) return new ProviderRefreshResult<RottenTomatoesScores>(scores, false);
+                if (!fetchOutcome.Successful) return new ProviderRefreshResult<RottenTomatoesScores>(scores, false, fetchOutcome.Failure ?? new("invalid_response"));
 
                 if (publication is not null)
                 {
@@ -239,6 +257,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                 }
 
                 _cache.Set(cacheKey, new CachedScores(scores, fetchOutcome.Successful), lifetime);
+                ProviderOutcomeDiagnostics.Record(_telemetry, "rottentomatoes", scores.HasAnyScore ? "completed" : "absent", "verified_response");
                 return new ProviderRefreshResult<RottenTomatoesScores>(scores, fetchOutcome.Successful);
             },
             cancellationToken);
@@ -303,6 +322,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         string? wikidataId,
         CancellationToken cancellationToken,
         bool forceRefresh,
+        bool forceIdentifierRefresh,
         FetchOutcome fetchOutcome,
         ProviderRefreshScope pageScope)
     {
@@ -314,11 +334,11 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         try
         {
             var identifier = await TrackStageAsync("wikidata_identifier",
-                () => _wikimediaClient.GetRottenTomatoesIdResultAsync(wikidataId, cancellationToken, forceRefresh),
+                () => _wikimediaClient.GetRottenTomatoesIdResultAsync(wikidataId, cancellationToken, forceIdentifierRefresh),
                 cancellationToken, result => result.IsSuccess,
                 result => string.IsNullOrWhiteSpace(result.Value) ? "absent" : "completed");
             var rottenTomatoesId = identifier.Value;
-            if (!identifier.IsSuccess) fetchOutcome.Successful = false;
+            if (!identifier.IsSuccess) RecordFailure(fetchOutcome, identifier.Failure ?? new("invalid_response"));
             if (string.IsNullOrWhiteSpace(rottenTomatoesId) || !IsExpectedMediaPath(mediaType, rottenTomatoesId))
             {
                 return RottenTomatoesScores.Empty;
@@ -351,11 +371,24 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
             cancellationToken, _ => fetchOutcome.Successful);
         if (string.IsNullOrWhiteSpace(html))
         {
+            if (fetchOutcome.Successful) RecordFailure(fetchOutcome, new("invalid_response", 200));
+            return RottenTomatoesScores.Empty;
+        }
+
+        var results = ParseSearchResults(html);
+        // A transport-successful challenge or changed document does not verify that
+        // ratings disappeared. Empty results require the provider's result container.
+        var recognizedEmptySearch = Regex.IsMatch(html, "class=[\"'][^\"']*\\bjs-search-no-results\\b[^\"']*[\"']", RegexOptions.IgnoreCase)
+                && Regex.IsMatch(html, "Sorry,\\s*no results found for", RegexOptions.IgnoreCase);
+        if (Regex.IsMatch(html, "cf-chl-|<title>\\s*Just a moment|verify you are human", RegexOptions.IgnoreCase)
+            || results.Count == 0 && (!recognizedEmptySearch || SearchRowRegex.IsMatch(html)))
+        {
+            RecordFailure(fetchOutcome, new("invalid_response", 200));
             return RottenTomatoesScores.Empty;
         }
 
         var match = await TrackStageAsync("search_match",
-            () => Task.FromResult(SelectBestSearchResult(ParseSearchResults(html), mediaType, normalizedTitle, year)),
+            () => Task.FromResult(SelectBestSearchResult(results, mediaType, normalizedTitle, year)),
             cancellationToken, completedOutcome: result => result is null ? "absent" : "completed");
         if (match is null)
         {
@@ -404,10 +437,11 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
             {
                 cache = "miss";
                 var outcome = new FetchOutcome();
-                var html = await TrackStageAsync("page_http", () => GetStringAsync(uri.AbsoluteUri, token, outcome),
-                    token, value => outcome.Successful && !string.IsNullOrWhiteSpace(value));
+                var html = await TrackStageAsync("page_http", () => GetStringAsync(uri.AbsoluteUri, token, outcome, notFoundIsAbsence: true),
+                    token, value => outcome.Successful && (!string.IsNullOrWhiteSpace(value) || outcome.VerifiedAbsent),
+                    value => outcome.VerifiedAbsent ? "absent" : "completed");
                 var scores = RottenTomatoesScores.Empty;
-                if (string.IsNullOrWhiteSpace(html)) outcome.Successful = false;
+                if (string.IsNullOrWhiteSpace(html)) outcome.Successful &= outcome.VerifiedAbsent;
                 else
                 {
                     try
@@ -424,9 +458,10 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
                 }
 
                 return new ProviderRefreshResult<DirectPageResult>(
-                    new DirectPageResult(scores, outcome.Successful), outcome.Successful);
+                    new DirectPageResult(scores, outcome.Successful, outcome.Failure), outcome.Successful);
             }, cancellationToken, _ => { cache = "hit"; return true; });
             fetchOutcome.Successful &= result.Successful;
+            fetchOutcome.Failure ??= result.Failure;
             status = !result.Successful ? "failed" : result.Scores.HasAnyScore ? "completed" : "absent";
             return result.Scores with
             {
@@ -449,7 +484,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         }
     }
 
-    private readonly record struct DirectPageResult(RottenTomatoesScores Scores, bool Successful);
+    private readonly record struct DirectPageResult(RottenTomatoesScores Scores, bool Successful, ProviderFailure? Failure);
 
     private async Task<T> TrackStageAsync<T>(string stage, Func<Task<T>> action, CancellationToken cancellationToken,
         Func<T, bool>? successful = null, Func<T, string>? completedOutcome = null)
@@ -480,33 +515,59 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         }
     }
 
-    private async Task<string?> GetStringAsync(string url, CancellationToken cancellationToken, FetchOutcome fetchOutcome)
+    private async Task<string?> GetStringAsync(string url, CancellationToken cancellationToken, FetchOutcome fetchOutcome, bool notFoundIsAbsence = false)
     {
+        var failures = new ProviderFailureCache(_cache, "rottentomatoes", _httpClient.BaseAddress);
+        if (failures.Get(DateTimeOffset.UtcNow) is { } deferred)
+        {
+            RecordFailure(fetchOutcome, deferred);
+            return null;
+        }
         try
         {
             using var response = await ProviderHttpRetry.SendAsync(
-                _httpClient,
-                () => new HttpRequestMessage(HttpMethod.Get, url),
-                cancellationToken);
-            if (!response.IsSuccessStatusCode)
+                _httpClient, () => new HttpRequestMessage(HttpMethod.Get, url), cancellationToken);
+            if (response.StatusCode == HttpStatusCode.NotFound && notFoundIsAbsence)
             {
-                fetchOutcome.Successful = false;
+                fetchOutcome.VerifiedAbsent = true;
+                ProviderOutcomeDiagnostics.Record(_telemetry, "rottentomatoes", "absent", "verified_not_found");
                 return null;
             }
-
+            if (!response.IsSuccessStatusCode)
+            {
+                var failure = ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow);
+                failures.Remember(failure, DateTimeOffset.UtcNow);
+                RecordFailure(fetchOutcome, failure);
+                return null;
+            }
             return await response.Content.ReadAsStringAsync(cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException)
         {
-            fetchOutcome.Successful = false;
-            _logger.LogWarning(ex, "Skipping Rotten Tomatoes request to {Url}.", url);
+            var failure = ProviderFailure.FromException(exception);
+            failures.Remember(failure, DateTimeOffset.UtcNow);
+            RecordFailure(fetchOutcome, failure);
             return null;
         }
+    }
+
+    private void RecordFailure(FetchOutcome outcome, ProviderFailure failure)
+    {
+        outcome.Successful = false;
+        outcome.Failure ??= failure;
+        _telemetry?.RecordDiagnostic("provider.outcome", _telemetry.CaptureDiagnosticContext(), new()
+        {
+            Provider = "rottentomatoes", Outcome = "failed", Reason = failure.Reason,
+            StatusCode = failure.StatusCode, RetryAtUtc = failure.RetryAtUtc, FromCache = failure.IsLocal
+        });
     }
 
     private sealed class FetchOutcome
     {
         public bool Successful { get; set; } = true;
+        public ProviderFailure? Failure { get; set; }
+        public bool VerifiedAbsent { get; set; }
     }
 
     private static RottenTomatoesSearchResult? SelectBestSearchResult(

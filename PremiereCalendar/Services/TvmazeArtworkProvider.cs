@@ -4,6 +4,7 @@ namespace PremiereCalendar.Services;
 
 public sealed class TvmazeArtworkProvider : IArtworkProvider
 {
+    public string OwnedSource => ArtworkSources.TvmazeImage;
     private readonly ITvmazeClient _client;
 
     public TvmazeArtworkProvider(ITvmazeClient client)
@@ -15,28 +16,26 @@ public sealed class TvmazeArtworkProvider : IArtworkProvider
         ArtworkRequest request,
         CancellationToken cancellationToken,
         bool forceRefresh = false)
+        => (await GetArtworkWithStatusAsync(request, cancellationToken, forceRefresh)).Value;
+
+    public async Task<ProviderRefreshResult<ArtworkCandidate?>> GetArtworkWithStatusAsync(ArtworkRequest request, CancellationToken cancellationToken, bool forceRefresh = false)
     {
         if (request.MediaType != PremiereMediaType.Series)
         {
-            return null;
+            return new(null, true, new("not_applicable"));
         }
 
-        var show = await _client.LookupShowAsync(request.TvdbId, request.ImdbId, cancellationToken, forceRefresh);
-        if (show is null)
-        {
-            return null;
-        }
-
-        var images = await _client.GetShowImagesAsync(show.Id, cancellationToken, forceRefresh);
-        var url = images
+        var lookup = await _client.LookupShowWithStatusAsync(request.TvdbId, request.ImdbId, cancellationToken, forceRefresh);
+        var show = lookup.Value;
+        if (show is null) return new(null, lookup.Successful, lookup.Failure);
+        var images = await _client.GetShowImagesWithStatusAsync(show.Id, cancellationToken, forceRefresh);
+        var url = images.Value
             .Where(image => !string.IsNullOrWhiteSpace(ImageUrl(image)))
             .OrderBy(image => ImageTypeRank(image.Type))
             .Select(ImageUrl)
             .FirstOrDefault();
 
-        return string.IsNullOrWhiteSpace(url)
-            ? null
-            : new ArtworkCandidate(url, ArtworkSources.TvmazeImage);
+        return new(string.IsNullOrWhiteSpace(url) ? null : new ArtworkCandidate(url, ArtworkSources.TvmazeImage), images.Successful, images.Failure);
     }
 
     private static int ImageTypeRank(string? type)

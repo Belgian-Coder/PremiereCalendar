@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Memory;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -366,8 +367,54 @@ public sealed class SimklCalendarEfficiencyTests
         finally { Directory.Delete(directory, recursive: true); }
     }
 
-    private static SimklClient CreateClient(CalendarHandler handler)
-        => new(new HttpClient(handler), Microsoft.Extensions.Options.Options.Create(new SimklOptions { ClientId = "test-client-id" }), new StateStore());
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized, "authentication_denied")]
+    [InlineData(HttpStatusCode.Forbidden, "authentication_denied")]
+    [InlineData(HttpStatusCode.TooManyRequests, "rate_limited")]
+    public async Task CalendarAccessAndQuotaDenialsStayTypedAndAreSharedAcrossForcedWindows(HttpStatusCode status, string reason)
+    {
+        using var memory = new MemoryCache(new MemoryCacheOptions());
+        var handler = new CalendarHandler((_, _) => Task.FromResult(Json("[]", status)));
+        var first = CreateClient(handler, memory);
+        var initial = await Record.ExceptionAsync(() => first.GetCalendarAsync(Start, End, CancellationToken.None));
+        var initialFailures = initial is AggregateException aggregate ? aggregate.Flatten().InnerExceptions.ToArray() : [initial!];
+        Assert.NotEmpty(initialFailures);
+        Assert.All(initialFailures, error =>
+        {
+            var failure = Assert.IsType<ProviderRequestException>(error).Failure;
+            Assert.Equal((int)status, failure.StatusCode);
+            Assert.True(failure.RetryAtUtc > DateTimeOffset.UtcNow);
+        });
+        Assert.Contains(initialFailures, error => ((ProviderRequestException)error).Failure.Reason == reason);
+        Assert.Single(handler.Paths);
+        var restarted = CreateClient(handler, memory);
+        var repeated = await Record.ExceptionAsync(() => restarted.GetCalendarAsync(Start.AddDays(7), End.AddDays(7), CancellationToken.None, forceRefresh: true));
+        var repeatedFailures = repeated is AggregateException repeatedAggregate ? repeatedAggregate.Flatten().InnerExceptions.ToArray() : [repeated!];
+        Assert.All(repeatedFailures, error =>
+        {
+            var failure = Assert.IsType<ProviderRequestException>(error).Failure;
+            Assert.Equal("local_backoff", failure.Reason);
+            Assert.Equal((int)status, failure.StatusCode);
+            Assert.Equal(((ProviderRequestException)initialFailures[0]).Failure.RetryAtUtc, failure.RetryAtUtc);
+        });
+        Assert.Single(handler.Paths);
+    }
+
+    [Fact]
+    public async Task MissingCalendarFeedKeepsItsExistingFailureSemanticsAndIsNotCachedAsEmpty()
+    {
+        var handler = new CalendarHandler((path, _) => Task.FromResult(Json("[]", path == AllPaths[0] ? HttpStatusCode.NotFound : HttpStatusCode.OK)));
+        var client = CreateClient(handler);
+        for (var index = 0; index < 2; index++)
+        {
+            var failure = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetCalendarAsync(Start, End, CancellationToken.None));
+            Assert.Equal(HttpStatusCode.NotFound, failure.StatusCode);
+        }
+        Assert.Equal(2, handler.Paths.Count(path => path == AllPaths[0]));
+    }
+
+    private static SimklClient CreateClient(CalendarHandler handler, IMemoryCache? cache = null)
+        => new(new HttpClient(handler), Microsoft.Extensions.Options.Options.Create(new SimklOptions { ClientId = "test-client-id" }), new StateStore(), cache: cache);
 
     private static HttpResponseMessage Json(string payload, HttpStatusCode status = HttpStatusCode.OK)
         => new(status) { Content = new StringContent(payload, Encoding.UTF8, "application/json") };

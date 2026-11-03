@@ -29,4 +29,7 @@ public sealed record PremiereLoadProgress(
     public IReadOnlyList<string> FailedSourceNames { get; init; } = [];
     public string? CheckpointKey { get; init; }
     public DateTimeOffset? RetryAfterUtc { get; init; }
+    public IReadOnlyList<SourceUnavailableNotice> UnavailableSources { get; init; } = [];
+    public bool IsReusableDegraded { get; init; }
+    public bool IsDegradedResult { get; init; }
 }

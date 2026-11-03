@@ -25,7 +25,7 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
 
         Assert.Equal(83, (await Scores(client, "PrivateExampleTitle")).CriticScore);
 
-        var events = diagnostics.ReadEvents();
+        var events = diagnostics.ReadEvents().Where(item => item.GetProperty("event").GetString() == "provider.rt.stage.completed").ToArray();
         Assert.All(events, item =>
         {
             Assert.Equal("provider.rt.stage.completed", item.GetProperty("event").GetString());
@@ -53,7 +53,7 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
     [InlineData("http", "page_http", "failed")]
     [InlineData("json", "scorecard_parse", "failed")]
     [InlineData("challenge", "scorecard_parse", "failed")]
-    [InlineData("timeout", "page_http", "timeout")]
+    [InlineData("timeout", "page_http", "failed")]
     public async Task AutomaticStageTimingsPersistFailuresAndTimeouts(string failure, string stage, string outcome)
     {
         using var diagnostics = new DiagnosticFixture();
@@ -62,17 +62,17 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         {
             if (request.RequestUri!.AbsolutePath == "/search") return Html("<html></html>");
             if (failure == "timeout") throw new OperationCanceledException();
-            return failure == "http" ? new HttpResponseMessage(HttpStatusCode.NotFound)
+            return failure == "http" ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
                 : failure == "challenge" ? Html("<html><title>Just a moment...</title><body>Verify you are human</body></html>")
                 : Html("<script id=\"media-scorecard-json\">{invalid}</script>");
         });
         var client = CreateClient(handler, cache, telemetry: diagnostics.Telemetry);
-        if (failure == "timeout")
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Scores(client, "Example"));
-        else
-            Assert.False((await Scores(client, "Example")).HasAnyScore);
-
-        var details = diagnostics.ReadEvents().Select(item => item.GetProperty("details")).ToArray();
+        Assert.False((await Scores(client, "Example")).HasAnyScore);
+        var events = diagnostics.ReadEvents();
+        if (failure == "timeout") Assert.Contains(events, item => item.GetProperty("event").GetString() == "provider.outcome"
+            && item.GetProperty("details").GetProperty("reason").GetString() == "timeout");
+        var details = events.Where(item => item.GetProperty("event").GetString() == "provider.rt.stage.completed")
+            .Select(item => item.GetProperty("details")).ToArray();
         Assert.Contains(details, item => item.GetProperty("stage").GetString() == stage
             && item.GetProperty("outcome").GetString() == outcome);
         Assert.Contains(details, item => item.GetProperty("stage").GetString() == "page_lookup"
@@ -154,7 +154,7 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
             if (++pageCalls > 1) return Scorecard(91, 94);
             return failure switch
             {
-                "http" => new HttpResponseMessage(HttpStatusCode.NotFound),
+                "http" => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable),
                 "blank" => Html(" "),
                 "json" => Html("<script id=\"media-scorecard-json\">{invalid}</script>"),
                 "array" => Html("<script id=\"media-scorecard-json\">[]</script>"),
@@ -313,6 +313,21 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         Assert.Equal(2, pageCalls);
         Assert.Equal(95, (await Scores(client, "Fourth", force: false)).CriticScore);
         Assert.Equal(3, pageCalls);
+    }
+
+    [Fact]
+    public async Task MissingKnownPage404IsVerifiedAndKeepsTheMatchingSearchRowScore()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath == "/search"
+            ? Search("Example", "/m/example", 83) : new HttpResponseMessage(HttpStatusCode.NotFound));
+        var client = CreateClient(handler, cache);
+        using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
+        var result = await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, "QExample", CancellationToken.None, true);
+        Assert.True(result.Successful);
+        Assert.Equal(83, result.Value.CriticScore);
+        Assert.Null(result.Value.AudienceScore);
+        Assert.Equal(2, handler.Requests.Count);
     }
 
     private static Task<RottenTomatoesScores> Scores(RottenTomatoesClient client, string title,

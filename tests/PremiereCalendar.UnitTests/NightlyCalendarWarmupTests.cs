@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Hosting;
 using PremiereCalendar.Models;
@@ -204,6 +205,29 @@ public sealed class NightlyCalendarWarmupTests
     }
 
     [Fact]
+    public async Task DegradedLeafLogsItsActualOutcomeAndCannotMintCompleteCoverageReceipt()
+    {
+        var fixture = new Fixture();
+        var payload = fixture.Windows[0];
+        var logger = new OutcomeLogger();
+        var pipeline = new RecordingPipeline(_ => Task.CompletedTask)
+        {
+            Final = new PremiereLoadProgress("Degraded", 0, 0, [], IsFinal: true)
+            {
+                HasSourceErrors = true, IsDegradedResult = true, IsReusableDegraded = true,
+                RetryAfterUtc = fixture.Clock.Now.AddMinutes(15)
+            }
+        };
+        var result = await fixture.Runner(pipeline, logger).RunAsync(payload, "degraded-leaf",
+            new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(), null), _ => Task.CompletedTask, default);
+        Assert.Equal(NightlyCalendarWarmupOutcome.Deferred, result);
+        Assert.Contains("degraded", logger.Outcomes);
+        Assert.DoesNotContain("provider_deferred", logger.Outcomes);
+        Assert.DoesNotContain(payload.ReceiptKey, fixture.Store.Values.Keys);
+        Assert.Equal(0, (await fixture.Planner().RunOnceAsync(default))!.Fresh);
+    }
+
+    [Fact]
     public async Task FreshOrdinaryCacheDoesNotProveThatNightlyDiscoveryCompleted()
     {
         var fixture = new Fixture();
@@ -325,7 +349,21 @@ public sealed class NightlyCalendarWarmupTests
             }
         }
         public NightlyCalendarWarmupPlanner Planner() => new(Store, Scheduler, Cache, Settings, Clock, NullLogger<NightlyCalendarWarmupPlanner>.Instance);
-        public NightlyCalendarWarmupRunner Runner(IPremiereLoadPipeline pipeline) => new(pipeline, Cache, Clock, NullLogger<NightlyCalendarWarmupRunner>.Instance, new PremiereTelemetry(), Settings, Store);
+        public NightlyCalendarWarmupRunner Runner(IPremiereLoadPipeline pipeline, ILogger<NightlyCalendarWarmupRunner>? logger = null)
+            => new(pipeline, Cache, Clock, logger ?? NullLogger<NightlyCalendarWarmupRunner>.Instance, new PremiereTelemetry(), Settings, Store);
+    }
+
+    private sealed class OutcomeLogger : ILogger<NightlyCalendarWarmupRunner>
+    {
+        public List<string> Outcomes { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (state is not IEnumerable<KeyValuePair<string, object?>> entries) return;
+            foreach (var entry in entries)
+                if (entry.Key == "Outcome" && entry.Value is string outcome) Outcomes.Add(outcome);
+        }
     }
 
     private sealed class MutableClock : TimeProvider

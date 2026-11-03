@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Caching.Memory;
+using System.Net;
 using PremiereCalendar.IntegrationTests.Support;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -162,6 +163,39 @@ public sealed class TvmazeClientIntegrationTests
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1710000000), first[0].UpdatedAtUtc);
         Assert.Equal([82, 83], second.Select(update => update.ShowId).ToArray());
         Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task ArtworkAdapterDoesNotVerifyImageFailureAsAbsence()
+    {
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath.EndsWith("/images")
+            ? new HttpResponseMessage(HttpStatusCode.Forbidden)
+            : StubHttpMessageHandler.Json("{\"id\":82,\"name\":\"Example\"}"));
+        var provider = new TvmazeArtworkProvider(CreateClient(handler, true));
+        var result = await provider.GetArtworkWithStatusAsync(new(PremiereCalendar.Models.PremiereMediaType.Series, 42, "tt42", 82, null, "Example"), CancellationToken.None);
+        Assert.False(result.Successful);
+        Assert.Equal("authentication_denied", result.Failure?.Reason);
+        Assert.Equal(403, result.Failure?.StatusCode);
+    }
+
+    [Fact]
+    public async Task LookupAndSearchExposeRateLimitStatusAndRetryDeadline()
+    {
+        var handler = new StubHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+            response.Headers.RetryAfter = new(TimeSpan.FromMinutes(5));
+            return response;
+        });
+        var client = CreateClient(handler, true);
+        var lookup = await client.LookupShowWithStatusAsync(82, null, CancellationToken.None);
+        var search = await client.SearchShowByNameWithStatusAsync("Example", CancellationToken.None);
+        Assert.False(lookup.Successful);
+        Assert.Equal("rate_limited", lookup.Failure?.Reason);
+        Assert.Equal(429, lookup.Failure?.StatusCode);
+        Assert.NotNull(lookup.Failure?.RetryAtUtc);
+        Assert.False(search.Successful);
+        Assert.Equal(429, search.Failure?.StatusCode);
     }
 
     private static TvmazeClient CreateClient(

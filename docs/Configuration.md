@@ -40,6 +40,8 @@ Serilog internal failures are counted process-wide in `OperationalLoggingDiagnos
 
 Detailed performance events are also saved by default in `Telemetry:LogDirectory/performance/performance-*.ndjson`, independently of OTLP, `Telemetry:Enabled`, and trace sampling. They include UTC timestamps, process elapsed time, event order, opaque load/job/operation/request IDs, fixed source and stage codes, counts, cache outcomes, and measured durations. A load can be followed into a queued job through its explicit linking event; provider attempts retain their parent job/source/operation context when assigning a request ID. An enrichment operation may record the public numeric TMDb item ID at its start, without its title. Cache keys use fixed partition names (`premieres-v1` or historical `default`) or criteria hashes, so filter contents are absent. Media titles, exception messages, HTTP addresses, headers, and response bodies have no diagnostic fields.
 
+Use `eng/Read-CalendarPerformance.ps1 -CacheAudit` for correlated page timings, provider status/retry outcomes, item/component reuse and accepted writes, and reconciliation failures. The audit exposes missing/truncated/lost evidence rather than treating an empty log as success. See [cache freshness verification](CacheFreshnessDiagnostics.md) for commands and interpretation.
+
 | Setting under `Telemetry` | Default | Behavior |
 | --- | --- | --- |
 | `PerformanceDiagnosticsEnabled` | `true` | Save detailed performance events locally. |

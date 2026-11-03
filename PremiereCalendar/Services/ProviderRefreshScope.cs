@@ -113,4 +113,4 @@ public sealed class ProviderRefreshScope
     }
 }
 
-public readonly record struct ProviderRefreshResult<T>(T Value, bool Successful);
+public readonly record struct ProviderRefreshResult<T>(T Value, bool Successful, ProviderFailure? Failure = null);

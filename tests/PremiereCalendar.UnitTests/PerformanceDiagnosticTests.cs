@@ -197,7 +197,10 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
     {
         using var directory = new TestDirectory();
         var options = new TelemetryOptions { PerformanceRetainedFileCount = 3 };
-        using (var store = new PerformanceDiagnosticStore(options, directory.Path, fileSizeLimitBytes: 8192))
+        // Tiny files deliberately force many rotations; this checks retention,
+        // while separate blocked-writer tests enforce production flush bounds.
+        using (var store = new PerformanceDiagnosticStore(options, directory.Path, fileSizeLimitBytes: 8192,
+            flushTimeout: TimeSpan.FromSeconds(30)))
         {
             var telemetry = new PremiereTelemetry(store);
             var context = telemetry.CreateDiagnosticContext();
@@ -207,6 +210,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
             telemetry.FlushDiagnostics();
             Assert.Equal(1000, store.Health.WrittenEvents);
             Assert.Equal(0, store.Health.DroppedEvents);
+            Assert.Equal(0, store.Health.FlushTimeouts);
         }
         var files = Directory.GetFiles(directory.PerformancePath, "performance-*.ndjson");
         Assert.Equal(3, files.Length);
@@ -487,9 +491,16 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         }
         finally { release.Set(); }
         store.Flush();
+        // Flush is intentionally bounded; after releasing blocked I/O its
+        // queued durability barrier can complete asynchronously under load.
+        var recovery = Stopwatch.StartNew();
+        while (!store.Health.Healthy && recovery.Elapsed < TimeSpan.FromSeconds(5))
+            await Task.Delay(10);
         Assert.True(store.Health.Healthy);
         Assert.False(store.Health.WriterStalled);
         Assert.Equal(0, store.Health.ActiveIoMs);
+        Assert.Equal(1, store.Health.WrittenEvents);
+        Assert.Equal(0, store.Health.DroppedEvents);
     }
 
     [Fact]

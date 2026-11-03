@@ -12,6 +12,8 @@ public sealed record ItemEnrichmentMetadata
     public string? OriginalTitle { get; init; }
     public string? Title { get; init; }
     public string? Overview { get; init; }
+    public string? OmdbPlot { get; init; }
+    public string? OmdbPosterUrl { get; init; }
     public string? PosterUrl { get; init; }
     public string? BackdropUrl { get; init; }
     public string? ImageSource { get; init; }
@@ -37,10 +39,28 @@ public sealed record ItemEnrichmentMetadata
     public int? TvmazeShowId { get; init; }
     public ItemEnrichmentTmdbObservation? TmdbVotes { get; init; }
     public bool AvailabilityComplete { get; init; }
+    // Only Watchmode may replace its prior availability entries during an
+    // optional retry. Legacy and TMDb entries have no Watchmode ownership.
+    public bool AvailabilityOwnedByWatchmode { get; init; }
+    // Optional providers have their own completeness. A failure must not make
+    // successfully fetched TMDb fields stale or replace their corrected values.
+    public bool OptionalMetadataComplete { get; init; } = true;
+    public bool TvmazeComplete { get; init; } = true;
+    public bool ArtworkComplete { get; init; } = true;
+    // The displayed poster is a retained fallback whose owner verified absence.
+    // Unrelated empty providers cannot create this evidence for legacy covers.
+    public bool PosterOwnerVerifiedEmpty { get; init; }
+    public bool RuntimeFromTvmaze { get; init; }
+    public bool OptionalFreshnessTracked { get; init; }
+    public DateTimeOffset? AvailabilityFetchedUtc { get; init; }
+    public DateTimeOffset? TvmazeFetchedUtc { get; init; }
+    public DateTimeOffset? ArtworkFetchedUtc { get; init; }
     // A provider validation result, not the date of the occurrence being mapped.
     public bool FirstEpisodeDateChecked { get; init; }
     public DateOnly? FirstEpisodeDate { get; init; }
 
+    // Date semantics on a calendar row can describe a fallback. Only an explicit
+    // successful season validation may set FirstEpisodeDateChecked.
     public static ItemEnrichmentMetadata FromItem(PremiereItem item) => new()
     {
         ImdbId = item.ImdbId, TvdbId = item.TvdbId, WikidataId = item.WikidataId,
@@ -57,11 +77,7 @@ public sealed record ItemEnrichmentMetadata
         TvmazeAverageRuntimeMinutes = item.TvmazeAverageRuntimeMinutes, TvmazeRating = item.TvmazeRating,
         OfficialSiteUrl = item.OfficialSiteUrl, TvmazeUrl = item.TvmazeUrl,
         TvmazeShowId = ParseTvmazeShowId(item.TvmazeUrl),
-        TmdbVotes = ItemEnrichmentTmdbObservation.Observe(null, item.TmdbScore, item.TmdbVoteCount, item.LastUpdatedUtc),
-        FirstEpisodeDateChecked = item.Type == PremiereItemType.SeriesPremiere
-            && item.DateSemantics?.SourceKind == PremiereDateSourceKind.TmdbSeasonOneEpisodeOne,
-        FirstEpisodeDate = item.Type == PremiereItemType.SeriesPremiere
-            && item.DateSemantics?.SourceKind == PremiereDateSourceKind.TmdbSeasonOneEpisodeOne ? item.PremiereDate : null
+        TmdbVotes = ItemEnrichmentTmdbObservation.Observe(null, item.TmdbScore, item.TmdbVoteCount, item.LastUpdatedUtc)
     };
 
     public PremiereItem Apply(PremiereItem discovered, bool preferDiscoveryMetadata = true) => discovered with
@@ -119,6 +135,15 @@ public sealed record ItemEnrichmentRatings(
     string? ImdbId = null, string? WikidataId = null, string? Title = null, int? Year = null,
     bool FreshnessVerified = true)
 {
+    public bool ProviderFreshnessTracked { get; init; }
+    public bool ExternalRequired { get; init; } = true;
+    public bool TomatoesRequired { get; init; } = true;
+    public DateTimeOffset? ExternalFetchedUtc { get; init; }
+    public DateTimeOffset? TomatoesFetchedUtc { get; init; }
+    public ItemEnrichmentRatingValues? ExternalValues { get; init; }
+    public ItemEnrichmentRatingValues? TomatoesValues { get; init; }
+    public bool DatasetRequired { get; init; }
+    public ItemEnrichmentDatasetRating? Dataset { get; init; }
     public static ItemEnrichmentRatings FromItem(PremiereItem item) => new(
         item.ImdbScore, item.ImdbVoteCount, item.RottenTomatoesScore, item.RottenTomatoesAudienceScore, item.MetacriticScore,
         item.ImdbId, item.WikidataId, item.Title, item.PremiereDate.Year);
@@ -132,14 +157,24 @@ public sealed record ItemEnrichmentRatings(
     internal bool MatchesImdb(string? imdbId) => Same(ImdbId, imdbId);
     internal bool MatchesTomatoes(string? wikidataId, string? title, int? year) => Same(WikidataId, wikidataId) && Same(Title, title) && Year == year;
 
-    public PremiereItem Apply(PremiereItem item) => item with
+    public PremiereItem Apply(PremiereItem item)
     {
-        ImdbScore = Same(ImdbId, item.ImdbId) ? ImdbScore ?? item.ImdbScore : null,
-        ImdbVoteCount = Same(ImdbId, item.ImdbId) ? ImdbVoteCount ?? item.ImdbVoteCount : null,
-        RottenTomatoesScore = Matches(item) ? RottenTomatoesScore ?? item.RottenTomatoesScore : null,
-        RottenTomatoesAudienceScore = Matches(item) ? RottenTomatoesAudienceScore ?? item.RottenTomatoesAudienceScore : null,
-        MetacriticScore = Same(ImdbId, item.ImdbId) ? MetacriticScore ?? item.MetacriticScore : null
-    };
+        var externalMatches = Same(ImdbId, item.ImdbId);
+        var tomatoesMatch = MatchesTomatoes(item.WikidataId, item.Title, item.PremiereDate.Year);
+        var critic = externalMatches && tomatoesMatch ? RottenTomatoesScore
+            : !ProviderFreshnessTracked ? null : externalMatches ? ExternalValues?.RottenTomatoesScore
+            : tomatoesMatch ? TomatoesValues?.RottenTomatoesScore : null;
+        var audience = externalMatches && tomatoesMatch ? RottenTomatoesAudienceScore
+            : !ProviderFreshnessTracked ? null : externalMatches ? ExternalValues?.RottenTomatoesAudienceScore
+            : tomatoesMatch ? TomatoesValues?.RottenTomatoesAudienceScore : null;
+        return item with
+        {
+            ImdbScore = externalMatches ? ImdbScore : null,
+            ImdbVoteCount = externalMatches ? ImdbVoteCount : null,
+            RottenTomatoesScore = critic, RottenTomatoesAudienceScore = audience,
+            MetacriticScore = externalMatches ? MetacriticScore : null
+        };
+    }
 
     public ItemEnrichmentRatings PreserveMissing(ItemEnrichmentRatings? previous) => previous is null ? this : this with
     {
@@ -152,3 +187,8 @@ public sealed record ItemEnrichmentRatings(
 
     private static bool Same(string? first, string? second) => string.Equals(first?.Trim(), second?.Trim(), StringComparison.OrdinalIgnoreCase);
 }
+
+public sealed record ItemEnrichmentRatingValues(double? ImdbScore = null, int? ImdbVoteCount = null,
+    int? RottenTomatoesScore = null, int? RottenTomatoesAudienceScore = null, int? MetacriticScore = null);
+
+public sealed record ItemEnrichmentDatasetRating(string? ImdbId, double? ImdbScore, int? ImdbVoteCount, DateTimeOffset FetchedUtc);

@@ -67,8 +67,10 @@ public sealed class NightlyCalendarWarmupRunner(
             if (final is null) throw new InvalidOperationException("Nightly calendar window ended without final discovery progress.");
             if (final.HasSourceErrors && final.RetryAfterUtc > timeProvider.GetUtcNow())
             {
-                outcome = "provider_deferred";
-                return NightlyCalendarWarmupOutcome.Deferred; // The scheduler durably defers to the recovery deadline.
+                outcome = final.IsDegradedResult ? "degraded" : "provider_deferred";
+                // Neither result proves complete nightly coverage. The scheduler
+                // handles terminal degraded progress separately from retryable work.
+                return NightlyCalendarWarmupOutcome.Deferred;
             }
             if (final.HasSourceErrors || !publishedOwnedSnapshot
                 || !await NightlyCalendarWarmupPlanner.HasCompleteSnapshotAsync(cache, payload, cancellationToken))

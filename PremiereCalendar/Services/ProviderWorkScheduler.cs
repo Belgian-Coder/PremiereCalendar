@@ -385,7 +385,11 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         var transitionStarted = _timeProvider.GetTimestamp();
         if (!await FlushAsync(job, cancellationToken)) return;
         var now = _timeProvider.GetUtcNow();
-        if (GetExecution(job).Latest?.CalendarProgress?.RetryAfterUtc is { } retryAfter && retryAfter > now)
+        var finalCalendar = GetExecution(job).Latest?.CalendarProgress;
+        var degraded = finalCalendar is { IsDegradedResult: true, HasSourceErrors: true }
+            && finalCalendar.UnavailableSources.Count > 0
+            && finalCalendar.UnavailableSources.All(source => source.IsOptionalAccessDenial && source.RetryAtUtc > now);
+        if (!degraded && finalCalendar?.RetryAfterUtc is { } retryAfter && retryAfter > now)
         {
             if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), now, retryAfter, false,
                     "Provider work is waiting for provider recovery.", cancellationToken, retryWaiting: true))
@@ -404,14 +408,19 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }
         if (!await _store.CompleteAsync(job.JobId, RequireOwner(job), now, cancellationToken))
         { RecordLeaseLost(job, "complete"); return; }
+        var completionOutcome = degraded ? "degraded" : finalCalendar?.HasSourceErrors == true ? "partial" : "completed";
         RecordDiagnostic(job, "scheduler.job.completed", new()
         {
-            Stage = "durable", Outcome = "completed", IsFinal = true, DurationMilliseconds = _timeProvider.GetElapsedTime(transitionStarted).TotalMilliseconds
+            Stage = "durable", Outcome = completionOutcome,
+            Reason = degraded ? "optional_source_access_denied" : finalCalendar?.HasSourceErrors == true ? "source_failure" : null,
+            IsFinal = true, DurationMilliseconds = _timeProvider.GetElapsedTime(transitionStarted).TotalMilliseconds
         });
         await RefreshCountsAsync(cancellationToken);
-        _telemetry.RecordJob(job.Kind.ToString(), "completed", Elapsed(job));
+        _telemetry.RecordJob(job.Kind.ToString(), completionOutcome, Elapsed(job));
         Publish(job.JobId,
-            new ProviderWorkProgress(job.JobId, ProviderWorkState.Completed, "Provider work completed."));
+            new ProviderWorkProgress(job.JobId, ProviderWorkState.Completed,
+                degraded ? "Provider work completed with unavailable optional source coverage."
+                    : completionOutcome == "partial" ? "Provider work ended with incomplete source coverage." : "Provider work completed."));
     }
 
     internal async Task PreemptAsync(ProviderWorkSnapshot job, CancellationToken cancellationToken)
@@ -865,6 +874,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     {
         DateTimeOffset? direct = error switch
         {
+            ProviderRequestException request => request.Failure.RetryAtUtc,
             ProviderCircuitOpenException circuit => circuit.RetryAtUtc,
             ProviderRetryAfterException retry => retry.RetryAtUtc,
             _ => null

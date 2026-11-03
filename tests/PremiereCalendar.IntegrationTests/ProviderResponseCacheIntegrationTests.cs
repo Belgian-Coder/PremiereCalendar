@@ -82,7 +82,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     public async Task RottenTomatoes_ScoresAndSuccessfulEmptySurviveRestart_ForceRefreshBypasses(bool empty)
     {
         var score = 72;
-        var handler = new StubHttpMessageHandler(request => Html(empty ? "<html>No matches</html>" :
+        var handler = new StubHttpMessageHandler(request => Html(empty ? "<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>" :
             request.RequestUri!.AbsolutePath == "/search" ?
             $"<search-page-media-row release-year=\"2026\" tomatometer-score=\"{score}\"><a href=\"/m/example\" data-qa=\"info-name\">Example</a></search-page-media-row>" :
             $"<script id=\"media-scorecard-json\" type=\"application/json\">{{\"criticsScore\":{{\"score\":\"{score}\"}}}}</script>"));
@@ -289,7 +289,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     public async Task RottenTomatoesConcurrentColdMisses_PerformOneReadAndOneSearch()
     {
         var store = new InterceptingStore(CreateStore()) { BlockReads = true };
-        var handler = new StubHttpMessageHandler(_ => Html("<html>No matching results</html>"));
+        var handler = new StubHttpMessageHandler(_ => Html("<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>"));
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var client = RottenTomatoes(handler, memory, Cache(store));
         var requests = Enumerable.Range(0, 20).Select(_ => Scores(client)).ToArray();
@@ -406,7 +406,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     public async Task RealWikimedia_OnlyVerifiedMissingIdentifiersPermitPersistentEmptyScores(HttpStatusCode wikimediaStatus, bool persistEmpty)
     {
         var wikiHandler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{\"entities\":{\"Q42\":{\"claims\":{}}}}", wikimediaStatus));
-        var rtHandler = new StubHttpMessageHandler(_ => Html("<html>No matching results</html>"));
+        var rtHandler = new StubHttpMessageHandler(_ => Html("<div class=\"js-search-no-results search__no-results\">Sorry, no results found for &quot;Example&quot;</div>"));
         for (var restart = 0; restart < 2; restart++)
         {
             using var memory = new MemoryCache(new MemoryCacheOptions());

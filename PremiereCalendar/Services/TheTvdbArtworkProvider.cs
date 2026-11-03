@@ -6,6 +6,7 @@ namespace PremiereCalendar.Services;
 
 public sealed class TheTvdbArtworkProvider : IArtworkProvider
 {
+    public string OwnedSource => ArtworkSources.TheTvdb;
     private readonly ITheTvdbClient _client;
     private readonly TheTvdbOptions _options;
 
@@ -19,14 +20,17 @@ public sealed class TheTvdbArtworkProvider : IArtworkProvider
         ArtworkRequest request,
         CancellationToken cancellationToken,
         bool forceRefresh = false)
+        => (await GetArtworkWithStatusAsync(request, cancellationToken, forceRefresh)).Value;
+
+    public async Task<ProviderRefreshResult<ArtworkCandidate?>> GetArtworkWithStatusAsync(ArtworkRequest request, CancellationToken cancellationToken, bool forceRefresh = false)
     {
         if (request.MediaType != PremiereMediaType.Series || request.TvdbId is not > 0)
         {
-            return null;
+            return new(null, true, new("not_applicable"));
         }
 
-        var artworks = await _client.GetSeriesArtworkAsync(request.TvdbId.Value, cancellationToken, forceRefresh);
-        var url = artworks
+        var result = await _client.GetSeriesArtworkWithStatusAsync(request.TvdbId.Value, cancellationToken, forceRefresh);
+        var url = result.Value
             .Where(artwork => IsPosterLike(artwork.Type))
             .Where(artwork => !string.IsNullOrWhiteSpace(ArtworkUrl(artwork)))
             .OrderBy(artwork => LanguageRank(artwork.Language))
@@ -34,9 +38,7 @@ public sealed class TheTvdbArtworkProvider : IArtworkProvider
             .Select(ArtworkUrl)
             .FirstOrDefault();
 
-        return string.IsNullOrWhiteSpace(url)
-            ? null
-            : new ArtworkCandidate(url, ArtworkSources.TheTvdb);
+        return new(string.IsNullOrWhiteSpace(url) ? null : new ArtworkCandidate(url, ArtworkSources.TheTvdb), result.Successful, result.Failure);
     }
 
     private string? ArtworkUrl(TheTvdbArtwork artwork)

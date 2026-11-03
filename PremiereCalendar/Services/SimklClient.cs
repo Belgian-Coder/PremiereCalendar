@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Caching.Memory;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 
@@ -22,6 +23,7 @@ public sealed class SimklClient : ISimklClient
     private readonly ISimklSyncStateStore _stateStore;
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly PremiereTelemetry? _telemetry;
+    private readonly IMemoryCache _failureCache;
     private readonly SemaphoreSlim _calendarFeedSlots = new(MaxConcurrentCalendarFeeds);
     private readonly object _calendarCacheLock = new();
     private readonly Dictionary<string, LinkedListNode<CalendarCacheEntry>> _calendarCache = new(StringComparer.Ordinal);
@@ -32,13 +34,15 @@ public sealed class SimklClient : ISimklClient
         IOptions<SimklOptions> options,
         ISimklSyncStateStore stateStore,
         IIntegrationSettingsStore? settingsStore = null,
-        PremiereTelemetry? telemetry = null)
+        PremiereTelemetry? telemetry = null,
+        IMemoryCache? cache = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _stateStore = stateStore;
         _settingsStore = settingsStore;
         _telemetry = telemetry;
+        _failureCache = cache ?? new MemoryCache(new MemoryCacheOptions());
     }
 
     public async Task<SimklPinCodeResult> RequestPinCodeAsync(CancellationToken cancellationToken)
@@ -360,7 +364,13 @@ public sealed class SimklClient : ISimklClient
         }
 
         var uri = BuildCalendarUri(path, settings);
-        var items = await StreamCalendarItemsAsync(uri, feedCode, type, start, end, cancellationToken);
+        var failures = new ProviderFailureCache(_failureCache, "simkl-calendar", uri, settings.ClientId.Trim());
+        if (failures.Get(DateTimeOffset.UtcNow) is { } deferred)
+        {
+            RecordCalendarFailure(deferred);
+            throw new ProviderRequestException("simkl", deferred);
+        }
+        var items = await StreamCalendarItemsAsync(uri, feedCode, type, start, end, cancellationToken, failures);
 
         SetCachedCalendar(cacheKey, items);
         return items;
@@ -372,7 +382,8 @@ public sealed class SimklClient : ISimklClient
         SimklCalendarItemType type,
         DateOnly start,
         DateOnly end,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ProviderFailureCache failures)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -390,6 +401,12 @@ public sealed class SimklClient : ISimklClient
                 HttpCompletionOption.ResponseHeadersRead,
                 requestCancellation.Token);
             statusCode = (int)response.StatusCode;
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)
+            {
+                var failure = ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow);
+                failures.Remember(failure, DateTimeOffset.UtcNow);
+                throw new ProviderRequestException("simkl", failure);
+            }
             if (!response.IsSuccessStatusCode)
             {
                 throw new HttpRequestException("SIMKL calendar feed returned an unsuccessful response.", null, response.StatusCode);
@@ -431,9 +448,22 @@ public sealed class SimklClient : ISimklClient
             RecordFeed("canceled");
             throw;
         }
+        catch (ProviderRequestException exception)
+        {
+            RecordFeed(exception.Failure.Reason);
+            RecordCalendarFailure(exception.Failure);
+            throw;
+        }
         catch (HttpRequestException exception) when (exception is ProviderCircuitOpenException or ProviderRetryAfterException)
         {
             RecordFeed(exception is ProviderCircuitOpenException ? "circuit_open" : "retry_after");
+            var failure = ProviderFailure.FromException(exception);
+            if (failure.StatusCode is 401 or 403)
+            {
+                failures.Remember(failure, DateTimeOffset.UtcNow);
+                RecordCalendarFailure(failure);
+                throw new ProviderRequestException("simkl", failure);
+            }
             throw;
         }
         catch (HttpRequestException)
@@ -455,6 +485,13 @@ public sealed class SimklClient : ISimklClient
                 StatusCode = statusCode, Count = count, DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
             });
     }
+
+    private void RecordCalendarFailure(ProviderFailure failure)
+        => _telemetry?.RecordDiagnostic("provider.outcome", _telemetry.CaptureDiagnosticContext(), new()
+        {
+            Provider = "simkl", Stage = "calendar_feed", Outcome = "failed", Reason = failure.Reason,
+            StatusCode = failure.StatusCode, RetryAtUtc = failure.RetryAtUtc, FromCache = failure.IsLocal
+        });
 
     private bool TryGetCachedCalendar(string cacheKey, out IReadOnlyList<SimklCalendarItem> items)
     {

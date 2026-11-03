@@ -94,7 +94,8 @@ public sealed class FileCalendarCache : ICalendarCache, ICalendarCacheMaintenanc
                 cached.Items,
                 new CalendarCacheMetadata(cachedAtUtc, cached.Items.Count, cached.SchemaVersion, cached.Completeness),
                 DateTimeOffset.UtcNow - cachedAtUtc <= maxAge,
-                cached.Generation ?? $"{cached.SchemaVersion}:{cachedAtUtc:O}");
+                cached.Generation ?? $"{cached.SchemaVersion}:{cachedAtUtc:O}")
+            { UnavailableSources = cached.UnavailableSources ?? [] };
         }
         catch (OperationCanceledException ex)
         {
@@ -349,6 +350,94 @@ public sealed class FileCalendarCache : ICalendarCache, ICalendarCacheMaintenanc
         }
     }
 
+    public async Task<bool> SetDegradedWeekAsync(DateOnly start, DateOnly end, string cacheKey,
+        IReadOnlyList<PremiereItem> items, IReadOnlyList<SourceUnavailableNotice> unavailableSources,
+        DateTimeOffset refreshStartedUtc, CancellationToken cancellationToken, string? expectedGeneration = null)
+    {
+        var started = Stopwatch.GetTimestamp();
+        if (!_options.Enabled || unavailableSources.Count == 0
+            || unavailableSources.Any(source => source is null || !source.IsOptionalAccessDenial || source.RetryAtUtc <= DateTimeOffset.UtcNow))
+        {
+            RecordCacheDiagnostic("calendar.cache.file.write", "degraded", start, end, cacheKey, started, "skipped", !_options.Enabled ? "disabled" : "invalid_notice");
+            return false;
+        }
+        return await SetExactPartialWeekAsync(start, end, cacheKey, items, unavailableSources, refreshStartedUtc,
+            cancellationToken, expectedGeneration, "degraded", "optional_source_access_denied");
+    }
+
+    public Task<bool> SetValidatedPartialWeekAsync(DateOnly start, DateOnly end, string cacheKey,
+        IReadOnlyList<PremiereItem> items, DateTimeOffset refreshStartedUtc,
+        CancellationToken cancellationToken, string? expectedGeneration = null)
+        => SetExactPartialWeekAsync(start, end, cacheKey, items, [], refreshStartedUtc,
+            cancellationToken, expectedGeneration, "validated_partial", "validated_projection");
+
+    private async Task<bool> SetExactPartialWeekAsync(DateOnly start, DateOnly end, string cacheKey,
+        IReadOnlyList<PremiereItem> items, IReadOnlyList<SourceUnavailableNotice> unavailableSources,
+        DateTimeOffset refreshStartedUtc, CancellationToken cancellationToken, string? expectedGeneration,
+        string stage, string reason)
+    {
+        var started = Stopwatch.GetTimestamp();
+        if (!_options.Enabled)
+        {
+            RecordCacheDiagnostic("calendar.cache.file.write", stage, start, end, cacheKey, started, "skipped", "disabled");
+            return false;
+        }
+        var saved = false;
+        var path = CachePath(start, end, cacheKey);
+        await CalendarCachePublicationLock.RunAsync(CacheDirectory(), async token =>
+        {
+            CalendarCacheEnvelope? latest = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    await using var reader = OpenCacheReader(path);
+                    latest = await JsonSerializer.DeserializeAsync<CalendarCacheEnvelope>(reader, JsonOptions, token);
+                }
+                catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+                {
+                    RecordCacheDiagnostic("calendar.cache.file.write", stage, start, end, cacheKey, started, "existing_preserved", "unreadable");
+                    return;
+                }
+                if (latest is null || latest.SchemaVersion != CurrentSchemaVersion || latest.Items is null
+                    || !IsValidCompleteness(latest.Completeness) || EffectiveCachedAtUtc(path, latest) > refreshStartedUtc)
+                {
+                    RecordCacheDiagnostic("calendar.cache.file.write", stage, start, end, cacheKey, started, "existing_preserved", "newer_or_invalid_snapshot");
+                    return;
+                }
+                var latestGeneration = latest.Generation ?? $"{latest.SchemaVersion}:{EffectiveCachedAtUtc(path, latest):O}";
+                if (!string.Equals(expectedGeneration, latestGeneration, StringComparison.Ordinal))
+                {
+                    RecordCacheDiagnostic("calendar.cache.file.write", stage, start, end, cacheKey, started, "existing_preserved", "generation_changed");
+                    return;
+                }
+            }
+            else if (expectedGeneration is not null) return;
+            Directory.CreateDirectory(CacheDirectory());
+            // The caller already retained unknown prior occurrences and removed
+            // only disproven dates. Re-unioning the old file would restore them.
+            var merged = items.ToList();
+            var envelope = new CalendarCacheEnvelope
+            {
+                SchemaVersion = CurrentSchemaVersion, Generation = Guid.NewGuid().ToString("N"),
+                CachedAtUtc = DateTimeOffset.UtcNow, Completeness = CalendarCacheCompleteness.Partial,
+                ItemCount = merged.Count, Items = merged, UnavailableSources = unavailableSources.ToArray()
+            };
+            var temporary = $"{path}.{Guid.NewGuid():N}.tmp";
+            try
+            {
+                await using (var writer = File.Create(temporary))
+                    await JsonSerializer.SerializeAsync(writer, envelope, JsonOptions, token);
+                token.ThrowIfCancellationRequested();
+                ReplaceAtomically(temporary, path);
+                saved = true;
+                RecordCacheDiagnostic("calendar.cache.file.write", stage, start, end, cacheKey, started, "saved", reason, merged.Count);
+            }
+            catch { TryDeleteFile(temporary); throw; }
+        }, cancellationToken);
+        return saved;
+    }
+
     private static List<PremiereItem> MergePartialRows(
         IReadOnlyList<PremiereItem> latest,
         IReadOnlyList<PremiereItem> incoming)
@@ -461,6 +550,7 @@ public sealed class FileCalendarCache : ICalendarCache, ICalendarCacheMaintenanc
                     CachedAtUtc = latest.Metadata.CachedAtUtc,
                     Completeness = latest.Metadata.Completeness,
                     ItemCount = merged.Count,
+                    UnavailableSources = latest.UnavailableSources,
                     Items = merged
                 };
                 var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
@@ -900,6 +990,7 @@ public sealed class FileCalendarCache : ICalendarCache, ICalendarCacheMaintenanc
         public DateTimeOffset CachedAtUtc { get; init; }
         public CalendarCacheCompleteness Completeness { get; init; } = CalendarCacheCompleteness.Complete;
         public int ItemCount { get; init; } = -1;
+        public IReadOnlyList<SourceUnavailableNotice>? UnavailableSources { get; init; }
         public List<PremiereItem> Items { get; init; } = [];
     }
 

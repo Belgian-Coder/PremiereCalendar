@@ -35,6 +35,9 @@ public sealed class WikimediaClient : IWikimediaClient
         string wikidataId,
         CancellationToken cancellationToken,
         bool forceRefresh = false)
+        => (await GetReusableImageWithStatusAsync(wikidataId, cancellationToken, forceRefresh)).Value;
+
+    public async Task<ProviderRefreshResult<string?>> GetReusableImageWithStatusAsync(string wikidataId, CancellationToken cancellationToken, bool forceRefresh = false)
     {
         var started = Stopwatch.GetTimestamp();
         var context = _telemetry?.CaptureDiagnosticContext();
@@ -48,7 +51,7 @@ public sealed class WikimediaClient : IWikimediaClient
             if (!enabled || string.IsNullOrWhiteSpace(wikidataId))
             {
                 outcome = "disabled_or_invalid";
-                return null;
+                return new(null, true, new("disabled"));
             }
 
             wikidataId = wikidataId.Trim();
@@ -59,7 +62,7 @@ public sealed class WikimediaClient : IWikimediaClient
             {
                 cacheHit = true;
                 outcome = "cache_hit";
-                return string.IsNullOrWhiteSpace(cached) ? null : cached;
+                return new(string.IsNullOrWhiteSpace(cached) ? null : cached, true);
             }
 
             var entity = await _claims.GetAsync(wikidataId, generation, cancellationToken);
@@ -67,42 +70,42 @@ public sealed class WikimediaClient : IWikimediaClient
             var fileName = entity.Image;
             if (!fileName.IsSuccess)
             {
-                return null;
+                return new(null, false, entity.Failure ?? new("invalid_response"));
             }
 
             if (string.IsNullOrWhiteSpace(fileName.Value))
             {
                 CacheResult(fence, generation, cacheKey, null);
                 outcome = "absent";
-                return null;
+                return new(null, true);
             }
 
             var imageUrl = await GetReusableCommonsImageUrlAsync(fileName.Value, cancellationToken, context);
             if (!imageUrl.IsSuccess)
             {
-                return null;
+                return new(null, false, imageUrl.Failure ?? new("invalid_response"));
             }
 
             CacheResult(fence, generation, cacheKey, imageUrl.Value);
             outcome = string.IsNullOrWhiteSpace(imageUrl.Value) ? "absent" : "found";
-            return imageUrl.Value;
+            return new(imageUrl.Value, true);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return null;
+            return new(null, false, new("timeout"));
         }
         catch (OperationCanceledException)
         {
             outcome = "cancelled";
             throw;
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException exception)
         {
-            return null;
+            return new(null, false, ProviderFailure.FromException(exception));
         }
         catch (JsonException)
         {
-            return null;
+            return new(null, false, new("invalid_response"));
         }
         finally
         {
@@ -133,7 +136,7 @@ public sealed class WikimediaClient : IWikimediaClient
             if (!enabled || string.IsNullOrWhiteSpace(wikidataId))
             {
                 outcome = "disabled_or_invalid";
-                return new(null, IsSuccess: false);
+                return new(null, IsSuccess: true, new("disabled"));
             }
 
             wikidataId = wikidataId.Trim();
@@ -152,7 +155,7 @@ public sealed class WikimediaClient : IWikimediaClient
             var rottenTomatoesId = entity.Identifier;
             if (!rottenTomatoesId.IsSuccess)
             {
-                return new(null, IsSuccess: false);
+                return new(null, IsSuccess: false, entity.Failure ?? new("invalid_response"));
             }
 
             CacheResult(fence, generation, cacheKey, rottenTomatoesId.Value);
@@ -202,7 +205,8 @@ public sealed class WikimediaClient : IWikimediaClient
 
         if (!response.IsSuccessStatusCode)
         {
-            return new Dictionary<string, WikimediaEntityClaims>();
+            var failure = ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow);
+            return ids.ToDictionary(id => id, _ => WikimediaEntityClaims.Failed with { Failure = failure }, StringComparer.Ordinal);
         }
 
         var started = Stopwatch.GetTimestamp();
@@ -367,7 +371,7 @@ public sealed class WikimediaClient : IWikimediaClient
 
         if (!response.IsSuccessStatusCode)
         {
-            return new WikimediaFetchResult<string>(null, IsSuccess: false);
+            return new WikimediaFetchResult<string>(null, IsSuccess: false, ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow));
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -439,5 +443,5 @@ public sealed class WikimediaClient : IWikimediaClient
                 : null;
     }
 
-    private readonly record struct WikimediaFetchResult<T>(T? Value, bool IsSuccess);
+    private readonly record struct WikimediaFetchResult<T>(T? Value, bool IsSuccess, ProviderFailure? Failure = null);
 }

@@ -286,12 +286,12 @@ public sealed class WatchmodeClientIntegrationTests
         var handler = new StubHttpMessageHandler(_ => throw new TaskCanceledException("Simulated HTTP timeout."));
         var client = CreateClient(handler);
 
-        var candidates = await client.GetReleaseCandidatesAsync(
+        var candidates = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetReleaseCandidatesAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None));
 
-        Assert.Empty(candidates);
+        Assert.NotNull(candidates.Failure);
         Assert.Single(handler.Requests);
     }
 
@@ -307,12 +307,12 @@ public sealed class WatchmodeClientIntegrationTests
         var client = CreateClient(handler);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
 
-        var candidates = await client.GetReleaseCandidatesAsync(
+        var candidates = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetReleaseCandidatesAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            cancellation.Token);
+            cancellation.Token));
 
-        Assert.Empty(candidates);
+        Assert.NotNull(candidates.Failure);
         Assert.Single(handler.Requests);
     }
 
@@ -328,17 +328,17 @@ public sealed class WatchmodeClientIntegrationTests
         var client = CreateClient(handler);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
 
-        var firstCandidates = await client.GetReleaseCandidatesAsync(
+        var firstCandidates = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetReleaseCandidatesAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            cancellation.Token);
-        var secondCandidates = await client.GetReleaseCandidatesAsync(
+            cancellation.Token));
+        var secondCandidates = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetReleaseCandidatesAsync(
             new DateOnly(2026, 5, 4),
             new DateOnly(2026, 5, 10),
-            CancellationToken.None);
+            CancellationToken.None));
 
-        Assert.Empty(firstCandidates);
-        Assert.Empty(secondCandidates);
+        Assert.NotNull(firstCandidates.Failure);
+        Assert.NotNull(secondCandidates.Failure);
         Assert.Single(handler.Requests);
     }
 
@@ -375,10 +375,10 @@ public sealed class WatchmodeClientIntegrationTests
         var start = new DateOnly(2026, 5, 4);
         var end = new DateOnly(2026, 5, 10);
 
-        var timeoutCandidates = await client.GetReleaseCandidatesAsync(start, end, CancellationToken.None);
+        var timeoutCandidates = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetReleaseCandidatesAsync(start, end, CancellationToken.None));
         var recoveredCandidates = await client.GetReleaseCandidatesAsync(start, end, CancellationToken.None);
 
-        Assert.Empty(timeoutCandidates);
+        Assert.NotNull(timeoutCandidates.Failure);
         Assert.Equal("Recovered Release", Assert.Single(recoveredCandidates).Title);
         Assert.Equal(2, handler.Requests.Count);
     }
@@ -411,6 +411,89 @@ public sealed class WatchmodeClientIntegrationTests
             CancellationToken.None));
 
         Assert.InRange(elapsed.ElapsedMilliseconds, 500, 2_500);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests, "rate_limited")]
+    [InlineData(HttpStatusCode.Unauthorized, "authentication_denied")]
+    public async Task ProviderFailureCooldownAppliesAcrossTitlesAndForceRefresh(HttpStatusCode status, string reason)
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(status));
+        var client = CreateClient(handler);
+        var first = await client.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 1, null, ["BE", "NL"], CancellationToken.None);
+        var second = await client.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 2, "tt2", ["BE", "NL"], CancellationToken.None, forceRefresh: true);
+        Assert.False(first.Successful);
+        Assert.Equal(reason, first.Failure?.Reason);
+        Assert.Equal("local_backoff", second.Failure?.Reason);
+        Assert.NotNull(second.Failure?.RetryAtUtc);
+        Assert.False(second.Successful);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task VerifiedEmptySearchIsReusedAndRemainsDifferentFromFailure()
+    {
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{\"title_results\":[]}"));
+        var client = CreateClient(handler);
+        var first = await client.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 1, null, ["BE"], CancellationToken.None);
+        var second = await client.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 1, null, ["BE"], CancellationToken.None);
+        Assert.True(first.Successful);
+        Assert.True(second.Successful);
+        Assert.Null(second.Failure);
+        Assert.Empty(second.Value);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task AvailabilityRefreshReusesStableTitleIdUnlessIdentityRefreshWasExplicitlyRequested()
+    {
+        var searches = 0;
+        var sources = 0;
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/search/"))
+            {
+                searches++;
+                return StubHttpMessageHandler.Json("{\"title_results\":[{\"id\":10}]}");
+            }
+            sources++;
+            return StubHttpMessageHandler.Json("[]");
+        });
+        var client = CreateClient(handler);
+        Assert.True((await client.GetTitleSourcesWithRefreshPolicyAsync(PremiereMediaType.Movie, 1, null, ["BE"], CancellationToken.None)).Successful);
+        Assert.True((await client.GetTitleSourcesWithRefreshPolicyAsync(PremiereMediaType.Movie, 1, null, ["BE"], CancellationToken.None, true, false)).Successful);
+        Assert.Equal(1, searches);
+        Assert.Equal(2, sources);
+        Assert.True((await client.GetTitleSourcesWithRefreshPolicyAsync(PremiereMediaType.Movie, 1, null, ["BE"], CancellationToken.None, true, true)).Successful);
+        Assert.Equal(2, searches);
+        Assert.Equal(3, sources);
+    }
+
+    [Fact]
+    public async Task EnabledBlankKeyAvailabilityIsSkippedWithoutFailureCooldown()
+    {
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("Unconfigured provider must not send."));
+        var result = await CreateClient(handler, " ").GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], CancellationToken.None, true);
+        Assert.True(result.Successful);
+        Assert.Equal("not_configured", result.Failure?.Reason);
+        Assert.Null(result.Failure?.RetryAtUtc);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    public async Task ReleaseDiscoveryAuthDenialsRemainTypedAcrossForcedWindows(HttpStatusCode status)
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(status));
+        var client = CreateClient(handler);
+        var first = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetReleaseCandidatesAsync(new(2026, 11, 2), new(2026, 11, 8), CancellationToken.None));
+        var repeated = await Assert.ThrowsAsync<ProviderRequestException>(() => client.GetReleaseCandidatesAsync(new(2026, 11, 9), new(2026, 11, 15), CancellationToken.None, true));
+        Assert.Equal((int)status, first.Failure.StatusCode);
+        Assert.Equal("authentication_denied", first.Failure.Reason);
+        Assert.Equal((int)status, repeated.Failure.StatusCode);
+        Assert.Equal(first.Failure.RetryAtUtc, repeated.Failure.RetryAtUtc);
+        Assert.Single(handler.Requests);
     }
 
     private static WatchmodeClient CreateClient(StubHttpMessageHandler handler, string apiKey = "test-watchmode-key")

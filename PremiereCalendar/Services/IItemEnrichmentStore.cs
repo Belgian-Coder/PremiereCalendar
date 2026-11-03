@@ -19,7 +19,11 @@ public sealed record ItemEnrichmentRecord(
 
 // A missing component means "leave its last successful value and clock alone".
 // Same-clock metadata repairs require the revision captured by ReadManyAsync.
-// When supplied, that revision also binds ratings to the retained metadata identity.
+// Legacy/unverified ratings retain that same revision guard. Explicit tracked
+// provider projections are merged atomically by their own clocks and accepted
+// metadata identities; they cannot replace core metadata through that merge.
+// ExpectedRatingsJson authorizes a same-clock final projection repair only while
+// both that exact payload and ExpectedMetadataRevision remain current.
 public sealed record ItemEnrichmentWrite(
     ItemEnrichmentIdentity Identity,
     long ExpectedGeneration,
@@ -29,7 +33,8 @@ public sealed record ItemEnrichmentWrite(
     DateTimeOffset? RatingsFetchedUtc = null,
     int? TvmazeShowId = null,
     DateTimeOffset? TmdbObservedUtc = null,
-    long? ExpectedMetadataRevision = null);
+    long? ExpectedMetadataRevision = null,
+    string? ExpectedRatingsJson = null);
 
 public interface IItemEnrichmentStore
 {

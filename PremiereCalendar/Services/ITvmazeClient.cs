@@ -23,6 +23,9 @@ public interface ITvmazeClient
         string title, CancellationToken cancellationToken, bool forceRefresh = false)
         => new(await SearchShowByNameAsync(title, cancellationToken, forceRefresh), true);
 
+    async Task<ProviderRefreshResult<IReadOnlyList<TvmazeShowImage>>> GetShowImagesWithStatusAsync(int showId, CancellationToken cancellationToken, bool forceRefresh = false)
+        => new(await GetShowImagesAsync(showId, cancellationToken, forceRefresh), true);
+
     Task<IReadOnlyList<TvmazeShowImage>> GetShowImagesAsync(
         int showId,
         CancellationToken cancellationToken,

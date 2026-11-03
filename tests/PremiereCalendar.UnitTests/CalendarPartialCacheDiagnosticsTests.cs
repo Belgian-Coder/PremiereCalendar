@@ -132,7 +132,10 @@ public sealed partial class PremiereServiceTests
                 Assert.Contains("calendar.load.started", events);
                 Assert.Contains("calendar.load.first_result", events);
                 Assert.Contains("calendar.cache.read", events);
-                Assert.Contains("calendar.cache.partial_publication", events);
+                Assert.Contains("calendar.cache.validated_partial", events);
+                Assert.Contains(rows, row => row.RootElement.GetProperty("event").GetString() == "calendar.cache.validated_partial"
+                    && row.RootElement.GetProperty("details").GetProperty("outcome").GetString() == "success"
+                    && row.RootElement.GetProperty("details").GetProperty("durationMilliseconds").GetDouble() >= 0);
                 Assert.Contains("source.finished", events);
                 Assert.Contains("enrichment.item.started", events);
                 Assert.Contains(rows, row => row.RootElement.GetProperty("event").GetString() == "calendar.load.finished"
@@ -207,14 +210,35 @@ public sealed partial class PremiereServiceTests
 
     private sealed class PartialSnapshotCache : ICalendarCache
     {
-        public IReadOnlyList<PremiereItem>? Items { get; private set; }
+        private readonly Dictionary<(DateOnly Start, DateOnly End, string Key), CalendarCacheSnapshot> _snapshots = [];
+        public IReadOnlyList<PremiereItem>? Items => _snapshots.Count == 0 ? null : _snapshots.Values.SelectMany(snapshot => snapshot.Items).ToArray();
         public int PartialWrites { get; private set; }
+        public Task<CalendarCacheSnapshot?> GetWeekSnapshotAsync(DateOnly start, DateOnly end, string cacheKey,
+            CancellationToken cancellationToken)
+            => Task.FromResult(_snapshots.GetValueOrDefault((start, end, cacheKey)));
         public Task<IReadOnlyList<PremiereItem>?> GetWeekAsync(DateOnly start, DateOnly end, string cacheKey,
             CancellationToken cancellationToken, bool allowExpired = false)
-            => Task.FromResult(allowExpired ? Items : null);
+            => Task.FromResult(allowExpired ? _snapshots.GetValueOrDefault((start, end, cacheKey))?.Items : null);
         public Task SetPartialWeekAsync(DateOnly start, DateOnly end, string cacheKey, IReadOnlyList<PremiereItem> items,
             CancellationToken cancellationToken)
-        { Items = items; PartialWrites++; return Task.CompletedTask; }
+        { Save(start, end, cacheKey, items); return Task.CompletedTask; }
+        public Task<bool> SetValidatedPartialWeekAsync(DateOnly start, DateOnly end, string cacheKey, IReadOnlyList<PremiereItem> items,
+            DateTimeOffset refreshStartedUtc, CancellationToken cancellationToken, string? expectedGeneration = null)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var current = _snapshots.GetValueOrDefault((start, end, cacheKey));
+            if (current is not null && (current.Metadata.CachedAtUtc > refreshStartedUtc || current.Generation != expectedGeneration)
+                || current is null && expectedGeneration is not null) return Task.FromResult(false);
+            Save(start, end, cacheKey, items);
+            return Task.FromResult(true);
+        }
+        private void Save(DateOnly start, DateOnly end, string cacheKey, IReadOnlyList<PremiereItem> items)
+        {
+            var rows = items.ToArray();
+            _snapshots[(start, end, cacheKey)] = new(rows,
+                new(DateTimeOffset.UtcNow, rows.Length, 8, CalendarCacheCompleteness.Partial), true, Guid.NewGuid().ToString("N"));
+            PartialWrites++;
+        }
         public Task SetWeekAsync(DateOnly start, DateOnly end, string cacheKey, IReadOnlyList<PremiereItem> items,
             CancellationToken cancellationToken) => throw new InvalidOperationException("Failed sources cannot produce a complete cache.");
     }
