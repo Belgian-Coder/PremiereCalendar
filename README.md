@@ -210,5 +210,6 @@ Technical references:
 - [Architecture](docs/Architecture.md)
 - [Performance Notes](docs/PerformanceReview.md)
 - [Measured refresh with saved filters](docs/SavedFilterTimingResults-20261102.md)
+- [Installed selective-cache validation and service totals](docs/CacheRefreshLiveValidation-20261103.md)
 - [Testing](docs/Testing.md)
 - [Docker and PostgreSQL](docs/DockerAndPostgres.md)

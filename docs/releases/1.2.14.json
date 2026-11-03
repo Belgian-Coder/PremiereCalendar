@@ -1,0 +1,758 @@
+{
+  "schemaVersion": 1,
+  "version": "1.2.14",
+  "tag": "v1.2.14",
+  "sourceRevision": "1781c3eb045513f182e4aa16da8dca37f19919d9",
+  "createdUtc": "2026-11-03T20:31:43Z",
+  "distribution": "docker-archive",
+  "platform": "linux/amd64",
+  "imageConfigurationDigest": "sha256:1bbaa00d773228eab29286d2328e81792cc7c0dedfbcda215730deb3a14b86bb",
+  "ociIndexDigest": "sha256:c154978fd34b44e9fd97904757b42c251954464dcc904c584a486dda58be3195",
+  "archive": "premierecalendar-1.2.14.tar",
+  "archiveBytes": 185451008,
+  "archiveSha256": "1de8b3e7d981573c23f6503e53c90f02eec712de63acce0d9b997616d5896c73",
+  "databaseSchemaVersion": 4,
+  "status": "installed",
+  "acceptance": {
+    "tests": [
+      {
+        "suite": "Unit",
+        "passed": 818,
+        "failed": 0,
+        "skipped": 1,
+        "wallSeconds": 82.8515068,
+        "testContainer": "premiere-final-tests-134"
+      },
+      {
+        "suite": "Component",
+        "passed": 191,
+        "failed": 0,
+        "skipped": 0,
+        "wallSeconds": 57.5333735,
+        "testContainer": "premiere-final-tests-134"
+      },
+      {
+        "suite": "Integration",
+        "passed": 501,
+        "failed": 0,
+        "skipped": 0,
+        "wallSeconds": 81.1356339,
+        "testContainer": "premiere-final-tests-134"
+      }
+    ],
+    "sourceReview": {
+      "schemaVersion": 1,
+      "sourceRevision": "1781c3eb045513f182e4aa16da8dca37f19919d9",
+      "completedUtc": "2026-11-03T20:29:56.634Z",
+      "openP0P2": 0,
+      "astra": {
+        "model": "gpt-6-astra",
+        "effort": "high",
+        "status": "completed",
+        "evidence": "astra-review.json",
+        "openP0P2": 0
+      },
+      "claude": {
+        "model": "claude-opus-5-5",
+        "effort": "xhigh",
+        "interface": "Claude CLI 2.1.316",
+        "status": "completed",
+        "actualModelVerified": true,
+        "evidence": [
+          "reviews/claude-final-small.json",
+          "reviews/claude-final-small-run.json",
+          "claude-final-adjudication.json",
+          "claude-prior-findings-closure.json",
+          "claude-backfill-adjudication.json"
+        ],
+        "adjudicatedOpenP0P2": 0
+      },
+      "runtimeSha256": {
+        "PremiereCalendar/Services/ItemEnrichmentRatingsMerger.cs": "8C75A724999AE6E8B6A955218DF100079EF22E1BFB859AAF1E51FFF430916E07",
+        "PremiereCalendar/Services/FileCalendarCache.cs": "EE60EF03C3B3E8A5482814A68B2C290447187F0113141E545D1CD7C45B347542",
+        "PremiereCalendar/Services/PremiereService.Diagnostics.cs": "CFD95B3A7C2F6025AB09E5358A9A33231935A9F4AF71CEBA66724D84B5A8F460",
+        "PremiereCalendar/Services/IItemEnrichmentStore.cs": "EED7739F413599720C9C0C497E18318ACD53A95DA33C13BD3E6B73CE8FA5C138",
+        "PremiereCalendar/Services/PremiereDiscoveryCriteria.cs": "0DC70EE523198D6FBA1C537ED752393683B8116DCE8015E9D128CC31AFCF232E",
+        "PremiereCalendar/Services/PremiereFilter.cs": "B5C0C85CD513A6B172D42B1C6E19E0151913C61C341B2B7A351D1E4363DA807B",
+        "PremiereCalendar/Services/PremiereService.cs": "646F430FB1779E223420204711932DECD45F088A3CA8ECCAA5AEE73885B2A185",
+        "PremiereCalendar/Services/ItemEnrichmentCacheCoordinator.cs": "75956D2C76E44FE4B1ED73D69357672335F83A132156B72E12FB928EE97CBF65",
+        "PremiereCalendar/Services/PremiereService.Enrichment.cs": "9BBD96205213FE27AFA3A6F7D231558881F2C321F04050FCC801B9668B21DB56",
+        "PremiereCalendar/Services/PremiereService.ItemCache.cs": "86915E155577243DE4CF2FFA1CF932E35E7BDBF1066FF8CB5ED1631129695F3D",
+        "PremiereCalendar/Services/AdaptiveProviderPolicy.cs": "133C4BCCC4E0FBBED243C82FE28A62C7FE55A3454F0973B1552BC587D96BB86E",
+        "PremiereCalendar/Services/ProviderFailure.cs": "57C9717A03DAF286232126D8CD683DDF5F2C22AA21A7437E1DBB2D02F65C2073",
+        "PremiereCalendar/Services/OmdbClient.cs": "5186522125587D472D899D44C8D5508AF00BE8345F02C5412E1372F14942F208",
+        "PremiereCalendar/Services/ProviderWorkScheduler.cs": "7A2FF7977C39D5906FF122969EECBD4042E69EE455E135F3AAE5CB8E8D5769FD",
+        "PremiereCalendar/Services/ItemEnrichmentMetadata.cs": "F2E21D5B42BF691F00527884BCF4A4003E0DDD17F9C680A80861598249E9AD62",
+        "PremiereCalendar/Services/IArtworkProvider.cs": "3F7D833864F2632C676F2F2A3B0B5AE8F52B15EBA78AD5D3CEAAA81F56F0E6C6",
+        "PremiereCalendar/Services/FanartArtworkProvider.cs": "AF7F39CC204CE3F07E0AF5E7868889D7398278C1A21783FEA1ACD30934E0F8B1",
+        "PremiereCalendar/Services/TheTvdbArtworkProvider.cs": "6A0418C9E7ABB1C68A39A0898F6C84467794D805CA2880D9A2E5CF5DE55E1452",
+        "PremiereCalendar/Services/TvmazeArtworkProvider.cs": "CBBDA5F56BC13704D3DBD1687B213658C637FFEA5BBDA7E447CA16218EB9C799",
+        "PremiereCalendar/Services/WikimediaArtworkProvider.cs": "68DEE31659F4D3378CEA39B467EC4587BC804DD026AB59E67CB44318ED426029"
+      },
+      "finalFixtureCorrection": {
+        "path": "tests/PremiereCalendar.IntegrationTests/WikimediaBatchIntegrationTests.cs",
+        "sha256": "F86AFD125605F6885965EE3223B9AAD7807DC503B4C5E3862E1035506D1B394F",
+        "scope": "Test-only deterministic queued force coalescing; newer forced generations remain isolated from prior dispatched work.",
+        "targetedTestsPassed": 21
+      },
+      "limits": [
+        "Source reviews are independent of the image, backup compatibility and installed performance gates.",
+        "Raw CLI findings are retained; final dispositions record fixes and contextual adjudication, rather than rewriting earlier findings.",
+        "Real provider credentials, permission and quotas may still cause explicitly partial results."
+      ]
+    },
+    "scanSummary": {
+      "sourceRevision": "1781c3eb045513f182e4aa16da8dca37f19919d9",
+      "archiveSha256": "1de8b3e7d981573c23f6503e53c90f02eec712de63acce0d9b997616d5896c73",
+      "trivy": {
+        "results": 4,
+        "vulnerabilities": 0,
+        "bySeverity": {},
+        "fixableBySeverity": {},
+        "misconfigurations": 0,
+        "secrets": 0
+      },
+      "sbom": {
+        "format": "CycloneDX",
+        "specVersion": "1.7",
+        "components": 488
+      },
+      "checks": {
+        "trivyZeroVulnerabilities": true,
+        "trivyZeroMisconfigurations": true,
+        "trivyZeroSecrets": true,
+        "cycloneDx17Nonempty": true,
+        "archiveIdentityPass": true,
+        "nugetNoVulnerablePackages": true
+      },
+      "allChecksPass": true
+    },
+    "schema4BackupCompatibility": {
+      "beforeSchemaVersion": 4,
+      "afterSchemaVersion": 4,
+      "beforePublicTableCounts": {
+        "appparameters": 304,
+        "calendarfilterusage": 8,
+        "imdbdatasetstate": 3,
+        "imdbratings": 1728074,
+        "itemenrichments": 2531,
+        "omdbcache": 13762,
+        "omdbproviderstate": 3,
+        "provideradaptivestate": 12,
+        "providercachestate": 572879,
+        "providerworkjobs": 1312,
+        "providerworkleases": 0,
+        "schemamigrations": 4,
+        "simklsyncstate": 0,
+        "viewsyncdevices": 347,
+        "viewsyncgroups": 1,
+        "viewsyncgroupstate": 3
+      },
+      "afterPublicTableCounts": {
+        "appparameters": 304,
+        "calendarfilterusage": 8,
+        "imdbdatasetstate": 3,
+        "imdbratings": 1728074,
+        "itemenrichments": 2531,
+        "omdbcache": 13762,
+        "omdbproviderstate": 3,
+        "provideradaptivestate": 12,
+        "providercachestate": 572879,
+        "providerworkjobs": 1312,
+        "providerworkleases": 0,
+        "schemamigrations": 4,
+        "simklsyncstate": 0,
+        "viewsyncdevices": 347,
+        "viewsyncgroups": 1,
+        "viewsyncgroupstate": 3
+      },
+      "migrationHistory1to4": {
+        "1": {
+          "name": "baseline-current-schema",
+          "checksum": "09bf8d563bf3afdf18c79cbf1931e22268a3b16e215202e420d7c971e3edb6e5"
+        },
+        "2": {
+          "name": "durable-provider-scheduler",
+          "checksum": "d296a5952fccd5272d6ae79a837299ff5cff79c82bb40d5128220f9c9ba166d2"
+        },
+        "3": {
+          "name": "scheduler-leases-and-centralized-stores",
+          "checksum": "ce2f893674ad83eb5f89d1d9eee95642dee7238fe2368bf23d3735b926910a63"
+        },
+        "4": {
+          "name": "normalized-item-enrichment-cache",
+          "checksum": "0e19b8ff266839912986b0e1c4f65c5a70ae973227fb1fa0032ac117a8088458"
+        }
+      },
+      "preferenceFingerprints": {
+        "appparameters": {
+          "rows": 304,
+          "md5": "a81605297c2c4cdd365e1ac722c676b1"
+        },
+        "calendarfilterusage": {
+          "rows": 8,
+          "md5": "e397a387109636d468440dd30498a65b"
+        },
+        "viewsyncgroups": {
+          "rows": 1,
+          "md5": "5acb8f7b1d53efa13fd05b13baae8698"
+        },
+        "viewsyncdevices": {
+          "rows": 347,
+          "md5": "16b8a05fa5e52204ea5fce9b286623a8"
+        },
+        "viewsyncgroupstate": {
+          "rows": 3,
+          "md5": "f998495bca1c824dfd5a6f60638afa26"
+        },
+        "simklsyncstate": {
+          "rows": 0,
+          "md5": "d41d8cd98f00b204e9800998ecf8427e"
+        }
+      },
+      "retainedItemEnrichmentsBefore": {
+        "rows": 2531,
+        "md5": "687fab20636c6164f7643b1be13ba494"
+      },
+      "retainedItemEnrichmentsAfter": {
+        "rows": 2531,
+        "md5": "687fab20636c6164f7643b1be13ba494"
+      },
+      "tableCountChanges": {},
+      "preferenceFingerprintChanges": {},
+      "checks": {
+        "backupSchema4": true,
+        "postStartupSchema4": true,
+        "migrationHistory1to4Preserved": true,
+        "allPublicTableCountsPreserved": true,
+        "preferenceFingerprintsPreserved": true,
+        "retainedItemEnrichmentsPresentBeforeAndAfter": true,
+        "retainedItemEnrichmentsUnchanged": true
+      },
+      "allChecksPass": true,
+      "dataPolicy": "Counts, migration metadata, and one-way row fingerprints only; no row payload stored."
+    },
+    "backupRestore": {
+      "backupPath": "\\\\NAS\\Docker\\PremiereCalendar\\backups\\pre-upgrade-1.2.14-20261103\\daily\\premierecalendar-20261103T174836Z-30557.dump",
+      "backupSha256": "D4B2CB8EA08126D4162487CD823389DCFC97C06266E3DEADD0008E4ECE4D2C6B",
+      "backupBytes": 86648057,
+      "destinationContainer": "premiere134c_backup_db",
+      "destinationDatabase": "premierecalendar",
+      "restoreExitCode": 0,
+      "elapsedMilliseconds": 73563,
+      "inputPipeFailed": false,
+      "stdoutBytes": 0,
+      "stderrLineCount": 0
+    },
+    "installedHealth": {
+      "direct": "passed",
+      "private": "passed"
+    },
+    "httpChecks": 6
+  },
+  "installation": {
+    "installedUtc": "2026-11-03T20:38:24.309029153Z",
+    "stackId": 20,
+    "stackFileVersion": 13,
+    "appContainer": "6c1d72fc05f12a463e53af88f753374e70823ac7d6e68c0d402c1c38b48c67c3",
+    "previousAppContainer": "5208cac18220d423908b4970fb2b301ded459c9fcbbc78722427857363d186ec",
+    "databaseContainer": "47e2c0c19b625113b0b88b6e734ae8a2cb1745b0c89fa9ad098abc79c35e4f16",
+    "backupContainer": "e5e41753ec9617eddd12d9921370b7cf88d7f0aeec2955d46a253e3bdcde2ed6",
+    "diagnosticDroppedEvents": 0,
+    "diagnosticWriterFailures": 0,
+    "operationalLoggingFailures": 0
+  },
+  "backup": {
+    "PrivateBackup": "\\\\NAS\\Data\\Backups\\Infrastructure-Secrets\\NAS\\Portainer\\stacks\\premierecalendar\\20261103T174847Z-before-1.2.14",
+    "NativeEntries": 250,
+    "NativeSha256": "f2899a46ce82e475c594151cf755b5a9311df60fb8f544e883cfba713cfa2a10",
+    "StackId": 20,
+    "StackRevision": 12,
+    "DatabaseDump": [
+      "d4b2cb8ea08126d4162487cd823389dcfc97c06266e3deadd0008e4ece4d2c6b  premierecalendar-20261103T174836Z-30557.dump"
+    ]
+  },
+  "rollback": {
+    "schema4CapableImageRequired": true,
+    "featureFallback": "ItemEnrichmentCache__Enabled=false",
+    "oldSchema3ImageDirectRollbackSupported": false,
+    "automaticDatabaseRestorePerformed": false
+  },
+  "assets": [
+    {
+      "name": "astra-review.json",
+      "bytes": 3902,
+      "sha256": "e6cff70b41ceae95e3953ba88d9eb91b58e0cf9d290c7c9f2b025a5aa8bbe401"
+    },
+    {
+      "name": "backup-compat-health.json",
+      "bytes": 1054,
+      "sha256": "6b2771e039e1eaba2345f2733f9fbe8eedb3f455caf95f9dcd12a32a4208ecee"
+    },
+    {
+      "name": "backup-compat-security.txt",
+      "bytes": 117,
+      "sha256": "813f3fbbf1c48d58fe4110a2102e0e3e0345f4d9feb2f7eb8f069f3456edc352"
+    },
+    {
+      "name": "backup-schema4-after.txt",
+      "bytes": 2456,
+      "sha256": "0b1d84f4a3036276457216eb0c50d783478318ded6ba75144937e2b1f126f0f6"
+    },
+    {
+      "name": "backup-schema4-before.txt",
+      "bytes": 2456,
+      "sha256": "0b1d84f4a3036276457216eb0c50d783478318ded6ba75144937e2b1f126f0f6"
+    },
+    {
+      "name": "build-metadata.json",
+      "bytes": 1153,
+      "sha256": "fd4a4430ec3bd64d66368f14db769b17135f7adab0a94f68a98049576aaf0e60"
+    },
+    {
+      "name": "build.log",
+      "bytes": 5087,
+      "sha256": "66a915b4b7eb2721cdbcc565daa0c1517823b6af848a2288dbda1b1d80506994"
+    },
+    {
+      "name": "cache-diagnostics.md",
+      "bytes": 7797,
+      "sha256": "38965ec594cd1831f2d261d00c0104adf80e3afde1a093b42d551d4603f8228c"
+    },
+    {
+      "name": "cache-operations.md",
+      "bytes": 6979,
+      "sha256": "c1e2d746bb85f11abd51695b63d321d5c10b85481fbafe631f86853c18691dd1"
+    },
+    {
+      "name": "claude-backfill-adjudication.json",
+      "bytes": 2036,
+      "sha256": "e0746a71c5dfb395695ad3d3c86aa0293cb2b3891aa04a7c15013a8522b02bc9"
+    },
+    {
+      "name": "claude-backfill-review.json",
+      "bytes": 7069,
+      "sha256": "61e9b3e4d89fb1d239f81d4924f5064b468bb77e29f009e9f34eddf0503518cb"
+    },
+    {
+      "name": "claude-backfill-run.json",
+      "bytes": 158,
+      "sha256": "50970836ec5861fb5215101e95c5ad820379602436893eaf800297c4383ddd02"
+    },
+    {
+      "name": "claude-final-adjudication.json",
+      "bytes": 2056,
+      "sha256": "73944972fddb4314bcc8bb47fd7c0ec041bff30a5ff59069614eebe7486bbf38"
+    },
+    {
+      "name": "claude-prior-findings-closure.json",
+      "bytes": 3064,
+      "sha256": "2938ddeed638d3f8a29976481dfab29ba343f7916e6e0c06640cce42598c5c7e"
+    },
+    {
+      "name": "installed-cache/acceptance.json",
+      "bytes": 1761,
+      "sha256": "f0b1d48bb2f64150a0476b4c54e8aece036bad28e84d98e227523659fe963201"
+    },
+    {
+      "name": "installed-cache/activation.json",
+      "bytes": 381,
+      "sha256": "afd0dcd3420f3c03cc145b60310341656ba92b464be5e87d890a7b0ca3f5aea4"
+    },
+    {
+      "name": "installed-cache/after.json",
+      "bytes": 21097,
+      "sha256": "c812037612f4e42efb74d2ae1c2f3d1198bfe6e0114f20fb7dd184531e8b9969"
+    },
+    {
+      "name": "installed-cache/before-final.json",
+      "bytes": 21507,
+      "sha256": "e37c4cb28eda556968fd1db025ca0c4f0be6b84a8ddaceb806069d245a43d5ab"
+    },
+    {
+      "name": "installed-cache/browser-console.json",
+      "bytes": 3,
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "name": "installed-cache/browser-visits.json",
+      "bytes": 7044,
+      "sha256": "2d94f946766b5a3626b2d519ffb98a11113cba09b5267ee5b3e36435009a37a6"
+    },
+    {
+      "name": "installed-cache/canonical-doc-update.json",
+      "bytes": 1409,
+      "sha256": "d0f7ca9a86efdeb88c13fb734bcb074cff3e1909353026eab8cde8cfc37b47a6"
+    },
+    {
+      "name": "installed-cache/containers-after.json",
+      "bytes": 895,
+      "sha256": "34086356b2935f43722369b6cf255b3fdc34739d9b42b84c3ded6821368f00c0"
+    },
+    {
+      "name": "installed-cache/containers-before.json",
+      "bytes": 895,
+      "sha256": "a1863c5226c411f8935944a726348e264e959ac4b80edae395f83ac7f4a7963b"
+    },
+    {
+      "name": "installed-cache/health-direct.json",
+      "bytes": 1287,
+      "sha256": "7a7620beba6f94af161934622b881c98d4e86d6b33c634a0e3d3a80e03575fd0"
+    },
+    {
+      "name": "installed-cache/health-private.json",
+      "bytes": 1287,
+      "sha256": "7a7620beba6f94af161934622b881c98d4e86d6b33c634a0e3d3a80e03575fd0"
+    },
+    {
+      "name": "installed-cache/http-checks.json",
+      "bytes": 656,
+      "sha256": "7558640c28ca4e19eeb066c06eb8a952d360e59f31b44b9931e4225588bbdfd5"
+    },
+    {
+      "name": "installed-cache/image-load.json",
+      "bytes": 346,
+      "sha256": "59490d2d2cdb07e64d11f04f3b3ee7e19c7db3c85bb8005461db84200cc97ce3"
+    },
+    {
+      "name": "installed-cache/installed-movies-oct19.png",
+      "bytes": 109453,
+      "sha256": "34d1ba6124f32f1b7b8cf45b6b0a7619ebb84877c86a9095d18737db6e5dac4f"
+    },
+    {
+      "name": "installed-cache/live-score-preservation.json",
+      "bytes": 34608,
+      "sha256": "c8d2cd8e1bb4f134ffde131d815f3210c0aee2a6bb90aeb18fe7fcee15a3042b"
+    },
+    {
+      "name": "installed-cache/performance-final.json",
+      "bytes": 291990,
+      "sha256": "7efeaa6a67930befb544a750e4cbefac6652527b2e166b0ae00a15c5619d7984"
+    },
+    {
+      "name": "installed-cache/performance-snapshot.json",
+      "bytes": 336,
+      "sha256": "77e0175dabe4e9974795de5a3b8b18e001f3c45d7b9b7473bf0b0b22b60e6e6a"
+    },
+    {
+      "name": "installed-cache/performance/performance-20261103T2038256524874Z-4cfec8f9b6e84a1197a1aa2c0464d56e-000001.ndjson",
+      "bytes": 15510151,
+      "sha256": "038d1d75d1b01df2d3b44cf4050f9fa1045ffb090c418b70e9ccb09cd4d414da"
+    },
+    {
+      "name": "installed-cache/projection-after-final.json",
+      "bytes": 3332672,
+      "sha256": "1e76124d95e4a7aea849b719925bf21f98dfd83739fdcd61b8d6e8348bc57557"
+    },
+    {
+      "name": "installed-cache/projection-before-activation.json",
+      "bytes": 3173054,
+      "sha256": "4980923d847bc3d5c0765784c0a52088cf93d4ee9e85957de5d1ca764a7644ff"
+    },
+    {
+      "name": "installed-cache/projection-comparison-after-final.json",
+      "bytes": 38559,
+      "sha256": "895250d1a2a4db8d1521b281258131043f87dcc7ca39e397b518059415a48554"
+    },
+    {
+      "name": "installed-cache/service-call-attribution.json",
+      "bytes": 7093,
+      "sha256": "9b514ee9000343558c0e2d84d8481e66bf4be59ac8797a0e7f6e71d38b6b5dda"
+    },
+    {
+      "name": "installed-validation.md",
+      "bytes": 9377,
+      "sha256": "f5183f81ad7bba608090b53e4a5bb120fd99599313448a067aa413592d7f0faf"
+    },
+    {
+      "name": "investigations/expected-old-store-failures.json",
+      "bytes": 254,
+      "sha256": "c21337e3cb3ca390081a48c90b527407ad50d447ec78c845d43801553e6b6825"
+    },
+    {
+      "name": "investigations/expected-old-store-failures.trx",
+      "bytes": 9314,
+      "sha256": "865cdf29486a1ea6db05952e3541b8935e08832321a8ce92c61327ac5cbb1754"
+    },
+    {
+      "name": "local-gate-timings.json",
+      "bytes": 823,
+      "sha256": "d94a811d011c3506cc8144aa6962ae7962113c735908edf8b00792695368f474"
+    },
+    {
+      "name": "premierecalendar-1.2.14.tar",
+      "bytes": 185451008,
+      "sha256": "1de8b3e7d981573c23f6503e53c90f02eec712de63acce0d9b997616d5896c73"
+    },
+    {
+      "name": "release-1.2.14-audit.json",
+      "bytes": 3629,
+      "sha256": "a9416b22f8443179460d9fed29659a373701510494663762eddb377da00e89bf"
+    },
+    {
+      "name": "release-1.2.14-sbom.cdx.json",
+      "bytes": 313741,
+      "sha256": "6604860d7d743f997da05196eb7b568fca02833b5691f7447bd7369c5e8d25b4"
+    },
+    {
+      "name": "release-1.2.14-scan-summary.json",
+      "bytes": 660,
+      "sha256": "efda28ada8c3b6523ada0350c59cf496e34ef02a68d6e34c6165523ebe6b95b5"
+    },
+    {
+      "name": "release-1.2.14-smoke.log",
+      "bytes": 708,
+      "sha256": "8adbc07a95ced6b5177b63ee7d693c11d08cd65c269f39b6075145a2efbfac81"
+    },
+    {
+      "name": "release-1.2.14-trivy.json",
+      "bytes": 60831,
+      "sha256": "0963a48ec7ebac6b9ed206f3c3a60f47003f13db503deff31347015558956a45"
+    },
+    {
+      "name": "release-notes.md",
+      "bytes": 4039,
+      "sha256": "2b9a49765f651cd0a12a61f5b2f3dab5450c09f123c250bd8bf97792475b40af"
+    },
+    {
+      "name": "release-nuget-audit.log",
+      "bytes": 487,
+      "sha256": "0a4c0eee6e10c6a5393e4879d24e09a3db369183bf451d3bdee7c84b28c6b25c"
+    },
+    {
+      "name": "release-syft.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "release-trivy.log",
+      "bytes": 1053,
+      "sha256": "e1787f68b010556fafde176ac6f17c07843157632c97d2ad0ab09c6c3fd46d7f"
+    },
+    {
+      "name": "reviews/claude-backfill-run.json",
+      "bytes": 158,
+      "sha256": "50970836ec5861fb5215101e95c5ad820379602436893eaf800297c4383ddd02"
+    },
+    {
+      "name": "reviews/claude-backfill-source-hashes.json",
+      "bytes": 316,
+      "sha256": "7c2969f6f938eb8d72cfdf7b3b89ae1bf698bb069ee813cf31cde618d4906993"
+    },
+    {
+      "name": "reviews/claude-backfill.json",
+      "bytes": 7069,
+      "sha256": "61e9b3e4d89fb1d239f81d4924f5064b468bb77e29f009e9f34eddf0503518cb"
+    },
+    {
+      "name": "reviews/claude-closure-packet-manifest.json",
+      "bytes": 48944,
+      "sha256": "c4f3c8378b8f758a2fd464b50ca79a21652c647af6a67202bf55fcdcb2f8338c"
+    },
+    {
+      "name": "reviews/claude-closure-run.json",
+      "bytes": 247,
+      "sha256": "51f20d277b3023dbff7c5386508597640e43c5245fefe3223039ca5e359b2fc3"
+    },
+    {
+      "name": "reviews/claude-closure.json",
+      "bytes": 12602,
+      "sha256": "e5fd8088ec53e6073fc6e4d813f29d4c9a26d7b2020b1bc5ea9bad64f9616f5c"
+    },
+    {
+      "name": "reviews/claude-final-run.json",
+      "bytes": 241,
+      "sha256": "b963aa52ce72ea5be73bc23786609950eb377b0b262d876a4716a80aeade0174"
+    },
+    {
+      "name": "reviews/claude-final-small-manifest.json",
+      "bytes": 441,
+      "sha256": "25c194206efd286398130bc81a64c2980673bcde620ee9f7fcaf741fc461f2f9"
+    },
+    {
+      "name": "reviews/claude-final-small-run.json",
+      "bytes": 169,
+      "sha256": "30cecd81fe5d98f2e8fe7090eb5b917e709f34983b909d230e4380e5ec6f4e2c"
+    },
+    {
+      "name": "reviews/claude-final-small.json",
+      "bytes": 6044,
+      "sha256": "f4ed01bdb7e837c78a94f7388a69b4f97247980a09a54ea9a92f2245b4d1a346"
+    },
+    {
+      "name": "reviews/claude-final.json",
+      "bytes": 12123,
+      "sha256": "c9c4535b9106cb189f7eba395305bd19531966e29ccc6552bb8e12f564713c95"
+    },
+    {
+      "name": "reviews/claude-initial.json",
+      "bytes": 11732,
+      "sha256": "cc24cbf5b031a2c1d0066d5e6322364aae504f2d102cc4de322d376fe8633110"
+    },
+    {
+      "name": "reviews/claude-ownership-state-manifest.json",
+      "bytes": 1706,
+      "sha256": "8b04fe0aab0cf3bebfa14db85f4dfd4a58504e6b693f419b235e1dbe25b44ab2"
+    },
+    {
+      "name": "reviews/claude-ownership-state-run.json",
+      "bytes": 172,
+      "sha256": "1b7fb1f480aa6abcc4e562592d54a51858404ac15b8957b70198231b51a89f5b"
+    },
+    {
+      "name": "reviews/claude-ownership-state.json",
+      "bytes": 7146,
+      "sha256": "e1dbb71738f5aca7d259c6f492ab121ccb0c31fc14af4a5f4e519adca76ffbfb"
+    },
+    {
+      "name": "reviews/claude-remediation-manifest.json",
+      "bytes": 1461,
+      "sha256": "32fc8728a006b0715aae4d624fcf1a88422fb24ca415e978ca5f152373f33aa4"
+    },
+    {
+      "name": "reviews/claude-remediation-run.json",
+      "bytes": 162,
+      "sha256": "f0c5b25dc8fe5ed43f3882f94827dd8ad12ed5ae067cd26ef3515bd7a49d2472"
+    },
+    {
+      "name": "reviews/claude-remediation.json",
+      "bytes": 8599,
+      "sha256": "fb60cc228e969eb3d2dcdd5e546e682dd8840b14db84a6f126cb0ae51137ff56"
+    },
+    {
+      "name": "reviews/rt-public-empty-search-evidence.json",
+      "bytes": 436,
+      "sha256": "3fb8afbd78d86a1febeee5fb788f5d0168c602157a400b522701dd4061ffe9ac"
+    },
+    {
+      "name": "reviews/tvdb-artwork-schema-evidence.json",
+      "bytes": 377,
+      "sha256": "7ac0ceadde4f92372293be67fb682aa3d8780d42c9b525f7ae00919fdb785f1b"
+    },
+    {
+      "name": "schema4-backup-compatibility.json",
+      "bytes": 3008,
+      "sha256": "90bd5e960d6f032b1371e3ec1eeeccfa80bb785fbfb015b720e66a466f7e9065"
+    },
+    {
+      "name": "smoke-blazor.web.js",
+      "bytes": 245494,
+      "sha256": "79728f577616593b254f06297dbf177f68a15ece5e90e0b6d9bb4443ae948321"
+    },
+    {
+      "name": "smoke-downgrade-command.json",
+      "bytes": 76,
+      "sha256": "ce0a67c168cade0162866e4e52bba6c9ee7000d1173aa4118dc023b4addb5ff5"
+    },
+    {
+      "name": "smoke-health.json",
+      "bytes": 1085,
+      "sha256": "fe11d1f8d6c746f34fb2e86b3a646bcee266225abbf2c4742ceb901c76b475a4"
+    },
+    {
+      "name": "smoke-nightly-planner.log",
+      "bytes": 747,
+      "sha256": "8a03825053c046afeea1f80437229f3f7599555698bd5fe3546de608682055ce"
+    },
+    {
+      "name": "smoke-root.html",
+      "bytes": 17231,
+      "sha256": "6aa196ea6cdb664e1c390fc82b78cc0632073cd43838485106fc1fe3bab357d8"
+    },
+    {
+      "name": "smoke-runtime.log",
+      "bytes": 2944,
+      "sha256": "9132188364c47fbe167518eab4fbef94ad04a0e5ea1d793c194e313b81eb233d"
+    },
+    {
+      "name": "smoke-security.log",
+      "bytes": 438,
+      "sha256": "5b4f31e4238a74062a515f2dfea854fe75c916e94e2d906961afe281f4f75383"
+    },
+    {
+      "name": "smoke-timezone-probe-build.log",
+      "bytes": 740,
+      "sha256": "ebabca9d68b3b508b7385ccec12a8e89dd84783fc56ca3a5876402c687af8c30"
+    },
+    {
+      "name": "smoke-timezone-probe.cs",
+      "bytes": 1560,
+      "sha256": "a9c0d0855360e7b1a6007204a59e84f78173d8d0c85c86548576f177afbba36c"
+    },
+    {
+      "name": "smoke-timezone-probe.csproj",
+      "bytes": 239,
+      "sha256": "45d36e95d2b5eedad55e1c5064eabdb9baf3f5f9d7dc6ffd74c2ff2bd4966428"
+    },
+    {
+      "name": "smoke-timezone-probe.log",
+      "bytes": 401,
+      "sha256": "7e3d1b2b7d4efc7ee84d55a214fe600b5623c74d55d9a4f0763997a39a585a7e"
+    },
+    {
+      "name": "smoke-zoneinfo.log",
+      "bytes": 47,
+      "sha256": "1e2610091575d0ad79ea50a8dd9f2916c78e56b91e380d771a38ca1f6739bcab"
+    },
+    {
+      "name": "source-1.2.14.tar",
+      "bytes": 16609280,
+      "sha256": "2903a574886be367446e7e18ce8a50d498d0ace5168b8979f4efd0b64ad56f68"
+    },
+    {
+      "name": "source-review.json",
+      "bytes": 4019,
+      "sha256": "64d416d1eb91ea99549bfa5f0133d2d143df9a66abb452f8f6ca6c0e47af85ff"
+    },
+    {
+      "name": "test-environment.json",
+      "bytes": 1282,
+      "sha256": "83413566091e571b9383165dfa74f417b6dcc88677c7418afde5bd37c7a1ac88"
+    },
+    {
+      "name": "test-summary.json",
+      "bytes": 530,
+      "sha256": "b8ce726f502ed5600675b172613cd37df7781a6a056118d769bafb10e6170801"
+    },
+    {
+      "name": "tested-source-fingerprints.json",
+      "bytes": 49207,
+      "sha256": "47c5fdc90755acc7fce374b2e32540d89dff606c29904c1ecf123c9b14ecb662"
+    },
+    {
+      "name": "tests/component.log",
+      "bytes": 26917,
+      "sha256": "2ed43d605fd87ee14a3910cb4cdd3be35d0e7f2096cc229f844321b100a07468"
+    },
+    {
+      "name": "tests/component.trx",
+      "bytes": 275709,
+      "sha256": "b26f83894e5ec3cd61031cee9517bb0348067a7933488905b1180b147eafe527"
+    },
+    {
+      "name": "tests/integration.log",
+      "bytes": 143997,
+      "sha256": "9e4453a9903b03acd34613663935ec86d24c4e67bcafa49b4d787232b71ee3e5"
+    },
+    {
+      "name": "tests/integration.trx",
+      "bytes": 818872,
+      "sha256": "145b180702bdabb8d3f30eb81647a977bd5a714db0b10d1a450072be96acf6c4"
+    },
+    {
+      "name": "tests/log-audit.log",
+      "bytes": 169,
+      "sha256": "bac5d351f6b1d80103d560102864795a7fc153b6587803cd312c8c4a4b054a1e"
+    },
+    {
+      "name": "tests/unit.log",
+      "bytes": 120175,
+      "sha256": "1e0b78d8d699b817a10257a903af49b14467adb53a0f89effa27af3a1f830401"
+    },
+    {
+      "name": "tests/unit.trx",
+      "bytes": 1186778,
+      "sha256": "41287f7c6e715ea10af7ed7e3f3e2644c684b62bcec96c73f890bd3b39398280"
+    }
+  ]
+}
