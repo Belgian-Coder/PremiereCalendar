@@ -87,20 +87,29 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         string? wikidataId,
         CancellationToken cancellationToken,
         bool forceRefresh = false)
+        => (await GetScoresWithStatusAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh)).Value;
+
+    public async Task<ProviderRefreshResult<RottenTomatoesScores>> GetScoresWithStatusAsync(
+        PremiereMediaType mediaType, string title, int? year, string? wikidataId,
+        CancellationToken cancellationToken, bool forceRefresh = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (string.IsNullOrWhiteSpace(title)) return RottenTomatoesScores.Empty;
+        if (!_options.Enabled || string.IsNullOrWhiteSpace(title)) return new(RottenTomatoesScores.Empty, true);
         var key = $"rottentomatoes:{_options.BaseUrl}:{ScoreCacheKey(mediaType, NormalizeTitle(title), year, wikidataId)}";
         if (ProviderRefreshScope.Current is { } refresh)
         {
             var cacheKey = ScoreCacheKey(mediaType, NormalizeTitle(title), year, wikidataId);
-            return await refresh.RunAsync(key, forceRefresh,
-                token => GetScoresCoreAsync(mediaType, title, year, wikidataId, token, forceRefresh),
+            return await refresh.RunAsync(key + ":outcome", forceRefresh,
+                async token =>
+                {
+                    var result = await GetScoresCoreAsync(mediaType, title, year, wikidataId, token, forceRefresh);
+                    return new ProviderRefreshResult<ProviderRefreshResult<RottenTomatoesScores>>(result, result.Successful);
+                },
                 cancellationToken,
-                value => TryGetVerifiedMemory(cacheKey, out var latest)
-                    && ReferenceEquals(latest, value));
+                result => TryGetVerifiedMemory(cacheKey, out var latest)
+                    && ReferenceEquals(latest, result.Value));
         }
-        return (await GetScoresCoreAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh)).Value;
+        return await GetScoresCoreAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh);
     }
 
     public async Task<RottenTomatoesScores?> TryGetCachedScoresAsync(

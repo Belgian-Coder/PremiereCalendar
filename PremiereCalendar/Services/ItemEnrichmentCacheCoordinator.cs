@@ -1,0 +1,685 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Options;
+using PremiereCalendar.Models;
+using PremiereCalendar.Options;
+
+namespace PremiereCalendar.Services;
+
+public sealed class ItemEnrichmentCacheCoordinator
+{
+    private readonly IItemEnrichmentStore _store;
+    private readonly ItemEnrichmentCacheOptions _options;
+    private readonly ILogger<ItemEnrichmentCacheCoordinator> _logger;
+    private readonly TimeProvider _clock;
+    private readonly IIntegrationSettingsStore? _integrationSettingsStore;
+    private readonly IAppStateStore? _appStateStore;
+    private readonly SemaphoreSlim _legacyPartitionGate = new(1);
+    private string? _legacyPartition;
+    private readonly SingleFlightCoordinator _flights = new();
+    private readonly PremiereTelemetry _telemetry;
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _metadataRetryAfter = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _ratingsRetryAfter = new(StringComparer.Ordinal);
+    public bool Enabled => _options.Enabled;
+    public string Partition { get; }
+
+    public ItemEnrichmentCacheCoordinator(IItemEnrichmentStore store,
+        IOptions<ItemEnrichmentCacheOptions> options, IOptions<TmdbOptions> tmdbOptions,
+        ILogger<ItemEnrichmentCacheCoordinator> logger, IConfiguration? configuration = null, TimeProvider? timeProvider = null,
+        IIntegrationSettingsStore? integrationSettingsStore = null, IAppStateStore? appStateStore = null,
+        PremiereTelemetry? telemetry = null)
+    {
+        _store = store;
+        _options = options.Value;
+        _logger = logger;
+        _clock = timeProvider ?? TimeProvider.System;
+        _integrationSettingsStore = integrationSettingsStore;
+        _appStateStore = appStateStore;
+        _telemetry = telemetry ?? new PremiereTelemetry();
+        var tmdb = tmdbOptions.Value;
+        var config = new StringBuilder(JsonSerializer.Serialize(new
+        {
+            Version = 1, tmdb.BaseUrl, tmdb.ImageBaseUrl, tmdb.PosterSize, tmdb.BackdropSize,
+            Regions = tmdb.SourceRegions.Select(region => region.Trim().ToUpperInvariant()).Order().ToArray()
+        }));
+        // Only the hash is persisted. Provider switches, endpoints, language and
+        // account settings partition results; request criteria and dates do not.
+        foreach (var section in new[] { "Omdb", "ImdbDataset", "Tvmaze", "Fanart", "TheTvdb", "Wikimedia", "RottenTomatoes", "Watchmode" })
+        {
+            foreach (var setting in configuration?.GetSection(section).AsEnumerable().OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                         ?? Enumerable.Empty<KeyValuePair<string, string?>>())
+                config.Append('\n').Append(setting.Key).Append('=').Append(setting.Value);
+        }
+        Partition = "item-v1:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(config.ToString()))).ToLowerInvariant();
+    }
+
+    internal async Task<ItemEnrichmentSession> CreateSessionAsync(CancellationToken cancellationToken)
+    {
+        if (_integrationSettingsStore is null) return new(this, Partition, await CanImportLegacyAsync(Partition, cancellationToken));
+        var sources = (await _integrationSettingsStore.GetAsync(cancellationToken)).Sources;
+        var effective = JsonSerializer.Serialize(new
+        {
+            Tvmaze = sources.Tvmaze.Enabled, Omdb = sources.Omdb.Enabled, Fanart = sources.Fanart.Enabled,
+            TheTvdb = sources.TheTvdb.Enabled, Wikimedia = sources.Wikimedia.Enabled,
+            Watchmode = sources.Watchmode.Enabled,
+            Regions = sources.Watchmode.Regions.Select(region => region.Trim().ToUpperInvariant()).Order().ToArray(),
+            sources.Watchmode.EnableAvailabilityEnrichment
+        });
+        var partition = Partition + ":" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(effective))).ToLowerInvariant();
+        return new(this, partition, await CanImportLegacyAsync(partition, cancellationToken));
+    }
+
+    private async Task<bool> CanImportLegacyAsync(string partition, CancellationToken cancellationToken)
+    {
+        await _legacyPartitionGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_legacyPartition is null)
+            {
+                const string key = "itemcache:legacy-import-partition:v1";
+                _legacyPartition = _appStateStore is null ? null : await _appStateStore.GetValueAsync(key, cancellationToken);
+                if (string.IsNullOrWhiteSpace(_legacyPartition))
+                {
+                    _legacyPartition = partition;
+                    if (_appStateStore is not null) await _appStateStore.SetValueAsync(key, partition, cancellationToken);
+                }
+            }
+            return string.Equals(_legacyPartition, partition, StringComparison.Ordinal);
+        }
+        finally { _legacyPartitionGate.Release(); }
+    }
+
+    internal async Task ImportAsync(IReadOnlyList<PremiereItem> items, CancellationToken cancellationToken)
+    {
+        if (!Enabled || items.Count == 0) return;
+        var started = Stopwatch.GetTimestamp();
+        var session = await CreateSessionAsync(cancellationToken);
+        await session.PrepareAsync(items.Select(item => new ItemEnrichmentIdentity(item.MediaType, item.TmdbId)), items, cancellationToken);
+        await session.FlushAsync(cancellationToken, rejectGenerationConflicts: false);
+        _telemetry.RecordDiagnostic("item_cache.import", details: new() { Count = items.Count, Outcome = "complete", DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds });
+    }
+
+    internal async Task SynchronizeMaintainedProjectionAsync(IReadOnlyList<PremiereItem> originalItems,
+        IReadOnlyList<PremiereItem> publishedItems, CalendarCacheMaintenanceKind kind, CancellationToken cancellationToken)
+    {
+        if (!Enabled || publishedItems.Count == 0) return;
+        var session = await CreateSessionAsync(cancellationToken);
+        await session.PrepareAsync(originalItems.Select(item => new ItemEnrichmentIdentity(item.MediaType, item.TmdbId)), originalItems, cancellationToken);
+        await session.FlushAsync(cancellationToken, rejectGenerationConflicts: false);
+        var baseline = publishedItems.Select(item => new ItemEnrichmentIdentity(item.MediaType, item.TmdbId)).Distinct()
+            .Select(identity => (Identity: identity, Snapshot: session.Find(identity))).Where(entry => entry.Snapshot is not null)
+            .ToDictionary(entry => entry.Identity, entry => entry.Snapshot!);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            session.SynchronizeMaintenanceFields(originalItems, publishedItems, kind, baseline);
+            if (!session.HasPendingWrites) return;
+            await session.FlushAsync(cancellationToken, rejectGenerationConflicts: false);
+        }
+        session.SynchronizeMaintenanceFields(originalItems, publishedItems, kind, baseline);
+        if (session.HasPendingWrites)
+            _logger.LogWarning("Item maintenance synchronization could not settle after three revision retries; current database winners remain authoritative.");
+    }
+
+    internal bool MetadataFresh(ItemEnrichmentSnapshot snapshot) => snapshot.Metadata is not null
+        && snapshot.Record.MetadataFetchedUtc is { } fetched
+        && fetched >= _clock.GetUtcNow().AddDays(-Math.Max(1, _options.MetadataRefreshDays))
+        && (snapshot.Record.MetadataInvalidatedUtc is not { } invalidated || fetched >= invalidated);
+
+    internal bool RatingsFresh(ItemEnrichmentSnapshot snapshot) => snapshot.Ratings is not null
+        && snapshot.Ratings.FreshnessVerified
+        && snapshot.Ratings.MatchesMetadata(snapshot.Metadata)
+        && snapshot.Record.RatingsFetchedUtc >= _clock.GetUtcNow().AddHours(-Math.Max(1, _options.RatingsRefreshHours));
+
+    internal sealed class ItemEnrichmentSession(ItemEnrichmentCacheCoordinator owner, string partition, bool allowLegacyImport)
+    {
+        private readonly ConcurrentDictionary<ItemEnrichmentIdentity, ItemEnrichmentSnapshot> _records = new();
+        private readonly ConcurrentDictionary<ItemEnrichmentIdentity, ItemEnrichmentSnapshot> _completed = new();
+        private readonly ConcurrentDictionary<ItemEnrichmentIdentity, ItemEnrichmentWrite> _writes = new();
+        private readonly SemaphoreSlim _prepareGate = new(1);
+        private readonly SemaphoreSlim _flushGate = new(1);
+        private readonly ConcurrentDictionary<PremiereMediaType, byte> _discoveryChanged = new();
+        private readonly ConcurrentDictionary<ItemEnrichmentIdentity, long> _selfAcceptedRevisions = new();
+        public bool ForceDiscoveryRefresh { get; set; }
+        public bool HasPendingWrites => !_writes.IsEmpty;
+        public void MarkDiscoveryUnverified(PremiereMediaType mediaType) => _discoveryChanged[mediaType] = 0;
+        public ConcurrentDictionary<int, Lazy<Task<FirstEpisodeValidation>>> FirstEpisodeDates { get; } = new();
+        public ConcurrentDictionary<string, Lazy<Task<int?>>> ResolvedCandidates { get; } = new(StringComparer.Ordinal);
+
+        public ItemEnrichmentSnapshot? Find(ItemEnrichmentIdentity identity) =>
+            _completed.TryGetValue(identity, out var result) ? result : _records.GetValueOrDefault(identity);
+
+        public bool MetadataFresh(ItemEnrichmentIdentity identity) => Find(identity) is { } snapshot && owner.MetadataFresh(snapshot);
+        public bool RatingsFresh(ItemEnrichmentIdentity identity) => Find(identity) is { } snapshot && owner.RatingsFresh(snapshot);
+        public bool RatingsRefreshNeeded(ItemEnrichmentIdentity identity) => !RatingsFresh(identity) && RatingsRetryAllowed(identity);
+        public bool MetadataRefreshNeeded(ItemEnrichmentIdentity identity)
+        {
+            var current = Find(identity);
+            return (current is null || !owner.MetadataFresh(current) || current.Metadata is { AvailabilityComplete: false })
+                && RetryAllowed(identity);
+        }
+        private string RetryKey(ItemEnrichmentIdentity identity) => $"{partition}:{identity.MediaType}:{identity.TmdbId}";
+        private bool RetryAllowed(ItemEnrichmentIdentity identity)
+        {
+            var key = RetryKey(identity);
+            if (!owner._metadataRetryAfter.TryGetValue(key, out var retry)) return true;
+            if (retry > owner._clock.GetUtcNow()) return false;
+            owner._metadataRetryAfter.TryRemove(key, out _);
+            return true;
+        }
+        private bool RatingsRetryAllowed(ItemEnrichmentIdentity identity)
+        {
+            var key = RetryKey(identity);
+            if (!owner._ratingsRetryAfter.TryGetValue(key, out var retry)) return true;
+            if (retry > owner._clock.GetUtcNow()) return false;
+            owner._ratingsRetryAfter.TryRemove(key, out _);
+            return true;
+        }
+
+        private void ObserveTmdbVotes(ItemEnrichmentIdentity identity, PremiereItem discovered)
+        {
+            var current = Find(identity);
+            if (current?.Metadata is null || current.Record.MetadataFetchedUtc is null) return;
+            var observation = ItemEnrichmentTmdbObservation.Observe(current.Metadata.TmdbVotes,
+                discovered.TmdbScore, discovered.TmdbVoteCount, current.Record.LastSeenUtc);
+            if (observation == current.Metadata.TmdbVotes) return;
+            var metadata = current.Metadata with { TmdbVotes = observation };
+            var updated = current with { Metadata = metadata };
+            _records[identity] = updated;
+            if (_completed.ContainsKey(identity)) _completed[identity] = updated;
+            if (current.Record.Generation < 0) return;
+            var write = new ItemEnrichmentWrite(identity, current.Record.Generation,
+                    JsonSerializer.Serialize(metadata), current.Record.MetadataFetchedUtc, TvmazeShowId: metadata.TvmazeShowId,
+                    TmdbObservedUtc: metadata.TmdbVotes?.TmdbObservedUtc, ExpectedMetadataRevision: current.Record.MetadataRevision);
+            _writes.AddOrUpdate(identity, write,
+                (_, previous) => previous.ExpectedMetadataRevision != current.Record.MetadataRevision ? write : previous with
+                { MetadataJson = write.MetadataJson, MetadataFetchedUtc = write.MetadataFetchedUtc, TmdbObservedUtc = write.TmdbObservedUtc,
+                    ExpectedMetadataRevision = current.Record.MetadataRevision });
+        }
+
+        public void RememberFirstEpisodeDate(ItemEnrichmentIdentity identity, FirstEpisodeValidation validation)
+        {
+            var current = Find(identity);
+            if (!validation.Successful || current?.Metadata is null || !owner.MetadataFresh(current)
+                || current.Record.Generation < 0) return;
+            var metadata = current.Metadata with { FirstEpisodeDateChecked = true, FirstEpisodeDate = validation.Date };
+            var updated = current with { Metadata = metadata };
+            _records[identity] = updated;
+            if (_completed.ContainsKey(identity)) _completed[identity] = updated;
+            var write = new ItemEnrichmentWrite(identity, current.Record.Generation,
+                    JsonSerializer.Serialize(metadata), current.Record.MetadataFetchedUtc, TvmazeShowId: metadata.TvmazeShowId,
+                    TmdbObservedUtc: metadata.TmdbVotes?.TmdbObservedUtc, ExpectedMetadataRevision: current.Record.MetadataRevision);
+            _writes.AddOrUpdate(identity, write,
+                (_, previous) => previous.ExpectedMetadataRevision != current.Record.MetadataRevision ? write : previous with
+                { MetadataJson = write.MetadataJson, MetadataFetchedUtc = write.MetadataFetchedUtc, TmdbObservedUtc = write.TmdbObservedUtc,
+                    ExpectedMetadataRevision = current.Record.MetadataRevision });
+        }
+
+        public void SynchronizeMaintainedProjection(IReadOnlyList<PremiereItem> items)
+        {
+            foreach (var item in items)
+            {
+                var identity = new ItemEnrichmentIdentity(item.MediaType, item.TmdbId);
+                var current = Find(identity);
+                if (current?.Metadata is null || current.Record.MetadataFetchedUtc is null || current.Record.Generation < 0) continue;
+                var metadata = ItemEnrichmentMetadata.FromItem(item) with
+                {
+                    FirstEpisodeDateChecked = current.Metadata.FirstEpisodeDateChecked,
+                    FirstEpisodeDate = current.Metadata.FirstEpisodeDate,
+                    TvmazeShowId = current.Metadata.TvmazeShowId,
+                    TmdbVotes = current.Metadata.TmdbVotes,
+                    AvailabilityComplete = current.Metadata.AvailabilityComplete
+                };
+                var ratings = current.Ratings;
+                if (ratings?.Matches(item) == true && ratings.MatchesMetadata(metadata))
+                    ratings = ItemEnrichmentRatings.FromItem(item).PreserveMissing(ratings) with { FreshnessVerified = ratings.FreshnessVerified };
+                var metadataJson = JsonSerializer.Serialize(metadata);
+                var ratingsJson = ratings is null ? null : JsonSerializer.Serialize(ratings);
+                var metadataChanged = metadataJson != JsonSerializer.Serialize(current.Metadata);
+                var ratingsChanged = ratingsJson != (current.Ratings is null ? null : JsonSerializer.Serialize(current.Ratings));
+                if (metadataChanged || ratingsChanged)
+                {
+                    _records[identity] = current with { Metadata = metadata, Ratings = ratings };
+                    _completed.TryRemove(identity, out _);
+                    _writes[identity] = new(identity, current.Record.Generation,
+                        metadataChanged ? metadataJson : null, metadataChanged ? current.Record.MetadataFetchedUtc : null,
+                        ratingsChanged ? ratingsJson : null, ratingsChanged ? current.Record.RatingsFetchedUtc : null, metadata.TvmazeShowId,
+                        metadata.TmdbVotes?.TmdbObservedUtc, current.Record.MetadataRevision);
+                }
+                else if (!owner.RatingsFresh(current)) _completed.TryRemove(identity, out _);
+            }
+        }
+
+        public void SynchronizeMaintenanceFields(IReadOnlyList<PremiereItem> originals, IReadOnlyList<PremiereItem> published,
+            CalendarCacheMaintenanceKind kind, IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentSnapshot> baselineByIdentity)
+        {
+            var originalById = originals.GroupBy(item => item.CanonicalId).ToDictionary(group => group.Key, group => group.First());
+            foreach (var item in published)
+            {
+                var identity = new ItemEnrichmentIdentity(item.MediaType, item.TmdbId);
+                var current = Find(identity);
+                if (current is null || current.Record.Generation < 0 || !originalById.TryGetValue(item.CanonicalId, out var original)
+                    || !baselineByIdentity.TryGetValue(identity, out var firstRead)) continue;
+                if (kind == CalendarCacheMaintenanceKind.ExternalIds && item.ImdbId == original.ImdbId && item.ImdbUrl == original.ImdbUrl
+                    && item.TvdbId == original.TvdbId && item.WikidataId == original.WikidataId) continue;
+                var metadata = current.Metadata;
+                if (kind == CalendarCacheMaintenanceKind.ExternalIds)
+                {
+                    metadata ??= new ItemEnrichmentMetadata();
+                    var imdbId = MaintenanceDelta(metadata.ImdbId, firstRead.Metadata?.ImdbId, original.ImdbId, item.ImdbId);
+                    metadata = metadata with
+                    {
+                        ImdbId = imdbId,
+                        ImdbUrl = imdbId == item.ImdbId
+                            ? MaintenanceDelta(metadata.ImdbUrl, firstRead.Metadata?.ImdbUrl, original.ImdbUrl, item.ImdbUrl) : metadata.ImdbUrl,
+                        TvdbId = MaintenanceDelta(metadata.TvdbId, firstRead.Metadata?.TvdbId, original.TvdbId, item.TvdbId),
+                        WikidataId = MaintenanceDelta(metadata.WikidataId, firstRead.Metadata?.WikidataId, original.WikidataId, item.WikidataId)
+                    };
+                }
+                var proposedRatings = ItemEnrichmentRatings.FromItem(item);
+                var ratings = current.Ratings;
+                var ratingsClock = current.Record.RatingsFetchedUtc;
+                var scoresChanged = item.ImdbScore != original.ImdbScore || item.ImdbVoteCount != original.ImdbVoteCount
+                    || item.RottenTomatoesScore != original.RottenTomatoesScore || item.RottenTomatoesAudienceScore != original.RottenTomatoesAudienceScore
+                    || item.MetacriticScore != original.MetacriticScore;
+                if (kind == CalendarCacheMaintenanceKind.Scores && scoresChanged && proposedRatings.MatchesMetadata(metadata))
+                {
+                    var baseline = current.Ratings?.MatchesMetadata(metadata) == true ? current.Ratings
+                        : new ItemEnrichmentRatings(null, null, null, null, null, item.ImdbId, item.WikidataId, item.Title, item.PremiereDate.Year);
+                    var tomatoesMatch = proposedRatings.MatchesTomatoes(baseline.WikidataId, baseline.Title, baseline.Year);
+                    ratings = baseline with
+                    {
+                        ImdbScore = MaintenanceDelta(baseline.ImdbScore, firstRead.Ratings?.ImdbScore, original.ImdbScore, item.ImdbScore),
+                        ImdbVoteCount = MaintenanceDelta(baseline.ImdbVoteCount, firstRead.Ratings?.ImdbVoteCount, original.ImdbVoteCount, item.ImdbVoteCount),
+                        RottenTomatoesScore = tomatoesMatch ? MaintenanceDelta(baseline.RottenTomatoesScore, firstRead.Ratings?.RottenTomatoesScore,
+                            original.RottenTomatoesScore, item.RottenTomatoesScore) : baseline.RottenTomatoesScore,
+                        RottenTomatoesAudienceScore = tomatoesMatch ? MaintenanceDelta(baseline.RottenTomatoesAudienceScore, firstRead.Ratings?.RottenTomatoesAudienceScore,
+                            original.RottenTomatoesAudienceScore, item.RottenTomatoesAudienceScore) : baseline.RottenTomatoesAudienceScore,
+                        MetacriticScore = MaintenanceDelta(baseline.MetacriticScore, firstRead.Ratings?.MetacriticScore, original.MetacriticScore, item.MetacriticScore),
+                        FreshnessVerified = false
+                    };
+                    if (ratings with { FreshnessVerified = baseline.FreshnessVerified } == baseline) ratings = baseline;
+                    if (item.ImdbScore is not null || item.ImdbVoteCount is not null || item.RottenTomatoesScore is not null
+                        || item.RottenTomatoesAudienceScore is not null || item.MetacriticScore is not null)
+                        ratingsClock ??= DateTimeOffset.MinValue; // Data imported by maintenance; freshness is unverified.
+                }
+                else if (kind == CalendarCacheMaintenanceKind.ExternalIds && ratings?.MatchesMetadata(metadata) == false)
+                {
+                    ratings = new ItemEnrichmentRatings(null, null, null, null, null, metadata?.ImdbId, metadata?.WikidataId,
+                        item.Title, item.PremiereDate.Year, FreshnessVerified: false);
+                    ratingsClock ??= DateTimeOffset.MinValue;
+                }
+                var metadataChanged = metadata != current.Metadata;
+                var ratingsChanged = ratings != current.Ratings;
+                if (!metadataChanged && !ratingsChanged) continue;
+                var metadataClock = metadataChanged ? current.Record.MetadataFetchedUtc ?? DateTimeOffset.MinValue : current.Record.MetadataFetchedUtc;
+                _records[identity] = current with { Metadata = metadata, Ratings = ratings, Record = current.Record with
+                    { MetadataFetchedUtc = metadataClock, RatingsFetchedUtc = ratingsClock } };
+                _completed.TryRemove(identity, out _);
+                var write = new ItemEnrichmentWrite(identity, current.Record.Generation,
+                    metadataChanged ? JsonSerializer.Serialize(metadata) : null,
+                    metadataChanged ? metadataClock : null,
+                    ratingsChanged ? JsonSerializer.Serialize(ratings) : null, ratingsChanged ? ratingsClock : null,
+                    metadata?.TvmazeShowId, metadata?.TmdbVotes?.TmdbObservedUtc, current.Record.MetadataRevision);
+                _writes.AddOrUpdate(identity, write, (_, previous) => previous.ExpectedMetadataRevision != write.ExpectedMetadataRevision ? write : write with
+                {
+                    MetadataJson = write.MetadataJson ?? previous.MetadataJson, MetadataFetchedUtc = write.MetadataFetchedUtc ?? previous.MetadataFetchedUtc,
+                    RatingsJson = write.RatingsJson ?? previous.RatingsJson, RatingsFetchedUtc = write.RatingsFetchedUtc ?? previous.RatingsFetchedUtc
+                });
+            }
+        }
+
+        private static T MaintenanceDelta<T>(T current, T firstRead, T original, T published) =>
+            EqualityComparer<T>.Default.Equals(original, published) || !EqualityComparer<T>.Default.Equals(current, firstRead) ? current : published;
+
+        public async Task PrepareAsync(IEnumerable<ItemEnrichmentIdentity> identities,
+            IEnumerable<PremiereItem>? legacyItems, CancellationToken cancellationToken)
+        {
+            var preparedAt = Stopwatch.GetTimestamp();
+            var requested = identities.Where(identity => identity.TmdbId > 0).Distinct().ToArray();
+            if (requested.Length == 0) return;
+            await _prepareGate.WaitAsync(cancellationToken);
+            try
+            {
+                var missing = requested.Where(identity => !_records.ContainsKey(identity)).ToArray();
+                if (missing.Length == 0) return;
+                IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord> stored;
+                var readStarted = Stopwatch.GetTimestamp();
+                try
+                {
+                    stored = await owner._store.ReadManyAsync(partition, missing, true, cancellationToken);
+                    owner._telemetry.RecordDiagnostic("item_cache.read", details: new() { Count = stored.Count, Total = missing.Length,
+                        Outcome = "success", DurationMilliseconds = Stopwatch.GetElapsedTime(readStarted).TotalMilliseconds });
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    owner._logger.LogWarning(ex, "Item enrichment cache read failed; continuing with provider enrichment.");
+                    owner._telemetry.RecordDiagnostic("item_cache.read", details: new() { Total = missing.Length, Outcome = "failed",
+                        DurationMilliseconds = Stopwatch.GetElapsedTime(readStarted).TotalMilliseconds });
+                    stored = new Dictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>();
+                }
+                var seeds = (legacyItems ?? []).Where(item => item.TmdbId > 0
+                        && item.VerificationState == PremiereVerificationState.Verified
+                        && item.LastUpdatedUtc != default)
+                    .GroupBy(item => new ItemEnrichmentIdentity(item.MediaType, item.TmdbId))
+                    .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.LastUpdatedUtc).First());
+                foreach (var identity in missing)
+                {
+                    // Failed DB reservations must never produce a write with an invented generation.
+                    var reserved = stored.TryGetValue(identity, out var record);
+                    record ??= new(identity, null, null, null, null, owner._clock.GetUtcNow(), -1, null, null);
+                    var snapshot = new ItemEnrichmentSnapshot(record, Deserialize<ItemEnrichmentMetadata>(record.MetadataJson),
+                        Deserialize<ItemEnrichmentRatings>(record.RatingsJson));
+                    if (allowLegacyImport && reserved && record.Generation == 0 && record.MetadataInvalidatedUtc is null
+                        && record.MetadataJson is null && record.RatingsJson is null
+                        && record.MetadataFetchedUtc is null && record.RatingsFetchedUtc is null
+                        && seeds.TryGetValue(identity, out var seed)
+                        && (seed.RuntimeMinutes is > 0 || !string.IsNullOrWhiteSpace(seed.ImdbId)
+                            || seed.Genres.Length > 0 || seed.Sources.Any(source => !string.Equals(source.Kind, "schedule", StringComparison.OrdinalIgnoreCase))))
+                    {
+                        var metadata = snapshot.Metadata ?? ItemEnrichmentMetadata.FromItem(seed);
+                        var hasRatings = seed.ImdbScore is not null || seed.ImdbVoteCount is not null
+                            || seed.RottenTomatoesScore is not null || seed.RottenTomatoesAudienceScore is not null || seed.MetacriticScore is not null;
+                        var ratings = hasRatings ? ItemEnrichmentRatings.FromItem(seed) : null;
+                        var write = new ItemEnrichmentWrite(identity, record.Generation,
+                            snapshot.Metadata is null ? JsonSerializer.Serialize(metadata) : null,
+                            snapshot.Metadata is null ? seed.LastUpdatedUtc : null,
+                            ratings is not null ? JsonSerializer.Serialize(ratings) : null,
+                            ratings is not null ? seed.LastUpdatedUtc : null, metadata.TvmazeShowId,
+                            metadata.TmdbVotes?.TmdbObservedUtc, record.MetadataRevision);
+                        _writes[identity] = write;
+                        snapshot = new(record with
+                        {
+                            MetadataFetchedUtc = record.MetadataFetchedUtc ?? seed.LastUpdatedUtc,
+                            RatingsFetchedUtc = ratings is not null ? seed.LastUpdatedUtc : null
+                        }, metadata, ratings);
+                    }
+                    _records[identity] = snapshot;
+                }
+            }
+            finally
+            {
+                _prepareGate.Release();
+                owner._telemetry.RecordDiagnostic("item_cache.prepare", details: new() { Count = requested.Length, Outcome = "complete",
+                    DurationMilliseconds = Stopwatch.GetElapsedTime(preparedAt).TotalMilliseconds });
+            }
+        }
+
+        public async Task<ItemEnrichmentSnapshot> GetAsync(ItemEnrichmentIdentity identity, bool forceRefresh,
+            Func<ItemEnrichmentSnapshot, bool, bool, CancellationToken, Task<ItemEnrichmentRefresh>> refresh,
+            CancellationToken cancellationToken, bool ratingsOnly = false, PremiereItem? ratingsInputs = null)
+        {
+            if (!ratingsOnly && ratingsInputs is not null) ObserveTmdbVotes(identity, ratingsInputs);
+            if (_completed.TryGetValue(identity, out var completed))
+            {
+                owner._telemetry.RecordDiagnostic("item_cache.item", details: new() { ItemId = identity.TmdbId,
+                    Stage = identity.MediaType.ToString(), Outcome = "session_hit" });
+                return completed;
+            }
+            var current = Find(identity) ?? throw new InvalidOperationException("Item identities must be reserved in a batch before enrichment.");
+            var metadataDue = !ratingsOnly && (forceRefresh || !owner.MetadataFresh(current) && RetryAllowed(identity));
+            var availabilityDue = !ratingsOnly && current.Metadata is { AvailabilityComplete: false } && (forceRefresh || RetryAllowed(identity));
+            var ratingsDue = forceRefresh || RatingsRetryAllowed(identity) && (!owner.RatingsFresh(current)
+                || ratingsInputs is not null && current.Ratings?.Matches(current.Metadata?.Apply(ratingsInputs) ?? ratingsInputs) != true);
+            owner._telemetry.RecordDiagnostic("item_cache.item", details: new() { ItemId = identity.TmdbId, Stage = identity.MediaType.ToString(),
+                Outcome = forceRefresh ? "forced" : metadataDue ? "metadata_due" : ratingsDue ? "ratings_due" : availabilityDue ? "availability_due" : "hit" });
+            if (!metadataDue && !ratingsDue && !availabilityDue) return current;
+            var flightKey = $"{partition}:{identity.MediaType}:{identity.TmdbId}:{current.Record.Generation}:{current.Record.MetadataRevision}:{metadataDue}:{ratingsDue}:{availabilityDue}";
+            var outcome = await owner._flights.RunAsync(flightKey, async token =>
+            {
+                if (_completed.TryGetValue(identity, out var existing)) return existing;
+                // Reservation precedes every provider branch, including debut-date
+                // validation. An older overlapping request cannot win by finishing last.
+                var started = current.Record.LastSeenUtc;
+                var result = await refresh(current, metadataDue, ratingsDue, token);
+                if (result.MetadataFailed)
+                {
+                    owner._metadataRetryAfter[RetryKey(identity)] = owner._clock.GetUtcNow().AddMinutes(Math.Max(1, owner._options.MetadataFailureRetryMinutes));
+                    if (owner._metadataRetryAfter.Count > 8192)
+                        foreach (var entry in owner._metadataRetryAfter.OrderBy(entry => entry.Value).Take(owner._metadataRetryAfter.Count - 8192))
+                            owner._metadataRetryAfter.TryRemove(entry.Key, out _);
+                }
+                else if (result.Metadata is not null) owner._metadataRetryAfter.TryRemove(RetryKey(identity), out _);
+                if (result.RatingsFailed)
+                {
+                    owner._ratingsRetryAfter[RetryKey(identity)] = owner._clock.GetUtcNow().AddMinutes(Math.Max(1, owner._options.RatingsFailureRetryMinutes));
+                    if (owner._ratingsRetryAfter.Count > 8192)
+                        foreach (var entry in owner._ratingsRetryAfter.OrderBy(entry => entry.Value).Take(owner._ratingsRetryAfter.Count - 8192))
+                            owner._ratingsRetryAfter.TryRemove(entry.Key, out _);
+                }
+                else if (result.Ratings is not null) owner._ratingsRetryAfter.TryRemove(RetryKey(identity), out _);
+                var metadata = result.Metadata is null ? current.Metadata : result.Metadata with
+                {
+                    TmdbVotes = result.RefreshMetadataClock
+                        ? ItemEnrichmentTmdbObservation.Observe(current.Metadata?.TmdbVotes,
+                            result.Metadata.TmdbVotes?.TmdbScore, result.Metadata.TmdbVotes?.TmdbVoteCount, started)
+                        : result.Metadata.TmdbVotes ?? current.Metadata?.TmdbVotes
+                };
+                var acceptedMetadata = result.RefreshMetadataClock ? metadata : current.Metadata;
+                var acceptedRatings = result.Ratings?.MatchesMetadata(acceptedMetadata) == true ? result.Ratings : null;
+                var ratings = acceptedRatings?.PreserveMissing(current.Ratings) ?? current.Ratings;
+                var record = current.Record with
+                {
+                    MetadataFetchedUtc = result.Metadata is null || !result.RefreshMetadataClock ? current.Record.MetadataFetchedUtc : started,
+                    RatingsFetchedUtc = acceptedRatings is null ? current.Record.RatingsFetchedUtc : started,
+                    TmdbObservedUtc = metadata?.TmdbVotes?.TmdbObservedUtc
+                };
+                return new ItemEnrichmentSnapshot(record, metadata, ratings);
+            }, cancellationToken);
+            if (current.Metadata?.TmdbVotes?.TmdbObservedUtc is { } ownObserved
+                && (outcome.Metadata?.TmdbVotes?.TmdbObservedUtc is null || ownObserved > outcome.Metadata.TmdbVotes.TmdbObservedUtc)
+                && outcome.Metadata is { } outcomeMetadata)
+                outcome = outcome with { Metadata = outcomeMetadata with { TmdbVotes = current.Metadata.TmdbVotes },
+                    Record = outcome.Record with { TmdbObservedUtc = ownObserved } };
+            if (!ratingsOnly && ratingsInputs is not null && outcome.Metadata is { } observedMetadata)
+            {
+                var observed = ItemEnrichmentTmdbObservation.Observe(observedMetadata.TmdbVotes,
+                    ratingsInputs.TmdbScore, ratingsInputs.TmdbVoteCount, current.Record.LastSeenUtc);
+                outcome = outcome with { Metadata = observedMetadata with { TmdbVotes = observed },
+                    Record = outcome.Record with { TmdbObservedUtc = observed?.TmdbObservedUtc } };
+            }
+            if (!ratingsOnly) _completed[identity] = outcome;
+            _records[identity] = outcome;
+            if (current.Record.Generation >= 0)
+            {
+                var metadataChanged = outcome.Record.MetadataFetchedUtc != current.Record.MetadataFetchedUtc
+                    || JsonSerializer.Serialize(outcome.Metadata) != JsonSerializer.Serialize(current.Metadata);
+                var ratingsChanged = outcome.Record.RatingsFetchedUtc != current.Record.RatingsFetchedUtc
+                    || JsonSerializer.Serialize(outcome.Ratings) != JsonSerializer.Serialize(current.Ratings);
+                if (metadataChanged || ratingsChanged)
+                {
+                    var write = new ItemEnrichmentWrite(identity, current.Record.Generation,
+                        metadataChanged ? JsonSerializer.Serialize(outcome.Metadata) : null,
+                        metadataChanged ? outcome.Record.MetadataFetchedUtc : null,
+                        ratingsChanged ? JsonSerializer.Serialize(outcome.Ratings) : null,
+                        ratingsChanged ? outcome.Record.RatingsFetchedUtc : null, outcome.Metadata?.TvmazeShowId,
+                        outcome.Metadata?.TmdbVotes?.TmdbObservedUtc, current.Record.MetadataRevision);
+                    _writes.AddOrUpdate(identity, write,
+                        (_, previous) => previous.ExpectedMetadataRevision != current.Record.MetadataRevision ? write : new(identity, current.Record.Generation,
+                            metadataChanged ? JsonSerializer.Serialize(outcome.Metadata) : previous.MetadataJson,
+                            metadataChanged ? outcome.Record.MetadataFetchedUtc : previous.MetadataFetchedUtc,
+                            ratingsChanged ? JsonSerializer.Serialize(outcome.Ratings) : previous.RatingsJson,
+                            ratingsChanged ? outcome.Record.RatingsFetchedUtc : previous.RatingsFetchedUtc,
+                            outcome.Metadata?.TvmazeShowId ?? previous.TvmazeShowId,
+                            outcome.Metadata?.TmdbVotes?.TmdbObservedUtc ?? previous.TmdbObservedUtc, current.Record.MetadataRevision));
+                }
+            }
+            return outcome;
+        }
+
+        public async Task FlushAsync(CancellationToken cancellationToken, bool rejectGenerationConflicts = true)
+        {
+            await _flushGate.WaitAsync(cancellationToken);
+            var started = Stopwatch.GetTimestamp();
+            var count = 0;
+            var outcome = "empty";
+            try
+            {
+                var writes = new List<ItemEnrichmentWrite>();
+                foreach (var identity in _writes.Keys)
+                    if (_writes.TryRemove(identity, out var write)) writes.Add(write);
+                count = writes.Count;
+                if (count == 0) return;
+                await owner._store.WriteManyAsync(partition, writes, cancellationToken);
+                // Re-read accepted payloads even when the generation is unchanged:
+                // another writer may have won a component clock/revision race.
+                var latest = await owner._store.ReadManyAsync(partition, writes.Select(write => write.Identity).ToArray(), false, cancellationToken);
+                var retries = new List<ItemEnrichmentWrite>();
+                foreach (var write in writes)
+                {
+                    if (!latest.TryGetValue(write.Identity, out var accepted) || accepted.Generation != write.ExpectedGeneration) continue;
+                    if (write.TmdbObservedUtc is { } observed && (accepted.TmdbObservedUtc is null || observed > accepted.TmdbObservedUtc)
+                        && Deserialize<ItemEnrichmentMetadata>(accepted.MetadataJson) is { } acceptedMetadata
+                        && Deserialize<ItemEnrichmentMetadata>(write.MetadataJson)?.TmdbVotes is { } observation
+                        && accepted.MetadataFetchedUtc is { } fetched)
+                    {
+                        // An observation may lose revision CAS to a field repair.
+                        // Retry only its newer votes on top of that accepted repair.
+                        var rebased = acceptedMetadata with { TmdbVotes = observation };
+                        retries.Add(new(write.Identity, accepted.Generation, JsonSerializer.Serialize(rebased), fetched,
+                            TvmazeShowId: rebased.TvmazeShowId, TmdbObservedUtc: observed, ExpectedMetadataRevision: accepted.MetadataRevision));
+                    }
+                }
+                if (retries.Count > 0)
+                {
+                    await owner._store.WriteManyAsync(partition, retries, cancellationToken);
+                    latest = await owner._store.ReadManyAsync(partition, writes.Select(write => write.Identity).ToArray(), false, cancellationToken);
+                }
+                var conflicted = false;
+                foreach (var write in writes)
+                {
+                    if (!latest.TryGetValue(write.Identity, out var record)) { conflicted = true; continue; }
+                    var previous = Find(write.Identity);
+                    if (previous is not null && previous.Record.MetadataInvalidatedUtc != record.MetadataInvalidatedUtc)
+                        _discoveryChanged[write.Identity.MediaType] = 0;
+                    conflicted |= record.Generation != write.ExpectedGeneration;
+                    if (record.MetadataJson == write.MetadataJson && record.MetadataFetchedUtc == write.MetadataFetchedUtc)
+                        _selfAcceptedRevisions[write.Identity] = record.MetadataRevision;
+                    Accept(record);
+                }
+                outcome = conflicted ? "generation_conflict" : "accepted_or_rebased";
+                if (conflicted && rejectGenerationConflicts) throw new ItemEnrichmentInvalidatedException();
+            }
+            catch (ItemEnrichmentInvalidatedException) { throw; }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                outcome = "failed";
+                owner._logger.LogWarning(ex, "Item enrichment cache write failed; provider results remain provisional until database validation.");
+            }
+            finally
+            {
+                _flushGate.Release();
+                owner._telemetry.RecordDiagnostic("item_cache.write", details: new() { Count = count, Outcome = outcome,
+                    DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds });
+            }
+        }
+
+        private ItemEnrichmentSnapshot Accept(ItemEnrichmentRecord record)
+        {
+            var current = Find(record.Identity);
+            var accepted = new ItemEnrichmentSnapshot(record, Deserialize<ItemEnrichmentMetadata>(record.MetadataJson), Deserialize<ItemEnrichmentRatings>(record.RatingsJson));
+            _records[record.Identity] = accepted;
+            if (_completed.ContainsKey(record.Identity)) _completed[record.Identity] = accepted;
+            if (current?.Record.MetadataRevision != record.MetadataRevision || current?.Record.Generation != record.Generation)
+                FirstEpisodeDates.TryRemove(record.Identity.TmdbId, out _);
+            return accepted;
+        }
+
+        public async Task<ItemEnrichmentReconciliation> ReconcileAsync(IReadOnlyList<PremiereItem> items,
+            bool includeConsumed, CancellationToken cancellationToken)
+        {
+            var started = Stopwatch.GetTimestamp();
+            var itemIdentities = items.Where(item => item.TmdbId > 0 && item.VerificationState == PremiereVerificationState.Verified)
+                .Select(item => new ItemEnrichmentIdentity(item.MediaType, item.TmdbId));
+            var identities = (includeConsumed ? itemIdentities.Concat(_records.Keys) : itemIdentities).Distinct().ToArray();
+            var dirty = _discoveryChanged.Keys.ToHashSet();
+            try
+            {
+                var latest = await owner._store.ReadManyAsync(partition, identities, false, cancellationToken);
+                foreach (var record in latest.Values)
+                {
+                    var previous = Find(record.Identity);
+                    if (previous is not null && previous.Record.MetadataInvalidatedUtc != record.MetadataInvalidatedUtc)
+                        dirty.Add(record.Identity.MediaType);
+                    Accept(record);
+                }
+                var result = items.Select(item =>
+                {
+                    var identity = new ItemEnrichmentIdentity(item.MediaType, item.TmdbId);
+                    if (item.TmdbId <= 0 || item.VerificationState != PremiereVerificationState.Verified) return item;
+                    if (!latest.TryGetValue(identity, out var record)) { dirty.Add(item.MediaType); return item; }
+                    var current = Find(identity)!;
+                    if (item.EnrichmentVersion?.MetadataInvalidatedUtc != record.MetadataInvalidatedUtc
+                        || item.Type == PremiereItemType.SeriesPremiere && item.DateSemantics?.SourceKind == PremiereDateSourceKind.TmdbSeasonOneEpisodeOne
+                            && current.Metadata is { FirstEpisodeDateChecked: true, FirstEpisodeDate: { } date } && date != item.PremiereDate)
+                        dirty.Add(item.MediaType);
+                    var metadataChanged = item.EnrichmentVersion is not { } version
+                        || version.MetadataRevision != record.MetadataRevision || version.MetadataFetchedUtc != record.MetadataFetchedUtc;
+                    if (_selfAcceptedRevisions.TryGetValue(identity, out var ownRevision) && ownRevision == record.MetadataRevision)
+                        metadataChanged = false;
+                    return current.Rebase(item, metadataChanged);
+                }).ToArray();
+                owner._telemetry.RecordDiagnostic("item_cache.reconcile", details: new() { Count = result.Length, Total = identities.Length,
+                    Outcome = dirty.Count == 0 ? "current" : "discovery_required", DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds });
+                return new(result, dirty);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                owner._logger.LogWarning(ex, "Could not validate item enrichment revisions; calendar results remain provisional.");
+                owner._telemetry.RecordDiagnostic("item_cache.reconcile", details: new() { Count = items.Count, Total = identities.Length,
+                    Outcome = "failed", DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds });
+                return new(items, identities.Select(identity => identity.MediaType).ToHashSet());
+            }
+        }
+    }
+
+    private static T? Deserialize<T>(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return default;
+        try { return JsonSerializer.Deserialize<T>(json); }
+        catch (JsonException) { return default; }
+    }
+}
+
+internal sealed record ItemEnrichmentSnapshot(ItemEnrichmentRecord Record, ItemEnrichmentMetadata? Metadata, ItemEnrichmentRatings? Ratings)
+{
+    public ItemEnrichmentVersion Version => new(Record.Generation, Record.MetadataRevision,
+        Record.MetadataFetchedUtc, Record.RatingsFetchedUtc, Record.MetadataInvalidatedUtc);
+
+    public PremiereItem Apply(PremiereItem discovered)
+    {
+        var applied = Ratings?.Apply(Metadata?.Apply(discovered) ?? discovered) ?? Metadata?.Apply(discovered) ?? discovered;
+        var clocks = new[] { Record.MetadataFetchedUtc, Record.RatingsFetchedUtc }.Where(clock => clock is { } known && known > DateTimeOffset.MinValue).Select(clock => clock!.Value).ToArray();
+        return applied with { LastUpdatedUtc = clocks.Length == 0 ? applied.LastUpdatedUtc : clocks.Min(), EnrichmentVersion = Version };
+    }
+
+    public PremiereItem Rebase(PremiereItem item, bool metadataChanged)
+    {
+        var applied = Record.RatingsFetchedUtc is null ? item : item with
+        {
+            ImdbScore = null, ImdbVoteCount = null, RottenTomatoesScore = null,
+            RottenTomatoesAudienceScore = null, MetacriticScore = null
+        };
+        if (metadataChanged && Metadata is not null) applied = Metadata.Apply(applied, preferDiscoveryMetadata: false);
+        if (Ratings is not null) applied = Ratings.Apply(applied);
+        var sources = applied.Sources.Where(source => !string.Equals(source.Kind, "schedule", StringComparison.OrdinalIgnoreCase))
+            .Concat(item.Sources.Where(source => string.Equals(source.Kind, "schedule", StringComparison.OrdinalIgnoreCase)))
+            .DistinctBy(source => $"{source.Kind}:{source.Id}:{source.Name}", StringComparer.OrdinalIgnoreCase).ToArray();
+        return applied with
+        {
+            Sources = sources, SourceNames = sources.Select(source => source.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            EnrichmentVersion = Version,
+            LastUpdatedUtc = new[] { Record.MetadataFetchedUtc, Record.RatingsFetchedUtc }.Where(clock => clock is { } known && known > DateTimeOffset.MinValue)
+                .Select(clock => clock!.Value).DefaultIfEmpty(applied.LastUpdatedUtc).Min()
+        };
+    }
+}
+
+internal sealed record ItemEnrichmentRefresh(ItemEnrichmentMetadata? Metadata, ItemEnrichmentRatings? Ratings,
+    bool RefreshMetadataClock = true, bool MetadataFailed = false, bool RatingsFailed = false);
+internal sealed record FirstEpisodeValidation(DateOnly? Date, bool Successful);
+internal sealed class ItemEnrichmentInvalidatedException() : Exception(
+    "Item metadata changed while enrichment was running. The source remains partial and will be retried.");
+internal sealed record ItemEnrichmentReconciliation(IReadOnlyList<PremiereItem> Items, IReadOnlySet<PremiereMediaType> DirtyMedia);

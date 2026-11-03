@@ -82,7 +82,7 @@ Default non-secret settings:
 
 The same TMDb token is also used by `TmdbFilterCatalogService` to load official filter values for genres, languages, countries, watch providers, and certifications. These catalog responses are cached in memory and have local fallback values so the filter pane still opens if a catalog request fails.
 
-Successful movie/TV detail responses also persist in the application database for their existing 12-hour lifetime; Rotten Tomatoes scores use their configured lifetime. Restart reads keep the original expiry, and forced refresh bypasses both cache tiers. Response envelopes are limited to 256 KiB; larger responses remain usable without persistence. Cache I/O is best effort with a 500 ms cooperative budget and five-second backoff per provider. SQLite response-cache connections additionally limit native busy retries to one second. PostgreSQL serves at most four response-cache operations concurrently; remote request limits are unchanged. Existing scheduled maintenance trims only these response-cache rows older than eight days when warmup and maintenance are enabled. See [measured movie-week refresh behavior](MovieWeekSpeedValidation.md).
+Successful movie/TV details and season-one responses persist in the application database for their existing 12-hour freshness lifetime; Rotten Tomatoes scores use their configured lifetime. External-ID and title resolution also persist: positive results remain fresh for 90 days and negative results for six hours. Restart reads keep the original expiry, and forced refresh bypasses both cache tiers. Response envelopes are limited to 256 KiB; larger responses remain usable without persistence. Cache I/O is best effort with a 500 ms cooperative budget and five-second backoff per provider. SQLite response-cache connections additionally limit native busy retries to one second. PostgreSQL serves at most four response-cache operations concurrently; remote request limits are unchanged. Scheduled maintenance retains these response-cache rows for three calendar months. Retention does not extend their freshness. See [item caching](ItemEnrichmentCache.md) and [earlier movie-week measurements](MovieWeekSpeedValidation.md).
 
 ## OMDb
 
@@ -284,11 +284,24 @@ Week-level normalized results are stored in a local file cache by default:
 
 The UI Refresh button bypasses the fresh week cache and the in-memory source API caches for the visible week, then fetches fresh data. If a source refresh fails, the app can still read the last cached week as a fallback. The cache directory is ignored by git.
 
-Keep the calendar and image cache payloads on disk rather than moving them into SQLite. The database is used for small mutable settings; week JSON files and poster bytes are larger, file-oriented payloads that benefit from streamed disk reads, simple cleanup, browser cache validators, and preservation across app updates without growing the settings database.
+Full-week JSON and image bytes remain on disk. Reusable per-title metadata, scores and provider response envelopes live in the application database, so different weeks and filters can share them. The supported deployment uses PostgreSQL; SQLite remains available for local/test use.
+
+```json
+"ItemEnrichmentCache": {
+  "Enabled": true,
+  "RetentionMonths": 3,
+  "MetadataRefreshDays": 7,
+  "RatingsRefreshHours": 24,
+  "MetadataFailureRetryMinutes": 5,
+  "RatingsFailureRetryMinutes": 5
+}
+```
+
+Retention uses calendar-month arithmetic since the item's last use. It does not make a three-month-old score fresh. Changed cached IDs are invalidated sooner by provider change checks; periodic discovery still reconciles dates and week membership. See [item cache operations](ItemEnrichmentCache.md).
 
 ## Provider Change Checks
 
-Some providers expose cheap "what changed" endpoints. The app records those markers in SQLite:
+Some providers expose cheap "what changed" endpoints. The app records their successful coverage in the database and uses TMDb/TVmaze changes to invalidate matching reusable item metadata:
 
 - TMDb movie/TV change lists.
 - TVmaze show update timestamps.
@@ -299,12 +312,16 @@ Some providers expose cheap "what changed" endpoints. The app records those mark
   "Enabled": true,
   "WakeIntervalMinutes": 60,
   "TmdbLookbackDays": 14,
+  "InitialLookbackDays": 2,
+  "ChangeHistoryConcurrency": 4,
   "UseTmdbChanges": true,
   "UseTvmazeUpdates": true
 }
 ```
 
 OMDb and the IMDb dataset do not expose per-item change endpoints. OMDb is cached by IMDb ID; the IMDb dataset is refreshed as a whole on its interval.
+
+TMDb checks start at the previous successful poll, bounded to 14 days of recovery. Only already-cached IDs returned by the change lists need individual change-history checks. Actual relevant timestamps make overlapping windows idempotent; cast/crew-only changes do not refresh card metadata. Failed or incomplete checks do not advance coverage. TVmaze uses day/week/month recovery windows and fresh checked feeds. Gaps beyond provider recovery remain covered by the seven-day metadata fallback rather than claiming complete change history.
 
 ## Adaptive Warmup And Load Budget
 

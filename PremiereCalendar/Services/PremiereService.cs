@@ -13,7 +13,9 @@ namespace PremiereCalendar.Services;
 
 public sealed partial class PremiereService : IPremiereService, IPremiereLoadPipeline
 {
-    private static readonly TimeSpan CachedEnrichmentMaxAge = TimeSpan.FromHours(12);
+    // Compatibility path for callers that do not supply the shared coordinator.
+    // Whole-row fallback must not outlive the default ratings refresh interval.
+    private static readonly TimeSpan CachedEnrichmentMaxAge = TimeSpan.FromHours(24);
     private const int ConflictingExternalIdsTmdbId = -1;
 
     private readonly ITmdbClient _tmdbClient;
@@ -35,6 +37,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
     private readonly MissingExternalIdRepairService? _missingExternalIdRepairService;
     private readonly IProviderWorkScheduler? _workScheduler;
     private readonly PremiereTelemetry _telemetry;
+    private readonly ItemEnrichmentCacheCoordinator? _itemEnrichmentCache;
+    private readonly AsyncLocal<ItemEnrichmentCacheCoordinator.ItemEnrichmentSession?> _itemCacheSession = new();
+    private readonly AsyncLocal<ItemEnrichmentAttempt?> _itemEnrichmentAttempt = new();
 
     public PremiereService(
         ITmdbClient tmdbClient,
@@ -56,7 +61,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         MissingExternalIdRepairService? missingExternalIdRepairService = null,
         IProviderWorkScheduler? workScheduler = null,
         PremiereTelemetry? telemetry = null,
-        CalendarLoadCacheOrchestrator? cacheOrchestrator = null)
+        CalendarLoadCacheOrchestrator? cacheOrchestrator = null,
+        ItemEnrichmentCacheCoordinator? itemEnrichmentCache = null)
     {
         _tmdbClient = tmdbClient;
         _omdbClient = omdbClient;
@@ -77,6 +83,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         _missingExternalIdRepairService = missingExternalIdRepairService;
         _workScheduler = workScheduler;
         _telemetry = telemetry ?? new PremiereTelemetry();
+        _itemEnrichmentCache = itemEnrichmentCache is { Enabled: true } ? itemEnrichmentCache : null;
     }
 
     public async Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
@@ -138,7 +145,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 var hydrated = await TraceEnrichmentStageAsync("cache.local_hydration",
                     () => HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken, allowRemote: false));
                 var items = ApplyRequestedFilters(hydrated, filters);
-                var isFinal = snapshot.IsComplete && !NeedsRemoteCachedHydration(hydrated, filters);
+                var isFinal = snapshot.IsComplete && !await NeedsRemoteCachedHydrationAsync(hydrated, filters, cancellationToken);
                 _telemetry.RecordDiagnostic("calendar.cache.decision", details: new()
                 {
                     Outcome = isFinal ? "direct_complete" : "provisional", Count = items.Count,
@@ -214,14 +221,28 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             var snapshot = await ReadCalendarCacheAsync(start, end, filters, cancellationToken);
             if (snapshot.Items is { } cached)
             {
+                var metadataHydration = await HydrateSharedItemMetadataAsync(cached, start, end, cancellationToken);
                 var hydrated = await TraceEnrichmentStageAsync("cache.hydration",
-                    () => HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken));
+                    () => HydrateCachedImdbRatingsAsync(metadataHydration.Items, filters, cancellationToken));
                 var cachedItems = ApplyRequestedFilters(hydrated, filters);
-                if (snapshot.IsComplete && resumeState?.RefreshCalendarSnapshot != true)
+                if (_itemCacheSession.Value is { } cachedSession)
+                {
+                    var validation = await cachedSession.ReconcileAsync(hydrated, includeConsumed: true, cancellationToken);
+                    cachedItems = ApplyRequestedFilters(validation.Items, filters);
+                    if (validation.DirtyMedia.Count > 0)
+                    {
+                        metadataHydration = (metadataHydration.Items, true);
+                        cachedSession.ForceDiscoveryRefresh = true;
+                    }
+                }
+                if (snapshot.IsComplete && !metadataHydration.DiscoveryChanged && resumeState?.RefreshCalendarSnapshot != true)
                 {
                     yield return CreateProgress("Week cache", cachedItems, cachedItems, isFinal: true, fromCache: true);
                     yield break;
                 }
+
+                if (metadataHydration.DiscoveryChanged)
+                    snapshot = snapshot with { IsComplete = false, HasFreshSeries = false, HasFreshMovies = false, FreshItems = [] };
 
                 var freshIds = snapshot.FreshItems.Select(item => item.CanonicalId).ToHashSet(StringComparer.Ordinal);
                 // Snapshot refresh may reuse metadata and provisional rows, but its
@@ -369,11 +390,31 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         if (finalUpdate is not null && forceRefresh && !finalUpdate.HasSourceErrors)
         {
             finalItems = await RepairAndBackfillAsync(finalItems, cancellationToken, forceRefresh);
+            if (_itemCacheSession.Value is { } itemSession)
+            {
+                itemSession.SynchronizeMaintainedProjection(finalItems);
+                await itemSession.FlushAsync(cancellationToken);
+                finalItems = await HydrateSharedItemRatingsAsync(finalItems, cancellationToken, allowRemote: true);
+            }
             finalUpdate = finalUpdate with
             {
                 Items = finalItems,
                 TotalItemCount = finalItems.Count,
                 SourceItems = finalItems
+            };
+        }
+
+        if (finalUpdate is not null && _itemCacheSession.Value is { } validationSession)
+        {
+            await validationSession.FlushAsync(cancellationToken);
+            var validation = await validationSession.ReconcileAsync(finalItems, includeConsumed: true, cancellationToken);
+            finalItems = ApplyRequestedFilters(validation.Items, filters);
+            finalUpdate = finalUpdate with
+            {
+                Items = finalItems, SourceItems = finalItems, TotalItemCount = finalItems.Count,
+                HasSourceErrors = finalUpdate.HasSourceErrors || validation.DirtyMedia.Count > 0,
+                FailedSourceNames = validation.DirtyMedia.Count == 0 ? finalUpdate.FailedSourceNames
+                    : finalUpdate.FailedSourceNames.Append("Item cache validation").Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
             };
         }
 
@@ -1232,6 +1273,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         bool allowRemote = true)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (_itemEnrichmentCache is not null)
+            return await HydrateSharedItemRatingsAsync(items, cancellationToken, allowRemote);
         if (items.Count == 0 || (_imdbRatingsStore is null && _rottenTomatoesClient is null))
         {
             return items;
@@ -1682,7 +1725,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
 
         return MergePremiereItems(cachedItems)
-            .Where(IsFreshReusableEnrichment)
+            .Where(item => item.VerificationState == PremiereVerificationState.Verified && EnrichmentScore(item) > 0)
             .GroupBy(item => item.CanonicalId, StringComparer.Ordinal)
             .ToDictionary(
                 group => group.Key,
@@ -1719,29 +1762,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
     private static PremiereItem MergeCachedEnrichment(PremiereItem cachedItem, PremiereItem discoveredItem)
     {
-        return cachedItem with
-        {
-            Type = discoveredItem.Type,
-            MediaType = discoveredItem.MediaType,
-            TmdbId = discoveredItem.TmdbId,
-            Title = discoveredItem.Title,
-            OriginalTitle = CoalesceText(discoveredItem.OriginalTitle, cachedItem.OriginalTitle),
-            PremiereDate = discoveredItem.PremiereDate,
-            Overview = CoalesceText(discoveredItem.Overview, cachedItem.Overview),
-            PosterUrl = CoalesceText(discoveredItem.PosterUrl, cachedItem.PosterUrl),
-            BackdropUrl = CoalesceText(discoveredItem.BackdropUrl, cachedItem.BackdropUrl),
-            ImageSource = discoveredItem.PosterUrl is not null ? discoveredItem.ImageSource : cachedItem.ImageSource,
-            TmdbUrl = CoalesceText(discoveredItem.TmdbUrl, cachedItem.TmdbUrl),
-            OriginalLanguage = CoalesceText(discoveredItem.OriginalLanguage, cachedItem.OriginalLanguage) ?? "",
-            OriginCountries = discoveredItem.OriginCountries.Length > 0 ? discoveredItem.OriginCountries : cachedItem.OriginCountries,
-            GenreIds = discoveredItem.GenreIds.Length > 0 ? discoveredItem.GenreIds : cachedItem.GenreIds,
-            EpisodeTitle = CoalesceText(discoveredItem.EpisodeTitle, cachedItem.EpisodeTitle),
-            SeasonNumber = discoveredItem.SeasonNumber ?? cachedItem.SeasonNumber,
-            EpisodeNumber = discoveredItem.EpisodeNumber ?? cachedItem.EpisodeNumber,
-            EpisodeSource = CoalesceText(discoveredItem.EpisodeSource, cachedItem.EpisodeSource),
-            TmdbScore = discoveredItem.TmdbScore ?? cachedItem.TmdbScore,
-            TmdbVoteCount = discoveredItem.TmdbVoteCount ?? cachedItem.TmdbVoteCount
-        };
+        return ItemEnrichmentRatings.FromItem(cachedItem).Apply(ItemEnrichmentMetadata.FromItem(cachedItem).Apply(discoveredItem))
+            with { LastUpdatedUtc = cachedItem.LastUpdatedUtc };
     }
 
     private static bool IsExactSeriesEpisode(PremiereItem item)

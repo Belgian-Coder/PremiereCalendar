@@ -9,7 +9,7 @@ namespace PremiereCalendar.UnitTests;
 public sealed class ProviderDeltaSyncServiceTests
 {
     [Fact]
-    public async Task RunOnceAsync_TmdbTimeoutDoesNotEscapeSyncCycle()
+    public async Task RunOnceAsync_TmdbTimeoutFailsDurableJobForBoundedRetry()
     {
         var tmdb = new TimeoutTmdbClient();
         var service = new ProviderDeltaSyncService(
@@ -30,7 +30,7 @@ public sealed class ProviderDeltaSyncServiceTests
 
         var exception = await Record.ExceptionAsync(() => service.RunOnceAsync(CancellationToken.None));
 
-        Assert.Null(exception);
+        Assert.IsType<ExternalApiException>(exception);
         Assert.Equal(1, tmdb.ChangedMovieCalls);
     }
 
@@ -65,7 +65,7 @@ public sealed class ProviderDeltaSyncServiceTests
     }
 
     [Fact]
-    public async Task RunOnceAsync_TmdbLookbackUsesInclusiveFourteenDayRange()
+    public async Task RunOnceAsync_InitialLookbackUsesTwoDaysInsteadOfRepeatedFourteenDaySweep()
     {
         var tmdb = new RecordingTmdbClient();
         var service = new ProviderDeltaSyncService(
@@ -87,9 +87,9 @@ public sealed class ProviderDeltaSyncServiceTests
 
         await service.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(new DateOnly(2026, 5, 3), tmdb.MovieStart);
+        Assert.Equal(new DateOnly(2026, 5, 15), tmdb.MovieStart);
         Assert.Equal(new DateOnly(2026, 5, 16), tmdb.MovieEnd);
-        Assert.Equal(new DateOnly(2026, 5, 3), tmdb.TvStart);
+        Assert.Equal(new DateOnly(2026, 5, 15), tmdb.TvStart);
         Assert.Equal(new DateOnly(2026, 5, 16), tmdb.TvEnd);
     }
 

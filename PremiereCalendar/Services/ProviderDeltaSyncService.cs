@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
+using System.Text.Json;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 
@@ -14,6 +16,8 @@ public sealed class ProviderDeltaSyncService : BackgroundService
     private readonly ILogger<ProviderDeltaSyncService> _logger;
     private readonly BackgroundJobTimelineService? _timeline;
     private readonly IProviderWorkScheduler? _workScheduler;
+    private readonly IItemEnrichmentStore? _itemEnrichmentStore;
+    private readonly PremiereTelemetry? _telemetry;
 
     public ProviderDeltaSyncService(
         ITmdbClient tmdbClient,
@@ -23,7 +27,9 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         TimeProvider timeProvider,
         ILogger<ProviderDeltaSyncService> logger,
         BackgroundJobTimelineService? timeline = null,
-        IProviderWorkScheduler? workScheduler = null)
+        IProviderWorkScheduler? workScheduler = null,
+        IItemEnrichmentStore? itemEnrichmentStore = null,
+        PremiereTelemetry? telemetry = null)
     {
         _tmdbClient = tmdbClient;
         _tvmazeClient = tvmazeClient;
@@ -33,6 +39,8 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         _logger = logger;
         _timeline = timeline;
         _workScheduler = workScheduler;
+        _itemEnrichmentStore = itemEnrichmentStore;
+        _telemetry = telemetry;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -83,7 +91,9 @@ public sealed class ProviderDeltaSyncService : BackgroundService
 
     internal async Task RunOnceAsync(CancellationToken cancellationToken)
     {
-        await RunOnceCoreAsync(cancellationToken);
+        var result = await RunOnceCoreAsync(cancellationToken);
+        if (result.Failures.Count > 0)
+            throw new ExternalApiException("One or more provider change feeds could not be synchronized.");
     }
 
     private async Task<ProviderDeltaSyncResult> RunOnceCoreAsync(CancellationToken cancellationToken)
@@ -183,10 +193,8 @@ public sealed class ProviderDeltaSyncService : BackgroundService
         try
         {
             var end = DateOnly.FromDateTime(nowUtc.UtcDateTime);
-            var lookbackDays = Math.Clamp(_options.CurrentValue.TmdbLookbackDays, 1, 14);
-            var start = end.AddDays(-(lookbackDays - 1));
-            await SyncTmdbMediaChangesAsync(PremiereMediaType.Movie, start, end, nowUtc, cancellationToken);
-            await SyncTmdbMediaChangesAsync(PremiereMediaType.Series, start, end, nowUtc, cancellationToken);
+            await SyncTmdbMediaChangesAsync(PremiereMediaType.Movie, end, nowUtc, cancellationToken);
+            await SyncTmdbMediaChangesAsync(PremiereMediaType.Series, end, nowUtc, cancellationToken);
             return null;
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
@@ -203,69 +211,95 @@ public sealed class ProviderDeltaSyncService : BackgroundService
 
     private async Task SyncTmdbMediaChangesAsync(
         PremiereMediaType mediaType,
-        DateOnly start,
         DateOnly end,
         DateTimeOffset nowUtc,
         CancellationToken cancellationToken)
     {
+        var started = Stopwatch.GetTimestamp();
+        var keyPrefix = mediaType == PremiereMediaType.Movie ? "movie" : "tv";
+        var globalKey = $"{keyPrefix}-changes";
+        var prior = await _stateStore.GetAsync("tmdb", ProviderCacheScope.Global, globalKey, cancellationToken);
+        var maximumDays = Math.Clamp(_options.CurrentValue.TmdbLookbackDays, 1, 14);
+        var minimum = end.AddDays(-(maximumDays - 1));
+        var start = prior is null
+            ? end.AddDays(-(Math.Clamp(_options.CurrentValue.InitialLookbackDays, 1, maximumDays) - 1))
+            : DateOnly.FromDateTime(prior.LastCheckedUtc.UtcDateTime);
+        var gap = start < minimum;
+        if (gap) start = minimum;
+        if (start > end) start = end;
         var changes = mediaType == PremiereMediaType.Movie
             ? await _tmdbClient.GetChangedMovieIdsAsync(start, end, cancellationToken)
             : await _tmdbClient.GetChangedTvIdsAsync(start, end, cancellationToken);
-        var keyPrefix = mediaType == PremiereMediaType.Movie ? "movie" : "tv";
         var watermark = end.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
-        var globalKey = $"{keyPrefix}-changes";
-
-        var states = new List<ProviderCacheState>
+        var ids = changes.Where(change => change.Id > 0).Select(change => change.Id).Distinct().ToArray();
+        var known = _itemEnrichmentStore is null ? new HashSet<int>()
+            : await _itemEnrichmentStore.FindKnownTmdbIdsAsync(mediaType, ids, cancellationToken);
+        var histories = new System.Collections.Concurrent.ConcurrentDictionary<int, DateTimeOffset?>();
+        await Parallel.ForEachAsync(known, new ParallelOptions
         {
-            new(
-                "tmdb",
-                ProviderCacheScope.Global,
-                globalKey,
-                nowUtc,
-                nowUtc,
-                watermark,
-                changes.Count,
-                null)
-        };
-
-        foreach (var change in changes)
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = Math.Clamp(_options.CurrentValue.ChangeHistoryConcurrency, 1, 8)
+        }, async (id, token) =>
         {
-            if (change.Id <= 0)
-            {
-                continue;
-            }
-
-            states.Add(new ProviderCacheState(
-                    "tmdb",
-                    ProviderCacheScope.Item,
-                    $"{keyPrefix}:{change.Id}",
-                    nowUtc,
-                    nowUtc,
-                    watermark,
-                    null,
-                    null));
+            var timestamp = await _tmdbClient.GetLastMetadataChangeUtcAsync(mediaType, id, start, end, token);
+            histories[id] = timestamp;
+        });
+        var invalidations = new Dictionary<int, DateTimeOffset>();
+        foreach (var (id, timestamp) in histories)
+        {
+            if (timestamp == DateTimeOffset.MinValue) continue;
+            // Unknown/deleted history is conservative; precise histories make
+            // overlapping change-list windows idempotent for unchanged items.
+            var changedAt = timestamp is null || timestamp > nowUtc ? nowUtc : timestamp.Value;
+            invalidations[id] = changedAt;
         }
-
+        var invalidated = _itemEnrichmentStore is null ? 0
+            : await _itemEnrichmentStore.InvalidateTmdbManyAsync(mediaType, invalidations, cancellationToken);
+        // Unrelated worldwide IDs need no per-item marker writes. The global
+        // coverage record retains the full feed count and successful watermark.
+        var states = known.Select(id => new ProviderCacheState("tmdb", ProviderCacheScope.Item,
+            $"{keyPrefix}:{id}", nowUtc,
+            histories.TryGetValue(id, out var actual) && actual != DateTimeOffset.MinValue ? actual : null,
+            watermark, null, null)).ToList();
+        // Advance the global watermark only after complete paging, history checks
+        // and every matching generation invalidation have succeeded.
         await _stateStore.SaveManyAsync(states, cancellationToken);
+        await _stateStore.SaveAsync(new ProviderCacheState("tmdb", ProviderCacheScope.Global, globalKey,
+            nowUtc, null, watermark, changes.Count,
+            JsonSerializer.Serialize(new { start, end, coverageGap = gap, known = known.Count, invalidated })), cancellationToken);
+        if (gap)
+            _logger.LogWarning("TMDb {MediaType} change recovery exceeded {MaximumDays} days; bounded metadata refresh remains required.", mediaType, maximumDays);
+        _logger.LogInformation("TMDb {MediaType} delta checked {ChangedIds} IDs, inspected {KnownIds} cached histories and invalidated {InvalidatedItems} records in {DurationMilliseconds} ms.",
+            mediaType, ids.Length, known.Count, invalidated, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        _telemetry?.RecordDiagnostic("itemcache.delta.completed", details: new()
+        {
+            Provider = "tmdb", Outcome = "success", Reason = gap ? "coverage_gap" : "targeted_changes",
+            Count = invalidated, Total = ids.Length, DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+        });
     }
 
     private async Task<ProviderDeltaFailure?> SyncTvmazeUpdatesAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
         try
         {
-            var updates = await _tvmazeClient.GetShowUpdatesAsync(TvmazeUpdateWindow.Day, cancellationToken);
-            var states = new List<ProviderCacheState>
+            var started = Stopwatch.GetTimestamp();
+            var prior = await _stateStore.GetAsync("tvmaze", ProviderCacheScope.Global, "show-updates", cancellationToken);
+            var age = prior is null ? TimeSpan.Zero : nowUtc - prior.LastCheckedUtc;
+            var window = age <= TimeSpan.FromDays(1) ? TvmazeUpdateWindow.Day
+                : age <= TimeSpan.FromDays(7) ? TvmazeUpdateWindow.Week : TvmazeUpdateWindow.Month;
+            var updates = await _tvmazeClient.GetShowUpdatesCheckedAsync(window, cancellationToken);
+            var invalidated = 0;
+            if (_itemEnrichmentStore is not null)
             {
-                new(
-                    "tvmaze",
-                    ProviderCacheScope.Global,
-                    "show-updates",
-                    nowUtc,
-                    updates.Count > 0 ? updates.Max(update => update.UpdatedAtUtc) : null,
-                    "day",
-                    updates.Count,
-                    null)
-            };
+                if (updates.Count > 0)
+                    invalidated += await _itemEnrichmentStore.FenceUnmappedTvmazeReservationsAsync(
+                        _timeProvider.GetUtcNow(), cancellationToken);
+                var changes = updates.GroupBy(update => update.ShowId).ToDictionary(group => group.Key,
+                    group => group.Max(update => update.UpdatedAtUtc) > nowUtc ? nowUtc
+                        : group.Max(update => update.UpdatedAtUtc));
+                invalidated += await _itemEnrichmentStore.InvalidateTvmazeManyAsync(changes, cancellationToken);
+            }
+            var states = new List<ProviderCacheState>();
 
             foreach (var update in updates)
             {
@@ -275,12 +309,21 @@ public sealed class ProviderDeltaSyncService : BackgroundService
                         $"show:{update.ShowId}",
                         nowUtc,
                         update.UpdatedAtUtc,
-                        "day",
+                        window.ToString().ToLowerInvariant(),
                         null,
                         null));
             }
 
             await _stateStore.SaveManyAsync(states, cancellationToken);
+            await _stateStore.SaveAsync(new ProviderCacheState("tvmaze", ProviderCacheScope.Global, "show-updates",
+                nowUtc, updates.Count > 0 ? updates.Max(update => update.UpdatedAtUtc) : null,
+                window.ToString().ToLowerInvariant(), updates.Count,
+                JsonSerializer.Serialize(new { coverageGap = age > TimeSpan.FromDays(30), invalidated })), cancellationToken);
+            _telemetry?.RecordDiagnostic("itemcache.delta.completed", details: new()
+            {
+                Provider = "tvmaze", Outcome = "success", Reason = age > TimeSpan.FromDays(30) ? "coverage_gap" : "targeted_changes",
+                Count = invalidated, Total = updates.Count, DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
+            });
             return null;
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)

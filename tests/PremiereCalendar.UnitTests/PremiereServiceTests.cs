@@ -4301,7 +4301,8 @@ public sealed partial class PremiereServiceTests
         PremiereTelemetry? telemetry = null,
         int maxEnrichmentConcurrency = 16,
         ScoreBackfillService? scoreBackfill = null,
-        MissingExternalIdRepairService? missingExternalIdRepair = null)
+        MissingExternalIdRepairService? missingExternalIdRepair = null,
+        ItemEnrichmentCacheCoordinator? itemEnrichmentCache = null)
     {
         return new PremiereService(
             tmdb,
@@ -4328,7 +4329,8 @@ public sealed partial class PremiereServiceTests
             scoreBackfillService: scoreBackfill,
             missingExternalIdRepairService: missingExternalIdRepair,
             workScheduler: workScheduler,
-            telemetry: telemetry);
+            telemetry: telemetry,
+            itemEnrichmentCache: itemEnrichmentCache);
     }
 
     private static string CacheKeyForPageMode(CalendarFilters filters, CalendarPageMode pageMode)
@@ -4494,6 +4496,7 @@ public sealed partial class PremiereServiceTests
         }
 
         public ConcurrentBag<DetailCall> TvDetailCalls { get; } = [];
+        public ConcurrentBag<DetailCall> MovieDetailCalls { get; } = [];
 
         public Task<TmdbDetailsWithExtras?> GetTvDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false)
         {
@@ -4566,6 +4569,7 @@ public sealed partial class PremiereServiceTests
 
         public async Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false)
         {
+            MovieDetailCalls.Add(new DetailCall(id, forceRefresh));
             if (MovieDetailDelay is { } delay) await Task.Delay(delay, cancellationToken);
             if (MovieDetailExceptions.TryGetValue(id, out var exception))
             {
@@ -4906,11 +4910,17 @@ public sealed partial class PremiereServiceTests
 
     private sealed class FakeWatchmodeClient : IWatchmodeClient
     {
+        public bool SourcesOutcomeSuccessful { get; init; } = true;
         public IReadOnlyList<PremiereSource> Sources { get; init; } = [];
         public IReadOnlyList<ExternalPremiereCandidate> ReleaseCandidates { get; init; } = [];
         public bool ThrowOnSources { get; init; }
         public Exception? SourcesException { get; init; }
         public ConcurrentBag<WatchmodeSourceCall> SourceCalls { get; } = [];
+
+        public async Task<ProviderRefreshResult<IReadOnlyList<PremiereSource>>> GetTitleSourcesWithStatusAsync(
+            PremiereMediaType mediaType, int tmdbId, string? imdbId, IReadOnlyList<string> regions,
+            CancellationToken cancellationToken, bool forceRefresh = false)
+            => new(await GetTitleSourcesAsync(mediaType, tmdbId, imdbId, regions, cancellationToken, forceRefresh), SourcesOutcomeSuccessful);
 
         public Task<IReadOnlyList<PremiereSource>> GetTitleSourcesAsync(
             PremiereMediaType mediaType,

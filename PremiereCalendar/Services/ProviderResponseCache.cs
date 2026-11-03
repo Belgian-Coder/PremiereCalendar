@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
+using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
@@ -10,7 +12,8 @@ public sealed class ProviderResponseCache(
     IProviderCacheStateStore store,
     ILogger<ProviderResponseCache> logger,
     TimeProvider? timeProvider = null,
-    PremiereTelemetry? telemetry = null)
+    PremiereTelemetry? telemetry = null,
+    IOptions<ItemEnrichmentCacheOptions>? itemCacheOptions = null)
 {
     private const int EnvelopeVersion = 1;
     private const int MaximumPayloadBytes = 256 * 1024;
@@ -131,6 +134,9 @@ public sealed class ProviderResponseCache(
             }
 
             var envelope = JsonSerializer.Deserialize<ResponseEnvelope<T>>(state.MetadataJson, JsonOptions);
+            if (envelope?.FreshUntilUtc is { } explicitExpiry && explicitExpiry < expiresAt)
+                expiresAt = explicitExpiry;
+            if (expiresAt <= now) return null;
             var result = envelope is { Version: EnvelopeVersion, Value: not null } && envelope.Type == typeof(T).FullName
                 ? new CachedProviderResponse<T>(envelope.Value, expiresAt)
                 : null;
@@ -165,7 +171,8 @@ public sealed class ProviderResponseCache(
         }
     }
 
-    public async Task SaveAsync<T>(string provider, string requestKey, T value, CancellationToken cancellationToken, bool invalidateOversized = false)
+    public async Task SaveAsync<T>(string provider, string requestKey, T value, CancellationToken cancellationToken,
+        bool invalidateOversized = false, TimeSpan? lifetime = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (value is null)
@@ -185,7 +192,9 @@ public sealed class ProviderResponseCache(
                 reason = "backoff_active";
                 return;
             }
-            var json = JsonSerializer.Serialize(new ResponseEnvelope<T>(EnvelopeVersion, typeof(T).FullName!, value), JsonOptions);
+            var now = _timeProvider.GetUtcNow();
+            var json = JsonSerializer.Serialize(new ResponseEnvelope<T>(EnvelopeVersion, typeof(T).FullName!, value,
+                lifetime is { } duration ? now.Add(duration) : null), JsonOptions);
             var oversized = Encoding.UTF8.GetByteCount(json) > MaximumPayloadBytes;
             if (oversized)
             {
@@ -197,7 +206,7 @@ public sealed class ProviderResponseCache(
             }
 
             await store.SaveAsync(new ProviderCacheState(
-                Namespace(provider), ProviderCacheScope.Item, Hash(requestKey), _timeProvider.GetUtcNow(),
+                Namespace(provider), ProviderCacheScope.Item, Hash(requestKey), now,
                 null, null, null, json), budget.Token);
             cancellationToken.ThrowIfCancellationRequested();
             budget.Token.ThrowIfCancellationRequested();
@@ -231,7 +240,7 @@ public sealed class ProviderResponseCache(
 
     private static string Namespace(string provider) => $"responsecache-{provider}";
     private static string Hash(string requestKey) => $"v1:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(requestKey)))}";
-    private sealed record ResponseEnvelope<T>(int Version, string Type, T Value);
+    private sealed record ResponseEnvelope<T>(int Version, string Type, T Value, DateTimeOffset? FreshUntilUtc = null);
 
     public async Task<int> CleanupAsync(CancellationToken cancellationToken)
     {
@@ -250,8 +259,10 @@ public sealed class ProviderResponseCache(
                 reason = "backoff_active";
                 return 0;
             }
-            // The maximum supported RT lifetime is seven days; retain an extra day of grace.
-            removed = await store.CleanupResponseCacheAsync(_timeProvider.GetUtcNow().AddDays(-8), budget.Token);
+            // Storage retention is independent of a provider response's freshness.
+            // Calendar-month arithmetic preserves the requested three-month window.
+            var months = Math.Clamp(itemCacheOptions?.Value.RetentionMonths ?? 3, 1, 24);
+            removed = await store.CleanupResponseCacheAsync(_timeProvider.GetUtcNow().AddMonths(-months), budget.Token);
             cancellationToken.ThrowIfCancellationRequested();
             budget.Token.ThrowIfCancellationRequested();
             outcome = "completed";

@@ -119,6 +119,45 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         Assert.Empty(await CreateStore().GetByProviderAsync("responsecache-rottentomatoes", 100, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task RottenTomatoesStatusDoesNotUseOldGoodScoreToConfirmFailedForce()
+    {
+        var fail = false;
+        var handler = new StubHttpMessageHandler(request => fail ? new HttpResponseMessage(HttpStatusCode.BadRequest)
+            : Html(request.RequestUri!.AbsolutePath == "/search"
+                ? "<search-page-media-row release-year=\"2026\" tomatometer-score=\"82\"><a href=\"/m/example\" data-qa=\"info-name\">Example</a></search-page-media-row>"
+                : "<script id=\"media-scorecard-json\" type=\"application/json\">{\"criticsScore\":{\"score\":\"82\"}}</script>"));
+        using var memory = new MemoryCache(new MemoryCacheOptions());
+        var client = RottenTomatoes(handler, memory, Cache(CreateStore()));
+        using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
+        Assert.True((await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, default)).Successful);
+        fail = true;
+        Assert.False((await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, default, true)).Successful);
+        Assert.True(client.TryGetCachedScores(PremiereMediaType.Movie, "Example", 2026, null, out var preserved));
+        Assert.Equal(82, preserved.CriticScore);
+    }
+
+    [Fact]
+    public async Task SeasonAndIdentityResolutionResponsesSurviveRestartWithoutRepeatedLookups()
+    {
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/3/tv/42/season/1" => StubHttpMessageHandler.Json("""{"id":421,"episodes":[{"episode_number":1,"air_date":"2026-05-04"}]}"""),
+            "/3/find/tt0000042" => StubHttpMessageHandler.Json("""{"movie_results":[{"id":42}],"tv_results":[]}"""),
+            "/3/search/movie" => StubHttpMessageHandler.Json("""{"page":1,"total_pages":1,"results":[{"id":42,"title":"Example"}]}"""),
+            _ => throw new InvalidOperationException("Unexpected request")
+        });
+        for (var restart = 0; restart < 2; restart++)
+        {
+            using var memory = new MemoryCache(new MemoryCacheOptions());
+            var client = Tmdb(handler, memory, Cache(CreateStore()));
+            Assert.NotNull(await client.GetTvSeasonDetailsAsync(42, 1, default));
+            Assert.Equal(42, await client.FindTmdbIdByExternalIdAsync(PremiereMediaType.Movie, "tt0000042", "imdb_id", default));
+            Assert.Single(await client.SearchTitlesAsync(PremiereMediaType.Movie, "Example", 2026, default));
+        }
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
     [Theory]
     [InlineData(12)]
     [InlineData(24)]
@@ -271,10 +310,10 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
             new(provider, scope, key, now.AddDays(-daysOld), null, null, null, "preserve metadata");
         var rows = new[]
         {
-            Row("responsecache-tmdb", ProviderCacheScope.Item, "expired-tmdb", 9),
-            Row("responsecache-rottentomatoes", ProviderCacheScope.Item, "expired-rt", 9),
+            Row("responsecache-tmdb", ProviderCacheScope.Item, "expired-tmdb", 9) with { LastCheckedUtc = now.AddMonths(-3).AddTicks(-1) },
+            Row("responsecache-rottentomatoes", ProviderCacheScope.Item, "expired-rt", 9) with { LastCheckedUtc = now.AddMonths(-3).AddTicks(-1) },
             Row("responsecache-tmdb", ProviderCacheScope.Item, "fresh", 7),
-            Row("responsecache-rottentomatoes", ProviderCacheScope.Item, "boundary", 8),
+            Row("responsecache-rottentomatoes", ProviderCacheScope.Item, "boundary", 8) with { LastCheckedUtc = now.AddMonths(-3) },
             Row("tmdb", ProviderCacheScope.Item, "v1:legacy", 90),
             Row("rottentomatoes", ProviderCacheScope.Item, "legacy", 90),
             Row("responsecache-tmdb", ProviderCacheScope.Week, "other-scope", 90),
@@ -296,7 +335,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     public async Task Maintenance_RunsResponseRetentionOnlyWhenEnabled(bool enabled)
     {
         var now = DateTimeOffset.UtcNow;
-        var row = new ProviderCacheState("responsecache-tmdb", ProviderCacheScope.Item, "expired", now.AddDays(-9), null, null, null, "{}");
+        var row = new ProviderCacheState("responsecache-tmdb", ProviderCacheScope.Item, "expired", now.AddMonths(-3).AddTicks(-1), null, null, null, "{}");
         await CreateStore().SaveAsync(row, CancellationToken.None);
         var clock = new TestTimeProvider(now);
         var noOp = new NoOpMaintenance();

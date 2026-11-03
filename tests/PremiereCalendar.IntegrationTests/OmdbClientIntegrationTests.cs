@@ -249,6 +249,31 @@ public sealed class OmdbClientIntegrationTests
             cacheStore: cacheStore);
     }
 
+    [Fact]
+    public async Task ForcedFailureReturnsGoodFallbackButDoesNotReportFreshSuccess()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var fail = false;
+            var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(fail
+                ? """{"Response":"False","Error":"Request limit reached!"}"""
+                : """{"Response":"True","imdbRating":"7.5","imdbVotes":"1500"}"""));
+            var store = CreateCacheStore(root);
+            var client = CreateOmdbClient(handler, true, store);
+            using var refresh = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
+            var first = await client.GetByImdbIdWithStatusAsync("tt0000042", default);
+            Assert.True(first.Successful);
+            var original = await store.GetAsync("tt0000042", default);
+            fail = true;
+            var result = await client.GetByImdbIdWithStatusAsync("tt0000042", default, forceRefresh: true);
+            Assert.False(result.Successful);
+            Assert.Equal("7.5", result.Value!.ImdbRating);
+            Assert.Equal(original!.CachedAtUtc, (await store.GetAsync("tt0000042", default))!.CachedAtUtc);
+        }
+        finally { TryDelete(root); }
+    }
+
     private static SqliteOmdbCacheStore CreateCacheStore(string root)
     {
         TestSqliteDatabase.Initialize(root, "data/app.db");

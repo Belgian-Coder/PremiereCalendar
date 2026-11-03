@@ -35,6 +35,14 @@ public interface IRottenTomatoesClient
         CancellationToken cancellationToken,
         bool forceRefresh = false);
 
+    async Task<ProviderRefreshResult<RottenTomatoesScores>> GetScoresWithStatusAsync(
+        PremiereMediaType mediaType, string title, int? year, string? wikidataId,
+        CancellationToken cancellationToken, bool forceRefresh = false)
+    {
+        var scores = await GetScoresAsync(mediaType, title, year, wikidataId, cancellationToken, forceRefresh);
+        return new(scores, scores.HasAnyScore);
+    }
+
     async Task<int?> GetTomatometerScoreAsync(
         PremiereMediaType mediaType,
         string title,

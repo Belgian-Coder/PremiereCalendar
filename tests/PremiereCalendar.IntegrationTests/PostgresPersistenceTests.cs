@@ -3,6 +3,7 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
@@ -74,17 +75,48 @@ public sealed partial class PostgresPersistenceTests
                 [new ImdbRatingRecord("tt0000001", 7.25, 1234, importedAt)],
                 importedAt,
                 CancellationToken.None);
+            var enrichmentKey = new ItemEnrichmentIdentity(PremiereMediaType.Series, 123);
+            var sourceEnrichments = new SqliteItemEnrichmentStore(sourceOptions, environment);
+            await sourceEnrichments.ReadManyAsync("import-config", [enrichmentKey], true, CancellationToken.None);
+            await sourceEnrichments.WriteManyAsync("import-config", [new(enrichmentKey, 0, "{\"title\":\"preserved\"}", importedAt,
+                "{\"score\":8}", importedAt)], CancellationToken.None);
+            await using (var sourceConnection = DatabaseConnectionFactory.Create(sourceOptions.Value, root))
+            {
+                await sourceConnection.OpenAsync();
+                await using var generation = sourceConnection.CreateCommand();
+                generation.CommandText = """
+                    UPDATE ItemEnrichments SET Generation = 4294967296, MetadataRevision = 8589934592,
+                        TvmazeFenceUtc = '2026-08-24T10:00:00.0000000+00:00', TmdbObservedUtc = '2026-08-24T10:00:00.0000000+00:00'
+                    """;
+                await generation.ExecuteNonQueryAsync();
+            }
 
             var migrator = new SqliteToPostgresMigrator(postgresOptions, environment);
             var report = await migrator.MigrateAsync(sqlite.ResolvePath(), CancellationToken.None);
             Assert.Equal(1, report.TableRowCounts["AppParameters"]);
             Assert.Equal(1, report.TableRowCounts["ImdbRatings"]);
+            Assert.Equal(1, report.TableRowCounts["ItemEnrichments"]);
             Assert.Equal("copied", await targetStore.GetValueAsync("migration.marker", CancellationToken.None));
             var targetRatings = new SqliteImdbRatingsStore(postgresOptions, environment);
             var copiedRating = await targetRatings.GetByImdbIdAsync("tt0000001", CancellationToken.None);
             Assert.NotNull(copiedRating);
             Assert.Equal(7.25, copiedRating.AverageRating, precision: 2);
             Assert.Equal(64, report.SourceSha256.Length);
+            var importedEnrichment = Assert.Single(await new SqliteItemEnrichmentStore(postgresOptions, environment)
+                .ReadManyAsync("import-config", [enrichmentKey], false, CancellationToken.None)).Value;
+            Assert.Equal(4294967296L, importedEnrichment.Generation);
+            Assert.Equal(8589934592L, importedEnrichment.MetadataRevision);
+            Assert.Equal(importedAt, importedEnrichment.TmdbObservedUtc);
+            Assert.Equal("{\"title\":\"preserved\"}", importedEnrichment.MetadataJson);
+            Assert.Equal(importedAt, importedEnrichment.MetadataFetchedUtc);
+            Assert.Equal(importedAt, importedEnrichment.RatingsFetchedUtc);
+            await using (var targetConnection = DatabaseConnectionFactory.Create(postgresOptions.Value, root))
+            {
+                await targetConnection.OpenAsync();
+                await using var fence = targetConnection.CreateCommand();
+                fence.CommandText = "SELECT TvmazeFenceUtc FROM ItemEnrichments WHERE PartitionKey = 'import-config' AND TmdbId = 123";
+                Assert.Equal(importedAt, DateTimeOffset.Parse((string)(await fence.ExecuteScalarAsync())!));
+            }
 
             var verification = await initializer.VerifyAsync();
             Assert.True(verification.IsHealthy, verification.Message);

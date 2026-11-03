@@ -4,8 +4,12 @@ namespace PremiereCalendar.Models;
 
 public sealed record WatchmodeSearchResponse
 {
+    private List<WatchmodeTitleSearchResult> _titleResults = [];
     [JsonPropertyName("title_results")]
-    public List<WatchmodeTitleSearchResult> TitleResults { get; init; } = [];
+    public List<WatchmodeTitleSearchResult> TitleResults { get => _titleResults; init { _titleResults = value; HasTitleResults = true; } }
+
+    [JsonIgnore]
+    public bool HasTitleResults { get; private init; }
 }
 
 public sealed record WatchmodeTitleSearchResult

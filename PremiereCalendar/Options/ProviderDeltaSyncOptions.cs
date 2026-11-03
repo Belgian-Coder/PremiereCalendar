@@ -7,6 +7,8 @@ public sealed class ProviderDeltaSyncOptions
     public int StartupDelaySeconds { get; set; } = 20;
     public int WakeIntervalMinutes { get; set; } = 60;
     public int TmdbLookbackDays { get; set; } = 14;
+    public int InitialLookbackDays { get; set; } = 2;
+    public int ChangeHistoryConcurrency { get; set; } = 4;
     public bool UseTmdbChanges { get; set; } = true;
     public bool UseTvmazeUpdates { get; set; } = true;
 }

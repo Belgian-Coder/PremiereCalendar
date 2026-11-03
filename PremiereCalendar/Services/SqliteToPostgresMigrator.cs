@@ -17,7 +17,7 @@ public sealed class SqliteToPostgresMigrator(
         "AppParameters", "ImdbRatings", "ImdbDatasetState", "OmdbCache", "OmdbProviderState",
         "ProviderCacheState", "SimklSyncState", "CalendarFilterUsage", "ViewSyncGroups",
         "ViewSyncDevices", "ViewSyncGroupState", "ProviderWorkJobs", "ProviderAdaptiveState",
-        "ProviderWorkLeases"
+        "ProviderWorkLeases", "ItemEnrichments"
     ];
 
     public async Task<DatabaseMigrationReport> MigrateAsync(string sourcePath, CancellationToken cancellationToken)
@@ -98,6 +98,9 @@ public sealed class SqliteToPostgresMigrator(
                             {
                                 case "INTEGER":
                                     await importer.WriteAsync(Convert.ToInt32(reader.GetValue(index), CultureInfo.InvariantCulture), NpgsqlDbType.Integer, cancellationToken);
+                                    break;
+                                case "BIGINT":
+                                    await importer.WriteAsync(Convert.ToInt64(reader.GetValue(index), CultureInfo.InvariantCulture), NpgsqlDbType.Bigint, cancellationToken);
                                     break;
                                 case "REAL":
                                     await importer.WriteAsync(Convert.ToSingle(reader.GetValue(index), CultureInfo.InvariantCulture), NpgsqlDbType.Real, cancellationToken);

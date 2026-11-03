@@ -15,7 +15,8 @@ public static class DatabaseSchema
     [
         new(1, "baseline-current-schema", BaselineSql, ApplyLegacyViewSyncMigrationAsync),
         new(2, "durable-provider-scheduler", SchedulerSql),
-        new(3, "scheduler-leases-and-centralized-stores", SchedulerLeaseSql)
+        new(3, "scheduler-leases-and-centralized-stores", SchedulerLeaseSql),
+        new(4, "normalized-item-enrichment-cache", ItemEnrichmentSql)
     ];
 
     private static int ReadCurrentVersion()
@@ -210,6 +211,32 @@ public static class DatabaseSchema
         SELECT JobId, LeaseOwner, LeaseExpiresUtc, COALESCE(StartedUtc, EnqueuedUtc)
         FROM ProviderWorkJobs
         WHERE State = 'Running' AND LeaseOwner IS NOT NULL AND LeaseExpiresUtc IS NOT NULL;
+        """;
+
+    private const string ItemEnrichmentSql = """
+        CREATE TABLE IF NOT EXISTS ItemEnrichments (
+            PartitionKey TEXT NOT NULL,
+            MediaType TEXT NOT NULL,
+            TmdbId INTEGER NOT NULL,
+            MetadataJson TEXT NULL,
+            RatingsJson TEXT NULL,
+            MetadataFetchedUtc TEXT NULL,
+            RatingsFetchedUtc TEXT NULL,
+            LastSeenUtc TEXT NOT NULL,
+            Generation BIGINT NOT NULL DEFAULT 0,
+            TvmazeShowId INTEGER NULL,
+            MetadataInvalidatedUtc TEXT NULL,
+            TvmazeFenceUtc TEXT NULL,
+            TmdbObservedUtc TEXT NULL,
+            MetadataRevision BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (PartitionKey, MediaType, TmdbId)
+        );
+        CREATE INDEX IF NOT EXISTS IX_ItemEnrichments_Tmdb
+            ON ItemEnrichments (MediaType, TmdbId);
+        CREATE INDEX IF NOT EXISTS IX_ItemEnrichments_Tvmaze
+            ON ItemEnrichments (TvmazeShowId);
+        CREATE INDEX IF NOT EXISTS IX_ItemEnrichments_LastSeen
+            ON ItemEnrichments (LastSeenUtc);
         """;
 
     private const string LegacyViewSyncSql = """

@@ -16,6 +16,8 @@ TMDb is required for live data. Everything else is optional.
 
 The app prepares the current and next month each night at 02:00 Brussels time for the default Series and Movies filters. Completed week caches stay fresh for 30 hours by default, so ordinary date navigation can use local data. Missed nightly work catches up after restart; progress and timings are logged automatically. See [configuration](docs/Configuration.md#adaptive-warmup-and-load-budget) for schedule overrides.
 
+Reusable item metadata and scores are stored in the application database for three calendar months since last use, independently of week files. Weeks share those items; change feeds target known changed titles, metadata has a seven-day fallback refresh, and scores refresh after 24 hours. See [item caching](docs/ItemEnrichmentCache.md) for retention, failure handling and configuration.
+
 ## Screenshots
 
 | Dark mode | Light mode |

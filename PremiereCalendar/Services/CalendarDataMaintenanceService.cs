@@ -9,19 +9,22 @@ public sealed class CalendarDataMaintenanceService
     private readonly ScoreBackfillService _scoreBackfillService;
     private readonly MissingExternalIdRepairService _missingExternalIdRepairService;
     private readonly ILogger<CalendarDataMaintenanceService> _logger;
+    private readonly ItemEnrichmentCacheCoordinator? _itemEnrichmentCache;
 
     public CalendarDataMaintenanceService(
         IProviderCacheStateStore providerCacheStateStore,
         ICalendarCache calendarCache,
         ScoreBackfillService scoreBackfillService,
         MissingExternalIdRepairService missingExternalIdRepairService,
-        ILogger<CalendarDataMaintenanceService> logger)
+        ILogger<CalendarDataMaintenanceService> logger,
+        ItemEnrichmentCacheCoordinator? itemEnrichmentCache = null)
     {
         _providerCacheStateStore = providerCacheStateStore;
         _calendarCache = calendarCache;
         _scoreBackfillService = scoreBackfillService;
         _missingExternalIdRepairService = missingExternalIdRepairService;
         _logger = logger;
+        _itemEnrichmentCache = itemEnrichmentCache;
     }
 
     public Task<BackfillResult> BackfillRecentScoresAsync(CancellationToken cancellationToken)
@@ -74,6 +77,9 @@ public sealed class CalendarDataMaintenanceService
                 {
                     published = await _calendarCache.UpdateWeekMetadataAsync(
                         weekStart, weekEnd, cacheKey, snapshot, result.Items, kind, cancellationToken);
+                    if (published is not null && _itemEnrichmentCache is { Enabled: true })
+                        await _itemEnrichmentCache.SynchronizeMaintainedProjectionAsync(
+                            snapshot.Items, published, kind, cancellationToken);
                 }
 
                 latestItems = [.. published ?? result.Items];

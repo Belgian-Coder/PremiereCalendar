@@ -47,12 +47,14 @@ public sealed partial class PremiereService
         => WithRefreshScope(TraceCalendarStream(start, end, forceRefresh, filters, resumeState, true, cancellationToken),
             cancellationToken);
 
-    private static async IAsyncEnumerable<T> WithRefreshScope<T>(
+    private async IAsyncEnumerable<T> WithRefreshScope<T>(
         IAsyncEnumerable<T> source, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var scope = ProviderRefreshScope.Create();
+        var itemSession = _itemEnrichmentCache is null ? null : await _itemEnrichmentCache.CreateSessionAsync(cancellationToken);
         IAsyncEnumerator<T> enumerator;
-        using (ProviderRefreshScope.Use(scope)) enumerator = source.GetAsyncEnumerator(cancellationToken);
+        using (ProviderRefreshScope.Use(scope))
+        using (UseItemCacheSession(itemSession)) enumerator = source.GetAsyncEnumerator(cancellationToken);
         try
         {
             while (true)
@@ -62,6 +64,7 @@ public sealed partial class PremiereService
                 // Async iterator callers restore their execution context after every yield.
                 // Re-enter the same refresh generation for every continuation and cleanup.
                 using (ProviderRefreshScope.Use(scope))
+                using (UseItemCacheSession(itemSession))
                 {
                     moved = await enumerator.MoveNextAsync();
                     if (moved) current = enumerator.Current;
@@ -73,7 +76,10 @@ public sealed partial class PremiereService
         }
         finally
         {
-            using (ProviderRefreshScope.Use(scope)) await enumerator.DisposeAsync();
+            using (ProviderRefreshScope.Use(scope))
+            using (UseItemCacheSession(itemSession)) await enumerator.DisposeAsync();
+            if (itemSession is not null && !cancellationToken.IsCancellationRequested)
+                await itemSession.FlushAsync(cancellationToken);
         }
     }
 
@@ -145,6 +151,24 @@ public sealed partial class PremiereService
     {
         var timer = Stopwatch.GetTimestamp();
         var snapshot = await ReadCalendarCacheCoreAsync(start, end, filters, cancellationToken);
+        if (_itemEnrichmentCache is not null && snapshot.Items is { Count: > 0 } legacyItems)
+        {
+            var session = _itemCacheSession.Value ?? await _itemEnrichmentCache.CreateSessionAsync(cancellationToken);
+            await session.PrepareAsync(legacyItems.Select(item => new ItemEnrichmentIdentity(item.MediaType, item.TmdbId)), legacyItems, cancellationToken);
+            await session.FlushAsync(cancellationToken, rejectGenerationConflicts: false);
+            var reconciled = await session.ReconcileAsync(legacyItems, includeConsumed: false, cancellationToken);
+            var freshIds = snapshot.FreshItems.Select(item => item.CanonicalId).ToHashSet(StringComparer.Ordinal);
+            snapshot = snapshot with
+            {
+                Items = reconciled.Items,
+                FreshItems = reconciled.Items.Where(item => freshIds.Contains(item.CanonicalId) && !reconciled.DirtyMedia.Contains(item.MediaType)).ToArray(),
+                IsComplete = snapshot.IsComplete && reconciled.DirtyMedia.Count == 0,
+                HasFreshSeries = snapshot.HasFreshSeries && !reconciled.DirtyMedia.Contains(PremiereMediaType.Series),
+                HasFreshMovies = snapshot.HasFreshMovies && !reconciled.DirtyMedia.Contains(PremiereMediaType.Movie),
+                HasPartialCache = snapshot.HasPartialCache || reconciled.DirtyMedia.Count > 0
+            };
+            session.ForceDiscoveryRefresh |= reconciled.DirtyMedia.Count > 0;
+        }
         _telemetry.RecordDiagnostic("calendar.cache.read", details: new()
         {
             WeekStart = start, WeekEnd = end, CacheKey = PremiereDiscoveryCriteria.FromFilters(filters).CacheKey(),

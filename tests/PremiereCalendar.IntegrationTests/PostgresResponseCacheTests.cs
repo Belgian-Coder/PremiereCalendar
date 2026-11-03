@@ -76,7 +76,7 @@ public sealed class PostgresResponseCacheTests
                 }
             }
 
-            var old = DateTimeOffset.UtcNow.AddDays(-10);
+            var old = DateTimeOffset.UtcNow.AddMonths(-3).AddTicks(-1);
             foreach (var state in new[]
             {
                 new ProviderCacheState("responsecache-tmdb", ProviderCacheScope.Item, "expired-response", old, null, null, null, "{}"),

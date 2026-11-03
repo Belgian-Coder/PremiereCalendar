@@ -4,17 +4,21 @@ namespace PremiereCalendar.Models;
 
 public sealed record TmdbPagedResponse<T>
 {
+    private List<T> _results = [];
     [JsonPropertyName("page")]
-    public int Page { get; init; }
+    public int Page { get; init; } = -1;
 
     [JsonPropertyName("total_pages")]
-    public int TotalPages { get; init; }
+    public int TotalPages { get; init; } = -1;
 
     [JsonPropertyName("total_results")]
     public int TotalResults { get; init; }
 
     [JsonPropertyName("results")]
-    public List<T> Results { get; init; } = [];
+    public List<T> Results { get => _results; init { _results = value; HasResults = true; } }
+
+    [JsonIgnore]
+    public bool HasResults { get; private init; }
 }
 
 public sealed record TmdbDiscoverBatch<T>(

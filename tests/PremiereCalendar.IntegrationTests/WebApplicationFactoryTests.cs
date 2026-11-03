@@ -59,8 +59,9 @@ public sealed class WebApplicationFactoryTests : IDisposable
     public async Task ReadinessAndVersionEndpoints_ReturnOperationalEvidence()
     {
         using var readiness = await _client.GetAsync("/health/ready");
-        readiness.EnsureSuccessStatusCode();
-        using var versionDocument = JsonDocument.Parse(await _client.GetStringAsync("/health/version"));
+        var versionJson = await _client.GetStringAsync("/health/version");
+        Assert.True(readiness.IsSuccessStatusCode, versionJson);
+        using var versionDocument = JsonDocument.Parse(versionJson);
 
         var version = versionDocument.RootElement.GetProperty("version").GetString();
         Assert.False(string.IsNullOrWhiteSpace(version));

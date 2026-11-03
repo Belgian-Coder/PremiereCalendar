@@ -93,4 +93,8 @@ public sealed record PremiereItem
     public string? TvmazeUrl { get; init; }
 
     public DateTimeOffset LastUpdatedUtc { get; init; } = DateTimeOffset.UtcNow;
+    public ItemEnrichmentVersion? EnrichmentVersion { get; init; }
 }
+
+public sealed record ItemEnrichmentVersion(long Generation, long MetadataRevision,
+    DateTimeOffset? MetadataFetchedUtc, DateTimeOffset? RatingsFetchedUtc, DateTimeOffset? MetadataInvalidatedUtc);

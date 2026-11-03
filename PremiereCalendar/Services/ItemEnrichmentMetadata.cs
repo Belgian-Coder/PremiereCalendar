@@ -1,0 +1,154 @@
+using PremiereCalendar.Models;
+
+namespace PremiereCalendar.Services;
+
+// This projection intentionally has no calendar identity, date, episode, verification,
+// or discovery provenance. It is safe to apply to another occurrence of a title.
+public sealed record ItemEnrichmentMetadata
+{
+    public string? ImdbId { get; init; }
+    public int? TvdbId { get; init; }
+    public string? WikidataId { get; init; }
+    public string? OriginalTitle { get; init; }
+    public string? Title { get; init; }
+    public string? Overview { get; init; }
+    public string? PosterUrl { get; init; }
+    public string? BackdropUrl { get; init; }
+    public string? ImageSource { get; init; }
+    public string? TrailerUrl { get; init; }
+    public string? ImdbUrl { get; init; }
+    public string OriginalLanguage { get; init; } = "";
+    public string[] OriginCountries { get; init; } = [];
+    public PremiereSource[] Sources { get; init; } = [];
+    public int[] GenreIds { get; init; } = [];
+    public string[] Genres { get; init; } = [];
+    public string[] Keywords { get; init; } = [];
+    public int[] MovieReleaseTypes { get; init; } = [];
+    public string[] Certifications { get; init; } = [];
+    public string? TvStatus { get; init; }
+    public string? TvType { get; init; }
+    public int? RuntimeMinutes { get; init; }
+    public string? NetworkName { get; init; }
+    public string? WebChannelName { get; init; }
+    public int? TvmazeAverageRuntimeMinutes { get; init; }
+    public double? TvmazeRating { get; init; }
+    public string? OfficialSiteUrl { get; init; }
+    public string? TvmazeUrl { get; init; }
+    public int? TvmazeShowId { get; init; }
+    public ItemEnrichmentTmdbObservation? TmdbVotes { get; init; }
+    public bool AvailabilityComplete { get; init; }
+    // A provider validation result, not the date of the occurrence being mapped.
+    public bool FirstEpisodeDateChecked { get; init; }
+    public DateOnly? FirstEpisodeDate { get; init; }
+
+    public static ItemEnrichmentMetadata FromItem(PremiereItem item) => new()
+    {
+        ImdbId = item.ImdbId, TvdbId = item.TvdbId, WikidataId = item.WikidataId,
+        Title = item.Title, OriginalTitle = item.OriginalTitle, Overview = item.Overview, PosterUrl = item.PosterUrl,
+        BackdropUrl = item.BackdropUrl, ImageSource = item.ImageSource, TrailerUrl = item.TrailerUrl,
+        ImdbUrl = item.ImdbUrl, OriginalLanguage = item.OriginalLanguage, OriginCountries = item.OriginCountries,
+        Sources = item.Sources.Where(source => !string.Equals(source.Kind, "schedule", StringComparison.OrdinalIgnoreCase)).ToArray(),
+        GenreIds = item.GenreIds, Genres = item.Genres, Keywords = item.Keywords,
+        MovieReleaseTypes = item.MovieReleaseTypes, Certifications = item.Certifications,
+        TvStatus = item.TvStatus, TvType = item.TvType, RuntimeMinutes = item.RuntimeMinutes,
+        NetworkName = item.Sources.Any(source => string.Equals(source.Kind, "schedule", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(source.Name, item.NetworkName, StringComparison.OrdinalIgnoreCase)) ? null : item.NetworkName,
+        WebChannelName = item.WebChannelName,
+        TvmazeAverageRuntimeMinutes = item.TvmazeAverageRuntimeMinutes, TvmazeRating = item.TvmazeRating,
+        OfficialSiteUrl = item.OfficialSiteUrl, TvmazeUrl = item.TvmazeUrl,
+        TvmazeShowId = ParseTvmazeShowId(item.TvmazeUrl),
+        TmdbVotes = ItemEnrichmentTmdbObservation.Observe(null, item.TmdbScore, item.TmdbVoteCount, item.LastUpdatedUtc),
+        FirstEpisodeDateChecked = item.Type == PremiereItemType.SeriesPremiere
+            && item.DateSemantics?.SourceKind == PremiereDateSourceKind.TmdbSeasonOneEpisodeOne,
+        FirstEpisodeDate = item.Type == PremiereItemType.SeriesPremiere
+            && item.DateSemantics?.SourceKind == PremiereDateSourceKind.TmdbSeasonOneEpisodeOne ? item.PremiereDate : null
+    };
+
+    public PremiereItem Apply(PremiereItem discovered, bool preferDiscoveryMetadata = true) => discovered with
+    {
+        ImdbId = ImdbId, TvdbId = TvdbId, WikidataId = WikidataId,
+        Title = preferDiscoveryMetadata ? Text(discovered.Title, Title) ?? discovered.Title : Text(Title, discovered.Title) ?? discovered.Title,
+        OriginalTitle = preferDiscoveryMetadata ? Text(discovered.OriginalTitle, OriginalTitle) : OriginalTitle,
+        Overview = preferDiscoveryMetadata ? Text(discovered.Overview, Overview) : Overview,
+        PosterUrl = preferDiscoveryMetadata ? Text(discovered.PosterUrl, PosterUrl) : PosterUrl,
+        BackdropUrl = preferDiscoveryMetadata ? Text(discovered.BackdropUrl, BackdropUrl) : BackdropUrl,
+        ImageSource = preferDiscoveryMetadata && discovered.PosterUrl is not null ? discovered.ImageSource : ImageSource, TrailerUrl = TrailerUrl, ImdbUrl = ImdbUrl,
+        OriginalLanguage = preferDiscoveryMetadata ? Text(discovered.OriginalLanguage, OriginalLanguage) ?? "" : OriginalLanguage,
+        OriginCountries = preferDiscoveryMetadata && OriginCountries.Length == 0 ? discovered.OriginCountries : OriginCountries,
+        Sources = Sources, SourceNames = Sources.Select(source => source.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+        GenreIds = preferDiscoveryMetadata && GenreIds.Length == 0 ? discovered.GenreIds : GenreIds, Genres = Genres, Keywords = Keywords,
+        MovieReleaseTypes = MovieReleaseTypes, Certifications = Certifications, TvStatus = TvStatus, TvType = TvType,
+        RuntimeMinutes = RuntimeMinutes, NetworkName = NetworkName, WebChannelName = WebChannelName,
+        TmdbScore = preferDiscoveryMetadata ? discovered.TmdbScore ?? TmdbVotes?.TmdbScore : TmdbVotes?.TmdbScore,
+        TmdbVoteCount = preferDiscoveryMetadata ? discovered.TmdbVoteCount ?? TmdbVotes?.TmdbVoteCount : TmdbVotes?.TmdbVoteCount,
+        TvmazeAverageRuntimeMinutes = TvmazeAverageRuntimeMinutes, TvmazeRating = TvmazeRating,
+        OfficialSiteUrl = OfficialSiteUrl, TvmazeUrl = TvmazeUrl
+    };
+
+    private static string? Text(string? preferred, string? fallback) => string.IsNullOrWhiteSpace(preferred) ? fallback : preferred;
+
+    private static int? ParseTvmazeShowId(string? value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || !(uri.Host.Equals("tvmaze.com", StringComparison.OrdinalIgnoreCase)
+                || uri.Host.Equals("www.tvmaze.com", StringComparison.OrdinalIgnoreCase))) return null;
+        var parts = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 2 && parts[0] == "shows" && int.TryParse(parts[1], out var id) && id > 0 ? id : null;
+    }
+}
+
+// TMDb votes are observed during discovery independently of external rating
+// requests. Keeping their clock here avoids fabricating an OMDb/RT success.
+public sealed record ItemEnrichmentTmdbObservation(double? TmdbScore, int? TmdbVoteCount, DateTimeOffset? TmdbObservedUtc)
+{
+    public static ItemEnrichmentTmdbObservation? Observe(ItemEnrichmentTmdbObservation? previous,
+        double? score, int? voteCount, DateTimeOffset observedUtc)
+    {
+        if (score is null && voteCount is null) return previous;
+        // If a partial observation retains an older field, retain its older clock too.
+        var keepsOldField = score is null && previous?.TmdbScore is not null
+            || voteCount is null && previous?.TmdbVoteCount is not null;
+        var clock = keepsOldField && previous?.TmdbObservedUtc is { } old && old < observedUtc ? old : observedUtc;
+        return new(score ?? previous?.TmdbScore, voteCount ?? previous?.TmdbVoteCount, clock);
+    }
+}
+
+public sealed record ItemEnrichmentRatings(
+    double? ImdbScore, int? ImdbVoteCount, int? RottenTomatoesScore,
+    int? RottenTomatoesAudienceScore, int? MetacriticScore,
+    string? ImdbId = null, string? WikidataId = null, string? Title = null, int? Year = null,
+    bool FreshnessVerified = true)
+{
+    public static ItemEnrichmentRatings FromItem(PremiereItem item) => new(
+        item.ImdbScore, item.ImdbVoteCount, item.RottenTomatoesScore, item.RottenTomatoesAudienceScore, item.MetacriticScore,
+        item.ImdbId, item.WikidataId, item.Title, item.PremiereDate.Year);
+
+    public bool Matches(PremiereItem item) => Same(ImdbId, item.ImdbId) && Same(WikidataId, item.WikidataId)
+        && Same(Title, item.Title) && Year == item.PremiereDate.Year;
+
+    internal bool MatchesMetadata(ItemEnrichmentMetadata? metadata) => metadata is null
+        || Same(ImdbId, metadata.ImdbId) && Same(WikidataId, metadata.WikidataId);
+
+    internal bool MatchesImdb(string? imdbId) => Same(ImdbId, imdbId);
+    internal bool MatchesTomatoes(string? wikidataId, string? title, int? year) => Same(WikidataId, wikidataId) && Same(Title, title) && Year == year;
+
+    public PremiereItem Apply(PremiereItem item) => item with
+    {
+        ImdbScore = Same(ImdbId, item.ImdbId) ? ImdbScore ?? item.ImdbScore : null,
+        ImdbVoteCount = Same(ImdbId, item.ImdbId) ? ImdbVoteCount ?? item.ImdbVoteCount : null,
+        RottenTomatoesScore = Matches(item) ? RottenTomatoesScore ?? item.RottenTomatoesScore : null,
+        RottenTomatoesAudienceScore = Matches(item) ? RottenTomatoesAudienceScore ?? item.RottenTomatoesAudienceScore : null,
+        MetacriticScore = Same(ImdbId, item.ImdbId) ? MetacriticScore ?? item.MetacriticScore : null
+    };
+
+    public ItemEnrichmentRatings PreserveMissing(ItemEnrichmentRatings? previous) => previous is null ? this : this with
+    {
+        ImdbScore = ImdbScore ?? (Same(ImdbId, previous.ImdbId) ? previous.ImdbScore : null),
+        ImdbVoteCount = ImdbVoteCount ?? (Same(ImdbId, previous.ImdbId) ? previous.ImdbVoteCount : null),
+        RottenTomatoesScore = RottenTomatoesScore ?? (Same(ImdbId, previous.ImdbId) && MatchesTomatoes(previous.WikidataId, previous.Title, previous.Year) ? previous.RottenTomatoesScore : null),
+        RottenTomatoesAudienceScore = RottenTomatoesAudienceScore ?? (Same(ImdbId, previous.ImdbId) && MatchesTomatoes(previous.WikidataId, previous.Title, previous.Year) ? previous.RottenTomatoesAudienceScore : null),
+        MetacriticScore = MetacriticScore ?? (Same(ImdbId, previous.ImdbId) ? previous.MetacriticScore : null)
+    };
+
+    private static bool Same(string? first, string? second) => string.Equals(first?.Trim(), second?.Trim(), StringComparison.OrdinalIgnoreCase);
+}

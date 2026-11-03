@@ -99,4 +99,11 @@ public interface ITmdbClient
         DateOnly end,
         CancellationToken cancellationToken,
         bool forceRefresh = false);
+
+    // Null means the provider cannot establish a precise change time; callers
+    // must invalidate conservatively. MinValue means only irrelevant fields changed.
+    Task<DateTimeOffset?> GetLastMetadataChangeUtcAsync(
+        PremiereMediaType mediaType, int id, DateOnly start, DateOnly end,
+        CancellationToken cancellationToken)
+        => Task.FromResult<DateTimeOffset?>(null);
 }

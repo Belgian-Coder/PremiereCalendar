@@ -37,8 +37,9 @@ public sealed partial class PremiereService
                 end,
                 criteria.ToTmdbFilters(PremiereMediaType.Series, keywordIds, language),
                 cancellationToken,
-                forceRefresh)));
-        var rawItems = rawItemGroups.SelectMany(items => items);
+                ForceDiscoveryRefresh(forceRefresh))));
+        var rawItems = rawItemGroups.SelectMany(items => items).ToArray();
+        await PrepareItemEnrichmentAsync(PremiereMediaType.Series, rawItems.Select(item => item.Id), null, cancellationToken);
 
         return await MapWithLimitedConcurrencyAsync(
             rawItems,
@@ -69,9 +70,10 @@ public sealed partial class PremiereService
                 end,
                 criteria.ToTmdbFilters(PremiereMediaType.Series, keywordIds, language),
                 cancellationToken,
-                forceRefresh)
+                ForceDiscoveryRefresh(forceRefresh))
             .WithCancellation(cancellationToken))
         {
+            await PrepareItemEnrichmentAsync(PremiereMediaType.Series, rawBatch.Results.Select(item => item.Id), cachedEnrichment, cancellationToken);
             var metadataItems = await MapWithLimitedConcurrencyAsync(
                 rawBatch.Results,
                 (item, token) => MapSeriesPremiereMetadataAsync(item, token, forceRefresh, start, end),
@@ -94,9 +96,11 @@ public sealed partial class PremiereService
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
+                if (_itemCacheSession.Value is { } batchSession) await batchSession.FlushAsync(cancellationToken);
                 yield return WithTmdbProgress(mappedBatch, rawBatch, completedRawItems);
             }
 
+            if (_itemCacheSession.Value is { } session) await session.FlushAsync(cancellationToken);
             completedRawItems += rawBatch.Results.Count;
         }
     }
@@ -125,11 +129,12 @@ public sealed partial class PremiereService
                 day,
                 criteria.ToTmdbFilters(PremiereMediaType.Series, keywordIds, language),
                 cancellationToken,
-                forceRefresh)));
+                ForceDiscoveryRefresh(forceRefresh))));
 
         var rawItems = rawItemGroups
             .SelectMany(items => items)
-            .Select(item => (Date: day, Item: item));
+            .Select(item => (Date: day, Item: item)).ToArray();
+        await PrepareItemEnrichmentAsync(PremiereMediaType.Series, rawItems.Select(result => result.Item.Id), null, cancellationToken);
 
         return await MapWithLimitedConcurrencyAsync(
             rawItems,
@@ -159,9 +164,10 @@ public sealed partial class PremiereService
                 day,
                 criteria.ToTmdbFilters(PremiereMediaType.Series, keywordIds, language),
                 cancellationToken,
-                forceRefresh)
+                ForceDiscoveryRefresh(forceRefresh))
             .WithCancellation(cancellationToken))
         {
+            await PrepareItemEnrichmentAsync(PremiereMediaType.Series, rawBatch.Results.Select(item => item.Id), cachedEnrichment, cancellationToken);
             var metadataItems = rawBatch.Results
                 .Select(item => MapSeriesMetadata(
                     item,
@@ -190,9 +196,11 @@ public sealed partial class PremiereService
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
+                if (_itemCacheSession.Value is { } batchSession) await batchSession.FlushAsync(cancellationToken);
                 yield return WithTmdbProgress(mappedBatch, rawBatch, completedRawItems);
             }
 
+            if (_itemCacheSession.Value is { } session) await session.FlushAsync(cancellationToken);
             completedRawItems += rawBatch.Results.Count;
         }
     }
@@ -233,8 +241,9 @@ public sealed partial class PremiereService
                 end,
                 criteria.ToTmdbFilters(PremiereMediaType.Movie, keywordIds, language),
                 cancellationToken,
-                forceRefresh)));
-        var rawItems = rawItemGroups.SelectMany(items => items);
+                ForceDiscoveryRefresh(forceRefresh))));
+        var rawItems = rawItemGroups.SelectMany(items => items).ToArray();
+        await PrepareItemEnrichmentAsync(PremiereMediaType.Movie, rawItems.Select(item => item.Id), null, cancellationToken);
 
         return await MapWithLimitedConcurrencyAsync(
             rawItems,
@@ -259,9 +268,10 @@ public sealed partial class PremiereService
                 end,
                 criteria.ToTmdbFilters(PremiereMediaType.Movie, keywordIds, language),
                 cancellationToken,
-                forceRefresh)
+                ForceDiscoveryRefresh(forceRefresh))
             .WithCancellation(cancellationToken))
         {
+            await PrepareItemEnrichmentAsync(PremiereMediaType.Movie, rawBatch.Results.Select(item => item.Id), cachedEnrichment, cancellationToken);
             var metadataItems = rawBatch.Results
                 .Select(MapMovieMetadata)
                 .Where(item => item is not null)
@@ -278,9 +288,11 @@ public sealed partial class PremiereService
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
+                if (_itemCacheSession.Value is { } batchSession) await batchSession.FlushAsync(cancellationToken);
                 yield return WithTmdbProgress(mappedBatch, rawBatch, completedRawItems);
             }
 
+            if (_itemCacheSession.Value is { } session) await session.FlushAsync(cancellationToken);
             completedRawItems += rawBatch.Results.Count;
         }
     }

@@ -123,7 +123,7 @@ public sealed class SqliteDatabaseInitializerTests
     }
 
     [Fact]
-    public async Task InitializeAsync_MigratesSchemaTwoToThreeAndCreatesDurableLeases()
+    public async Task InitializeAsync_MigratesSchemaTwoToCurrentAndCreatesDurableLeases()
     {
         var root = Path.Combine(Path.GetTempPath(), "premiere-calendar-sqlite-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -137,14 +137,14 @@ public sealed class SqliteDatabaseInitializerTests
             {
                 await connection.OpenAsync();
                 await using var downgrade = connection.CreateCommand();
-                downgrade.CommandText = "DROP TABLE ProviderWorkLeases; DELETE FROM SchemaMigrations WHERE Version = 3; PRAGMA user_version = 2;";
+                downgrade.CommandText = "DROP TABLE ItemEnrichments; DROP TABLE ProviderWorkLeases; DELETE FROM SchemaMigrations WHERE Version >= 3; PRAGMA user_version = 2;";
                 await downgrade.ExecuteNonQueryAsync();
             }
 
             await initializer.InitializeAsync();
 
             Assert.True(state.Snapshot.IsHealthy);
-            Assert.Equal(3, state.Snapshot.CurrentVersion);
+            Assert.Equal(DatabaseSchema.CurrentVersion, state.Snapshot.CurrentVersion);
             await using var migrated = new SqliteConnection($"Data Source={path}");
             await migrated.OpenAsync();
             await using var verify = migrated.CreateCommand();
@@ -173,7 +173,7 @@ public sealed class SqliteDatabaseInitializerTests
             {
                 await connection.OpenAsync();
                 await using var damage = connection.CreateCommand();
-                damage.CommandText = "DROP TABLE ProviderWorkLeases; CREATE TABLE ProviderWorkLeases (WrongColumn TEXT); DELETE FROM SchemaMigrations WHERE Version = 3; PRAGMA user_version = 2;";
+                damage.CommandText = "DROP TABLE ItemEnrichments; DROP TABLE ProviderWorkLeases; CREATE TABLE ProviderWorkLeases (WrongColumn TEXT); DELETE FROM SchemaMigrations WHERE Version >= 3; PRAGMA user_version = 2;";
                 await damage.ExecuteNonQueryAsync();
             }
 

@@ -190,7 +190,8 @@ public sealed class TmdbClient : ITmdbClient
                 token,
                 notFoundReturnsNull: true),
             cancellationToken,
-            forceRefresh);
+            forceRefresh,
+            persistentRequestKey: $"season-v1:{_options.BaseUrl}:{TmdbQueryBuilder.BuildTvSeasonDetailsPath(id, seasonNumber)}");
     }
 
     public Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false)
@@ -227,7 +228,7 @@ public sealed class TmdbClient : ITmdbClient
         var cacheKey = $"tmdb:find:{mediaType}:{externalSource}:{externalId}";
         var response = await GetOrCreateAsync(
             cacheKey,
-            TimeSpan.FromDays(7),
+            TimeSpan.FromDays(90),
             token => SendJsonAsync<TmdbFindResponse>(
                 TmdbQueryBuilder.BuildFindByExternalIdPath(
                     Uri.EscapeDataString(externalId.Trim()),
@@ -236,7 +237,10 @@ public sealed class TmdbClient : ITmdbClient
                 token,
                 notFoundReturnsNull: true),
             cancellationToken,
-            forceRefresh);
+            forceRefresh,
+            persistentRequestKey: $"find-v1:{_options.BaseUrl}:{externalSource.Trim()}:{externalId.Trim()}",
+            lifetimeSelector: result => result.MovieResults.Count > 0 || result.TvResults.Count > 0
+                ? TimeSpan.FromDays(90) : TimeSpan.FromHours(6));
 
         var result = mediaType == PremiereMediaType.Movie
             ? response?.MovieResults.FirstOrDefault()
@@ -261,16 +265,18 @@ public sealed class TmdbClient : ITmdbClient
 
         var normalizedQuery = query.Trim();
         var normalizedYear = year is > 0 ? year.Value.ToString(CultureInfo.InvariantCulture) : "any";
-        var response = await GetOrCreateRequiredAsync(
+        var response = await GetOrCreateAsync(
             $"tmdb:title-search:{mediaType}:{normalizedYear}:{normalizedQuery.ToLowerInvariant()}",
-            TimeSpan.FromDays(7),
+            TimeSpan.FromDays(90),
             token => SendJsonAsync<TmdbPagedResponse<TmdbTitleSearchResult>>(
                 TmdbQueryBuilder.BuildSearchTitlePath(mediaType, normalizedQuery, year),
                 "TMDb title search",
                 token,
                 notFoundReturnsNull: false),
             cancellationToken,
-            forceRefresh);
+            forceRefresh,
+            persistentRequestKey: $"search-v1:{_options.BaseUrl}:{TmdbQueryBuilder.BuildSearchTitlePath(mediaType, normalizedQuery, year)}",
+            lifetimeSelector: result => result.Results.Count > 0 ? TimeSpan.FromDays(90) : TimeSpan.FromHours(6));
 
         return response?.Results ?? [];
     }
@@ -426,6 +432,37 @@ public sealed class TmdbClient : ITmdbClient
         return GetChangedIdsAsync(PremiereMediaType.Series, start, end, cancellationToken, forceRefresh);
     }
 
+    public async Task<DateTimeOffset?> GetLastMetadataChangeUtcAsync(
+        PremiereMediaType mediaType, int id, DateOnly start, DateOnly end,
+        CancellationToken cancellationToken)
+    {
+        EnsureConfigured();
+        if (id <= 0 || end < start) throw new ArgumentOutOfRangeException(nameof(id));
+        var media = mediaType == PremiereMediaType.Movie ? "movie" : "tv";
+        // Inspect history only for cached IDs returned by the cheap change list.
+        // This is not a full-catalog detail sweep.
+        var history = await SendJsonAsync<TmdbChangeHistory>(
+            $"{media}/{id}/changes?start_date={start:yyyy-MM-dd}&end_date={end:yyyy-MM-dd}",
+            "TMDb item change history", cancellationToken, notFoundReturnsNull: true);
+        if (history is null) return null;
+        if (history.Changes is null) throw new ExternalApiException("TMDb change history omitted its changes collection.");
+        DateTimeOffset? latest = null;
+        foreach (var field in history.Changes)
+        {
+            if (field.Key is "cast" or "crew" or "guest_stars" or "aggregate_credits") continue;
+            foreach (var item in field.Items)
+            {
+                var text = item.Time.EndsWith(" UTC", StringComparison.Ordinal)
+                    ? item.Time[..^4] + "Z" : item.Time;
+                if (!DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var timestamp))
+                    throw new ExternalApiException("TMDb change history contained an invalid timestamp.");
+                if (latest is null || timestamp > latest) latest = timestamp;
+            }
+        }
+        return latest ?? DateTimeOffset.MinValue;
+    }
+
     private Task<IReadOnlyList<TmdbChangedItem>> GetChangedIdsAsync(
         PremiereMediaType mediaType,
         DateOnly start,
@@ -446,21 +483,26 @@ public sealed class TmdbClient : ITmdbClient
             TimeSpan.FromHours(1),
             token => GetPagedAsync<TmdbChangedItem>(
                 page => TmdbQueryBuilder.BuildChangesPath(mediaType, start, end, page),
-                token),
+                token, requireComplete: true),
             cancellationToken,
             forceRefresh);
     }
 
     private async Task<IReadOnlyList<T>> GetPagedAsync<T>(
         Func<int, string> pathFactory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireComplete = false)
     {
         var firstPage = await FetchDiscoverPageAsync<T>(pathFactory, 1, cancellationToken);
         if (firstPage is null)
         {
+            if (requireComplete) throw new ExternalApiException("TMDb changes returned no first page.");
             return [];
         }
 
+        if (requireComplete && (firstPage.Page != 1 || firstPage.TotalPages < 0 || !firstPage.HasResults || firstPage.Results is null
+            || (firstPage.TotalPages == 0 && firstPage.Results.Count != 0)))
+            throw new ExternalApiException("TMDb changes returned an invalid first page.");
         var totalPages = Math.Clamp(Math.Max(1, firstPage.TotalPages), 1, TmdbMaximumPage);
         var configuredMaxPages = IsBroadDiscoverQuery(firstPage, pathFactory)
             ? _options.MaxUnfilteredPagesPerQuery
@@ -469,6 +511,7 @@ public sealed class TmdbClient : ITmdbClient
         var pagesToFetch = Math.Min(totalPages, maxPages);
         if (firstPage.TotalPages > maxPages)
         {
+            if (requireComplete) throw new ExternalApiException("TMDb changes exceeded the complete-page safety limit.");
             _logger.LogWarning(
                 "TMDb discover query returned {TotalPages} pages; fetching configured cap of {MaxPagesPerQuery} pages. Increase Tmdb:MaxPagesPerQuery to avoid truncation.",
                 firstPage.TotalPages,
@@ -499,6 +542,9 @@ public sealed class TmdbClient : ITmdbClient
             });
 
         var fetchedPages = await Task.WhenAll(remainingPageTasks);
+        if (requireComplete && fetchedPages.Any(page => page.Response is null || page.Response.Page != page.Page
+            || page.Response.TotalPages != firstPage.TotalPages || !page.Response.HasResults || page.Response.Results is null))
+            throw new ExternalApiException("TMDb changes contained an incomplete page.");
         foreach (var fetchedPage in fetchedPages.OrderBy(page => page.Page))
         {
             if (fetchedPage.Response is not null)
@@ -660,9 +706,10 @@ public sealed class TmdbClient : ITmdbClient
         Func<CancellationToken, Task<T?>> factory,
         CancellationToken cancellationToken,
         bool forceRefresh,
-        string? persistentRequestKey = null)
+        string? persistentRequestKey = null,
+        Func<T, TimeSpan>? lifetimeSelector = null)
         => TraceLookupAsync(cacheKey, forceRefresh, () => GetOrCreateScopedAsync(
-            cacheKey, duration, factory, cancellationToken, forceRefresh, persistentRequestKey));
+            cacheKey, duration, factory, cancellationToken, forceRefresh, persistentRequestKey, lifetimeSelector));
 
     private Task<T?> GetOrCreateScopedAsync<T>(
         string cacheKey,
@@ -670,15 +717,16 @@ public sealed class TmdbClient : ITmdbClient
         Func<CancellationToken, Task<T?>> factory,
         CancellationToken cancellationToken,
         bool forceRefresh,
-        string? persistentRequestKey)
+        string? persistentRequestKey,
+        Func<T, TimeSpan>? lifetimeSelector)
     {
         if (typeof(T) != typeof(TmdbDetailsWithExtras) || ProviderRefreshScope.Current is not { } refresh)
-            return GetOrCreateCoreAsync(cacheKey, duration, factory, cancellationToken, forceRefresh, persistentRequestKey);
+            return GetOrCreateCoreAsync(cacheKey, duration, factory, cancellationToken, forceRefresh, persistentRequestKey, lifetimeSelector);
 
         return refresh.RunAsync($"tmdb:{_options.BaseUrl}:{cacheKey}", forceRefresh,
             async token =>
             {
-                var value = await GetOrCreateCoreAsync(cacheKey, duration, factory, token, forceRefresh, persistentRequestKey);
+                var value = await GetOrCreateCoreAsync(cacheKey, duration, factory, token, forceRefresh, persistentRequestKey, lifetimeSelector);
                 return new ProviderRefreshResult<T?>(value, IsVerifiedDetail(value));
             }, cancellationToken,
             value => IsVerifiedDetail(value) && _cache.TryGetValue(cacheKey, out T? latest) && ReferenceEquals(latest, value));
@@ -693,7 +741,8 @@ public sealed class TmdbClient : ITmdbClient
         Func<CancellationToken, Task<T?>> factory,
         CancellationToken cancellationToken,
         bool forceRefresh,
-        string? persistentRequestKey = null)
+        string? persistentRequestKey = null,
+        Func<T, TimeSpan>? lifetimeSelector = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var memoryStarted = Stopwatch.GetTimestamp();
@@ -735,21 +784,23 @@ public sealed class TmdbClient : ITmdbClient
                 var value = await factory(token);
                 if (value is not null)
                 {
+                    var effectiveDuration = lifetimeSelector?.Invoke(value) ?? duration;
                     if (publication is not null)
                     {
                         return await publication.PublishAsync(async current =>
                         {
                             if (current)
                             {
-                                _cache.Set(cacheKey, value, duration);
-                                await _responseCache!.SaveAsync("tmdb", persistentRequestKey!, value, token, invalidateOversized: forceRefresh);
+                                _cache.Set(cacheKey, value, effectiveDuration);
+                                await _responseCache!.SaveAsync("tmdb", persistentRequestKey!, value, token,
+                                    invalidateOversized: forceRefresh, lifetime: effectiveDuration);
                             }
                             else if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? latest)) return latest;
                             return value;
                         }, token);
                     }
 
-                    _cache.Set(cacheKey, value, duration);
+                    _cache.Set(cacheKey, value, effectiveDuration);
                 }
 
                 return value;

@@ -3,7 +3,7 @@
     <Version Condition="'$(Version)' == ''">0.0.0-local</Version>
     <FileVersion Condition="'$(FileVersion)' == ''">0.0.0.0</FileVersion>
     <InformationalVersion Condition="'$(InformationalVersion)' == ''">0.0.0-local</InformationalVersion>
-    <DatabaseSchemaVersion>3</DatabaseSchemaVersion>
+    <DatabaseSchemaVersion>4</DatabaseSchemaVersion>
     <!-- Keep routine local build output out of the source checkout. Hosted CI
          keeps its conventional layout for existing artifact collection. -->
     <UseArtifactsOutput Condition="'$(UseArtifactsOutput)' == '' and '$(CI)' != 'true'">true</UseArtifactsOutput>

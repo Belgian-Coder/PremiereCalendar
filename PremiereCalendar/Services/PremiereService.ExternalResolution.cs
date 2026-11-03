@@ -26,7 +26,7 @@ public sealed partial class PremiereService
         }
 
         var candidateTasks = _discoveryProviders.Select(provider =>
-            GetCandidatesFromProviderAsync(provider, start, end, cancellationToken, forceRefresh));
+            GetCandidatesFromProviderAsync(provider, start, end, cancellationToken, ForceDiscoveryRefresh(forceRefresh)));
 
         var candidateGroups = await Task.WhenAll(candidateTasks);
         var candidates = candidateGroups
@@ -71,7 +71,7 @@ public sealed partial class PremiereService
         Exception? providerFailure = null;
 
         await using var providerEnumerator = StreamCandidatesFromProviderAsync(
-            provider, start, end, criteria, forceRefresh, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            provider, start, end, criteria, ForceDiscoveryRefresh(forceRefresh), cancellationToken).GetAsyncEnumerator(cancellationToken);
         while (true)
         {
             bool moved;
@@ -232,6 +232,7 @@ public sealed partial class PremiereService
         DateOnly requestEnd,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        await PrepareExternalItemEnrichmentAsync(candidates, forceRefresh, cachedEnrichment, cancellationToken);
         await foreach (var mappedBatch in MapInProgressBatchesAsync(
                 candidates,
                 (candidate, token) => MapExternalCandidateAsync(
@@ -245,8 +246,10 @@ public sealed partial class PremiereService
                 cancellationToken)
             .WithCancellation(cancellationToken))
         {
+            if (_itemCacheSession.Value is { } batchSession) await batchSession.FlushAsync(cancellationToken);
             yield return WithCandidateProgress(mappedBatch, candidates.Count);
         }
+        if (_itemCacheSession.Value is { } session) await session.FlushAsync(cancellationToken);
     }
 
     private async Task<int[]> SearchKeywordIdsAsync(string keywordText, CancellationToken cancellationToken, bool forceRefresh)
@@ -311,7 +314,7 @@ public sealed partial class PremiereService
         }
 
         candidate = canonicalCandidate;
-        if (TryReuseCachedExternalCandidate(cachedEnrichment, candidate, criteria, out var cachedCandidateItem))
+        if (_itemCacheSession.Value is null && TryReuseCachedExternalCandidate(cachedEnrichment, candidate, criteria, out var cachedCandidateItem))
         {
             if (candidate.MediaType == PremiereMediaType.Series
                 && criteria.Series.SeriesDateMode == SeriesDateMode.NewSeriesOnly
@@ -367,6 +370,8 @@ public sealed partial class PremiereService
         }
 
         var title = candidate.Title;
+        if (string.IsNullOrWhiteSpace(title))
+            title = _itemCacheSession.Value?.Find(new ItemEnrichmentIdentity(candidate.MediaType, tmdbId.Value))?.Metadata?.Title ?? title;
         if (string.IsNullOrWhiteSpace(title))
         {
             var details = candidate.MediaType == PremiereMediaType.Movie
@@ -611,7 +616,7 @@ public sealed partial class PremiereService
                 continue;
             }
 
-            reusedItem = MergeCachedExternalCandidate(cachedItem, candidate);
+            reusedItem = MergeCachedExternalCandidate(cachedItem, candidate, criteria);
             return true;
         }
 
@@ -700,35 +705,26 @@ public sealed partial class PremiereService
 
     private static PremiereItem MergeCachedExternalCandidate(
         PremiereItem cachedItem,
-        ExternalPremiereCandidate candidate)
+        ExternalPremiereCandidate candidate,
+        PremiereDiscoveryCriteria criteria)
     {
-        var sourceNames = SourceNamesWithCandidate(cachedItem.SourceNames, candidate);
-        var candidateImdbId = NormalizeExternalId(candidate.ImdbId);
-        var imdbId = CoalesceText(cachedItem.ImdbId, candidateImdbId);
-        return cachedItem with
+        var type = candidate.MediaType == PremiereMediaType.Movie ? PremiereItemType.MovieFirstRelease
+            : criteria.Series.SeriesDateMode == SeriesDateMode.AllEpisodes ? PremiereItemType.SeriesEpisode : PremiereItemType.SeriesPremiere;
+        var discovered = new PremiereItem
         {
-            ImdbId = imdbId,
-            ImdbUrl = CoalesceText(cachedItem.ImdbUrl, BuildImdbUrl(imdbId)),
-            TvdbId = cachedItem.TvdbId ?? candidate.TvdbId,
+            CanonicalId = type == PremiereItemType.SeriesEpisode
+                ? PremiereIdentity.SeriesEpisodeCanonicalId(cachedItem.TmdbId, candidate.PremiereDate, candidate.SeasonNumber, candidate.EpisodeNumber)
+                : PremiereIdentity.CanonicalId(candidate.MediaType, cachedItem.TmdbId),
+            Type = type, MediaType = candidate.MediaType, TmdbId = cachedItem.TmdbId,
             Title = CoalesceText(candidate.Title, cachedItem.Title) ?? cachedItem.Title,
-            PremiereDate = candidate.PremiereDate,
-            EpisodeTitle = CoalesceText(candidate.EpisodeTitle, cachedItem.EpisodeTitle),
-            SeasonNumber = candidate.SeasonNumber ?? cachedItem.SeasonNumber,
-            EpisodeNumber = candidate.EpisodeNumber ?? cachedItem.EpisodeNumber,
-            EpisodeSource = CoalesceText(candidate.Source, cachedItem.EpisodeSource),
-            ImdbScore = cachedItem.ImdbScore ?? candidate.ImdbScore,
-            ImdbVoteCount = cachedItem.ImdbVoteCount ?? candidate.ImdbVoteCount,
-            SourceNames = sourceNames,
-            Sources = SourceEntriesWithCandidate(cachedItem.Sources, candidate),
-            MergeContributions = cachedItem.MergeContributions
-                .Append(PremiereDiagnosticsFactory.ExternalContribution(
-                    candidate,
-                    ExternalCandidateMatchMethod(candidate),
-                    "Reused cached TMDb-backed enrichment for this external candidate."))
-                .DistinctBy(MergeContributionKey, StringComparer.OrdinalIgnoreCase)
-                .ToArray(),
-            NetworkName = CoalesceText(candidate.Source, cachedItem.NetworkName)
+            PremiereDate = candidate.PremiereDate, EpisodeTitle = candidate.EpisodeTitle,
+            SeasonNumber = candidate.SeasonNumber, EpisodeNumber = candidate.EpisodeNumber, EpisodeSource = candidate.Source,
+            OriginalLanguage = candidate.OriginalLanguage ?? "",
+            DateSemantics = new PremiereDateSemantics(candidate.PremiereDate, PremiereDateSourceKind.ExternalProviderDate,
+                PremiereDataConfidence.High, $"Date accepted from {candidate.Source} and mapped back to TMDb."),
+            MergeContributions = [PremiereDiagnosticsFactory.TmdbContribution(candidate.MediaType, cachedItem.TmdbId)]
         };
+        return MergeExternalCandidateSource(MergeCachedEnrichment(cachedItem, discovered), candidate);
     }
 
     private static PremiereItem MergeExternalCandidateSource(
@@ -739,6 +735,9 @@ public sealed partial class PremiereService
         var imdbId = CoalesceText(item.ImdbId, candidateImdbId);
         return item with
         {
+            ExternalProviderId = candidate.ExternalProviderId,
+            ExternalUrl = candidate.ExternalUrl,
+            ExternalCandidateKey = ExternalCandidateKey(candidate),
             ImdbId = imdbId,
             ImdbUrl = CoalesceText(item.ImdbUrl, BuildImdbUrl(imdbId)),
             TvdbId = item.TvdbId ?? candidate.TvdbId,
@@ -803,6 +802,8 @@ public sealed partial class PremiereService
         bool forceRefresh)
     {
         var candidateImdbId = NormalizeExternalId(candidate.ImdbId);
+        if (_itemCacheSession.Value?.Find(new ItemEnrichmentIdentity(item.MediaType, item.TmdbId)) is { Metadata.ImdbId: { } cachedImdbId }
+            && string.Equals(candidateImdbId, cachedImdbId, StringComparison.OrdinalIgnoreCase)) return item;
         if (string.IsNullOrWhiteSpace(candidateImdbId)
             || !string.Equals(candidateImdbId, item.ImdbId, StringComparison.OrdinalIgnoreCase))
         {
@@ -906,7 +907,16 @@ public sealed partial class PremiereService
             && !string.Equals(source, "Simkl", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task<int?> ResolveCandidateTmdbIdAsync(
+    private Task<int?> ResolveCandidateTmdbIdAsync(
+        ExternalPremiereCandidate candidate, CancellationToken cancellationToken, bool forceRefresh)
+    {
+        if (_itemCacheSession.Value is not { } session)
+            return ResolveCandidateTmdbIdCoreAsync(candidate, cancellationToken, forceRefresh);
+        return session.ResolvedCandidates.GetOrAdd(ExternalCandidateKey(candidate), _ => new Lazy<Task<int?>>(
+            () => ResolveCandidateTmdbIdCoreAsync(candidate, cancellationToken, forceRefresh))).Value;
+    }
+
+    private async Task<int?> ResolveCandidateTmdbIdCoreAsync(
         ExternalPremiereCandidate candidate,
         CancellationToken cancellationToken,
         bool forceRefresh)

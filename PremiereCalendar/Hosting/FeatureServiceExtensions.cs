@@ -19,6 +19,7 @@ public static class FeatureServiceExtensions
         services.Configure<WatchmodeOptions>(configuration.GetSection("Watchmode"));
         services.Configure<SimklOptions>(configuration.GetSection("Simkl"));
         services.Configure<CalendarCacheOptions>(configuration.GetSection("CalendarCache"));
+        services.Configure<ItemEnrichmentCacheOptions>(configuration.GetSection("ItemEnrichmentCache"));
         services.Configure<CalendarWarmupOptions>(configuration.GetSection("CalendarWarmup"));
         services.Configure<CalendarLoadOptions>(configuration.GetSection("CalendarLoad"));
         services.Configure<CacheMaintenanceOptions>(configuration.GetSection("CacheMaintenance"));
@@ -45,6 +46,8 @@ public static class FeatureServiceExtensions
         services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();
         services.AddSingleton<IOmdbCacheStore, SqliteOmdbCacheStore>();
         services.AddSingleton<IProviderCacheStateStore, SqliteProviderCacheStateStore>();
+        services.AddSingleton<IItemEnrichmentStore, SqliteItemEnrichmentStore>();
+        services.AddSingleton<ItemEnrichmentCacheCoordinator>();
         services.AddSingleton<ProviderResponseCache>();
         services.AddSingleton<IViewSyncStore, SqliteViewSyncStore>();
         services.AddSingleton<IViewSyncService, ViewSyncService>();
@@ -60,6 +63,7 @@ public static class FeatureServiceExtensions
         services.AddSingleton<ProviderWorkScheduler>();
         services.AddSingleton<IProviderWorkScheduler>(provider => provider.GetRequiredService<ProviderWorkScheduler>());
         services.AddHostedService<ProviderWorkSchedulerHostedService>();
+        services.AddHostedService<ItemEnrichmentCacheBackfillService>();
         services.AddSingleton<AdjacentWeekPrefetcher>();
         services.AddSingleton<IAdjacentWeekPrefetcher>(provider => provider.GetRequiredService<AdjacentWeekPrefetcher>());
         services.AddHostedService(provider => provider.GetRequiredService<AdjacentWeekPrefetcher>());

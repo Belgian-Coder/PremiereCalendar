@@ -63,22 +63,28 @@ public sealed class OmdbClient : IOmdbClient
     }
 
     public async Task<OmdbItem?> GetByImdbIdAsync(string imdbId, CancellationToken cancellationToken, bool forceRefresh = false)
+        => (await GetByImdbIdWithStatusAsync(imdbId, cancellationToken, forceRefresh)).Value;
+
+    public async Task<ProviderRefreshResult<OmdbItem?>> GetByImdbIdWithStatusAsync(
+        string imdbId, CancellationToken cancellationToken, bool forceRefresh = false)
     {
         var settings = await GetEffectiveSettingsAsync(cancellationToken);
-        if (!settings.Enabled || string.IsNullOrWhiteSpace(settings.ApiKey) || string.IsNullOrWhiteSpace(imdbId))
-        {
-            return null;
-        }
+        if (!settings.Enabled || string.IsNullOrWhiteSpace(imdbId)) return new(null, true);
+        if (string.IsNullOrWhiteSpace(settings.ApiKey)) return new(null, false);
 
         if (ProviderRefreshScope.Current is { } refresh)
         {
             var cacheKey = $"omdb:imdb:{imdbId}";
-            return await refresh.RunAsync($"omdb:{_httpClient.BaseAddress}:{imdbId}", forceRefresh,
-                token => GetByImdbIdCoreAsync(imdbId, settings, token, forceRefresh), cancellationToken,
-                value => value is not null && IsVerifiedResponse(value)
-                    && _cache.TryGetValue(cacheKey, out OmdbItem? latest) && ReferenceEquals(latest, value));
+            return await refresh.RunAsync($"omdb:{_httpClient.BaseAddress}:{imdbId}:outcome", forceRefresh,
+                async token =>
+                {
+                    var result = await GetByImdbIdCoreAsync(imdbId, settings, token, forceRefresh);
+                    return new ProviderRefreshResult<ProviderRefreshResult<OmdbItem?>>(result, result.Successful);
+                }, cancellationToken,
+                result => result.Value is not null && IsVerifiedResponse(result.Value)
+                    && _cache.TryGetValue(cacheKey, out OmdbItem? latest) && ReferenceEquals(latest, result.Value));
         }
-        return (await GetByImdbIdCoreAsync(imdbId, settings, cancellationToken, forceRefresh)).Value;
+        return await GetByImdbIdCoreAsync(imdbId, settings, cancellationToken, forceRefresh);
     }
 
     private async Task<ProviderRefreshResult<OmdbItem?>> GetByImdbIdCoreAsync(
