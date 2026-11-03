@@ -68,11 +68,19 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
     [Fact]
     public async Task ConcurrentArtworkAndIdentifierForSameEntityShareOneFetch()
     {
-        var handler = new AsyncHandler((request, _) => Task.FromResult(Identifiers(request)));
+        var release = Signal();
+        var handler = new AsyncHandler(async (request, token) =>
+        {
+            await release.Task.WaitAsync(token);
+            return Identifiers(request);
+        });
         var client = CreateClient(handler);
         var identifier = client.GetRottenTomatoesIdAsync("Q123", CancellationToken.None);
         var image = client.GetReusableImageUrlAsync("Q123", CancellationToken.None);
         var duplicate = client.GetRottenTomatoesIdAsync("Q123", CancellationToken.None);
+        // Keep the response pending until every consumer has joined, including
+        // when full-suite scheduling pauses between the calls above.
+        release.TrySetResult();
 
         Assert.Equal("m/Q123", await identifier);
         Assert.Null(await image);

@@ -616,7 +616,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                             && current.Metadata is { FirstEpisodeDateChecked: true, FirstEpisodeDate: { } date } && date != item.PremiereDate)
                         dirty.Add(item.MediaType);
                     var metadataChanged = item.EnrichmentVersion is not { } version
-                        || version.MetadataRevision != record.MetadataRevision || version.MetadataFetchedUtc != record.MetadataFetchedUtc;
+                        || version.MetadataFetchedUtc != record.MetadataFetchedUtc;
                     if (_selfAcceptedRevisions.TryGetValue(identity, out var ownRevision) && ownRevision == record.MetadataRevision)
                         metadataChanged = false;
                     return current.Rebase(item, metadataChanged);
@@ -662,7 +662,17 @@ internal sealed record ItemEnrichmentSnapshot(ItemEnrichmentRecord Record, ItemE
             ImdbScore = null, ImdbVoteCount = null, RottenTomatoesScore = null,
             RottenTomatoesAudienceScore = null, MetacriticScore = null
         };
-        if (metadataChanged && Metadata is not null) applied = Metadata.Apply(applied, preferDiscoveryMetadata: false);
+        if (Metadata is not null)
+        {
+            applied = Metadata.Apply(applied, preferDiscoveryMetadata: !metadataChanged);
+            if (!metadataChanged) applied = applied with
+            {
+                OriginCountries = item.OriginCountries.Length > 0 ? item.OriginCountries : applied.OriginCountries,
+                GenreIds = item.GenreIds.Length > 0 ? item.GenreIds : applied.GenreIds,
+                TmdbScore = Metadata.TmdbVotes?.TmdbScore ?? applied.TmdbScore,
+                TmdbVoteCount = Metadata.TmdbVotes?.TmdbVoteCount ?? applied.TmdbVoteCount
+            };
+        }
         if (Ratings is not null) applied = Ratings.Apply(applied);
         var sources = applied.Sources.Where(source => !string.Equals(source.Kind, "schedule", StringComparison.OrdinalIgnoreCase))
             .Concat(item.Sources.Where(source => string.Equals(source.Kind, "schedule", StringComparison.OrdinalIgnoreCase)))

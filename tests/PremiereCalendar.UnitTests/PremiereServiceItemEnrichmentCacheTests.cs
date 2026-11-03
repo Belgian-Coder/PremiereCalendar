@@ -11,6 +11,53 @@ namespace PremiereCalendar.UnitTests;
 public sealed partial class PremiereServiceTests
 {
     [Fact]
+    public async Task ForeignVoteOnlyRevisionPreservesFreshDiscoveryFieldsAcrossCachedFileSessions()
+    {
+        var date = new DateOnly(2026, 11, 2);
+        var clock = new ItemCacheClock();
+        var store = new MemoryItemEnrichmentStore(clock);
+        var coordinator = ItemCacheCoordinator(store, clock);
+        var old = ItemCacheLegacyItem(date, clock) with
+        {
+            Title = "Old global title", Overview = "Old global overview", PosterUrl = "https://old.example/poster.jpg",
+            TmdbScore = 6.5, TmdbVoteCount = 100
+        };
+        await coordinator.ImportAsync([old], CancellationToken.None);
+        var metadataClock = Assert.Single(store.Records.Values).MetadataFetchedUtc;
+        var identity = new ItemEnrichmentIdentity(old.MediaType, old.TmdbId);
+        var sessionA = await coordinator.CreateSessionAsync(CancellationToken.None);
+        await sessionA.PrepareAsync([identity], null, CancellationToken.None);
+        var fresh = old with { Title = "Fresh discovery title", Overview = "Fresh discovery overview",
+            PosterUrl = "https://fresh.example/poster.jpg", TmdbScore = 7, TmdbVoteCount = 150 };
+        var first = await sessionA.GetAsync(identity, false, (_, _, _, _) => Task.FromResult(new ItemEnrichmentRefresh(null, null)),
+            CancellationToken.None, ratingsInputs: fresh);
+        await sessionA.FlushAsync(CancellationToken.None);
+        var firstReconciliation = await sessionA.ReconcileAsync([first.Apply(fresh)], true, CancellationToken.None);
+        var cachedFile = JsonSerializer.Deserialize<PremiereItem>(JsonSerializer.Serialize(Assert.Single(firstReconciliation.Items)))!;
+        clock.Advance(TimeSpan.FromHours(1));
+        var sessionB = await coordinator.CreateSessionAsync(CancellationToken.None);
+        await sessionB.PrepareAsync([identity], null, CancellationToken.None);
+        await sessionB.GetAsync(identity, false, (_, _, _, _) => Task.FromResult(new ItemEnrichmentRefresh(null, null)),
+            CancellationToken.None, ratingsInputs: old with { TmdbScore = 8, TmdbVoteCount = 200 });
+        await sessionB.FlushAsync(CancellationToken.None);
+        var sessionC = await coordinator.CreateSessionAsync(CancellationToken.None);
+        await sessionC.PrepareAsync([identity], null, CancellationToken.None);
+
+        var final = await sessionC.ReconcileAsync([cachedFile], false, CancellationToken.None);
+
+        var item = Assert.Single(final.Items);
+        Assert.Empty(final.DirtyMedia);
+        Assert.Equal("Fresh discovery title", item.Title);
+        Assert.Equal("Fresh discovery overview", item.Overview);
+        Assert.Equal("https://fresh.example/poster.jpg", item.PosterUrl);
+        Assert.Equal(8, item.TmdbScore);
+        Assert.Equal(200, item.TmdbVoteCount);
+        Assert.Equal(metadataClock, item.EnrichmentVersion?.MetadataFetchedUtc);
+        Assert.True(item.EnrichmentVersion?.MetadataRevision > cachedFile.EnrichmentVersion?.MetadataRevision);
+        Assert.Equal("Old global title", JsonSerializer.Deserialize<ItemEnrichmentMetadata>(Assert.Single(store.Records.Values).MetadataJson!)?.Title);
+    }
+
+    [Fact]
     public async Task MaintenanceMergesDifferentScoreDeltasAcrossOccurrencesAndHidesUnknownUiClock()
     {
         var date = new DateOnly(2026, 11, 2);
