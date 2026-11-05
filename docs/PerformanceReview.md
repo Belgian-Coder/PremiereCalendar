@@ -1,6 +1,6 @@
 # Performance Review
 
-Last reviewed: 2026-11-05. The November 5 candidate passed local source checks and final Astra high / Claude Opus 5.5 high reviews with no open P0â€“P2 findings. The first local image was rejected by the restored-backup checksum gate before installation; the narrow correction passed the final LF-source test pass. Corrected-image gates and installed acceptance remain pending.
+Last reviewed: 2026-11-05. v1.2.15 is installed on the NAS from source `6f8d1bc`; local image/backup gates, installed health and both requested high-effort reviews passed. Cached revisit was 486 ms, but the observed full durable refresh still took 108.95 seconds and remained partial under provider restrictions.
 
 ## November 5 candidate
 

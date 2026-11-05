@@ -1,6 +1,6 @@
 # November 5 performance implementation and evidence
 
-Status: implemented, locally tested and independently reviewed. Final Astra high and fresh Claude Opus 5.5 high reviews have no actionable P0â€“P2 findings. Exact-image release gates and installed acceptance are pending. No new installation or live browser-speed claim is recorded here. Builds and tests ran locally; GitHub workflows remained disabled.
+Status: v1.2.15 is installed on the NAS. Both requested high-effort reviews, local security/runtime gates and real-backup preservation checks passed. Cached display is fast; the observed full durable refresh still took 108.95 seconds and remained partial under provider restrictions. Builds/tests/scans ran locally; GitHub workflows remained disabled.
 
 The original 20 requests and the additional 20-item table overlap. The grouped coverage below describes the resulting behavior rather than counting the same change twice. All configured providers remain enabled; none was removed to improve timings. Result/data preservation remains part of acceptance, and no production PostgreSQL, application-data or backup deployment was performed for these measurements.
 
@@ -111,7 +111,7 @@ The 13 findings were adjudicated and valid defects corrected; this is not a clai
 
 ## Fresh full-review corrections
 
-The subsequent frozen-snapshot reviews used Astra high and Claude CLI `claude-opus-5-5 --effort high`; the CLI outputs confirm the actual model. Ten P2 issues were confirmed across the reviews and their follow-up. All have corrections and passing affected regressions. Both final-candidate reviews report no actionable P0â€“P2 findings. Raw reports and byte manifests are retained with the local release evidence.
+The subsequent frozen-snapshot reviews used Astra high and Claude CLI `claude-opus-5-5 --effort high`; the CLI outputs confirm the actual model. Ten P2 issues were confirmed across the reviews and their follow-up. All have corrections and passing affected regressions. Both final-candidate reviews report no actionable P0–P2 findings. Raw reports and byte manifests are retained with the local release evidence.
 
 The first clean source checkpoint had an 84-entry program/test/tool manifest. Its exact bytes preceded the later checksum correction and LF-only normalization. Its SHA256 is `6f23916d47916faa4bb1509f6991ec098b463123bdeecfd6e527544e6b7d1a97`; diff SHA256 is `d9713109988132151281a4dd69951cc93bd5eadbaee554ab2039a581cfa2d1d8`. The [Astra receipt](../../PremiereCalendar.Build.Improvements20261105/astra-final-candidate.md) and [fresh Claude report](../../PremiereCalendar.Build.Improvements20261105/claude-final-candidate.json) distinguish read-only source review from parent-executed checks. Claude read new files directly; hash verification was performed separately by Astra and the parent.
 
@@ -132,12 +132,37 @@ The first clean source checkpoint had an 84-entry program/test/tool manifest. It
 
 The first local v1.2.15 image was rejected before installation. Its empty-database smoke and security checks passed, but startup against an isolated restore of the actual schema-4 backup rejected migration 1's checksum. Windows `git archive` had converted C# SQL raw-string line endings to CRLF; the stored history used LF. Production remained on v1.2.14 and no migration history was rewritten.
 
-Migration checksums now use canonical LF SQL. Only historical migrations 1â€“4 also accept their exact CRLF-SQL checksum representation; name, version, completeness and schema-shape guards remain enforced. Golden LF/CRLF/mixed-history tests cover both PostgreSQL and SQLite, including rejection and data preservation. The C# LF attribute and a pre-build archive/blob/test-fingerprint comparison make the source representation explicit.
+Migration checksums now use canonical LF SQL. Only historical migrations 1–4 also accept their exact CRLF-SQL checksum representation; name, version, completeness and schema-shape guards remain enforced. Golden LF/CRLF/mixed-history tests cover both PostgreSQL and SQLite, including rejection and data preservation. The C# LF attribute and a pre-build archive/blob/test-fingerprint comparison make the source representation explicit.
 
-The checksum supplement passed 10 unit/SQLite cases and 13 actual PostgreSQL cases. Astra found no actionable issue in the correction. Claude confirmed the runtime correction and found an evidence gap between CRLF-tested and LF-shipped source. One final LF-bound build/test pass completed with 1,738 passed and one expected skip. A stricter archive fingerprint gate and evidence packing checks bind the counted LF tests, compiler document hashes, committed blobs and source archive; stale CRLF evidence is rejected. Follow-up review receipts and corrected-image runtime gates remain required before release acceptance. The rejected bundle remains preserved separately from candidate 2.
+The checksum supplement passed 10 unit/SQLite cases and 13 actual PostgreSQL cases. Astra found no actionable issue in the correction. Claude confirmed the runtime correction and found an evidence gap between CRLF-tested and LF-shipped source. One final LF-bound build/test pass completed with 1,738 passed and one expected skip. A stricter archive fingerprint gate and evidence packing checks bind the counted LF tests, compiler document hashes, committed blobs and source archive; stale CRLF evidence is rejected. Both high-effort follow-up reviews cleared the final LF evidence and packing correction. The corrected image subsequently passed the actual restored-backup gate and was installed; candidate 1 remains rejected. The rejected bundle remains preserved separately from candidate 2.
+
+## Installed v1.2.15 acceptance
+
+The NAS app was updated at **2026-11-05 21:24:31 UTC**, stack 20 revision 14. Built source is `6f8d1bcf3d8eb44607da0f0ac36384b267bfc4db`; the archive-loaded image configuration identity is `sha256:b87ae77208bbb88ffd7177002c2172601a619c09027d5c19261792962041e2ca`. PostgreSQL and backup container IDs/start times, mounts, environment, saved settings and application data were retained. No production database restore occurred.
+
+Local release gates passed: NuGet and Trivy reported zero vulnerabilities; Trivy reported zero secrets/misconfigurations; CycloneDX 1.7 lists 488 components. Hardened clean-database startup, HTTP/assets, timezone/DST, nightly planning and legacy-checkpoint CLI checks passed. The exact image also started on the separately restored real schema-4 backup, preserving migration history, all public table counts, preference fingerprints and all 7,155 enrichment rows. Direct/private installed identity, schema, health, assets and hardening checks passed. Both requested high-effort reviewers cleared source and follow-up corrections. GitHub workflows remained disabled.
+
+The deployment guard initially stopped safely because PowerShell had converted an ISO timestamp to a locale-formatted `DateTime` before parsing it again, interpreting November 5 as May 11. Reading that field as text and parsing invariantly fixed the guard; the unchanged 26-hour limit accepts the actual two-hour-old backup and rejects a 27-hour control. Astra and Claude independently cleared the two-line operational correction. No additional image rebuild was needed.
+
+| Installed browser observation | Result |
+| --- | --- |
+| Reported movie week, cached reload to first visible card | 486 ms |
+| Wednesday → Thursday / Thursday → Wednesday | 315 / 262 ms |
+| Render window / observed DOM size | 10 cards / 437–444 nodes |
+| Filters / horizontal overflow / browser warnings or errors | 2 retained / none / none |
+| Cached rows before background refresh | 150 titles, cache dated November 1 |
+| Rows after background refresh | 151 titles; partial; explicit Trakt warning and next check at 22:30 |
+
+Browser timings include automation overhead and are single observations. The screenshot captures the cached view before its background update, not the final partial state.
+
+**Full refresh remains slow.** The same durable job continued across the reload and took **108.95 seconds total**; the second page observation waited 62.20 seconds. Server first rows arrived in 195.26 ms initially and 58.62 ms after reload. The final outcome was degraded, with Trakt deferred and Watchmode returning two 429 responses. That job recorded 916 TMDb, 258 Rotten Tomatoes, 33 Wikimedia, eight Fanart and three SIMKL HTTP responses. The two page records share that one job; their traffic must not be added together. This unmatched live run establishes no full-refresh improvement over the user's earlier 77-second observation. The benefit established here is prompt cached display and durable continuation, alongside the matched provider fixtures above.
+
+A retained startup/browser trace snapshot contains 33,412 complete events (15,434,025 bytes), with zero omitted/malformed records or loss markers in the observed interval. Installed health reported zero dropped events, writer/serialization/archive failures and operational logging failures, with the event queue drained. This is a bounded observation, not a production soak or evidence for data already removed by retention.
+
+Sanitized runtime evidence, browser measurements/screenshot, trace analysis, raw review receipts, tests, SBOM, checksums and archive are retained in the local/NAS v1.2.15 release bundle. The full fine-grained application traces remain in the NAS performance-log directory; the bounded investigation snapshot is local under `artifacts/Improvements20261105/installed-traces`.
 
 ## Remaining acceptance boundaries
 
 Trakt's observed 403 and Watchmode's observed 429 cannot be repaired by granting allowance inside this application. The Trakt denial circuit was respected without an extra probe. One Watchmode zero-credit status probe returned 429 with `Retry-After: 60` and zero remaining request allowance; it did not establish monthly credit exhaustion. No billing, approval, credential or provider-enable settings were changed. See [sanitized external-provider findings](ProviderClientImprovements.md#trakt-and-watchmode-operational-follow-up).
 
-This report does not establish new installed-runtime, browser, physical NAS-locking or live-provider completion times. Local release/scans/SBOM and installation/runtime acceptance remain pending. PostgreSQL, application data and backups must remain preserved during any later app-only deployment.
+Installed runtime and browser observations are recorded above. Actual next-night execution, Windows/NAS cross-process locking and production latency distributions remain unverified by this release. Provider account restrictions remain external; a partial result is not represented as complete.
