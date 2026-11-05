@@ -1,6 +1,6 @@
 # November 5 performance implementation and evidence
 
-Status: implemented, locally tested and independently reviewed. Final Astra high and fresh Claude Opus 5.5 high reviews have no actionable P0–P2 findings. Exact-image release gates and installed acceptance are pending. No new installation or live browser-speed claim is recorded here. Builds and tests ran locally; GitHub workflows remained disabled.
+Status: implemented, locally tested and independently reviewed. Final Astra high and fresh Claude Opus 5.5 high reviews have no actionable P0â€“P2 findings. Exact-image release gates and installed acceptance are pending. No new installation or live browser-speed claim is recorded here. Builds and tests ran locally; GitHub workflows remained disabled.
 
 The original 20 requests and the additional 20-item table overlap. The grouped coverage below describes the resulting behavior rather than counting the same change twice. All configured providers remain enabled; none was removed to improve timings. Result/data preservation remains part of acceptance, and no production PostgreSQL, application-data or backup deployment was performed for these measurements.
 
@@ -56,19 +56,20 @@ Matched evidence: baseline [fresh](../artifacts/Improvements20261105/matched/bas
 
 ## Executed validation
 
-The compiled `--no-build --list-tests` rosters were reconciled against the latest selected TRX result for each case at the linked source-fingerprint checkpoint. This gives **1,721 passed and one expected Linux skip**, with no failed cases or missing evidence:
+The final LF-source build completed once, then Unit, Component and Integration ran with `--no-build --no-restore`. Their fresh compiled rosters were reconciled only against those LF-run TRX files at the linked source-fingerprint checkpoint. This gives **1,738 passed and one expected Linux skip**, with no failed cases or missing evidence:
 
 | Final roster | Passed | Skipped |
 | --- | --- | --- |
-| Unit | 984 | 1 |
+| Unit | 997 | 1 |
 | Component | 191 | 0 |
-| Integration | 546 | 0 |
+| Integration | 550 | 0 |
 
-The reconciliation excludes four obsolete unit names and six obsolete integration names after test renames. Its [summary](../artifacts/Improvements20261105/acceptance/test-summary.json), [per-case evidence map](../artifacts/Improvements20261105/acceptance/test-evidence-map.json) and [tested-source fingerprints](../artifacts/Improvements20261105/acceptance/tested-source-fingerprints.json) are authoritative for these counts. Review corrections passed affected checks and both final reviews are clear. The underlying execution groups below overlap; adding their counts would inflate the result. Later targeted runs validate corrections after the grouped run, rather than representing another full-suite run.
+The final evidence uses only the three LF-run results, without mixing earlier compilation checkpoints. It also includes three current unit cases omitted by the older result-name reconciliation. Its [summary](../artifacts/Improvements20261105/acceptance/test-summary.json), [per-case evidence map](../artifacts/Improvements20261105/acceptance/test-evidence-map.json) and [tested-source fingerprints](../artifacts/Improvements20261105/acceptance/tested-source-fingerprints.json) are authoritative for these counts. Review corrections passed affected checks; final evidence follow-up receipts are retained separately. The earlier execution groups below overlap; adding their counts would inflate the result. The LF pass supersedes their acceptance counts; they remain diagnostic history.
 
 | Check | Recorded result | Local evidence |
 | --- | --- | --- |
-| Local solution build | 0 errors; 3 warnings (`SYSLIB0066`, `CS9124`, `xUnit2031`) | [Build log](../artifacts/Improvements20261105/final/build.log) |
+| Final LF source pass | 997 unit + 191 component + 550 integration passed; 1 expected Linux skip | [LF build](../artifacts/Improvements20261105/lf-acceptance/build.log), [unit](../artifacts/Improvements20261105/lf-acceptance/lf-Unit.trx), [component](../artifacts/Improvements20261105/lf-acceptance/lf-Component.trx), [integration](../artifacts/Improvements20261105/lf-acceptance/lf-Integration.trx) |
+| Earlier local solution build | 0 errors; 3 warnings (`SYSLIB0066`, `CS9124`, `xUnit2031`) | [Build log](../artifacts/Improvements20261105/final/build.log) |
 | Grouped unit suite | 935 passed; 1 expected Linux skip | [Unit log](../artifacts/Improvements20261105/final/Unit.log), [TRX](../artifacts/Improvements20261105/final/final-Unit.trx) |
 | Grouped component suite | 191 passed | [Component log](../artifacts/Improvements20261105/final/Component.log), [TRX](../artifacts/Improvements20261105/final/final-Component.trx) |
 | Grouped integration suite | 538 passed; 6 failed at that checkpoint | [Integration log](../artifacts/Improvements20261105/final/Integration.log), [TRX](../artifacts/Improvements20261105/final/final-Integration.trx) |
@@ -82,7 +83,7 @@ The reconciliation excludes four obsolete unit names and six obsolete integratio
 | Targeted provider measurements | Baseline 4 passed; candidate 4 passed | Provider-measurement links above |
 | Trace analyzer | 23 standalone PowerShell checks passed; console result recorded in handoff | [Audit script](../tests/PerformanceLogAudit.Tests.ps1); [execution handoff](../../PremiereCalendar.Build.Improvements20261105/HANDOFF.md) |
 
-Real PostgreSQL configuration was present: 54 PostgreSQL-named integration cases executed, with no database-configuration skips. The expected Linux skip is the Windows cross-process publication file-lock test; it does not establish Windows/NAS filesystem acceptance. Focused coverage also includes image shutdown/force races, archive crash/lease/retention races, serialization and queue bounds, failed-flush preservation and a real 2,500-ID SQLite accepted-write/pure-read batch.
+Real PostgreSQL configuration was present: 58 PostgreSQL-named integration cases executed, with no database-configuration skips. The expected Linux skip is the Windows cross-process publication file-lock test; it does not establish Windows/NAS filesystem acceptance. Focused coverage also includes image shutdown/force races, archive crash/lease/retention races, serialization and queue bounds, failed-flush preservation and a real 2,500-ID SQLite accepted-write/pure-read batch.
 
 Artifact links point to local ignored evidence, not files shipped in source releases. The [local handoff](../../PremiereCalendar.Build.Improvements20261105/HANDOFF.md) records selection and execution context. Exploratory failure runs remain available for diagnosis and are not presented as passing acceptance.
 
@@ -106,13 +107,13 @@ Claude CLI round one used `claude-opus-5-5` with high effort; Astra independentl
 | 12. Routine delta continuation consumed failure attempts | Persist a normal continuation deadline without charging a failed attempt. |
 | 13. Corrupt history session prevented later feeds | Validate/rebuild the session and preserve independent feed execution. |
 
-The 13 findings were adjudicated and valid defects corrected; this is not a claim that all 13 were independently confirmed bugs. Fresh final reviews are still required.
+The 13 findings were adjudicated and valid defects corrected; this is not a claim that all 13 were independently confirmed bugs. The later frozen-snapshot reviews below supersede that round.
 
 ## Fresh full-review corrections
 
-The subsequent frozen-snapshot reviews used Astra high and Claude CLI `claude-opus-5-5 --effort high`; the CLI outputs confirm the actual model. Ten P2 issues were confirmed across the reviews and their follow-up. All have corrections and passing affected regressions. Both final-candidate reviews report no actionable P0–P2 findings. Raw reports and byte manifests are retained with the local release evidence.
+The subsequent frozen-snapshot reviews used Astra high and Claude CLI `claude-opus-5-5 --effort high`; the CLI outputs confirm the actual model. Ten P2 issues were confirmed across the reviews and their follow-up. All have corrections and passing affected regressions. Both final-candidate reviews report no actionable P0â€“P2 findings. Raw reports and byte manifests are retained with the local release evidence.
 
-The final program/test/tool manifest contains 84 entries; all match current bytes. Its SHA256 is `6f23916d47916faa4bb1509f6991ec098b463123bdeecfd6e527544e6b7d1a97`; diff SHA256 is `d9713109988132151281a4dd69951cc93bd5eadbaee554ab2039a581cfa2d1d8`. The [Astra receipt](../../PremiereCalendar.Build.Improvements20261105/astra-final-candidate.md) and [fresh Claude report](../../PremiereCalendar.Build.Improvements20261105/claude-final-candidate.json) distinguish read-only source review from parent-executed checks. Claude read new files directly; hash verification was performed separately by Astra and the parent.
+The first clean source checkpoint had an 84-entry program/test/tool manifest. Its exact bytes preceded the later checksum correction and LF-only normalization. Its SHA256 is `6f23916d47916faa4bb1509f6991ec098b463123bdeecfd6e527544e6b7d1a97`; diff SHA256 is `d9713109988132151281a4dd69951cc93bd5eadbaee554ab2039a581cfa2d1d8`. The [Astra receipt](../../PremiereCalendar.Build.Improvements20261105/astra-final-candidate.md) and [fresh Claude report](../../PremiereCalendar.Build.Improvements20261105/claude-final-candidate.json) distinguish read-only source review from parent-executed checks. Claude read new files directly; hash verification was performed separately by Astra and the parent.
 
 | Finding | Correction and preservation coverage |
 | --- | --- |
@@ -126,6 +127,14 @@ The final program/test/tool manifest contains 84 entries; all match current byte
 | A forced filter rejection could retain an old or bare discovery stub | Persist the already-fetched core projection and filter that fresh row before forced backfill. Criteria-dependent forced flights have normalized eligibility variants; same-criteria joiners and later eligible profiles see the fresh core. Optional data/clocks remain retained. |
 | Core-only state could override optional-provider cooldowns | The marker now means pending local completion. Clear it when the full local merge returns, even after provider failures; independent incomplete flags and retry deadlines remain intact. |
 | Response-cache storage failures could trigger optional HTTP | Typed reads distinguish misses from unavailable storage. Optional clients defer before HTTP with the existing deadline, retain available memory, preserve empty-list/null contracts and keep cancellation neutral. Legacy nullable reads remain compatible. |
+
+## Restored-backup gate and source-byte compatibility
+
+The first local v1.2.15 image was rejected before installation. Its empty-database smoke and security checks passed, but startup against an isolated restore of the actual schema-4 backup rejected migration 1's checksum. Windows `git archive` had converted C# SQL raw-string line endings to CRLF; the stored history used LF. Production remained on v1.2.14 and no migration history was rewritten.
+
+Migration checksums now use canonical LF SQL. Only historical migrations 1â€“4 also accept their exact CRLF-SQL checksum representation; name, version, completeness and schema-shape guards remain enforced. Golden LF/CRLF/mixed-history tests cover both PostgreSQL and SQLite, including rejection and data preservation. The C# LF attribute and a pre-build archive/blob/test-fingerprint comparison make the source representation explicit.
+
+The checksum supplement passed 10 unit/SQLite cases and 13 actual PostgreSQL cases. Astra found no actionable issue in the correction. Claude confirmed the runtime correction and found an evidence gap between CRLF-tested and LF-shipped source. One final LF-bound build/test pass completed with 1,738 passed and one expected skip. A stricter archive fingerprint gate and evidence packing checks bind the counted LF tests, compiler document hashes, committed blobs and source archive; stale CRLF evidence is rejected. Follow-up review receipts and corrected-image runtime gates remain required before release acceptance. The rejected bundle remains preserved separately from candidate 2.
 
 ## Remaining acceptance boundaries
 

@@ -270,8 +270,21 @@ internal sealed record DatabaseMigration(
     string Sql,
     Func<SqliteConnection, SqliteTransaction, CancellationToken, Task>? AfterSql = null)
 {
-    public string Checksum { get; } = Convert.ToHexString(
-        SHA256.HashData(Encoding.UTF8.GetBytes($"{Version}\n{Name}\n{Sql}"))).ToLowerInvariant();
+    public string Checksum { get; } = ComputeChecksum(Version, Name, Sql.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+    public bool MatchesChecksum(string checksum)
+    {
+        if (string.Equals(checksum, Checksum, StringComparison.OrdinalIgnoreCase)) return true;
+        // Historical Windows archives embedded CRLF in these four SQL raw
+        // strings. Accept only that demonstrated representation of the same
+        // authoritative SQL; never rewrite SQL or the existing history row.
+        return Version is >= 1 and <= 4 && string.Equals(checksum,
+            ComputeChecksum(Version, Name, Sql.Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace("\n", "\r\n", StringComparison.Ordinal)), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ComputeChecksum(int version, string name, string sql) => Convert.ToHexString(
+        SHA256.HashData(Encoding.UTF8.GetBytes($"{version.ToString(CultureInfo.InvariantCulture)}\n{name}\n{sql}"))).ToLowerInvariant();
 }
 
 public sealed class DatabaseRecoveryState

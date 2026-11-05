@@ -305,7 +305,7 @@ public sealed class SqliteDatabaseInitializer(
             var expected = DatabaseSchema.Migrations.SingleOrDefault(migration => migration.Version == version)
                 ?? throw new InvalidOperationException($"Database migration {version} is not recognized by this application.");
             if (!string.Equals(reader.GetString(1), expected.Name, StringComparison.Ordinal)
-                || !string.Equals(reader.GetString(2), expected.Checksum, StringComparison.OrdinalIgnoreCase))
+                || !expected.MatchesChecksum(reader.GetString(2)))
             {
                 throw new InvalidOperationException($"Database migration {version} does not match its authoritative checksum.");
             }

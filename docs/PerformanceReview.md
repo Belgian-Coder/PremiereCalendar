@@ -1,12 +1,12 @@
 # Performance Review
 
-Last reviewed: 2026-11-05. The November 5 candidate passed local source checks and final Astra high / Claude Opus 5.5 high reviews with no open P0–P2 findings. Exact-image release gates and installed acceptance remain pending.
+Last reviewed: 2026-11-05. The November 5 candidate passed local source checks and final Astra high / Claude Opus 5.5 high reviews with no open P0â€“P2 findings. The first local image was rejected by the restored-backup checksum gate before installation; the narrow correction passed the final LF-source test pass. Corrected-image gates and installed acceptance remain pending.
 
 ## November 5 candidate
 
 The candidate reduces repeated provider work, overlaps independent enrichment, makes background recovery and scheduling bounded, and separates trace archival from event persistence. Provider coverage, forced-refresh fences and existing data remain protected. Controlled fixtures demonstrate SIMKL sends falling from five to three across adjacent weeks and shorter series enrichment critical paths with matching full projections. The matched 2,000-row fixture does **not** establish a broad cold-load speedup: cold first-result and completion times were slower in the candidate pair.
 
-The recorded compiled-checkpoint test rosters reconcile to 1,721 passing cases and one expected Linux skip; no roster case lacks result evidence. See [November 5 implementation and evidence](PerformanceImprovements-20261105.md) for the overlapping request coverage, exact measurements, executed checks, review dispositions and remaining external-provider/install boundaries. Historical hosted measurements below describe earlier binaries and workloads.
+The recorded compiled-checkpoint test rosters reconcile to 1,738 passing cases and one expected Linux skip; no roster case lacks result evidence. See [November 5 implementation and evidence](PerformanceImprovements-20261105.md) for the overlapping request coverage, exact measurements, executed checks, review dispositions and remaining external-provider/install boundaries. Historical hosted measurements below describe earlier binaries and workloads.
 
 ## Calendar loading and recovery
 

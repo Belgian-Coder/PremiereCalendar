@@ -156,7 +156,7 @@ public sealed class PostgresDatabaseInitializer(
             var appliedVersion = reader.GetInt32(0);
             var expected = DatabaseSchema.Migrations.SingleOrDefault(migration => migration.Version == appliedVersion);
             if (expected is null || !string.Equals(reader.GetString(1), expected.Name, StringComparison.Ordinal)
-                || !string.Equals(reader.GetString(2), expected.Checksum, StringComparison.OrdinalIgnoreCase))
+                || !expected.MatchesChecksum(reader.GetString(2)))
                 throw new InvalidOperationException($"Database migration {appliedVersion} does not match its authoritative checksum.");
             seen.Add(appliedVersion);
         }
