@@ -15,6 +15,7 @@ public sealed class WikimediaClient : IWikimediaClient
     private readonly PremiereTelemetry? _telemetry;
     private readonly WikimediaClaimBatcher _claims;
     private readonly object _fenceGate = new();
+    private readonly OptionalProviderResponseCache _commonsResponses;
 
     public WikimediaClient(
         HttpClient httpClient,
@@ -29,6 +30,7 @@ public sealed class WikimediaClient : IWikimediaClient
         _settingsStore = settingsStore;
         _telemetry = telemetry;
         _claims = new WikimediaClaimBatcher(FetchEntityClaimsAsync, telemetry);
+        _commonsResponses = new(cache, null);
     }
 
     public async Task<string?> GetReusableImageUrlAsync(
@@ -65,7 +67,7 @@ public sealed class WikimediaClient : IWikimediaClient
                 return new(string.IsNullOrWhiteSpace(cached) ? null : cached, true);
             }
 
-            var entity = await _claims.GetAsync(wikidataId, generation, cancellationToken);
+            var entity = await GetClaimsAsync(wikidataId, fence, generation, forceRefresh, cancellationToken);
             context = (context ?? new()) with { RequestId = entity.RequestId };
             var fileName = entity.Image;
             if (!fileName.IsSuccess)
@@ -75,18 +77,18 @@ public sealed class WikimediaClient : IWikimediaClient
 
             if (string.IsNullOrWhiteSpace(fileName.Value))
             {
-                CacheResult(fence, generation, cacheKey, null);
+                CacheResult(fence, generation, cacheKey, null, forceRefresh);
                 outcome = "absent";
                 return new(null, true);
             }
 
-            var imageUrl = await GetReusableCommonsImageUrlAsync(fileName.Value, cancellationToken, context);
+            var imageUrl = await GetReusableCommonsImageUrlAsync(fileName.Value, cancellationToken, context, forceRefresh);
             if (!imageUrl.IsSuccess)
             {
                 return new(null, false, imageUrl.Failure ?? new("invalid_response"));
             }
 
-            CacheResult(fence, generation, cacheKey, imageUrl.Value);
+            CacheResult(fence, generation, cacheKey, imageUrl.Value, forceRefresh);
             outcome = string.IsNullOrWhiteSpace(imageUrl.Value) ? "absent" : "found";
             return new(imageUrl.Value, true);
         }
@@ -150,7 +152,7 @@ public sealed class WikimediaClient : IWikimediaClient
                 return new(string.IsNullOrWhiteSpace(cached) ? null : cached, IsSuccess: true);
             }
 
-            var entity = await _claims.GetAsync(wikidataId, generation, cancellationToken);
+            var entity = await GetClaimsAsync(wikidataId, fence, generation, forceRefresh, cancellationToken);
             context = (context ?? new()) with { RequestId = entity.RequestId };
             var rottenTomatoesId = entity.Identifier;
             if (!rottenTomatoesId.IsSuccess)
@@ -158,7 +160,7 @@ public sealed class WikimediaClient : IWikimediaClient
                 return new(null, IsSuccess: false, entity.Failure ?? new("invalid_response"));
             }
 
-            CacheResult(fence, generation, cacheKey, rottenTomatoesId.Value);
+            CacheResult(fence, generation, cacheKey, rottenTomatoesId.Value, forceRefresh);
             outcome = string.IsNullOrWhiteSpace(rottenTomatoesId.Value) ? "absent" : "found";
             return new(rottenTomatoesId.Value, IsSuccess: true);
         }
@@ -183,6 +185,22 @@ public sealed class WikimediaClient : IWikimediaClient
         {
             RecordCall("identifier", context, outcome, cacheHit, started);
         }
+    }
+
+    private async Task<WikimediaEntityClaims> GetClaimsAsync(string id, CacheFence fence, long generation,
+        bool force, CancellationToken token)
+    {
+        // Both relevant claims arrive together. Keep the unused claim for a later
+        // sequential caller, with the same absence/positive lifetimes as public values.
+        if (!force && _cache.TryGetValue($"wikimedia:filename:{id}", out string? image)
+            && _cache.TryGetValue($"wikimedia:rtid:{id}", out string? identifier))
+        {
+            return new(new(image, true), new(identifier, true));
+        }
+        var entity = await _claims.GetAsync(id, generation, token);
+        if (entity.Image.IsSuccess) CacheResult(fence, generation, $"wikimedia:filename:{id}", entity.Image.Value);
+        if (entity.Identifier.IsSuccess) CacheResult(fence, generation, $"wikimedia:rtid:{id}", entity.Identifier.Value);
+        return entity;
     }
 
     private void RecordCall(string stage, PerformanceDiagnosticContext? context, string outcome, bool cacheHit, long started)
@@ -312,17 +330,21 @@ public sealed class WikimediaClient : IWikimediaClient
             })!;
     }
 
-    private void CacheResult(CacheFence fence, long generation, string key, string? value)
+    private void CacheResult(CacheFence fence, long generation, string key, string? value, bool completeForce = false)
     {
         lock (fence)
             if (fence.Generation == generation)
+            {
                 _cache.Set(key, string.IsNullOrWhiteSpace(value) ? "" : value,
                     string.IsNullOrWhiteSpace(value) ? TimeSpan.FromDays(7) : TimeSpan.FromDays(30));
+                if (completeForce) fence.Complete();
+            }
     }
 
     private sealed class CacheFence
     {
         internal long Generation { get; private set; }
+        internal void Complete() => Generation++;
         internal long Capture(bool force)
         {
             lock (this)
@@ -336,14 +358,22 @@ public sealed class WikimediaClient : IWikimediaClient
     private async Task<WikimediaFetchResult<string>> GetReusableCommonsImageUrlAsync(
         string fileName,
         CancellationToken cancellationToken,
-        PerformanceDiagnosticContext? context)
+        PerformanceDiagnosticContext? context,
+        bool forceRefresh)
     {
         var started = Stopwatch.GetTimestamp();
         var outcome = "failed";
         try
         {
             using var scope = _telemetry?.UseDiagnosticContext(context);
-            var result = await FetchReusableCommonsImageUrlAsync(fileName, cancellationToken);
+            var partition = OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, "", $"{_options.CommonsApiUrl}:{fileName}");
+            var cached = await _commonsResponses.GetAsync<string?>("wikimedia", partition, forceRefresh,
+                TimeSpan.FromDays(7), async token =>
+                {
+                    var fetched = await FetchReusableCommonsImageUrlAsync(fileName, token);
+                    return new(fetched.Value, fetched.IsSuccess, fetched.Failure);
+                }, cancellationToken);
+            var result = new WikimediaFetchResult<string>(cached.Value, cached.Successful, cached.Failure);
             outcome = !result.IsSuccess ? "failed" : string.IsNullOrWhiteSpace(result.Value) ? "absent" : "found";
             return result;
         }
@@ -389,14 +419,17 @@ public sealed class WikimediaClient : IWikimediaClient
 
         foreach (var page in pages.EnumerateObject())
         {
+            if (page.Value.ValueKind != JsonValueKind.Object) return new(null, false);
             if (!page.Value.TryGetProperty("imageinfo", out var imageInfos)
                 || imageInfos.ValueKind != JsonValueKind.Array)
             {
+                if (!page.Value.TryGetProperty("missing", out _)) return new(null, false);
                 continue;
             }
 
             foreach (var imageInfo in imageInfos.EnumerateArray())
             {
+                if (imageInfo.ValueKind != JsonValueKind.Object) return new(null, false);
                 if (!HasReusableMetadata(imageInfo))
                 {
                     continue;
@@ -415,7 +448,7 @@ public sealed class WikimediaClient : IWikimediaClient
 
     private static bool HasReusableMetadata(JsonElement imageInfo)
     {
-        if (!imageInfo.TryGetProperty("extmetadata", out var metadata))
+        if (!imageInfo.TryGetProperty("extmetadata", out var metadata) || metadata.ValueKind != JsonValueKind.Object)
         {
             return false;
         }
@@ -437,6 +470,7 @@ public sealed class WikimediaClient : IWikimediaClient
     private static string? MetadataValue(JsonElement metadata, string propertyName)
     {
         return metadata.TryGetProperty(propertyName, out var property)
+            && property.ValueKind == JsonValueKind.Object
             && property.TryGetProperty("value", out var value)
             && value.ValueKind == JsonValueKind.String
                 ? value.GetString()

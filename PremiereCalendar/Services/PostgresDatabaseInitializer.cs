@@ -13,9 +13,12 @@ public sealed class PostgresDatabaseInitializer(
     PremiereTelemetry telemetry)
 {
     private readonly AppDatabaseOptions _options = options.Value;
+    internal bool RetryPending { get; private set; }
+    internal void MarkRecoveryTimeout() => RetryPending = true;
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
+        RetryPending = false;
         try
         {
             await using var connection = DatabaseConnectionFactory.Create(_options, environment.ContentRootPath);
@@ -38,6 +41,7 @@ public sealed class PostgresDatabaseInitializer(
             {
                 throw new InvalidOperationException($"Database schema {currentVersion} is newer than supported schema {DatabaseSchema.CurrentVersion}.");
             }
+            await ValidateMigrationHistoryAsync(connection, currentVersion, cancellationToken);
 
             string? lastMigration = null;
             foreach (var migration in DatabaseSchema.Migrations.Where(item => item.Version > currentVersion))
@@ -83,6 +87,7 @@ public sealed class PostgresDatabaseInitializer(
             }
 
             await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
+            await ValidateSchemaShapeAsync(connection, cancellationToken);
             recoveryState.Set(new DatabaseStatusSnapshot(
                 currentVersion,
                 DatabaseSchema.CurrentVersion,
@@ -92,12 +97,25 @@ public sealed class PostgresDatabaseInitializer(
                 null));
             logger.LogInformation("PostgreSQL initialized with schema {DatabaseSchemaVersion}.", currentVersion);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (DatabaseConnectionFactory.IsTransient(exception))
+        {
+            RetryPending = true;
+            telemetry.RecordDatabaseException(exception);
+            logger.LogWarning(exception, "PostgreSQL is temporarily unavailable; initialization will retry.");
+            recoveryState.Set(new DatabaseStatusSnapshot(0, DatabaseSchema.CurrentVersion, false,
+                "PostgreSQL is temporarily unavailable; initialization will retry.", null, null));
+        }
         catch (Exception exception)
         {
             telemetry.RecordDatabaseException(exception);
-            logger.LogCritical(exception, "PostgreSQL initialization or schema validation failed.");
             recoveryState.Set(new DatabaseStatusSnapshot(0, DatabaseSchema.CurrentVersion, false,
-                "PostgreSQL initialization or schema validation failed.", null, null));
+                "PostgreSQL initialization or schema validation failed; operator intervention is required.", null, null));
+            logger.LogCritical(exception, "PostgreSQL initialization failed with a non-transient error.");
+            throw;
         }
     }
 
@@ -109,6 +127,8 @@ public sealed class PostgresDatabaseInitializer(
         command.CommandText = "SELECT COALESCE(MAX(Version), 0) FROM SchemaMigrations";
         var version = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
+        await ValidateMigrationHistoryAsync(connection, version, cancellationToken);
+        await ValidateSchemaShapeAsync(connection, cancellationToken);
         return new DatabaseStatusSnapshot(
             version,
             DatabaseSchema.CurrentVersion,
@@ -125,6 +145,42 @@ public sealed class PostgresDatabaseInitializer(
         return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
     }
 
+    private static async Task ValidateMigrationHistoryAsync(System.Data.Common.DbConnection connection, int version, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT Version, Name, Checksum FROM SchemaMigrations ORDER BY Version";
+        var seen = new HashSet<int>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var appliedVersion = reader.GetInt32(0);
+            var expected = DatabaseSchema.Migrations.SingleOrDefault(migration => migration.Version == appliedVersion);
+            if (expected is null || !string.Equals(reader.GetString(1), expected.Name, StringComparison.Ordinal)
+                || !string.Equals(reader.GetString(2), expected.Checksum, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"Database migration {appliedVersion} does not match its authoritative checksum.");
+            seen.Add(appliedVersion);
+        }
+        if (DatabaseSchema.Migrations.Any(migration => migration.Version <= version && !seen.Contains(migration.Version)))
+            throw new InvalidOperationException("Database migration history is incomplete.");
+    }
+
+    private static async Task ValidateSchemaShapeAsync(System.Data.Common.DbConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT JobId, Kind, DedupeKey, Priority, PayloadJson, CheckpointJson, State,
+                AttemptCount, EnqueuedUtc, StartedUtc, CompletedUtc, NextAttemptUtc,
+                LastError, LeaseOwner, LeaseExpiresUtc, ProgressJson FROM ProviderWorkJobs WHERE FALSE;
+            SELECT JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc FROM ProviderWorkLeases WHERE FALSE;
+            SELECT PartitionKey, MediaType, TmdbId, MetadataJson, RatingsJson, MetadataFetchedUtc,
+                RatingsFetchedUtc, LastSeenUtc, Generation, TvmazeShowId, MetadataInvalidatedUtc,
+                TvmazeFenceUtc, TmdbObservedUtc, MetadataRevision FROM ItemEnrichments WHERE FALSE;
+            SELECT Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark,
+                ItemCount, MetadataJson FROM ProviderCacheState WHERE FALSE;
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private static string ToPostgresSql(string sql) => sql.Replace(
         "INSERT OR REPLACE INTO ProviderWorkLeases (JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc)",
         "INSERT INTO ProviderWorkLeases (JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc)",
@@ -137,12 +193,32 @@ public sealed class PostgresDatabaseInitializer(
 public sealed class DatabaseInitializerHostedService(
     IOptions<AppDatabaseOptions> options,
     SqliteDatabaseInitializer sqlite,
-    PostgresDatabaseInitializer postgres) : IHostedService
+    PostgresDatabaseInitializer postgres) : BackgroundService
 {
-    public Task StartAsync(CancellationToken cancellationToken) =>
-        DatabaseConnectionFactory.IsPostgreSql(options.Value)
-            ? postgres.InitializeAsync(cancellationToken)
-            : sqlite.InitializeAsync(cancellationToken);
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (DatabaseConnectionFactory.IsPostgreSql(options.Value))
+            await postgres.InitializeAsync(cancellationToken);
+        else
+            await sqlite.InitializeAsync(cancellationToken);
+        await base.StartAsync(cancellationToken);
+    }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var delay = Math.Clamp(options.Value.RecoveryRetrySeconds, 1, 300);
+        while (postgres.RetryPending && !stoppingToken.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(delay), stoppingToken);
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            attempt.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.Value.RecoveryAttemptTimeoutSeconds, 5, 300)));
+            try { await postgres.InitializeAsync(attempt.Token); }
+            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested && attempt.IsCancellationRequested)
+            {
+                // A timed-out attempt remains retryable; shutdown is never swallowed.
+                postgres.MarkRecoveryTimeout();
+            }
+            delay = Math.Min(delay * 2, Math.Clamp(options.Value.RecoveryMaximumRetrySeconds, 1, 300));
+        }
+    }
 }

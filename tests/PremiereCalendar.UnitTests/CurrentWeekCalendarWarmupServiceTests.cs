@@ -51,11 +51,34 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
     }
 
     [Fact]
-    public void BuildWarmupWindows_OrdersCurrentDayWeekMonthAndSixFutureMonths()
+    public void BuildWarmupWindows_OrdersCurrentDayWeekAndCurrentAndNextMonth()
     {
         var windows = CurrentWeekCalendarWarmupRunner.BuildWarmupWindows(new DateOnly(2026, 5, 8));
 
         Assert.Equal(ExpectedWindowsForMay8(), windows.Select(window => (window.Start, window.End)).ToArray());
+    }
+
+    [Theory]
+    [InlineData(2026, 6, 1)]
+    [InlineData(2026, 12, 31)]
+    [InlineData(2027, 2, 1)]
+    public void BuildWarmupWindows_CoversOnlyWeeksIntersectingCurrentOrNextMonth(int year, int month, int day)
+    {
+        var today = new DateOnly(year, month, day);
+        var first = new DateOnly(year, month, 1);
+        var last = first.AddMonths(2).AddDays(-1);
+        var expected = new List<(DateOnly Start, DateOnly End)>();
+        for (var start = CalendarFilters.StartOfWeek(first); start <= last; start = start.AddDays(7))
+            expected.Add((start, start.AddDays(6)));
+        var actual = CurrentWeekCalendarWarmupRunner.BuildWarmupWindows(today);
+        Assert.Equal(expected, actual.Select(window => (window.Start, window.End)).OrderBy(window => window.Start));
+        Assert.Equal(actual.Count, actual.Select(window => window.Start).Distinct().Count());
+        Assert.All(actual, window =>
+        {
+            Assert.True(window.End >= first && window.Start <= last);
+            Assert.InRange(window.PriorityDate, first, last);
+            Assert.InRange(window.PriorityDate, window.Start, window.End);
+        });
     }
 
     [Fact]
@@ -356,33 +379,7 @@ public sealed class CurrentWeekCalendarWarmupServiceTests
             (new DateOnly(2026, 6, 8), new DateOnly(2026, 6, 14)),
             (new DateOnly(2026, 6, 15), new DateOnly(2026, 6, 21)),
             (new DateOnly(2026, 6, 22), new DateOnly(2026, 6, 28)),
-            (new DateOnly(2026, 6, 29), new DateOnly(2026, 7, 5)),
-            (new DateOnly(2026, 3, 30), new DateOnly(2026, 4, 5)),
-            (new DateOnly(2026, 4, 6), new DateOnly(2026, 4, 12)),
-            (new DateOnly(2026, 4, 13), new DateOnly(2026, 4, 19)),
-            (new DateOnly(2026, 4, 20), new DateOnly(2026, 4, 26)),
-            (new DateOnly(2026, 7, 6), new DateOnly(2026, 7, 12)),
-            (new DateOnly(2026, 7, 13), new DateOnly(2026, 7, 19)),
-            (new DateOnly(2026, 7, 20), new DateOnly(2026, 7, 26)),
-            (new DateOnly(2026, 7, 27), new DateOnly(2026, 8, 2)),
-            (new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 9)),
-            (new DateOnly(2026, 8, 10), new DateOnly(2026, 8, 16)),
-            (new DateOnly(2026, 8, 17), new DateOnly(2026, 8, 23)),
-            (new DateOnly(2026, 8, 24), new DateOnly(2026, 8, 30)),
-            (new DateOnly(2026, 8, 31), new DateOnly(2026, 9, 6)),
-            (new DateOnly(2026, 9, 7), new DateOnly(2026, 9, 13)),
-            (new DateOnly(2026, 9, 14), new DateOnly(2026, 9, 20)),
-            (new DateOnly(2026, 9, 21), new DateOnly(2026, 9, 27)),
-            (new DateOnly(2026, 9, 28), new DateOnly(2026, 10, 4)),
-            (new DateOnly(2026, 10, 5), new DateOnly(2026, 10, 11)),
-            (new DateOnly(2026, 10, 12), new DateOnly(2026, 10, 18)),
-            (new DateOnly(2026, 10, 19), new DateOnly(2026, 10, 25)),
-            (new DateOnly(2026, 10, 26), new DateOnly(2026, 11, 1)),
-            (new DateOnly(2026, 11, 2), new DateOnly(2026, 11, 8)),
-            (new DateOnly(2026, 11, 9), new DateOnly(2026, 11, 15)),
-            (new DateOnly(2026, 11, 16), new DateOnly(2026, 11, 22)),
-            (new DateOnly(2026, 11, 23), new DateOnly(2026, 11, 29)),
-            (new DateOnly(2026, 11, 30), new DateOnly(2026, 12, 6))
+            (new DateOnly(2026, 6, 29), new DateOnly(2026, 7, 5))
         ];
     }
 

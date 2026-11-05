@@ -92,6 +92,14 @@ public sealed partial class PremiereServiceTests
             Assert.True(writeCounts.LeaseRowWrites >= 0);
             Assert.True(writeCounts.CheckpointWrites >= 0);
             Assert.Equal(2_000, items.Count);
+            var expectedProjection = cached.OrderBy(item => item.CanonicalId, StringComparer.Ordinal)
+                .Select(item => new { item.CanonicalId, item.PremiereDate, item.Title, item.TmdbScore }).ToArray();
+            var actualProjection = items.OrderBy(item => item.CanonicalId, StringComparer.Ordinal)
+                .Select(item => new { item.CanonicalId, item.PremiereDate, item.Title, item.TmdbScore }).ToArray();
+            Assert.Equal(JsonSerializer.Serialize(expectedProjection), JsonSerializer.Serialize(actualProjection));
+            var projectionHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(actualProjection))));
+            _evidence.WriteLine($"PROJECTION sha256={projectionHash}");
             if (cacheState == "fresh")
             {
                 Assert.Equal(2, jobs); // Only the two deliberately occupied jobs, no cache-hit job.

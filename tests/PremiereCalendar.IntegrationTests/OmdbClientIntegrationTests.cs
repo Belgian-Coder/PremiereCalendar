@@ -250,7 +250,7 @@ public sealed class OmdbClientIntegrationTests
     }
 
     [Fact]
-    public async Task UnknownFalsePayloadIsRetriedInsteadOfCachedAsVerifiedAbsence()
+    public async Task UnknownFalsePayloadBacksOffWithoutCachingVerifiedAbsence()
     {
         var calls = 0;
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls == 1
@@ -258,12 +258,13 @@ public sealed class OmdbClientIntegrationTests
             : Fixture.Read("omdb/by-imdb-id-success.json")));
         var client = CreateOmdbClient(handler, enabled: true);
         var failed = await client.GetByImdbIdWithStatusAsync("tt1", CancellationToken.None);
-        var recovered = await client.GetByImdbIdWithStatusAsync("tt1", CancellationToken.None);
+        var deferred = await client.GetByImdbIdWithStatusAsync("tt1", CancellationToken.None);
         Assert.False(failed.Successful);
         Assert.Equal("invalid_response", failed.Failure?.Reason);
-        Assert.True(recovered.Successful);
-        Assert.Equal("8.2", recovered.Value?.ImdbRating);
-        Assert.Equal(2, handler.Requests.Count);
+        Assert.False(deferred.Successful);
+        Assert.Equal("local_backoff", deferred.Failure?.Reason);
+        Assert.Null(deferred.Value);
+        Assert.Single(handler.Requests);
     }
 
     [Fact]

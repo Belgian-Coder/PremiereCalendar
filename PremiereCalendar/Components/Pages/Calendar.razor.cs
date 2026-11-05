@@ -795,6 +795,7 @@ public partial class Calendar
             ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)
             : null;
 
+        var observation = new CalendarObservationScope();
         var completion = ObserveLoadCompletionAsync(ConsumeLoadAsync());
         if (await Task.WhenAny(completion, foregroundDeadline.Task) == completion)
         {
@@ -839,9 +840,13 @@ public partial class Calendar
             CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
             RequestPageRender(diagnostic, "foreground_handoff");
         });
+        try { await observation.ReleaseForegroundAsync(token); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+
 
         async Task ConsumeLoadAsync()
         {
+            using var observationContext = observation.Enter();
             try
             {
                 var start = _filters.WeekStart;

@@ -12,6 +12,7 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
     private readonly ILogger<ImdbDatasetRefreshService> _logger;
     private readonly BackgroundJobTimelineService? _timeline;
     private readonly IProviderWorkScheduler? _workScheduler;
+    private readonly DatabaseRecoveryState? _databaseState;
 
     public ImdbDatasetRefreshService(
         IImdbDatasetImporter importer,
@@ -20,7 +21,8 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
         TimeProvider timeProvider,
         ILogger<ImdbDatasetRefreshService> logger,
         BackgroundJobTimelineService? timeline = null,
-        IProviderWorkScheduler? workScheduler = null)
+        IProviderWorkScheduler? workScheduler = null,
+        DatabaseRecoveryState? databaseState = null)
     {
         _importer = importer;
         _ratingsStore = ratingsStore;
@@ -29,6 +31,7 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
         _logger = logger;
         _timeline = timeline;
         _workScheduler = workScheduler;
+        _databaseState = databaseState;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -65,17 +68,30 @@ public sealed class ImdbDatasetRefreshService : BackgroundService
 
     private async Task QueueOrImportAsync(CancellationToken cancellationToken)
     {
+        if (_databaseState is not null) await _databaseState.WaitUntilHealthyAsync(cancellationToken);
         if (_workScheduler is null)
         {
             await ImportIfDueAsync(cancellationToken);
             return;
         }
 
-        await _workScheduler.EnqueueAsync(new ProviderWorkRequest(
-            ProviderWorkKind.ImdbDatasetRefresh,
-            "imdb-dataset-refresh",
-            ProviderWorkPriority.Maintenance,
-            "{}"), cancellationToken);
+        var delay = TimeSpan.FromSeconds(5);
+        while (true)
+        {
+            try
+            {
+                await _workScheduler.EnqueueAsync(new ProviderWorkRequest(
+                    ProviderWorkKind.ImdbDatasetRefresh, "imdb-dataset-refresh", ProviderWorkPriority.Maintenance,
+                    "{}"), cancellationToken);
+                return;
+            }
+            catch (Exception exception) when (DatabaseConnectionFactory.IsTransient(exception))
+            {
+                _logger.LogWarning(exception, "IMDb refresh scheduling will retry after temporary database unavailability.");
+                await Task.Delay(delay, _timeProvider, cancellationToken);
+                delay = TimeSpan.FromSeconds(Math.Min(60, delay.TotalSeconds * 2));
+            }
+        }
     }
 
     internal async Task ImportIfDueAsync(CancellationToken cancellationToken)

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
@@ -17,6 +18,7 @@ public sealed class SimklClient : ISimklClient
     private static readonly TimeSpan CalendarCacheDuration = TimeSpan.FromHours(5);
     private const int MaxCalendarCacheEntries = 8;
     private const int MaxConcurrentCalendarFeeds = 2;
+    private static readonly ConditionalWeakTable<IMemoryCache, CalendarReuseState> CalendarStates = new();
 
     private readonly HttpClient _httpClient;
     private readonly SimklOptions _options;
@@ -24,10 +26,20 @@ public sealed class SimklClient : ISimklClient
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly PremiereTelemetry? _telemetry;
     private readonly IMemoryCache _failureCache;
-    private readonly SemaphoreSlim _calendarFeedSlots = new(MaxConcurrentCalendarFeeds);
-    private readonly object _calendarCacheLock = new();
-    private readonly Dictionary<string, LinkedListNode<CalendarCacheEntry>> _calendarCache = new(StringComparer.Ordinal);
-    private readonly LinkedList<CalendarCacheEntry> _calendarCacheLru = new();
+    private readonly SemaphoreSlim _calendarFeedSlots;
+    private readonly object _calendarCacheLock;
+    private readonly Dictionary<string, LinkedListNode<CalendarCacheEntry>> _calendarCache;
+    private readonly LinkedList<CalendarCacheEntry> _calendarCacheLru;
+    private readonly Dictionary<string, CalendarPublicationState> _calendarPublications;
+
+    private sealed class CalendarReuseState
+    {
+        public readonly SemaphoreSlim Slots = new(MaxConcurrentCalendarFeeds);
+        public readonly object Gate = new();
+        public readonly Dictionary<string, LinkedListNode<CalendarCacheEntry>> Cache = new(StringComparer.Ordinal);
+        public readonly LinkedList<CalendarCacheEntry> Lru = new();
+        public readonly Dictionary<string, CalendarPublicationState> Publications = new(StringComparer.Ordinal);
+    }
 
     public SimklClient(
         HttpClient httpClient,
@@ -43,6 +55,12 @@ public sealed class SimklClient : ISimklClient
         _settingsStore = settingsStore;
         _telemetry = telemetry;
         _failureCache = cache ?? new MemoryCache(new MemoryCacheOptions());
+        var reuse = CalendarStates.GetValue(_failureCache, static _ => new CalendarReuseState());
+        _calendarFeedSlots = reuse.Slots;
+        _calendarCacheLock = reuse.Gate;
+        _calendarCache = reuse.Cache;
+        _calendarCacheLru = reuse.Lru;
+        _calendarPublications = reuse.Publications;
     }
 
     public async Task<SimklPinCodeResult> RequestPinCodeAsync(CancellationToken cancellationToken)
@@ -351,7 +369,8 @@ public sealed class SimklClient : ISimklClient
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
-        var cacheKey = $"{path}:{start:yyyyMMdd}:{end:yyyyMMdd}";
+        var uri = BuildCalendarUri(path, settings);
+        var cacheKey = $"{type}:{uri.AbsoluteUri}";
         var feedCode = (path.Count(character => character == '/') == 1 ? "current_" : "archive_")
             + (type == SimklCalendarItemType.Tv ? "tv" : "movie");
         if (!forceRefresh && TryGetCachedCalendar(cacheKey, out var cached))
@@ -360,28 +379,70 @@ public sealed class SimklClient : ISimklClient
             {
                 Provider = "simkl", Stage = "calendar_feed", Reason = feedCode, Outcome = "success", FromCache = true, Count = cached.Count
             });
-            return cached;
+            return FilterCalendar(cached, start, end);
         }
 
-        var uri = BuildCalendarUri(path, settings);
-        var failures = new ProviderFailureCache(_failureCache, "simkl-calendar", uri, settings.ClientId.Trim());
-        if (failures.Get(DateTimeOffset.UtcNow) is { } deferred)
+        var publication = BeginCalendarPublication(cacheKey, forceRefresh);
+        var entered = false;
+        try
         {
-            RecordCalendarFailure(deferred);
-            throw new ProviderRequestException("simkl", deferred);
-        }
-        var items = await StreamCalendarItemsAsync(uri, feedCode, type, start, end, cancellationToken, failures);
+            if (!forceRefresh)
+            {
+                await publication.State.NormalGate.WaitAsync(cancellationToken);
+                entered = true;
+                if (TryGetCachedCalendar(cacheKey, out cached)) return FilterCalendar(cached, start, end);
+            }
+            var failures = new ProviderFailureCache(_failureCache, "simkl-calendar", uri, settings.ClientId.Trim());
+            if (failures.Get(DateTimeOffset.UtcNow) is { } deferred)
+            {
+                RecordCalendarFailure(deferred);
+                throw new ProviderRequestException("simkl", deferred);
+            }
+            var items = await StreamCalendarItemsAsync(uri, feedCode, type, cancellationToken, failures);
 
-        SetCachedCalendar(cacheKey, items);
-        return items;
+            lock (_calendarCacheLock)
+            {
+                if (publication.State.Generation == publication.Generation)
+                {
+                    SetCachedCalendar(cacheKey, items);
+                    if (forceRefresh) publication.State.Generation++;
+                }
+            }
+            return FilterCalendar(items, start, end);
+        }
+        finally
+        {
+            if (entered) publication.State.NormalGate.Release();
+            lock (_calendarCacheLock)
+            {
+                if (--publication.State.References == 0)
+                {
+                    _calendarPublications.Remove(cacheKey);
+                    publication.State.NormalGate.Dispose();
+                }
+            }
+        }
+    }
+
+    private static IReadOnlyList<SimklCalendarItem> FilterCalendar(IReadOnlyList<SimklCalendarItem> items, DateOnly start, DateOnly end)
+        => items.Where(item => CalendarItemDate(item) is var date && date >= start && date <= end).ToArray();
+
+    private (CalendarPublicationState State, long Generation) BeginCalendarPublication(string key, bool forceRefresh)
+    {
+        lock (_calendarCacheLock)
+        {
+            if (!_calendarPublications.TryGetValue(key, out var state))
+                _calendarPublications[key] = state = new CalendarPublicationState();
+            state.References++;
+            if (forceRefresh) state.Generation++;
+            return (state, state.Generation);
+        }
     }
 
     private async Task<IReadOnlyList<SimklCalendarItem>> StreamCalendarItemsAsync(
         Uri uri,
         string feedCode,
         SimklCalendarItemType type,
-        DateOnly start,
-        DateOnly end,
         CancellationToken cancellationToken,
         ProviderFailureCache failures)
     {
@@ -427,8 +488,7 @@ public sealed class SimklClient : ISimklClient
                     continue;
                 }
 
-                var date = CalendarItemDate(item);
-                if (date >= start && date <= end) items.Add(item);
+                items.Add(item);
             }
             RecordFeed("success", items.Count);
             return items;
@@ -897,6 +957,13 @@ public sealed class SimklClient : ISimklClient
         string Key,
         IReadOnlyList<SimklCalendarItem> Items,
         DateTimeOffset ExpiresUtc);
+
+    private sealed class CalendarPublicationState
+    {
+        public SemaphoreSlim NormalGate { get; } = new(1, 1);
+        public long Generation;
+        public int References;
+    }
 
     private sealed record CalendarFeedResult(IReadOnlyList<SimklCalendarItem> Items, Exception? Error);
 }

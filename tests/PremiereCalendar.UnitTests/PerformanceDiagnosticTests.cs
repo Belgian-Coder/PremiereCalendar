@@ -105,7 +105,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
     public void DetailedEventBurstReportsPersistenceCost()
     {
         using var directory = new TestDirectory();
-        using var store = new PerformanceDiagnosticStore(new() { PerformanceQueueCapacity = 16384 }, directory.Path);
+        using var store = new PerformanceDiagnosticStore(new() { PerformanceQueueCapacity = 16384, PerformanceQueueMemoryMegabytes = 64 }, directory.Path);
         var telemetry = new PremiereTelemetry(store);
         var context = telemetry.CreateDiagnosticContext() with
         {

@@ -47,6 +47,12 @@ public sealed record ItemEnrichmentMetadata
     public bool OptionalMetadataComplete { get; init; } = true;
     public bool TvmazeComplete { get; init; } = true;
     public bool ArtworkComplete { get; init; } = true;
+    // A filter preflight verified core TMDb fields without running optional work.
+    // Its record metadata clock is the proof clock when another profile completes it.
+    public bool CoreMetadataOnly { get; init; }
+    // A preflight retained a complete, matching OMDb cover. This is separate
+    // from an incomplete artwork retry or a cover whose owner verified absence.
+    public bool CoreOmdbCoverReusable { get; init; }
     // The displayed poster is a retained fallback whose owner verified absence.
     // Unrelated empty providers cannot create this evidence for legacy covers.
     public bool PosterOwnerVerifiedEmpty { get; init; }

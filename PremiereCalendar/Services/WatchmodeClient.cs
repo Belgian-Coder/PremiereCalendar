@@ -20,6 +20,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
     private readonly ISingleFlightCoordinator _singleFlight;
     private readonly ProviderRequestThrottler _requestThrottler;
     private readonly PremiereTelemetry? _telemetry;
+    private readonly OptionalProviderResponseCache _responses;
 
     public WatchmodeClient(
         HttpClient httpClient,
@@ -28,7 +29,9 @@ public sealed class WatchmodeClient : IWatchmodeClient
         IIntegrationSettingsStore? settingsStore = null,
         ISingleFlightCoordinator? singleFlight = null,
         ProviderRequestThrottler? requestThrottler = null,
-        PremiereTelemetry? telemetry = null)
+        PremiereTelemetry? telemetry = null,
+        ProviderResponseCache? responseCache = null,
+        TimeProvider? timeProvider = null)
     {
         _httpClient = httpClient;
         _cache = cache;
@@ -37,6 +40,7 @@ public sealed class WatchmodeClient : IWatchmodeClient
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
         _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
         _telemetry = telemetry;
+        _responses = new(cache, responseCache, timeProvider);
     }
 
     public async Task<IReadOnlyList<PremiereSource>> GetTitleSourcesAsync(
@@ -85,38 +89,24 @@ public sealed class WatchmodeClient : IWatchmodeClient
 
         var sourceRegions = NormalizeRegions(regions.Count > 0 ? regions : settings.Regions);
         var regionsKey = string.Join(',', sourceRegions);
-        var cacheKey = $"watchmode:sources:{titleId.Value}:{regionsKey}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<PremiereSource>? cached) && cached is not null)
-        {
-            return new(cached, true);
-        }
-
-        return await _singleFlight.RunAsync<ProviderRefreshResult<IReadOnlyList<PremiereSource>>>(
-            FlightKey(cacheKey, forceRefresh),
-            async token =>
+        var partition = OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, settings.ApiKey,
+            $"sources:{titleId.Value}:{regionsKey}:{CacheDuration(settings).Ticks}");
+        return await _responses.GetAsync<IReadOnlyList<PremiereSource>>("watchmode", partition, forceRefresh,
+            CacheDuration(settings), async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<PremiereSource>? flightCached) && flightCached is not null)
-                {
-                    return new(flightCached, true);
-                }
-
                 var sources = await GetTitleSourceDtosAsync(titleId.Value, settings.ApiKey.Trim(), sourceRegions, token);
                 if (!sources.IsSuccess && sources.Value is not { Count: > 0 })
-                {
                     return new([], false, sources.Failure);
-                }
-
+                if (sources.Value?.Any(source => source is null || string.IsNullOrWhiteSpace(source.Name)) == true)
+                    return new([], false, new("invalid_response", 200));
                 var mapped = (sources.Value ?? [])
                     .Select(ToPremiereSource)
                     .Where(source => source is not null)
                     .Select(source => source!)
                     .DistinctBy(source => $"{source.Kind}:{source.Id}:{source.Name}", StringComparer.OrdinalIgnoreCase)
                     .ToArray();
-
-                if (sources.IsSuccess) _cache.Set(cacheKey, mapped, CacheDuration(settings));
                 return new(mapped, resolution.Successful && sources.IsSuccess, sources.Failure ?? resolution.Failure);
-            },
-            enrichmentToken);
+            }, enrichmentToken, unavailableFallback: Array.Empty<PremiereSource>());
     }
 
     public async Task<IReadOnlyList<ExternalPremiereCandidate>> GetReleaseCandidatesAsync(
@@ -270,44 +260,25 @@ public sealed class WatchmodeClient : IWatchmodeClient
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
-        var cacheKey = $"watchmode:search:{field}:{value}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out int? cached))
-        {
-            ProviderOutcomeDiagnostics.Record(_telemetry, "watchmode", cached is null ? "absent" : "completed", "cached_response", true);
-            return new(cached, true);
-        }
-
-        return await _singleFlight.RunAsync<ProviderRefreshResult<int?>>(
-            FlightKey(cacheKey, forceRefresh),
-            async token =>
+        var partition = OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, settings.ApiKey,
+            $"identity:{field}:{value}:{mediaType}:{CacheDuration(settings).Ticks}");
+        return await _responses.GetAsync<int?>("watchmode", partition, forceRefresh,
+            TimeSpan.FromDays(30), async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out int? flightCached))
-                {
-                    return new(flightCached, true);
-                }
-
-                var apiKey = settings.ApiKey.Trim();
                 var query = ToQueryString(new Dictionary<string, string?>
                 {
                     ["search_field"] = field,
                     ["search_value"] = value,
                     ["types"] = mediaType == PremiereMediaType.Movie ? "movie" : "tv_series,tv_miniseries,tv_special"
                 });
-                var response = await GetJsonWithRetryResultAsync<WatchmodeSearchResponse>($"search/{query}", apiKey, token);
-                if (!response.IsSuccess || response.Value is not { HasTitleResults: true, TitleResults: not null })
+                var response = await GetJsonWithRetryResultAsync<WatchmodeSearchResponse>($"search/{query}", settings.ApiKey.Trim(), token);
+                if (!response.IsSuccess || response.Value is not { HasTitleResults: true, TitleResults: not null }
+                    || response.Value.TitleResults.Any(result => result is null || result.Id <= 0))
                     return new(null, false, response.Failure ?? new("invalid_response"));
-                var titleId = response.Value?.TitleResults
-                    .Where(result => result.Id > 0)
-                    .Select(result => (int?)result.Id)
-                    .FirstOrDefault();
-
-                // A valid empty title_results array confirms absence. Reuse it just like a match.
-                _cache.Set(cacheKey, titleId, CacheDuration(settings));
+                var titleId = response.Value.TitleResults.Select(result => (int?)result.Id).FirstOrDefault();
                 ProviderOutcomeDiagnostics.Record(_telemetry, "watchmode", titleId is null ? "absent" : "completed", "verified_response");
-
-                return new(titleId, response.IsSuccess && response.Value is not null);
-            },
-            cancellationToken);
+                return new(titleId, true);
+            }, cancellationToken, id => id is > 0 ? TimeSpan.FromDays(30) : CacheDuration(settings));
     }
 
     private async Task<JsonFetchResult<T>> GetJsonWithRetryResultAsync<T>(

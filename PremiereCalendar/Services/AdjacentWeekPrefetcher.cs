@@ -14,6 +14,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
     private readonly CalendarLoadCoordinator? _loadCoordinator;
     private readonly BackgroundJobTimelineService? _timeline;
     private readonly IProviderWorkScheduler? _workScheduler;
+    private readonly DatabaseRecoveryState? _databaseState;
     private readonly ConcurrentDictionary<string, byte> _scheduledWeeks = [];
     private readonly object _queueGate = new();
     private readonly PriorityQueue<PrefetchRequest, PrefetchPriority> _queue = new();
@@ -23,6 +24,8 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
     private long _nextSequence;
     private int _nextGeneration;
     private int _workerStarted;
+    private int _reconciledGeneration;
+    private string[] _desiredDedupeKeys = [];
     private Task? _workerTask;
     private volatile bool _disposed;
 
@@ -33,7 +36,8 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         ILogger<AdjacentWeekPrefetcher> logger,
         CalendarLoadCoordinator? loadCoordinator = null,
         BackgroundJobTimelineService? timeline = null,
-        IProviderWorkScheduler? workScheduler = null)
+        IProviderWorkScheduler? workScheduler = null,
+        DatabaseRecoveryState? databaseState = null)
     {
         _scopeFactory = scopeFactory;
         _applicationLifetime = applicationLifetime;
@@ -42,6 +46,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         _loadCoordinator = loadCoordinator;
         _timeline = timeline;
         _workScheduler = workScheduler;
+        _databaseState = databaseState;
     }
 
     public void PrefetchAdjacentWeeks(DateOnly weekStart, CalendarFilters? filters = null)
@@ -56,29 +61,42 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         {
             CalendarFilterState.NormalizeForCalendar(filtersSnapshot);
         }
-        var generation = Interlocked.Increment(ref _nextGeneration);
+        int generation;
         var rank = 0;
-        if (_workScheduler is not null)
+        lock (_queueGate)
         {
-            foreach (var offset in PrefetchWeekOffsets())
-            {
-                var target = weekStart.AddDays(offset * 7);
-                _ = QueueDurablePrefetchAsync(target, filtersSnapshot, rank++);
-            }
-            return;
+            if (_disposed) return;
+            generation = ++_nextGeneration;
+            foreach (var key in _pendingRequests.Keys) _scheduledWeeks.TryRemove(key, out _);
+            _pendingRequests.Clear();
+            _queue.Clear();
+            _desiredDedupeKeys = PrefetchWeekOffsets().Select(offset =>
+                $"prefetch:{weekStart.AddDays(offset * 7):yyyyMMdd}:{PremiereDiscoveryCriteria.FromFilters(filtersSnapshot).CacheKey()}").ToArray();
         }
 
         foreach (var offset in PrefetchWeekOffsets())
         {
             QueuePrefetch(weekStart.AddDays(offset * 7), filtersSnapshot, generation, rank++);
         }
+        EnsureWorkerStarted();
+        _queueSignal.Release();
     }
 
-    private async Task QueueDurablePrefetchAsync(DateOnly weekStart, CalendarFilters? filters, int rank)
+    private async Task QueueDurablePrefetchAsync(PrefetchRequest request, CancellationToken cancellationToken)
     {
+        var retry = false;
         try
         {
+            if (CurrentDesiredRequest(request) is not { } current) return;
+            var weekStart = request.WeekStart;
+            var filters = request.Filters;
             var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            if (scope.ServiceProvider.GetService<ICalendarCache>() is { } cache
+                && await cache.GetWeekSnapshotAsync(weekStart, weekStart.AddDays(6), criteria.CacheKey(), cancellationToken)
+                    is { IsComplete: true }) return;
+            if (CurrentDesiredRequest(request) is not { } latest) return;
+            current = latest;
             var payload = new CalendarProviderWorkPayload(
                 weekStart,
                 weekStart.AddDays(6),
@@ -87,12 +105,30 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
             await _workScheduler!.EnqueueAsync(new ProviderWorkRequest(
                 ProviderWorkKind.AdjacentWeekPrefetch,
                 $"prefetch:{weekStart:yyyyMMdd}:{criteria.CacheKey()}",
-                (ProviderWorkPriority)Math.Min((int)ProviderWorkPriority.Maintenance - 1, (int)ProviderWorkPriority.Adjacent + rank),
-                System.Text.Json.JsonSerializer.Serialize(payload)));
+                (ProviderWorkPriority)Math.Min((int)ProviderWorkPriority.Maintenance - 1, (int)ProviderWorkPriority.Adjacent + current.Rank),
+                System.Text.Json.JsonSerializer.Serialize(payload)), cancellationToken);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex) when (DatabaseConnectionFactory.IsTransient(ex))
         {
-            _logger.LogDebug(ex, "Could not persist adjacent week prefetch for {WeekStart}.", weekStart);
+            _logger.LogWarning(ex, "Could not persist adjacent week prefetch for {WeekStart}.", request.WeekStart);
+            retry = true;
+        }
+        finally { _scheduledWeeks.TryRemove(request.Key, out _); }
+        if (retry)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+            if (CurrentDesiredRequest(request) is { } current)
+                QueuePrefetch(current.WeekStart, current.Filters, current.Generation, current.Rank);
+        }
+    }
+
+    private PrefetchRequest? CurrentDesiredRequest(PrefetchRequest request)
+    {
+        lock (_queueGate)
+        {
+            var rank = Array.IndexOf(_desiredDedupeKeys, "prefetch:" + request.Key);
+            return !_disposed && rank >= 0 ? request with { Generation = _nextGeneration, Rank = rank } : null;
         }
     }
 
@@ -132,7 +168,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         var queued = false;
         lock (_queueGate)
         {
-            if (_disposed)
+            if (_disposed || generation != _nextGeneration)
             {
                 return;
             }
@@ -219,6 +255,38 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
                 {
                     break;
                 }
+                if (_databaseState is not null) await _databaseState.WaitUntilHealthyAsync(workerToken);
+
+                if (_workScheduler is not null)
+                {
+                    string[] activeKeys;
+                    int generation;
+                    lock (_queueGate)
+                    {
+                        activeKeys = _desiredDedupeKeys;
+                        generation = _nextGeneration;
+                    }
+                    if (generation != _reconciledGeneration)
+                    {
+                        try
+                        {
+                            await _workScheduler.RetireObsoletePrefetchAsync(activeKeys, workerToken);
+                            if (generation != Volatile.Read(ref _nextGeneration))
+                            {
+                                _queueSignal.Release();
+                                continue;
+                            }
+                            _reconciledGeneration = generation;
+                        }
+                        catch (Exception exception) when (DatabaseConnectionFactory.IsTransient(exception))
+                        {
+                            _logger.LogWarning(exception, "Adjacent prefetch reconciliation will retry after temporary database unavailability.");
+                            await Task.Delay(TimeSpan.FromSeconds(5), workerToken);
+                            _queueSignal.Release();
+                            continue;
+                        }
+                    }
+                }
 
                 var request = TryDequeueNextRequest();
                 if (request is null)
@@ -226,7 +294,9 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
                     continue;
                 }
 
-                await PrefetchWeekAsync(
+                if (_workScheduler is not null)
+                    await QueueDurablePrefetchAsync(request, workerToken);
+                else await PrefetchWeekAsync(
                     request.WeekStart,
                     request.Key,
                     request.Filters,
@@ -242,7 +312,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Adjacent week prefetch worker stopped unexpectedly.");
+            _logger.LogError(ex, "Adjacent week prefetch worker stopped unexpectedly; foreground service remains available.");
             Interlocked.Exchange(ref _workerStarted, 0);
         }
     }

@@ -11,8 +11,80 @@ namespace PremiereCalendar.UnitTests;
 
 public sealed partial class ProviderWorkSchedulerTests
 {
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task NewNavigationPreemptsOnlyPassiveRunningCalendarsAndResumesWithoutChargedAttempt(bool keepSecondActive, bool enqueueBeforeDemotion)
+    {
+        var firstStart = new DateOnly(2026, 10, 5);
+        var secondStart = firstStart.AddDays(7);
+        var visibleStart = firstStart.AddDays(14);
+        var pipeline = new ForegroundHandoffPipeline(firstStart);
+        var first = await EnqueueCalendarAsync("passive-navigation-first", firstStart);
+        var second = await EnqueueCalendarAsync("passive-navigation-second", secondStart);
+        var firstObservation = new CalendarObservationScope();
+        var secondObservation = new CalendarObservationScope();
+        await using var firstWatcher = _scheduler.WatchAsync(first).GetAsyncEnumerator();
+        using (firstObservation.Enter()) Assert.True(await firstWatcher.MoveNextAsync());
+        await using var secondWatcher = _scheduler.WatchAsync(second).GetAsyncEnumerator();
+        using (secondObservation.Enter()) Assert.True(await secondWatcher.MoveNextAsync());
+        await using var services = new ServiceCollection().AddSingleton<IPremiereLoadPipeline>(pipeline).BuildServiceProvider();
+        var recovery = new DatabaseRecoveryState();
+        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null, null));
+        using var worker = new ProviderWorkSchedulerHostedService(_scheduler, services.GetRequiredService<IServiceScopeFactory>(),
+            recovery, Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 }),
+            NullLogger<ProviderWorkSchedulerHostedService>.Instance);
+        await worker.StartAsync(default);
+        try
+        {
+            await Task.WhenAll(pipeline.Entered(firstStart), pipeline.Entered(secondStart)).WaitAsync(TimeSpan.FromSeconds(5));
+            ProviderWorkHandle? visible = null;
+            if (enqueueBeforeDemotion)
+            {
+                visible = await EnqueueCalendarAsync("passive-navigation-visible", visibleStart);
+                Assert.Equal(ProviderWorkState.Queued, (await _scheduler.GetAsync(visible.JobId))!.State);
+                Assert.Equal(0, pipeline.CancellationCount(firstStart));
+                Assert.Equal(0, pipeline.CancellationCount(secondStart));
+            }
+            await firstObservation.ReleaseForegroundAsync(default);
+            if (!keepSecondActive) await secondObservation.ReleaseForegroundAsync(default);
+            if (!enqueueBeforeDemotion)
+            {
+                Assert.Equal(0, pipeline.CancellationCount(firstStart));
+                Assert.Equal(0, pipeline.CancellationCount(secondStart));
+            }
+            Assert.Equal(ProviderWorkPriority.Adjacent, pipeline.CurrentPriority(firstStart));
+            visible ??= await EnqueueCalendarAsync("passive-navigation-visible", visibleStart);
+            await using var visibleWatcher = _scheduler.WatchAsync(visible).GetAsyncEnumerator();
+            Assert.True(await visibleWatcher.MoveNextAsync());
+            await pipeline.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await pipeline.Entered(visibleStart).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(0, (await _scheduler.GetAsync(first.JobId))!.AttemptCount);
+            Assert.Contains("completed-source", ProviderWorkScheduler.TryReadCheckpoint((await _scheduler.GetAsync(first.JobId))!.CheckpointJson)!.CompletedSources.Keys);
+            if (keepSecondActive)
+            {
+                Assert.Equal(0, pipeline.CancellationCount(secondStart));
+                Assert.Equal(ProviderWorkPriority.Foreground, pipeline.CurrentPriority(secondStart));
+                Assert.Equal(ProviderWorkState.Running, (await _scheduler.GetAsync(second.JobId))!.State);
+            }
+            pipeline.Release(visibleStart);
+            pipeline.Release(secondStart);
+            await pipeline.Resumed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, pipeline.SourceFetchCount(firstStart));
+            pipeline.Release(firstStart);
+            await WaitUntilAsync(async () => (await _scheduler.GetAsync(first.JobId))!.State == ProviderWorkState.Completed
+                && (await _scheduler.GetAsync(second.JobId))!.State == ProviderWorkState.Completed
+                && (await _scheduler.GetAsync(visible.JobId))!.State == ProviderWorkState.Completed);
+            Assert.Equal(0, (await _scheduler.GetAsync(first.JobId))!.AttemptCount);
+            Assert.Equal(0, (await _scheduler.GetAsync(second.JobId))!.AttemptCount);
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
     [Fact]
-    public async Task AbandonedRunningForegroundReleasesWorkerAndResumesItsCheckpointInBackground()
+    public async Task QueuedNavigationPreemptsCalendarAfterLastObserverDetachAndResumesSavedSources()
     {
         var abandonedStart = new DateOnly(2026, 10, 5);
         var keptStart = abandonedStart.AddDays(7);
@@ -46,21 +118,21 @@ public sealed partial class ProviderWorkSchedulerTests
             });
             await pipeline.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await pipeline.Entered(visibleStart).WaitAsync(TimeSpan.FromSeconds(5));
-
             var checkpointed = (await _scheduler.GetAsync(abandoned.JobId))!;
-            Assert.Contains(checkpointed.State, new[] { ProviderWorkState.Queued, ProviderWorkState.Running });
+            Assert.Equal(ProviderWorkState.Queued, checkpointed.State);
             Assert.Equal(ProviderWorkPriority.Adjacent, checkpointed.Priority);
+            Assert.Equal(ProviderWorkPriority.Adjacent, pipeline.CurrentPriority(abandonedStart));
             Assert.Equal(0, checkpointed.AttemptCount);
             Assert.Contains("completed-source", ProviderWorkScheduler.TryReadCheckpoint(checkpointed.CheckpointJson)!.CompletedSources.Keys);
             Assert.Equal(ProviderWorkState.Running, (await _scheduler.GetAsync(kept.JobId))!.State);
             Assert.Equal(0, pipeline.CancellationCount(keptStart));
+            Assert.Equal(1, pipeline.CancellationCount(abandonedStart));
 
             pipeline.Release(visibleStart);
             pipeline.Release(keptStart);
             await WaitUntilAsync(async () => (await _scheduler.GetAsync(visible.JobId))!.State == ProviderWorkState.Completed
                 && (await _scheduler.GetAsync(kept.JobId))!.State == ProviderWorkState.Completed);
             await pipeline.Resumed.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Contains("completed-source", pipeline.AbandonedResume!.CompletedSources.Keys);
             Assert.Equal(1, pipeline.SourceFetchCount(abandonedStart));
             pipeline.Release(abandonedStart);
             await WaitUntilAsync(async () => (await _scheduler.GetAsync(abandoned.JobId))!.State == ProviderWorkState.Completed);
@@ -70,7 +142,7 @@ public sealed partial class ProviderWorkSchedulerTests
     }
 
     [Fact]
-    public async Task RunningForegroundRemainsActiveUntilItsLastWatcherDetaches()
+    public async Task LastWatcherDetachDemotesRunningForegroundWithoutCancelingIt()
     {
         var handle = await _scheduler.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "shared-watchers", ProviderWorkPriority.Foreground, "{}"));
         await using var first = _scheduler.WatchAsync(handle).GetAsyncEnumerator();
@@ -85,7 +157,7 @@ public sealed partial class ProviderWorkSchedulerTests
             Assert.False(execution.IsCancellationRequested);
             Assert.Equal(ProviderWorkPriority.Foreground, (await _scheduler.GetAsync(job.JobId))!.Priority);
             await second.DisposeAsync();
-            Assert.True(execution.IsCancellationRequested);
+            Assert.False(execution.IsCancellationRequested);
             await _scheduler.PreemptAsync(job, CancellationToken.None);
             Assert.Equal(ProviderWorkPriority.Adjacent, (await _scheduler.GetAsync(job.JobId))!.Priority);
             Assert.Equal(0, (await _scheduler.GetAsync(job.JobId))!.AttemptCount);
@@ -108,10 +180,12 @@ public sealed partial class ProviderWorkSchedulerTests
         var execution = _scheduler.BeginExecution(job, CancellationToken.None);
         try
         {
-            Assert.Equal(!reattach, execution.IsCancellationRequested);
-            if (!reattach) await _scheduler.PreemptAsync(job, CancellationToken.None);
+            Assert.False(execution.IsCancellationRequested);
+            using var providerContext = _scheduler.UseProviderExecutionContext(job);
+            var priority = ProviderExecutionContext.CapturePriorityAccessor();
             Assert.Equal(reattach ? ProviderWorkPriority.Foreground : ProviderWorkPriority.Adjacent,
-                (await _scheduler.GetAsync(job.JobId))!.Priority);
+                priority());
+            Assert.Equal(ProviderWorkPriority.Foreground, (await _scheduler.GetAsync(job.JobId))!.Priority);
         }
         finally { _scheduler.EndExecution(job, execution); }
     }

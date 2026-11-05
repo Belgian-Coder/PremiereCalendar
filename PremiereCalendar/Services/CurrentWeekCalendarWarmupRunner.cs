@@ -315,12 +315,6 @@ public sealed class CurrentWeekCalendarWarmupRunner
         AddSpan(weekEnd.AddDays(1), monthEnd);
         AddSpan(monthStart, weekStart.AddDays(-1));
         AddMonth(1);
-        AddMonth(-1);
-
-        for (var offset = 2; offset <= 6; offset++)
-        {
-            AddMonth(offset);
-        }
 
         return windows;
 
@@ -332,6 +326,8 @@ public sealed class CurrentWeekCalendarWarmupRunner
 
         void AddSpan(DateOnly start, DateOnly end)
         {
+            start = Max(start, monthStart);
+            end = Min(end, monthStart.AddMonths(2).AddDays(-1));
             if (end < start)
             {
                 return;

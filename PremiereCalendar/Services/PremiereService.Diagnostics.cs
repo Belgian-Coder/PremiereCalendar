@@ -76,10 +76,19 @@ public sealed partial class PremiereService
         }
         finally
         {
-            using (ProviderRefreshScope.Use(scope))
-            using (UseItemCacheSession(itemSession)) await enumerator.DisposeAsync();
-            if (itemSession is not null && !cancellationToken.IsCancellationRequested)
-                await itemSession.FlushAsync(cancellationToken);
+            try
+            {
+                using (ProviderRefreshScope.Use(scope))
+                using (UseItemCacheSession(itemSession)) await enumerator.DisposeAsync();
+            }
+            finally
+            {
+                if (itemSession is not null)
+                {
+                    try { if (!cancellationToken.IsCancellationRequested) await itemSession.FlushAsync(cancellationToken); }
+                    finally { await itemSession.DisposeAsync(); }
+                }
+            }
         }
     }
 

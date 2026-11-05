@@ -95,7 +95,7 @@ public sealed class FanartClientIntegrationTests
         Assert.True((await missing.GetMovieArtworkWithStatusAsync(42, CancellationToken.None)).Successful);
         Assert.True((await missing.GetMovieArtworkWithStatusAsync(42, CancellationToken.None)).Successful);
         Assert.Single(missingHandler.Requests);
-        var malformed = CreateClient(new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{}")));
+        var malformed = CreateClient(new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{\"unexpected\":true}")));
         Assert.False((await malformed.GetMovieArtworkWithStatusAsync(42, CancellationToken.None)).Successful);
         var timeout = CreateClient(new StubHttpMessageHandler(_ => throw new TaskCanceledException()));
         var failed = await timeout.GetMovieArtworkWithStatusAsync(42, CancellationToken.None);

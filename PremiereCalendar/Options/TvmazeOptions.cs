@@ -7,5 +7,6 @@ public sealed class TvmazeOptions
     public bool EnableScheduleDiscovery { get; set; } = true;
     public int ScheduleFetchConcurrency { get; set; } = 4;
     public int MaxConcurrentRequests { get; set; } = 4;
+    public int MinimumRequestIntervalMilliseconds { get; set; } = 510;
     public string[] ScheduleCountries { get; set; } = [];
 }

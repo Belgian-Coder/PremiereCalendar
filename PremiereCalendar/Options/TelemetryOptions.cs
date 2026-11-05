@@ -15,6 +15,9 @@ public sealed class TelemetryOptions
     public int PerformanceFileSizeLimitMegabytes { get; set; } = 25;
     public int PerformanceRetainedFileCount { get; set; } = 64;
     public int PerformanceFlushIntervalSeconds { get; set; } = 2;
+    public int PerformanceQueueMemoryMegabytes { get; set; } = 16;
+    public bool PerformanceArchiveClosedFiles { get; set; } = true;
+    public int PerformanceArchiveAfterMinutes { get; set; } = 10;
     public int PerformanceQueueCapacity { get; set; } = 4096;
     public int PerformanceFlushTimeoutSeconds { get; set; } = 5;
     public int PerformanceShutdownTimeoutSeconds { get; set; } = 5;

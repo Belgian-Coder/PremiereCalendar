@@ -1,6 +1,12 @@
 # Performance Review
 
-Last reviewed: 2026-11-02.
+Last reviewed: 2026-11-05. The November 5 candidate passed local source checks and final Astra high / Claude Opus 5.5 high reviews with no open P0–P2 findings. Exact-image release gates and installed acceptance remain pending.
+
+## November 5 candidate
+
+The candidate reduces repeated provider work, overlaps independent enrichment, makes background recovery and scheduling bounded, and separates trace archival from event persistence. Provider coverage, forced-refresh fences and existing data remain protected. Controlled fixtures demonstrate SIMKL sends falling from five to three across adjacent weeks and shorter series enrichment critical paths with matching full projections. The matched 2,000-row fixture does **not** establish a broad cold-load speedup: cold first-result and completion times were slower in the candidate pair.
+
+The recorded compiled-checkpoint test rosters reconcile to 1,721 passing cases and one expected Linux skip; no roster case lacks result evidence. See [November 5 implementation and evidence](PerformanceImprovements-20261105.md) for the overlapping request coverage, exact measurements, executed checks, review dispositions and remaining external-provider/install boundaries. Historical hosted measurements below describe earlier binaries and workloads.
 
 ## Calendar loading and recovery
 
@@ -12,7 +18,7 @@ Provider cancellation caused by navigation, background preemption, or shutdown r
 
 Scheduler checkpoints retain the union of successfully completed sources and their completion times. Failed sources remain retryable, and legacy checkpoints conservatively rerun uncertain source states. Successful sources older than `WeekCacheHours` are fetched again after long deferrals. Source completion means iterator exhaustion: processing counters reaching their current total do not establish completion. Source completion and final snapshots persist immediately; other progress persists at most once every two seconds. Dense source snapshots coalesce at 250 ms, retaining every row and always flushing errors and completion. Diagnostics retain the latest update per source instead of every growing snapshot.
 
-Claims use unique ownership tokens, independently renewed leases, transactional lease/job updates, and fenced persistence. Calendar file publication holds the owned job lock, so an expired worker cannot overwrite a reclaimed job's cache. Recovery checks run every five seconds and terminal retention cleanup runs daily. Queued jobs without watchers yield priority; detached foreground execution checkpoints and requeues. Returning to that running job promotes it without cancelling its own execution. Progress subscriptions retain bounded source summaries and the latest canonical snapshot, and late subscribers replay durable state.
+Claims use unique ownership tokens, independently renewed leases, transactional lease/job updates, and fenced persistence. Calendar file publication holds the owned job lock, so an expired worker cannot overwrite a reclaimed job's cache. Recovery checks run every five seconds and terminal retention cleanup runs daily. Queued jobs without watchers yield priority. Detaching an observation demotes its demand without cancelling the running work or another browser's interest. Competing active foreground demand can checkpoint and preempt that now-passive work; returning to it restores priority. Progress subscriptions retain bounded source summaries and the latest canonical snapshot, and late subscribers replay durable state.
 
 Watched demand flows through shared provider admission, including a single-flight request shared with background work. Provider queues retain FIFO order within foreground/background lanes and admit an oldest background waiter after eight foreground admissions during contention. TMDb's configured token bucket/concurrency and adaptive provider cooldown, circuit and capacity limits remain unchanged. In-flight background requests finish normally.
 
@@ -20,7 +26,7 @@ One refresh generation reuses verified successful provider outcomes for exact lo
 
 Checkpoint storage can use a bounded Brotli envelope containing the complete version 3 JSON, without dropping canonical progress, source summaries or completion times. Small/unhelpful or very large payloads stay raw. The two-second progress durability interval and immediate source/final/preempt persistence are unchanged. Older checkpoints remain readable. Before downgrading to an older binary that cannot read the envelope, stop workers and run the new binary's transactional `database prepare-legacy-checkpoints` command; see [speed implementation and validation](SpeedImprovements.md).
 
-Calendar metadata reads use an optional item-count header; older envelopes retain their full-parse fallback. All-view warmup checks both media keys. Images share decode and staging limits across cache instances, reject oversized decoded images, use content-based ETags, and retain short-lived stale fallback. Cache readers allow atomic replacement while an existing reader finishes its original file.
+Calendar metadata reads use an optional item-count header; older envelopes retain their full-parse fallback. All-view warmup checks both media keys. Images share decode and staging limits across cache instances, reject oversized decoded images and use content-based ETags. An existing immutable stale image returns immediately while a bounded, deduplicated background refresh runs; explicit refresh still waits for its fetch. Cache readers allow atomic replacement while an existing reader finishes its original file.
 
 Backfill batches IMDb lookups, deduplicates detail and rating requests by their provider keys, and uses bounded workers while preserving input order and known values.
 
@@ -30,7 +36,7 @@ See [speed and reliability validation](SpeedReliabilityValidation.md) for the co
 
 ## .NET 11 Notes
 
-The app targets `net11.0` and `global.json` pins .NET SDK `11.0.100-rc.3.26522.148`. Local builds use the machine-wide SDK and write their outputs to the sibling `PremiereCalendar.Build` directory, keeping SDK and build copies out of the checkout. The deployed Windows compatibility build is self-contained.
+The app targets `net11.0` and `global.json` pins .NET SDK `11.0.100-rc.3.26522.148`. November 5 validation uses the pinned SDK in the existing local WSL Docker build container; build outputs stay in the sibling build volume and ignored local artifacts. The historical Windows compatibility build is self-contained.
 
 The .NET 11 release notes drove the current dense-list change:
 
@@ -80,7 +86,7 @@ If the app is only started as a background process, service recovery is not acti
 
 ## Cache And Images
 
-Calendar data is cached by week plus discovery criteria, not by transient display-only choices. Refresh bypasses the matching week cache for row discovery, but it now reuses fresh enriched rows from that same week cache as a seed. This keeps known sources, trailers, external IDs, runtime, and ratings available without repeating expensive detail/enrichment calls for already-known canonical IDs.
+Calendar data is cached by week plus discovery criteria, not by transient display-only choices. Normal loads reuse fresh enriched item projections across occurrences and retain known sources, trailers, external IDs, runtime and ratings. Explicit forced refresh keeps its provider-cache bypass and publication fences; a failed forced fetch cannot replace a previous good result with false absence.
 
 Broad date-only TMDb Discover calls are complete by default up to TMDb's 500-page ceiling. They stay usable by streaming page 1 first, then fetching later pages in `Tmdb:PageBatchSize` chunks with bounded page and enrichment concurrency. `Tmdb:MaxUnfilteredPagesPerQuery` and `Tmdb:MaxPagesPerQuery` are still available as hard technical caps, but lowering them means accepting incomplete results.
 
@@ -91,7 +97,7 @@ Image optimization status:
 - Card posters request width-specific variants using `w=185`.
 - Browsers advertise image formats through `Accept`; width-specific poster requests are stored as WebP when supported and JPEG/original bytes remain the fallback. APNG retains its bounded original PNG bytes to preserve animation; CSS controls its displayed size.
 - Format is part of the cache key and `/cached-image` returns `Vary: Accept`, so WebP and fallback representations cannot collide.
-- Browser responses include cache headers, ETags, Last-Modified, range support, and stale fallback.
+- Browser responses include cache headers, ETags, Last-Modified, range support and immediate stale fallback with a one-minute browser lifetime while a bounded refresh is queued.
 - Resized image fetches now use a bounded temporary source file instead of a `MemoryStream`, reducing managed byte-array pressure for large remote posters.
 - Deployment updates should use `deploy/Publish-PremiereCalendar.ps1` so the hosted `App_Data` folder is preserved. The local calendar and image caches are runtime data, not publish artifacts.
 
@@ -119,7 +125,7 @@ Operational safeguards:
 - `Tmdb:MaxConcurrentRequests` defaults to 4. This is a separate hard cap from the rate limiter and prevents page/detail enrichment fan-out from creating large local queues that then time out.
 - `Tmdb:RequestTimeoutSeconds` bounds each HTTP request.
 - `Tmdb:SourceTimeoutSeconds` lets one slow source fail closed instead of leaving Refresh in an updating state indefinitely.
-- `Tvmaze:ScheduleFetchConcurrency` defaults to 4. TVmaze documents at least 20 calls per 10 seconds and recommends backing off on `429`; schedule calls now retry `429` with `Retry-After` or a small fallback delay. `Tvmaze:MaxConcurrentRequests` also defaults to 4 across schedule, lookup, search, and image-list calls.
+- `Tvmaze:ScheduleFetchConcurrency` and `Tvmaze:MaxConcurrentRequests` default to 4. The shared `Tvmaze:MinimumRequestIntervalMilliseconds` defaults to 510 ms across schedule, lookup, search and image-list sends, alongside adaptive admission and `Retry-After`. This deliberately stays within the documented guarantee of at least 20 calls per 10 seconds; it does not guarantee allowance when other applications share the public IP. The pacing setting preserves existing item-cache partitions.
 - `Watchmode:MaxConcurrentRequests` defaults to 2 because the free plan is request-limited and availability fallback can otherwise multiply quickly across many cards.
 - `CalendarWarmup:MaximumRemoteWindowsPerWake` defaults to 4. The warmer still checks all priority windows, but fresh cache metadata is skipped and only a few missing/stale windows can start remote work per wake.
 - `ImageCache:MaxConcurrentDownloads` defaults to 4 so browser lazy loading cannot start unbounded remote poster downloads.
@@ -128,7 +134,7 @@ Operational safeguards:
 - Calendar cache files are written atomically through a temporary file and then replaced after the write succeeds.
 - Best-effort JavaScript calls catch `JSDisconnectedException`, so filter storage, day scrolling, and reconnect-related browser work do not fault the circuit during disconnects.
 
-Latest measured dense refresh case:
+Historical dense refresh case (earlier binary):
 
 - URL: `/series?week=2026-05-04&seriesLang=en%2Cnl`
 - Existing week cache: 823 items for the current local settings.
@@ -138,7 +144,7 @@ Latest measured dense refresh case:
 - TVmaze schedule source complete: about 4.6 seconds.
 - Full refresh complete: about 4.75 seconds.
 
-Latest hosted smoke after the stability pass:
+Historical hosted smoke after the earlier stability pass:
 
 - URL: `/series?week=2026-05-04&seriesLang=en%2Cnl`
 - Foreground refresh completed without browser console errors or circuit disconnects.
@@ -151,7 +157,7 @@ Latest hosted smoke after the stability pass:
 
 The current full-completion limit is a mix of TMDb Discover/detail work and TVmaze schedule mapping. TMDb does not expose a larger page-size parameter in the app's Discover flow, so optimization is done by page batching, source-level parallelism, and bounded request rates rather than asking TMDb for more than 20 rows per page. When a language filter is selected, TVmaze candidates with known non-matching language are now skipped before TMDb resolution.
 
-Live broad-week checks show that TVmaze can be expensive when every episode is enabled without narrowing filters, but it is not wasted globally. For `2026-05-04` with English and Dutch selected, TVmaze contributed 80 source cards and the final total was 823 cards versus 767 from TMDb. For an unfiltered `2026-04-27` every-episode refresh, TVmaze contributed 193 source cards and the final total was 2,219 versus 2,089 from TMDb, but full completion took about 115 seconds because both TMDb and TVmaze had a very large episode set. Keep TVmaze enabled when maximum episode/source coverage matters; disable schedule discovery in Settings when broad unfiltered refresh speed matters more.
+Live broad-week checks show that TVmaze can be expensive when every episode is enabled without narrowing filters, but it is not wasted globally. For `2026-05-04` with English and Dutch selected, TVmaze contributed 80 source cards and the final total was 823 cards versus 767 from TMDb. For an unfiltered `2026-04-27` every-episode refresh, TVmaze contributed 193 source cards and the final total was 2,219 versus 2,089 from TMDb, but full completion took about 115 seconds because both TMDb and TVmaze had a very large episode set. These historical runs show why coverage and provider cost must be measured together. The November 5 changes preserve TVmaze and the other configured providers.
 
 Nearby-week prefetch now runs after the visible week completes. The default queue warms next week, previous week, weeks +2, +3, +4, and then week -2 with the same saved filters. These calls use the normal week cache path and `forceRefresh: false`, so already-warmed weeks return from disk while interrupted or missing weeks resume on a later visible page load. The queue behaves as a sliding window: when the user moves to Previous or Next, pending weeks for the newly visible window are promoted ahead of older far-away pending weeks.
 

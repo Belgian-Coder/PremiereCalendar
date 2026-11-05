@@ -46,12 +46,55 @@ public sealed class ItemEnrichmentStoreTests
                 await Task.Delay(10, budget.Token);
             }
             Assert.False(pendingWrite.IsCompleted);
+            Assert.Single(await fixture.Store.ReadCurrentManyAsync("a", [blockedKey], budget.Token).WaitAsync(TimeSpan.FromSeconds(1)));
             Assert.Single(await fixture.Store.ReadManyAsync("a", [independentKey], false, budget.Token).WaitAsync(TimeSpan.FromSeconds(1)));
         }
         finally
         {
             await transaction.RollbackAsync(CancellationToken.None);
             Assert.Equal(1, await pendingWrite);
+        }
+    });
+
+    [ConfiguredPostgresFact]
+    public Task PostgreSQL_ConcurrentAcceptedWritesReturnTheWinnerInsideEachTransaction() => WithStoreAsync(true, async fixture =>
+    {
+        var key = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 703);
+        var now = fixture.Clock.GetUtcNow();
+        await fixture.Store.ReadManyAsync("accepted", [key], true, CancellationToken.None);
+        var other = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
+        await using var blocker = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+        await blocker.OpenAsync();
+        await using var transaction = await blocker.BeginTransactionAsync();
+        await using (var hold = new NpgsqlCommand("SELECT 1 FROM ItemEnrichments WHERE PartitionKey = 'accepted' AND TmdbId = 703 FOR UPDATE", blocker, transaction))
+            await hold.ExecuteNonQueryAsync();
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var first = fixture.Store.WriteAcceptedAsync("accepted", [new(key, 0, "{\"winner\":1}", now)], budget.Token);
+        Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>>? second = null;
+        try
+        {
+            await WaitForLockWaitersAsync(1);
+            second = other.WriteAcceptedAsync("accepted", [new(key, 0, "{\"winner\":2}", now.AddSeconds(1))], budget.Token);
+            await WaitForLockWaitersAsync(2);
+        }
+        finally { await transaction.RollbackAsync(CancellationToken.None); }
+        var firstResult = await first;
+        Assert.NotNull(second);
+        var secondResult = await second;
+        Assert.Equal("{\"winner\":1}", firstResult[key].MetadataJson);
+        Assert.Equal("{\"winner\":2}", secondResult[key].MetadataJson);
+        Assert.Equal(secondResult[key], (await fixture.Store.ReadCurrentManyAsync("accepted", [key], budget.Token))[key]);
+
+        async Task WaitForLockWaitersAsync(int count)
+        {
+            await using var observer = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+            await observer.OpenAsync(budget.Token);
+            while (true)
+            {
+                await using var command = new NpgsqlCommand("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'", observer);
+                if (Convert.ToInt32(await command.ExecuteScalarAsync(budget.Token)) >= count) return;
+                await Task.Delay(10, budget.Token);
+            }
         }
     });
 
@@ -66,6 +109,10 @@ public sealed class ItemEnrichmentStoreTests
     [InlineData("unmapped-tvmaze-reservation")]
     [InlineData("calendar-month-retention")]
     [InlineData("duplicate-writes")]
+    [InlineData("pure-validation-and-accepted-winners")]
+    [InlineData("local-known-and-all-partitions-dirty")]
+    [InlineData("tvmaze-reservation-retention")]
+    [InlineData("tvmaze-reservation-expiry")]
     public Task SQLite_StoreContract(string scenario) => WithStoreAsync(false, fixture => RunScenarioAsync(scenario, fixture));
 
     [ConfiguredPostgresTheory]
@@ -79,6 +126,10 @@ public sealed class ItemEnrichmentStoreTests
     [InlineData("unmapped-tvmaze-reservation")]
     [InlineData("calendar-month-retention")]
     [InlineData("duplicate-writes")]
+    [InlineData("pure-validation-and-accepted-winners")]
+    [InlineData("local-known-and-all-partitions-dirty")]
+    [InlineData("tvmaze-reservation-retention")]
+    [InlineData("tvmaze-reservation-expiry")]
     public Task PostgreSQL_StoreContract(string scenario) => WithStoreAsync(true, fixture => RunScenarioAsync(scenario, fixture));
 
     [Theory]
@@ -562,6 +613,10 @@ public sealed class ItemEnrichmentStoreTests
         "unmapped-tvmaze-reservation" => UnmappedTvmazeReservationAsync(fixture),
         "calendar-month-retention" => CalendarMonthRetentionAsync(fixture),
         "duplicate-writes" => DuplicateWritesAsync(fixture),
+        "pure-validation-and-accepted-winners" => PureValidationAndAcceptedWinnersAsync(fixture),
+        "local-known-and-all-partitions-dirty" => LocalKnownAndAllPartitionsDirtyAsync(fixture),
+        "tvmaze-reservation-retention" => TvmazeReservationRetentionAsync(fixture),
+        "tvmaze-reservation-expiry" => TvmazeReservationExpiryAsync(fixture),
         _ => throw new ArgumentOutOfRangeException(nameof(scenario))
     };
 
@@ -846,19 +901,26 @@ public sealed class ItemEnrichmentStoreTests
         var unresolved = new ItemEnrichmentIdentity(PremiereMediaType.Series, 101);
         var cachedWithoutMap = new ItemEnrichmentIdentity(PremiereMediaType.Series, 102);
         var cachedWithInvalidation = new ItemEnrichmentIdentity(PremiereMediaType.Series, 105);
+        var idleWithoutMap = new ItemEnrichmentIdentity(PremiereMediaType.Series, 106);
         var mapped = new ItemEnrichmentIdentity(PremiereMediaType.Series, 103);
         var movie = unresolved with { MediaType = PremiereMediaType.Movie };
         var now = fixture.Clock.GetUtcNow();
-        await fixture.Store.ReadManyAsync("a", [unresolved, cachedWithoutMap, cachedWithInvalidation, mapped, movie], true, CancellationToken.None);
+        await fixture.Store.ReadManyAsync("a", [unresolved, cachedWithoutMap, cachedWithInvalidation, idleWithoutMap, mapped, movie], true, CancellationToken.None);
         await fixture.Store.ReadManyAsync("b", [unresolved], true, CancellationToken.None);
         await fixture.Store.WriteManyAsync("a", [
             new(unresolved, 0, RatingsJson: "{\"score\":7}", RatingsFetchedUtc: now.AddHours(-1)),
             new(cachedWithoutMap, 0, "{\"title\":\"cached\"}", now.AddHours(-2), "{\"score\":8}", now.AddHours(-1)),
             new(cachedWithInvalidation, 0, "{\"title\":\"cached after prior change\"}", now.AddHours(-2), "{\"score\":9}", now.AddHours(-1)),
+            new(idleWithoutMap, 0, "{\"title\":\"idle saved metadata\"}", now.AddHours(-2)),
             new(mapped, 0, "{\"title\":\"mapped\"}", now.AddHours(-2), TvmazeShowId: 1103)
         ], CancellationToken.None);
         var earlierChange = now.AddHours(-3);
         Assert.Equal(1, await fixture.Store.InvalidateTmdbAsync(PremiereMediaType.Series, [cachedWithInvalidation.TmdbId], earlierChange, CancellationToken.None));
+        await using var firstLookup = await fixture.Store.ReserveTvmazeLookupAsync("a", cachedWithoutMap, CancellationToken.None);
+        await using var overlappingLookup = await new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock)
+            .ReserveTvmazeLookupAsync("a", cachedWithoutMap, CancellationToken.None);
+        await using var invalidatedLookup = await fixture.Store.ReserveTvmazeLookupAsync("a", cachedWithInvalidation, CancellationToken.None);
+        await firstLookup.DisposeAsync(); // One session cannot remove the other session's reservation.
         fixture.Clock.UtcNow = now.AddMinutes(1);
         var epoch = fixture.Clock.GetUtcNow();
         Assert.Equal(4, await fixture.Store.FenceUnmappedTvmazeReservationsAsync(epoch, CancellationToken.None));
@@ -878,7 +940,7 @@ public sealed class ItemEnrichmentStoreTests
             retention.CommandText = "SELECT LastSeenUtc FROM ItemEnrichments WHERE PartitionKey = 'a' AND MediaType = 'Series' AND TmdbId = 101";
             Assert.Equal(now, DateTimeOffset.Parse((string)(await retention.ExecuteScalarAsync())!));
         }
-        var rows = await fixture.Store.ReadManyAsync("a", [unresolved, cachedWithoutMap, cachedWithInvalidation, mapped, movie], false, CancellationToken.None);
+        var rows = await fixture.Store.ReadManyAsync("a", [unresolved, cachedWithoutMap, cachedWithInvalidation, idleWithoutMap, mapped, movie], false, CancellationToken.None);
         Assert.Equal(1, rows[unresolved].Generation);
         Assert.Equal(epoch, rows[unresolved].MetadataInvalidatedUtc);
         Assert.Null(rows[unresolved].TvmazeShowId);
@@ -898,6 +960,10 @@ public sealed class ItemEnrichmentStoreTests
         Assert.Equal("{\"score\":9}", rows[cachedWithInvalidation].RatingsJson);
         Assert.Equal(earlierChange, rows[cachedWithInvalidation].MetadataInvalidatedUtc);
         Assert.True(rows[cachedWithInvalidation].MetadataFetchedUtc!.Value >= rows[cachedWithInvalidation].MetadataInvalidatedUtc!.Value);
+        Assert.Equal(0, rows[idleWithoutMap].Generation);
+        Assert.Equal("{\"title\":\"idle saved metadata\"}", rows[idleWithoutMap].MetadataJson);
+        Assert.Equal(now.AddHours(-2), rows[idleWithoutMap].MetadataFetchedUtc);
+        Assert.Null(rows[idleWithoutMap].MetadataInvalidatedUtc);
         Assert.Equal(0, rows[mapped].Generation);
         Assert.Null(rows[mapped].MetadataInvalidatedUtc);
         Assert.Equal(0, rows[movie].Generation);
@@ -908,12 +974,150 @@ public sealed class ItemEnrichmentStoreTests
         Assert.Equal(0, newReservation.Generation);
         Assert.Equal(1, await fixture.Store.WriteManyAsync("a", [new(afterFeed, newReservation.Generation,
             "{\"title\":\"new reservation\"}", epoch, TvmazeShowId: 1104)], CancellationToken.None));
-        Assert.Equal(4, await fixture.Store.FenceUnmappedTvmazeReservationsAsync(epoch.AddMinutes(1), CancellationToken.None));
+        await overlappingLookup.DisposeAsync();
+        Assert.Equal(3, await fixture.Store.FenceUnmappedTvmazeReservationsAsync(epoch.AddMinutes(1), CancellationToken.None));
         var afterAnotherFeed = (await fixture.Store.ReadManyAsync("a", [cachedWithoutMap, cachedWithInvalidation], false, CancellationToken.None));
+        Assert.Equal(1, afterAnotherFeed[cachedWithoutMap].Generation);
+        Assert.Equal(3, afterAnotherFeed[cachedWithInvalidation].Generation);
         Assert.Equal(now.AddHours(-2), afterAnotherFeed[cachedWithoutMap].MetadataFetchedUtc);
         Assert.Null(afterAnotherFeed[cachedWithoutMap].MetadataInvalidatedUtc);
         Assert.Equal(now.AddHours(-2), afterAnotherFeed[cachedWithInvalidation].MetadataFetchedUtc);
         Assert.Equal(earlierChange, afterAnotherFeed[cachedWithInvalidation].MetadataInvalidatedUtc);
+    }
+
+    private static async Task PureValidationAndAcceptedWinnersAsync(Fixture fixture)
+    {
+        var key = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 701);
+        var missing = key with { TmdbId = 702 };
+        var t0 = fixture.Clock.GetUtcNow();
+        await fixture.Store.ReadManyAsync("validation", [key], true, CancellationToken.None);
+        var winner = await fixture.Store.WriteAcceptedAsync("validation",
+            [new(key, 0, "{\"title\":\"newer winner\"}", t0)], CancellationToken.None);
+        Assert.Equal("{\"title\":\"newer winner\"}", winner[key].MetadataJson);
+        Assert.Equal(1, winner[key].MetadataRevision);
+        fixture.Clock.UtcNow = t0.AddDays(1);
+        var read = await fixture.Store.ReadCurrentManyAsync("validation", [key, missing], CancellationToken.None);
+        Assert.Single(read);
+        Assert.Equal(t0, read[key].LastSeenUtc);
+        Assert.Equal(t0, read[key].MetadataFetchedUtc);
+        var rejected = await fixture.Store.WriteAcceptedAsync("validation",
+            [new(key, 0, "{\"title\":\"stale loser\"}", t0.AddMinutes(-1))], CancellationToken.None);
+        Assert.Equal(winner[key], rejected[key]);
+        Assert.Equal(0, await fixture.Store.WriteManyAsync("validation",
+            [new(key, 0, "{\"title\":\"stale loser\"}", t0.AddMinutes(-1))], CancellationToken.None));
+        Assert.Equal(1, await fixture.Store.CleanupAsync(t0.AddHours(1), CancellationToken.None));
+        Assert.Empty(await fixture.Store.ReadCurrentManyAsync("validation", [key, missing], CancellationToken.None));
+    }
+
+    private static async Task LocalKnownAndAllPartitionsDirtyAsync(Fixture fixture)
+    {
+        var one = new ItemEnrichmentIdentity(PremiereMediaType.Series, 711);
+        var two = one with { TmdbId = 712 };
+        var three = one with { TmdbId = 713 };
+        var neverInvalidated = one with { TmdbId = 714 };
+        var movie = one with { MediaType = PremiereMediaType.Movie };
+        var t0 = fixture.Clock.GetUtcNow();
+        await fixture.Store.ReadManyAsync("a", [one, two, three, neverInvalidated, movie], true, CancellationToken.None);
+        await fixture.Store.ReadManyAsync("b", [one], true, CancellationToken.None);
+        await fixture.Store.WriteManyAsync("a", [new(one, 0, "{}", t0, TvmazeShowId: 1711),
+            new(two, 0, "{}", t0, TvmazeShowId: 1712), new(movie, 0, "{}", t0, TvmazeShowId: 1999)], CancellationToken.None);
+        await fixture.Store.WriteManyAsync("b", [new(one, 0, "{}", t0, TvmazeShowId: 1713)], CancellationToken.None);
+        fixture.Clock.UtcNow = t0.AddDays(1);
+        var known = await fixture.Store.FindKnownTvmazeIdsAsync([1711, 1712, 1713, 1999, 9999, -1], CancellationToken.None);
+        Assert.Equal(new[] { 1711, 1712, 1713 }, known.Order().ToArray());
+        await fixture.Store.InvalidateTmdbAsync(PremiereMediaType.Series, [711, 712, 713], t0.AddHours(1), CancellationToken.None);
+        Assert.Equal(new[] { 711, 712, 713 }, (await fixture.Store.FindDirtyTmdbIdsAsync(PremiereMediaType.Series,
+            [711, 712, 713, 714, 9999], CancellationToken.None)).Order().ToArray());
+        var b = (await fixture.Store.ReadCurrentManyAsync("b", [one], CancellationToken.None))[one];
+        await fixture.Store.WriteManyAsync("b", [new(one, b.Generation, "{\"current\":true}", t0.AddHours(2))], CancellationToken.None);
+        Assert.Equal(new[] { 712, 713 }, (await fixture.Store.FindDirtyTmdbIdsAsync(PremiereMediaType.Series,
+            [711, 712, 713, 714], CancellationToken.None)).Order().ToArray());
+        var current = await fixture.Store.ReadCurrentManyAsync("a", [one, two, three, neverInvalidated], CancellationToken.None);
+        Assert.All(current.Values, row => Assert.Equal(t0, row.LastSeenUtc));
+    }
+
+    private static async Task TvmazeReservationRetentionAsync(Fixture fixture)
+    {
+        var expired = new ItemEnrichmentIdentity(PremiereMediaType.Series, 721);
+        var retained = expired with { TmdbId = 722 };
+        var now = fixture.Clock.GetUtcNow();
+        await fixture.Store.ReadManyAsync("leases", [expired], true, CancellationToken.None);
+        await using var expiredLease = await fixture.Store.ReserveTvmazeLookupAsync("leases", expired, CancellationToken.None);
+        fixture.Clock.UtcNow = now.AddDays(2);
+        await fixture.Store.ReadManyAsync("leases", [retained], true, CancellationToken.None);
+        await using var retainedLease = await fixture.Store.ReserveTvmazeLookupAsync("leases", retained, CancellationToken.None);
+        Assert.Equal(2, await CountLeasesAsync());
+        Assert.Equal(1, await fixture.Store.CleanupAsync(now.AddDays(1), CancellationToken.None));
+        Assert.Equal(1, await CountLeasesAsync());
+        await expiredLease.DisposeAsync();
+        Assert.Equal(1, await CountLeasesAsync());
+        await retainedLease.DisposeAsync();
+        Assert.Equal(0, await CountLeasesAsync());
+
+        async Task<int> CountLeasesAsync()
+        {
+            await using var connection = DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM ProviderCacheState WHERE Provider = 'item-cache.tvmaze-lookup'";
+            return Convert.ToInt32(await command.ExecuteScalarAsync());
+        }
+    }
+
+    private static async Task TvmazeReservationExpiryAsync(Fixture fixture)
+    {
+        var crashed = new ItemEnrichmentIdentity(PremiereMediaType.Series, 731);
+        var foreign = crashed with { TmdbId = 732 };
+        var active = crashed with { TmdbId = 733 };
+        var now = fixture.Clock.GetUtcNow();
+        await fixture.Store.ReadManyAsync("expiry", [crashed, foreign, active], true, CancellationToken.None);
+        await fixture.Store.WriteManyAsync("expiry", [new(crashed, 0, "{\"title\":\"saved absence\"}", now),
+            new(foreign, 0, "{\"title\":\"original\"}", now), new(active, 0, "{\"title\":\"active original\"}", now)], CancellationToken.None);
+        var captured = await fixture.Store.ReadCurrentManyAsync("expiry", [crashed, foreign], CancellationToken.None);
+        await using var crashedLease = await fixture.Store.ReserveTvmazeLookupAsync("expiry", crashed, CancellationToken.None);
+        await using var foreignLease = await fixture.Store.ReserveTvmazeLookupAsync("expiry", foreign, CancellationToken.None);
+        var crashedToken = Assert.IsAssignableFrom<IItemEnrichmentLookupLease>(crashedLease).Token;
+        var foreignToken = Assert.IsAssignableFrom<IItemEnrichmentLookupLease>(foreignLease).Token;
+        fixture.Clock.UtcNow = now.AddMinutes(20);
+        await using var activeLease = await fixture.Store.ReserveTvmazeLookupAsync("expiry", active, CancellationToken.None);
+        fixture.Clock.UtcNow = now.AddMinutes(31);
+        var epoch = fixture.Clock.GetUtcNow();
+        Assert.Equal(1, await fixture.Store.FenceUnmappedTvmazeReservationsAsync(epoch, CancellationToken.None));
+        var afterFeed = await fixture.Store.ReadCurrentManyAsync("expiry", [crashed, foreign, active], CancellationToken.None);
+        Assert.Equal(captured[crashed], afterFeed[crashed]); // A crashed lookup does not dirty saved absence forever.
+        Assert.Equal(captured[foreign], afterFeed[foreign]);
+        Assert.Equal(1, afterFeed[active].Generation); // The still-valid overlapping lookup remains fenced.
+        await activeLease.DisposeAsync();
+        Assert.Equal(0, await fixture.Store.FenceUnmappedTvmazeReservationsAsync(epoch.AddMinutes(1), CancellationToken.None));
+
+        var expiredWrite = new ItemEnrichmentWrite(crashed, captured[crashed].Generation,
+            "{\"title\":\"expired lookup result\"}", epoch, TvmazeShowId: 1731,
+            ExpectedMetadataRevision: captured[crashed].MetadataRevision, ExpectedTvmazeReservationToken: crashedToken);
+        var rejected = (await fixture.Store.WriteAcceptedAsync("expiry", [expiredWrite], CancellationToken.None))[crashed];
+        Assert.Equal(captured[crashed].MetadataJson, rejected.MetadataJson);
+        Assert.Equal(captured[crashed].MetadataFetchedUtc, rejected.MetadataFetchedUtc);
+        Assert.Equal(captured[crashed].Generation + 1, rejected.Generation);
+        Assert.Equal(epoch, rejected.MetadataInvalidatedUtc);
+        Assert.Null(rejected.TvmazeShowId);
+
+        var other = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
+        var winner = (await other.WriteAcceptedAsync("expiry", [new(foreign, captured[foreign].Generation,
+            "{\"title\":\"fresh other writer\"}", epoch, ExpectedMetadataRevision: captured[foreign].MetadataRevision)], CancellationToken.None))[foreign];
+        var preserved = (await fixture.Store.WriteAcceptedAsync("expiry", [new(foreign, captured[foreign].Generation,
+            "{\"title\":\"late stale lookup\"}", epoch.AddSeconds(1), ExpectedMetadataRevision: captured[foreign].MetadataRevision,
+            ExpectedTvmazeReservationToken: foreignToken)], CancellationToken.None))[foreign];
+        Assert.Equal(winner, preserved); // Expiry fencing must never invalidate a foreign winner.
+        Assert.Null(preserved.MetadataInvalidatedUtc);
+
+        await using var repairLease = await fixture.Store.ReserveTvmazeLookupAsync("expiry", crashed, CancellationToken.None);
+        var repairToken = Assert.IsAssignableFrom<IItemEnrichmentLookupLease>(repairLease).Token;
+        var repaired = (await fixture.Store.WriteAcceptedAsync("expiry", [new(crashed, rejected.Generation,
+            "{\"title\":\"verified absence\"}", epoch.AddSeconds(1), ExpectedMetadataRevision: rejected.MetadataRevision,
+            ExpectedTvmazeReservationToken: repairToken)], CancellationToken.None))[crashed];
+        Assert.Equal("{\"title\":\"verified absence\"}", repaired.MetadataJson);
+        await repairLease.DisposeAsync();
+        Assert.Equal(0, await fixture.Store.FenceUnmappedTvmazeReservationsAsync(epoch.AddMinutes(2), CancellationToken.None));
+        Assert.Equal(repaired, (await fixture.Store.ReadCurrentManyAsync("expiry", [crashed], CancellationToken.None))[crashed]);
     }
 
     private static async Task CalendarMonthRetentionAsync(Fixture fixture)

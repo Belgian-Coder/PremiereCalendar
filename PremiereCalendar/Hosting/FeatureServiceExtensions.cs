@@ -95,6 +95,8 @@ public static class FeatureServiceExtensions
         services.AddSingleton<ISingleFlightCoordinator, SingleFlightCoordinator>();
         services.AddSingleton<ProviderRequestThrottler>();
         services.AddSingleton<ImageDecodeLimiter>();
+        services.AddSingleton<ImageRefreshQueue>();
+        services.AddHostedService(provider => provider.GetRequiredService<ImageRefreshQueue>());
         services.AddSingleton<CalendarPageCoordinator>();
         services.AddSingleton<CalendarLoadCoordinator>(provider => provider.GetRequiredService<CalendarPageCoordinator>());
         services.AddSingleton<IFilterCatalogService, TmdbFilterCatalogService>();

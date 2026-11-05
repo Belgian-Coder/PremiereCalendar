@@ -8,7 +8,7 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-/// <summary>Bounded nonblocking event capture; one background writer owns all diagnostic file I/O.</summary>
+/// <summary>Bounded nonblocking capture with independent single-writer persistence and archival workers.</summary>
 public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -21,7 +21,14 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
     private readonly string _directory;
     private readonly long _fileSizeLimit;
     private readonly int _retainedFileCount;
+    private readonly object _filesGate = new();
+    private readonly HashSet<string> _artifactBlocked = new(StringComparer.Ordinal);
+    private readonly PerformanceTraceArchiveWorker? _archiveWorker;
+    private readonly Task _completion = Task.CompletedTask;
+    private long _archiveMaintenanceFailures;
+    private int _archiveReady;
     private readonly int _queueCapacity;
+    private readonly long _queueByteCapacity;
     private readonly TimeSpan _flushInterval;
     private readonly TimeSpan _flushTimeout;
     private readonly TimeSpan _shutdownTimeout;
@@ -38,8 +45,11 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
     private int _writerRunning;
     private int _writerHealthy = 1;
     private int _flushTimedOut;
+    private int _memoryFull;
     private int _shutdownTimedOut;
     private long _queuedEvents;
+    private long _queuedBytes;
+    private long _serializationFailures;
     private long _writtenEvents;
     private long _droppedEvents;
     private long _writerFailures;
@@ -49,6 +59,7 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
     private long _activeIoStarted;
     // Only the writer task accesses the following fields.
     private FileStream? _stream;
+    private FileStream? _streamLease;
     private long _currentLength;
     private long _currentFileLimit;
     private bool _dirty;
@@ -58,14 +69,15 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
 
     internal bool Enabled => _enabled;
     internal string InstanceId { get; } = Guid.NewGuid().ToString("N");
-    internal Task Completion => _writerTask ?? Task.CompletedTask;
+    internal Task Completion => _completion;
 
     public PerformanceDiagnosticStore(IOptions<TelemetryOptions> options, IWebHostEnvironment environment)
         : this(options.Value, environment.ContentRootPath) { }
 
     internal PerformanceDiagnosticStore(TelemetryOptions options, string contentRoot, long? fileSizeLimitBytes = null,
         int? queueCapacity = null, Action? beforeWrite = null, TimeSpan? flushTimeout = null, TimeSpan? shutdownTimeout = null,
-        Action<string>? beforeDelete = null, Action? beforeFlush = null, Action? beforeBarrier = null)
+        Action<string>? beforeDelete = null, Action? beforeFlush = null, Action? beforeBarrier = null,
+        Action<CancellationToken>? beforeArchive = null)
     {
         _enabled = options.PerformanceDiagnosticsEnabled;
         var directory = string.IsNullOrWhiteSpace(options.PerformanceDiagnosticsDirectory)
@@ -74,6 +86,7 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
         _fileSizeLimit = fileSizeLimitBytes ?? Math.Clamp(options.PerformanceFileSizeLimitMegabytes, 1, 1024) * 1024L * 1024L;
         _retainedFileCount = Math.Clamp(options.PerformanceRetainedFileCount, 1, 100);
         _queueCapacity = queueCapacity ?? Math.Clamp(options.PerformanceQueueCapacity, 256, 32768);
+        _queueByteCapacity = Math.Clamp(options.PerformanceQueueMemoryMegabytes, 1, 256) * 1024L * 1024L;
         _flushInterval = TimeSpan.FromSeconds(Math.Clamp(options.PerformanceFlushIntervalSeconds, 1, 60));
         _flushTimeout = flushTimeout ?? TimeSpan.FromSeconds(Math.Clamp(options.PerformanceFlushTimeoutSeconds, 1, 30));
         _shutdownTimeout = shutdownTimeout ?? TimeSpan.FromSeconds(Math.Clamp(options.PerformanceShutdownTimeoutSeconds, 1, 15));
@@ -90,8 +103,12 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
                 SingleReader = true, SingleWriter = false, AllowSynchronousContinuations = false,
                 FullMode = BoundedChannelFullMode.Wait
             });
+            if (options.PerformanceArchiveClosedFiles)
+                _archiveWorker = new PerformanceTraceArchiveWorker(_directory, _fileSizeLimit,
+                    TimeSpan.FromMinutes(Math.Clamp(options.PerformanceArchiveAfterMinutes, 0, 1440)), _filesGate, beforeArchive);
             Volatile.Write(ref _writerRunning, 1);
             _writerTask = Task.Run(WriteLoopAsync);
+            _completion = Task.WhenAll(_writerTask, _archiveWorker?.Completion ?? Task.CompletedTask);
         }
     }
 
@@ -100,7 +117,7 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
         get
         {
             var queued = Math.Max(0, Interlocked.Read(ref _queuedEvents));
-            var full = _enabled && (_queue?.Reader.Count ?? 0) >= _queueCapacity;
+            var full = _enabled && (Volatile.Read(ref _memoryFull) != 0 || (_queue?.Reader.Count ?? 0) >= _queueCapacity);
             var running = Volatile.Read(ref _writerRunning) != 0;
             var shutdownTimedOut = Volatile.Read(ref _shutdownTimedOut) != 0;
             var ioStarted = Interlocked.Read(ref _activeIoStarted);
@@ -110,23 +127,38 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
                 && !shutdownTimedOut && !stalled && !full && (running || Volatile.Read(ref _stopping) != 0));
             return new(_enabled, healthy, Interlocked.Read(ref _writtenEvents), Interlocked.Read(ref _droppedEvents),
                 Interlocked.Read(ref _writerFailures), ReadDate(ref _lastSuccessTicks), ReadDate(ref _lastFailureTicks),
-                queued, _enabled ? _queueCapacity : 0, full, running, Interlocked.Read(ref _flushTimeouts), shutdownTimedOut, stalled, activeIoMs);
+                queued, _enabled ? _queueCapacity : 0, full, running, Interlocked.Read(ref _flushTimeouts), shutdownTimedOut, stalled, activeIoMs,
+                Math.Max(0, Interlocked.Read(ref _queuedBytes)), _enabled ? _queueByteCapacity : 0,
+                Interlocked.Read(ref _serializationFailures),
+                Interlocked.Read(ref _archiveMaintenanceFailures) + (_archiveWorker?.Failures ?? 0),
+                _archiveWorker?.Active ?? false, _archiveWorker?.Pending ?? 0, _archiveWorker?.Running ?? false);
         }
     }
 
     internal void Write(PerformanceDiagnosticEvent diagnosticEvent)
     {
         if (!_enabled) return;
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(diagnosticEvent, JsonOptions);
-        if (bytes.Length + 1 > MaximumEventBytes || Volatile.Read(ref _stopping) != 0)
+        // The schema consists only of immutable records, scalar values and strings.
+        // Reserve a conservative managed-memory estimate before retaining a snapshot;
+        // serialization and its UTF-8 allocation belong to the single writer.
+        var reservedBytes = diagnosticEvent.EstimatedSnapshotBytes;
+        if (reservedBytes > 16 * 1024 || Volatile.Read(ref _stopping) != 0)
         {
             Interlocked.Increment(ref _droppedEvents);
             return;
         }
+        if (Interlocked.Add(ref _queuedBytes, reservedBytes) > _queueByteCapacity)
+        {
+            Interlocked.Add(ref _queuedBytes, -reservedBytes);
+            Volatile.Write(ref _memoryFull, 1);
+            Interlocked.Increment(ref _droppedEvents);
+            return;
+        }
         Interlocked.Increment(ref _queuedEvents);
-        if (!_queue!.Writer.TryWrite(new QueueEntry(bytes, null)))
+        if (!_queue!.Writer.TryWrite(new QueueEntry(diagnosticEvent, null, reservedBytes)))
         {
             Interlocked.Decrement(ref _queuedEvents);
+            Interlocked.Add(ref _queuedBytes, -reservedBytes);
             Interlocked.Increment(ref _droppedEvents);
         }
     }
@@ -144,7 +176,7 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            await _queue!.Writer.WriteAsync(new QueueEntry(null, completion), timeout.Token).ConfigureAwait(false);
+            await _queue!.Writer.WriteAsync(new QueueEntry(null, completion, 0), timeout.Token).ConfigureAwait(false);
             await completion.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
@@ -171,6 +203,7 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
                 {
                     if (!await tick.ConfigureAwait(false)) break;
                     FlushWriter();
+                    ScheduleArchive(DateTimeOffset.UtcNow);
                     tick = timer.WaitForNextTickAsync(token).AsTask();
                 }
                 if (readable.IsCompleted)
@@ -178,10 +211,12 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
                     if (!await readable.ConfigureAwait(false)) break;
                     for (var count = 0; count < 256 && !token.IsCancellationRequested && _queue.Reader.TryRead(out var entry); count++)
                     {
-                        if (entry.Bytes is { } bytes)
+                        if (entry.Event is { } diagnosticEvent)
                         {
                             Interlocked.Decrement(ref _queuedEvents);
-                            if (!TryWriteBytes(bytes)) Interlocked.Increment(ref _droppedEvents);
+                            Interlocked.Add(ref _queuedBytes, -entry.ReservedBytes);
+                            Volatile.Write(ref _memoryFull, 0);
+                            WriteEvent(diagnosticEvent);
                         }
                         else
                         {
@@ -205,15 +240,38 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
             _queue!.Writer.TryComplete();
             while (_queue.Reader.TryRead(out var entry))
             {
-                if (entry.Bytes is not null)
+                if (entry.Event is not null)
                 {
                     Interlocked.Decrement(ref _queuedEvents);
+                    Interlocked.Add(ref _queuedBytes, -entry.ReservedBytes);
                     Interlocked.Increment(ref _droppedEvents);
                 }
                 else entry.Completion!.TrySetResult(false);
             }
             CloseStream();
+            _archiveWorker?.RequestStop();
             Volatile.Write(ref _writerRunning, 0);
+            _abort.Dispose();
+        }
+    }
+
+    private void WriteEvent(PerformanceDiagnosticEvent diagnosticEvent)
+    {
+        try
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(diagnosticEvent, JsonOptions);
+            if (bytes.Length + 1 > MaximumEventBytes || !TryWriteBytes(bytes))
+                Interlocked.Increment(ref _droppedEvents);
+        }
+        catch (OperationCanceledException) when (_abort.IsCancellationRequested)
+        {
+            Interlocked.Increment(ref _droppedEvents);
+            throw;
+        }
+        catch (Exception exception) when (exception is JsonException or ArgumentException or InvalidOperationException or NotSupportedException)
+        {
+            Interlocked.Increment(ref _serializationFailures);
+            Interlocked.Increment(ref _droppedEvents);
         }
     }
 
@@ -253,7 +311,8 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
                 TimestampUtc = DateTimeOffset.UtcNow, Event = "diagnostics.loss", InstanceId,
                 DroppedEvents = dropped, DroppedEventsSinceLastReport = dropped - _reportedDroppedEvents,
                 WriterFailures = failures, WriterFailuresSinceLastReport = failures - _reportedWriterFailures,
-                QueueCapacity = _queueCapacity
+                QueueCapacity = _queueCapacity, QueueByteCapacity = _queueByteCapacity,
+                SerializationFailures = Interlocked.Read(ref _serializationFailures)
             }, JsonOptions);
             markerWritten = TryWriteBytes(marker);
             if (markerWritten) { _reportedDroppedEvents = dropped; _reportedWriterFailures = failures; }
@@ -295,11 +354,17 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
 
     private void Rotate(int requiredBytes)
     {
+        lock (_filesGate) RotateCore(requiredBytes);
+    }
+
+    private void RotateCore(int requiredBytes)
+    {
         CloseStream();
         Directory.CreateDirectory(_directory);
+        CleanupInterruptedTraceArtifacts();
         var budget = _fileSizeLimit * _retainedFileCount;
         var attempted = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var file in RetainedFiles().Where(file => file.Length > _fileSizeLimit)) TryDelete(file);
+        foreach (var file in RetainedFiles().Where(file => file.BodyLength > _fileSizeLimit)) TryDelete(file);
         while (true)
         {
             var remaining = RetainedFiles();
@@ -315,19 +380,110 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
             throw new IOException("Diagnostic retention capacity is blocked.");
         _currentFileLimit = Math.Min(_fileSizeLimit, availableBytes);
         var name = $"performance-{DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ", CultureInfo.InvariantCulture)}-{InstanceId}-{++_fileSequence:D6}.ndjson";
-        _stream = new FileStream(Path.Combine(_directory, name), FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024);
+        var path = Path.Combine(_directory, name);
+        _streamLease = PerformanceTraceArchive.AcquireLease(path);
+        try { _stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024); }
+        catch { _streamLease.Dispose(); _streamLease = null; throw; }
         _currentLength = 0;
+        Volatile.Write(ref _archiveReady, 1);
+        ScheduleArchive(DateTimeOffset.UtcNow);
 
-        void TryDelete(FileInfo file)
+        void TryDelete(TraceFile file)
         {
             attempted.Add(file.FullName);
-            try { _beforeDelete?.Invoke(file.FullName); file.Delete(); }
+            if (_artifactBlocked.Contains(file.FullName)) return;
+            try
+            {
+                using var lease = PerformanceTraceArchive.TryAcquireLease(file.FullName);
+                if (lease is null) return; // A live writer or archiver still owns this trace.
+                // Re-read paths under the lease; archival may have published since enumeration.
+                foreach (var path in TracePaths(file.FullName))
+                {
+                    if (!File.Exists(path)) continue;
+                    try { _beforeDelete?.Invoke(path); File.Delete(path); }
+                    catch (Exception exception) when (IsWriterFailure(exception)) { RecordFailure(); }
+                }
+            }
             catch (Exception exception) when (IsWriterFailure(exception)) { RecordFailure(); }
         }
     }
 
-    private FileInfo[] RetainedFiles() => Directory.EnumerateFiles(_directory, "performance-*.ndjson")
-        .Select(path => new FileInfo(path)).OrderBy(file => file.Name, StringComparer.Ordinal).ToArray();
+    private TraceFile[] RetainedFiles()
+        => Directory.EnumerateFiles(_directory, "performance-*")
+            .Select(path => (Path: path, Raw: TraceBasePath(path)))
+            .Where(entry => entry.Raw is not null)
+            .GroupBy(entry => entry.Raw!, StringComparer.Ordinal)
+            .Select(group => new TraceFile(group.Key, group.Select(entry => entry.Path).ToArray()))
+            .OrderBy(file => file.Name, StringComparer.Ordinal).ToArray();
+
+    private static string? TraceBasePath(string path)
+    {
+        var raw = path;
+        foreach (var suffix in new[] { ".gz.index.json.pending", ".gz.index.json", ".gz.pending", ".gz" })
+            if (raw.EndsWith(suffix, StringComparison.Ordinal)) { raw = raw[..^suffix.Length]; break; }
+        // Retain the historical date/name convention as well as current process-qualified files.
+        return PerformanceTraceArchive.IsTrace(raw)
+            || System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(raw),
+                @"^performance-\d{8}(?:-[a-z0-9]+)?\.ndjson$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            ? raw : null;
+    }
+
+    private void ScheduleArchive(DateTimeOffset nowUtc)
+    {
+        if (Volatile.Read(ref _archiveReady) != 0 && Volatile.Read(ref _stopping) == 0)
+            _archiveWorker?.Schedule(nowUtc);
+    }
+
+    internal Task ArchiveClosedTracesAsync(DateTimeOffset nowUtc)
+        => _archiveWorker?.RunOnceAsync(nowUtc) ?? Task.CompletedTask;
+
+    private void CleanupInterruptedTraceArtifacts()
+    {
+        _artifactBlocked.Clear();
+        foreach (var file in RetainedFiles().Where(file => file.HasInterruptedArtifacts))
+        {
+            try
+            {
+                using var lease = PerformanceTraceArchive.TryAcquireLease(file.FullName);
+                if (lease is null) continue;
+                PerformanceTraceArchive.CleanupInterruptedArtifacts(file.FullName, _beforeDelete);
+            }
+            catch (Exception exception) when (IsWriterFailure(exception))
+            {
+                // Preserve authoritative raw if its expendable companions cannot be removed.
+                _artifactBlocked.Add(file.FullName);
+                Interlocked.Increment(ref _archiveMaintenanceFailures);
+            }
+        }
+    }
+
+    private static IEnumerable<string> TracePaths(string rawPath)
+    {
+        yield return rawPath;
+        yield return rawPath + ".gz";
+        yield return rawPath + ".gz.index.json";
+        yield return rawPath + ".gz.pending";
+        yield return rawPath + ".gz.index.json.pending";
+    }
+
+    private sealed record TraceFile(string FullName, string[] Paths)
+    {
+        public string Name => Path.GetFileName(FullName);
+        public long BodyLength => ReadLength(FullName) is var raw && raw >= 0 ? raw : Math.Max(0, ReadLength(FullName + ".gz"));
+        // Count physical remnants against aggregate retention, but never mistake
+        // raw plus staging for one oversized authoritative body.
+        public long Length => Math.Max(Paths.Sum(path => Math.Max(0, ReadLength(path))),
+            ReadLength(FullName) is var raw && raw >= 0 ? raw
+                : Math.Max(0, ReadLength(FullName + ".gz")) + Math.Max(0, ReadLength(FullName + ".gz.index.json")));
+        public bool HasInterruptedArtifacts => Paths.Any(path => path.EndsWith(".pending", StringComparison.Ordinal))
+            || File.Exists(FullName) && Paths.Any(path => !string.Equals(path, FullName, StringComparison.Ordinal));
+        private static long ReadLength(string path)
+        {
+            try { return new FileInfo(path).Length; }
+            catch (FileNotFoundException) { return -1; }
+            catch (DirectoryNotFoundException) { return -1; }
+        }
+    }
 
     private void RecordFailure()
     {
@@ -349,6 +505,8 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
         finally
         {
             _stream = null;
+            _streamLease?.Dispose();
+            _streamLease = null;
             _currentLength = 0;
             _currentFileLimit = 0;
             EndIo(io);
@@ -385,21 +543,22 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
     private async Task ShutdownAsync()
     {
         Interlocked.Exchange(ref _stopping, 1);
+        _archiveWorker?.RequestStop();
         _queue?.Writer.TryComplete();
         if (_writerTask is null) { _abort.Dispose(); return; }
         try
         {
-            await _writerTask.WaitAsync(_shutdownTimeout).ConfigureAwait(false);
-            _abort.Dispose();
+            await _completion.WaitAsync(_shutdownTimeout).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
             Volatile.Write(ref _shutdownTimedOut, 1);
-            _abort.Cancel();
+            try { _abort.Cancel(); }
+            catch (ObjectDisposedException) { /* The writer completed at the timeout boundary. */ }
         }
     }
 
     public void Dispose() => GetShutdownTask().GetAwaiter().GetResult();
 
-    private sealed record QueueEntry(byte[]? Bytes, TaskCompletionSource<bool>? Completion);
+    private sealed record QueueEntry(PerformanceDiagnosticEvent? Event, TaskCompletionSource<bool>? Completion, int ReservedBytes);
 }

@@ -109,6 +109,8 @@ public sealed class OmdbClient : IOmdbClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         var cacheKey = $"omdb:imdb:{imdbId}";
+        _cache.TryGetValue(cacheKey, out OmdbItem? previousMemory);
+        if (previousMemory is not null && !IsVerifiedResponse(previousMemory)) previousMemory = null;
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out OmdbItem? cached)
             && cached is not null && IsVerifiedResponse(cached))
         {
@@ -120,14 +122,14 @@ public sealed class OmdbClient : IOmdbClient
         if (!forceRefresh && IsFresh(persisted)
             && IsVerifiedResponse(persisted!.Item))
         {
-            _cache.Set(cacheKey, persisted!.Item, CacheDuration(persisted.Item));
+            _cache.Set(cacheKey, persisted!.Item, persisted.CachedAtUtc.Add(CacheDuration(persisted.Item)));
             ProviderOutcomeDiagnostics.Record(_telemetry, "omdb", persisted.Item.Response == "False" ? "absent" : "completed", "cached_response", true);
             return new(persisted.Item, true);
         }
 
         var failures = new ProviderFailureCache(_cache, "omdb", _httpClient.BaseAddress, settings.ApiKey);
         if (failures.Get(_timeProvider.GetUtcNow()) is { } deferred)
-            return Failed(persisted?.Item, deferred);
+            return Failed(persisted?.Item ?? previousMemory, deferred);
 
         var state = _cacheStore is null
             ? new OmdbProviderCacheState(null, null, null)
@@ -135,8 +137,13 @@ public sealed class OmdbClient : IOmdbClient
         if (state.RateLimitedUntilUtc is { } rateLimitedUntil
             && rateLimitedUntil > _timeProvider.GetUtcNow())
         {
-            return Failed(persisted?.Item, new("local_backoff", null, rateLimitedUntil, true));
+            return Failed(persisted?.Item ?? previousMemory, new("local_backoff", null, rateLimitedUntil, true));
         }
+
+        var payloadFailures = new ProviderFailureCache(_cache, "omdb-payload", _httpClient.BaseAddress,
+            OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, settings.ApiKey, imdbId.Trim().ToLowerInvariant()));
+        if (!forceRefresh && payloadFailures.Get(_timeProvider.GetUtcNow()) is { } payloadDeferred)
+            return Failed(persisted?.Item ?? previousMemory, payloadDeferred);
 
         return await _singleFlight.RunAsync(
             forceRefresh ? $"refresh:{cacheKey}" : $"cache:{cacheKey}",
@@ -152,7 +159,7 @@ public sealed class OmdbClient : IOmdbClient
                 if (!forceRefresh && IsFresh(flightPersisted)
                     && IsVerifiedResponse(flightPersisted!.Item))
                 {
-                    _cache.Set(cacheKey, flightPersisted!.Item, CacheDuration(flightPersisted.Item));
+                    _cache.Set(cacheKey, flightPersisted!.Item, flightPersisted.CachedAtUtc.Add(CacheDuration(flightPersisted.Item)));
                     return new ProviderRefreshResult<OmdbItem?>(flightPersisted.Item, IsVerifiedResponse(flightPersisted.Item));
                 }
 
@@ -177,11 +184,25 @@ public sealed class OmdbClient : IOmdbClient
                         };
                         failures.Remember(failure, _timeProvider.GetUtcNow());
                         await RecordFailureAsync(response, failure.Reason, token);
-                        return Failed(flightPersisted?.Item, failure);
+                        return Failed(flightPersisted?.Item ?? previousMemory, failure);
                     }
 
-                    var item = await response.Content.ReadFromJsonAsync<OmdbItem>(JsonOptions, token);
-                    if (item is null) return Failed(flightPersisted?.Item, new("invalid_response"));
+                    using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(token), cancellationToken: token);
+                    if (document.RootElement.ValueKind != JsonValueKind.Object)
+                    {
+                        var invalid = new ProviderFailure("invalid_response", 200, _timeProvider.GetUtcNow().AddMinutes(1));
+                        payloadFailures.Remember(invalid, _timeProvider.GetUtcNow());
+                        await MarkFailureAsync("invalid_response", token);
+                        return Failed(flightPersisted?.Item ?? previousMemory, invalid, "payload_non_object");
+                    }
+                    var item = document.RootElement.Deserialize<OmdbItem>(JsonOptions);
+                    if (item is null || item.Ratings is null || item.Ratings.Any(rating => rating is null))
+                    {
+                        var invalid = new ProviderFailure("invalid_response", 200, _timeProvider.GetUtcNow().AddMinutes(1));
+                        payloadFailures.Remember(invalid, _timeProvider.GetUtcNow());
+                        await MarkFailureAsync("invalid_response", token);
+                        return Failed(flightPersisted?.Item ?? previousMemory, invalid, "payload_invalid_fields");
+                    }
                     if (!IsVerifiedResponse(item))
                     {
                         var error = item.Error ?? "";
@@ -189,11 +210,21 @@ public sealed class OmdbClient : IOmdbClient
                             ? new ProviderFailure("rate_limited", 200, _timeProvider.GetUtcNow().AddHours(Math.Max(1, _options.RateLimitBackoffHours)))
                             : error.Contains("key", StringComparison.OrdinalIgnoreCase)
                                 ? new ProviderFailure("authentication_denied", 200, _timeProvider.GetUtcNow().AddMinutes(15))
-                                : new ProviderFailure("invalid_response", 200);
-                        failures.Remember(failure, _timeProvider.GetUtcNow());
-                        if (_cacheStore is not null && failure.RetryAtUtc is { } until)
-                            await _cacheStore.MarkRateLimitedAsync(until, failure.Reason, token);
-                        return Failed(flightPersisted?.Item, failure);
+                                : new ProviderFailure("invalid_response", 200, _timeProvider.GetUtcNow().AddMinutes(1));
+                        var payloadCategory = string.IsNullOrWhiteSpace(item.Response) ? "payload_missing_response"
+                            : string.Equals(item.Response, "False", StringComparison.OrdinalIgnoreCase) ? "payload_unrecognized_error" : "payload_invalid_response_marker";
+                        if (failure.Reason == "invalid_response")
+                        {
+                            payloadFailures.Remember(failure, _timeProvider.GetUtcNow());
+                            await MarkFailureAsync(failure.Reason, token);
+                        }
+                        else
+                        {
+                            failures.Remember(failure, _timeProvider.GetUtcNow());
+                            if (_cacheStore is not null && failure.RetryAtUtc is { } until)
+                                await _cacheStore.MarkRateLimitedAsync(until, failure.Reason, token);
+                        }
+                        return Failed(flightPersisted?.Item ?? previousMemory, failure, payloadCategory);
                     }
 
                     _cache.Set(cacheKey, item, CacheDuration(item));
@@ -204,7 +235,7 @@ public sealed class OmdbClient : IOmdbClient
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    return Failed(flightPersisted?.Item, new("timeout"));
+                    return Failed(flightPersisted?.Item ?? previousMemory, new("timeout"));
                 }
                 catch (OperationCanceledException)
                 {
@@ -215,38 +246,42 @@ public sealed class OmdbClient : IOmdbClient
                     var failure = ProviderFailure.FromException(exception);
                     failures.Remember(failure, _timeProvider.GetUtcNow());
                     await MarkFailureAsync(failure.Reason, token);
-                    return Failed(flightPersisted?.Item, failure);
+                    return Failed(flightPersisted?.Item ?? previousMemory, failure);
                 }
                 catch (JsonException)
                 {
+                    var failure = new ProviderFailure("invalid_response", 200, _timeProvider.GetUtcNow().AddMinutes(1));
+                    payloadFailures.Remember(failure, _timeProvider.GetUtcNow());
                     await MarkFailureAsync("invalid_response", token);
-                    return Failed(flightPersisted?.Item, new("invalid_response"));
+                    return Failed(flightPersisted?.Item ?? previousMemory, failure, "payload_invalid_json");
                 }
             },
             cancellationToken);
     }
 
-    private ProviderRefreshResult<OmdbItem?> Failed(OmdbItem? previous, ProviderFailure failure)
+    private ProviderRefreshResult<OmdbItem?> Failed(OmdbItem? previous, ProviderFailure failure, string? payloadCategory = null)
     {
         _telemetry?.RecordDiagnostic("provider.outcome", _telemetry.CaptureDiagnosticContext(), new()
         {
-            Provider = "omdb", Outcome = "failed", Reason = failure.Reason,
+            Provider = "omdb", Outcome = "failed", Reason = failure.Reason, Stage = payloadCategory,
             StatusCode = failure.StatusCode, RetryAtUtc = failure.RetryAtUtc, FromCache = failure.IsLocal
         });
         return new(previous, false, failure);
     }
 
     private static bool IsVerifiedResponse(OmdbItem item)
-        => string.Equals(item.Response, "False", StringComparison.OrdinalIgnoreCase)
+        => item.Ratings is not null && item.Ratings.All(rating => rating is not null)
+            && (string.Equals(item.Response, "False", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(item.Error?.Trim(), "Movie not found!", StringComparison.OrdinalIgnoreCase)
             || string.Equals(item.Response, "True", StringComparison.OrdinalIgnoreCase)
-                && string.IsNullOrWhiteSpace(item.Error);
+                && string.IsNullOrWhiteSpace(item.Error));
 
     private async Task<OmdbCacheEntry?> GetPersistedAsync(string imdbId, CancellationToken cancellationToken)
     {
-        return _cacheStore is null
+        var persisted = _cacheStore is null
             ? null
             : await _cacheStore.GetAsync(imdbId, cancellationToken);
+        return persisted is not null && IsVerifiedResponse(persisted.Item) ? persisted : null;
     }
 
     private bool IsFresh(OmdbCacheEntry? entry)

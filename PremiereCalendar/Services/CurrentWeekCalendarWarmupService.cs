@@ -13,6 +13,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
     private readonly BackgroundJobTimelineService? _timeline;
     private readonly IProviderWorkScheduler? _workScheduler;
     private readonly NightlyCalendarWarmupPlanner? _nightlyPlanner;
+    private readonly DatabaseRecoveryState? _databaseState;
     private DateTimeOffset? _lastMaintenanceUtc;
 
     public CurrentWeekCalendarWarmupService(
@@ -23,7 +24,8 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
         ILogger<CurrentWeekCalendarWarmupService> logger,
         BackgroundJobTimelineService? timeline = null,
         IProviderWorkScheduler? workScheduler = null,
-        NightlyCalendarWarmupPlanner? nightlyPlanner = null)
+        NightlyCalendarWarmupPlanner? nightlyPlanner = null,
+        DatabaseRecoveryState? databaseState = null)
     {
         _scopeFactory = scopeFactory;
         _warmupOptions = warmupOptions;
@@ -33,6 +35,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
         _timeline = timeline;
         _workScheduler = workScheduler;
         _nightlyPlanner = nightlyPlanner;
+        _databaseState = databaseState;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -88,6 +91,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
 
     private async Task RunWarmupAndMaintenanceAsync(CancellationToken stoppingToken)
     {
+        if (_databaseState is not null) await _databaseState.WaitUntilHealthyAsync(stoppingToken);
         await RunNightlyPlanAsync(stoppingToken);
         if (_workScheduler is not null)
         {
@@ -178,6 +182,7 @@ public sealed class CurrentWeekCalendarWarmupService : BackgroundService
     private async Task RunNightlyPlanAsync(CancellationToken stoppingToken)
     {
         if (_nightlyPlanner is null) return;
+        if (_databaseState is not null) await _databaseState.WaitUntilHealthyAsync(stoppingToken);
         try
         {
             await _nightlyPlanner.RunOnceAsync(stoppingToken);

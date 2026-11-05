@@ -13,10 +13,15 @@ public sealed class AdaptiveProviderPolicy(
     ProviderAdaptiveStateStore store,
     TimeProvider timeProvider,
     PremiereTelemetry telemetry,
-    IOptions<ProviderSchedulerOptions>? schedulerOptions = null)
+    IOptions<ProviderSchedulerOptions>? schedulerOptions = null,
+    IOptions<TvmazeOptions>? tvmazeOptions = null)
 {
     private readonly ConcurrentDictionary<string, ProviderRuntimeState> _states = new(StringComparer.OrdinalIgnoreCase);
     private readonly ProviderSchedulerOptions _schedulerOptions = schedulerOptions?.Value ?? new ProviderSchedulerOptions();
+    private readonly ProviderPacingLimiter _tvmazePacing = new(timeProvider, tvmazeOptions?.Value.MinimumRequestIntervalMilliseconds ?? 510);
+
+    internal Task PaceAsync(string provider, CancellationToken cancellationToken)
+        => provider.Equals("tvmaze", StringComparison.OrdinalIgnoreCase) ? _tvmazePacing.WaitAsync(cancellationToken) : Task.CompletedTask;
 
     public async Task<ProviderExecutionLease> AcquireAsync(
         string provider,
@@ -574,6 +579,11 @@ public sealed class AdaptiveProviderHandler(
                     {
                         using var retryRequest = attempt == 1 ? null : await CloneAsync(request, requestToken);
                         requestToken.ThrowIfCancellationRequested();
+                        var pacingStarted = policy.GetTimestamp();
+                        await policy.PaceAsync(provider, requestToken);
+                        if (provider.Equals("tvmaze", StringComparison.OrdinalIgnoreCase))
+                            attemptDiagnostics.Record("provider.pacing.wait.completed", new()
+                            { Stage = "rate", Outcome = "admitted", WaitMilliseconds = policy.ElapsedMilliseconds(pacingStarted) });
                         requestSent = true;
                         sendStarted = policy.GetTimestamp();
                         response = await base.SendAsync(retryRequest ?? request, requestToken);

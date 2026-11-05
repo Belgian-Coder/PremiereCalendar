@@ -22,6 +22,7 @@ public sealed class TvmazeClient : ITvmazeClient
     private readonly ProviderRequestThrottler _requestThrottler;
     private readonly object _lookupPublicationGate;
     private readonly PremiereTelemetry? _telemetry;
+    private readonly OptionalProviderResponseCache _responses;
 
     public TvmazeClient(
         HttpClient httpClient,
@@ -30,7 +31,9 @@ public sealed class TvmazeClient : ITvmazeClient
         IIntegrationSettingsStore? settingsStore = null,
         ISingleFlightCoordinator? singleFlight = null,
         ProviderRequestThrottler? requestThrottler = null,
-        PremiereTelemetry? telemetry = null)
+        PremiereTelemetry? telemetry = null,
+        ProviderResponseCache? responseCache = null,
+        TimeProvider? timeProvider = null)
     {
         _httpClient = httpClient;
         _cache = cache;
@@ -40,6 +43,7 @@ public sealed class TvmazeClient : ITvmazeClient
         _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
         _lookupPublicationGate = LookupPublicationGates.GetValue(cache, static _ => new object());
         _telemetry = telemetry;
+        _responses = new(cache, responseCache, timeProvider);
     }
 
     public async Task<TvmazeShow?> LookupShowAsync(
@@ -64,65 +68,30 @@ public sealed class TvmazeClient : ITvmazeClient
             return new(null, true, new("not_applicable"));
         }
 
-        var cacheKey = $"tvmaze:lookup:{path}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out TvmazeShow? cached))
-        {
-            return new(cached, true);
-        }
-
-        return await _singleFlight.RunAsync<ProviderRefreshResult<TvmazeShow?>>(
-            FlightKey(cacheKey, forceRefresh),
+        var cacheKey = LookupCacheKey(path);
+        if (!forceRefresh && _cache.TryGetValue(cacheKey, out TvmazeShow? cached)) return new(cached, true);
+        var partition = OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, "", $"lookup:{path}");
+        return await _responses.GetAsync<TvmazeShow?>("tvmaze", partition, forceRefresh, TimeSpan.FromDays(7),
             async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out TvmazeShow? flightCached))
-                {
-                    return new(flightCached, true);
-                }
-
                 try
                 {
                     using var response = await GetAsync(path, token);
-                    if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                    {
-                        _cache.Set<TvmazeShow?>(cacheKey, null, TimeSpan.FromHours(6));
-                        return new(null, true);
-                    }
-
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        return new(null, false, ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow));
-                    }
-
+                    if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return new(null, true);
+                    if (!response.IsSuccessStatusCode) return new(null, false, ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow));
                     var show = await response.Content.ReadFromJsonAsync<TvmazeShow>(JsonOptions, token);
-                    if (show is { Id: > 0 })
-                    {
-                        lock (_lookupPublicationGate)
-                        {
-                            token.ThrowIfCancellationRequested();
-                            _cache.Set(cacheKey, show, TimeSpan.FromDays(7));
-                        }
-                    }
-
                     return show is { Id: > 0 } ? new(show, true) : new(null, false, new("invalid_response", 200));
                 }
-                catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                {
-                    return new(null, false, new("timeout"));
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (HttpRequestException exception)
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception exception) when (exception is OperationCanceledException or HttpRequestException or JsonException)
                 {
                     return new(null, false, ProviderFailure.FromException(exception));
                 }
-                catch (JsonException)
-                {
-                    return new(null, false, new("invalid_response"));
-                }
-            },
-            cancellationToken);
+            }, cancellationToken, show => show is null ? TimeSpan.FromHours(6) : TimeSpan.FromDays(7),
+            (show, expires) =>
+            {
+                lock (_lookupPublicationGate) _cache.Set(cacheKey, show, expires);
+            });
     }
 
     public async Task<TvmazeShow?> SearchShowByNameAsync(
@@ -146,68 +115,25 @@ public sealed class TvmazeClient : ITvmazeClient
             return new(null, true, new("not_applicable"));
         }
 
-        var cacheKey = $"tvmaze:search:{normalizedTitle}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out TvmazeShow? cached))
-        {
-            return new(cached, true);
-        }
-
-        return await _singleFlight.RunAsync<ProviderRefreshResult<TvmazeShow?>>(
-            FlightKey(cacheKey, forceRefresh),
+        var partition = OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, "", $"search:{normalizedTitle}");
+        return await _responses.GetAsync<TvmazeShow?>("tvmaze", partition, forceRefresh, TimeSpan.FromDays(7),
             async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out TvmazeShow? flightCached))
-                {
-                    return new(flightCached, true);
-                }
-
                 try
                 {
-                    var path = $"search/shows?q={Uri.EscapeDataString(title.Trim())}";
-                    using var response = await GetAsync(path, token);
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        return new(null, false, ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow));
-                    }
-
-                    var results = await response.Content.ReadFromJsonAsync<IReadOnlyList<TvmazeSearchResult>>(
-                        JsonOptions,
-                        token);
-
+                    using var response = await GetAsync($"search/shows?q={Uri.EscapeDataString(title.Trim())}", token);
+                    if (!response.IsSuccessStatusCode) return new(null, false, ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow));
+                    var results = await response.Content.ReadFromJsonAsync<IReadOnlyList<TvmazeSearchResult>>(JsonOptions, token);
                     if (results is null || results.Any(result => result?.Show is not { Id: > 0 }))
                         return new(null, false, new("invalid_response", 200));
-
-                    var show = results?
-                        .Select(result => result.Show)
-                        .FirstOrDefault(show => NormalizeTitle(show?.Name) == normalizedTitle);
-
-                    if (show is not null)
-                    {
-                        _cache.Set(cacheKey, show, TimeSpan.FromDays(7));
-                    }
-
-                    if (results is not null && show is null)
-                        _cache.Set<TvmazeShow?>(cacheKey, null, TimeSpan.FromHours(6));
-                    return new(show, results is not null);
+                    return new(results.Select(result => result.Show).FirstOrDefault(show => NormalizeTitle(show?.Name) == normalizedTitle), true);
                 }
-                catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                {
-                    return new(null, false, new("timeout"));
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (HttpRequestException exception)
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception exception) when (exception is OperationCanceledException or HttpRequestException or JsonException)
                 {
                     return new(null, false, ProviderFailure.FromException(exception));
                 }
-                catch (JsonException)
-                {
-                    return new(null, false, new("invalid_response"));
-                }
-            },
-            cancellationToken);
+            }, cancellationToken, show => show is null ? TimeSpan.FromHours(6) : TimeSpan.FromDays(7));
     }
 
     public async Task<IReadOnlyList<TvmazeShowImage>> GetShowImagesAsync(
@@ -224,57 +150,30 @@ public sealed class TvmazeClient : ITvmazeClient
             return new([], true, new("disabled"));
         }
 
-        var cacheKey = $"tvmaze:images:{showId}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<TvmazeShowImage>? cached) && cached is not null)
-        {
-            return new(cached, true);
-        }
-
-        return await _singleFlight.RunAsync<ProviderRefreshResult<IReadOnlyList<TvmazeShowImage>>>(
-            FlightKey(cacheKey, forceRefresh),
+        var partition = OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, "", $"images:{showId}");
+        var responseLifetime = TimeSpan.FromDays(7);
+        return await _responses.GetAsync<IReadOnlyList<TvmazeShowImage>>("tvmaze", partition, forceRefresh, TimeSpan.FromDays(7),
             async token =>
             {
-                if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<TvmazeShowImage>? flightCached) && flightCached is not null)
-                {
-                    return new(flightCached, true);
-                }
-
                 try
                 {
                     using var response = await GetAsync($"shows/{showId}/images", token);
                     if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                     {
-                        _cache.Set<IReadOnlyList<TvmazeShowImage>>(cacheKey, [], TimeSpan.FromHours(6));
+                        responseLifetime = TimeSpan.FromHours(6);
                         return new([], true);
                     }
                     if (!response.IsSuccessStatusCode) return new([], false, ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow));
-
-                    var images = await response.Content.ReadFromJsonAsync<IReadOnlyList<TvmazeShowImage>>(
-                        JsonOptions,
-                        token);
-                    if (images is null) return new([], false, new("invalid_response", 200));
-
-                    _cache.Set(cacheKey, images, TimeSpan.FromDays(7));
-                    return new(images, true);
+                    var images = await response.Content.ReadFromJsonAsync<IReadOnlyList<TvmazeShowImage>>(JsonOptions, token);
+                    return images is null || images.Any(image => image is null)
+                        ? new([], false, new("invalid_response", 200)) : new(images, true);
                 }
-                catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                {
-                    return new([], false, new("timeout"));
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (HttpRequestException exception)
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception exception) when (exception is OperationCanceledException or HttpRequestException or JsonException)
                 {
                     return new([], false, ProviderFailure.FromException(exception));
                 }
-                catch (JsonException)
-                {
-                    return new([], false, new("invalid_response"));
-                }
-            },
-            cancellationToken);
+            }, cancellationToken, _ => responseLifetime, unavailableFallback: Array.Empty<TvmazeShowImage>());
     }
 
     public async Task<IReadOnlyList<TvmazeScheduleEpisode>> GetScheduleAsync(
@@ -432,7 +331,7 @@ public sealed class TvmazeClient : ITvmazeClient
 
         void AddCandidate(string path, TvmazeShow show)
         {
-            var key = $"tvmaze:lookup:{path}";
+            var key = LookupCacheKey(path);
             if (!candidates.TryGetValue(key, out var previous)) candidates.Add(key, show);
             else if (previous?.Id != show.Id) candidates[key] = null;
         }
@@ -597,6 +496,10 @@ public sealed class TvmazeClient : ITvmazeClient
             }
             : (await _settingsStore.GetAsync(cancellationToken)).Sources.Tvmaze;
     }
+
+    private string LookupCacheKey(string path)
+        => _httpClient.BaseAddress == new Uri("https://api.tvmaze.com/") ? $"tvmaze:lookup:{path}"
+            : "tvmaze:lookup:" + OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, "", path);
 
     private static string FlightKey(string cacheKey, bool forceRefresh)
     {

@@ -277,6 +277,7 @@ internal sealed record DatabaseMigration(
 public sealed class DatabaseRecoveryState
 {
     private readonly object _gate = new();
+    private TaskCompletionSource _healthy = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DatabaseStatusSnapshot _snapshot = new(0, DatabaseSchema.CurrentVersion, false, "Database has not been initialized.", null, null);
 
     public DatabaseStatusSnapshot Snapshot
@@ -286,7 +287,18 @@ public sealed class DatabaseRecoveryState
 
     internal void Set(DatabaseStatusSnapshot snapshot)
     {
-        lock (_gate) _snapshot = snapshot;
+        lock (_gate)
+        {
+            _snapshot = snapshot;
+            if (snapshot.IsHealthy) _healthy.TrySetResult();
+            else if (_healthy.Task.IsCompleted)
+                _healthy = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    internal Task WaitUntilHealthyAsync(CancellationToken cancellationToken)
+    {
+        lock (_gate) return _healthy.Task.WaitAsync(cancellationToken);
     }
 }
 

@@ -16,19 +16,23 @@ public sealed class FanartClient : IFanartClient
     private readonly FanartOptions _options;
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly PremiereTelemetry? _telemetry;
+    private readonly OptionalProviderResponseCache _responses;
 
     public FanartClient(
         HttpClient httpClient,
         IMemoryCache cache,
         IOptions<FanartOptions> options,
         IIntegrationSettingsStore? settingsStore = null,
-        PremiereTelemetry? telemetry = null)
+        PremiereTelemetry? telemetry = null,
+        ProviderResponseCache? responseCache = null,
+        TimeProvider? timeProvider = null)
     {
         _httpClient = httpClient;
         _cache = cache;
         _options = options.Value;
         _settingsStore = settingsStore;
         _telemetry = telemetry;
+        _responses = new(cache, responseCache, timeProvider);
     }
 
     public async Task<FanartMovieArtwork?> GetMovieArtworkAsync(int tmdbId, CancellationToken cancellationToken, bool forceRefresh = false)
@@ -52,44 +56,66 @@ public sealed class FanartClient : IFanartClient
             ProviderOutcomeDiagnostics.Record(_telemetry, "fanart", "skipped", "not_configured");
             return new(default, true, new("not_configured"));
         }
-        var cacheKey = $"fanart:{kind}:{id}";
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? cached)) return new(cached, true);
-        var failures = new ProviderFailureCache(_cache, "fanart", _httpClient.BaseAddress, settings.ApiKey);
+        var partition = OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, settings.ApiKey, $"{kind}:{id}");
+        return await _responses.GetAsync<T?>("fanart", partition, forceRefresh, TimeSpan.FromDays(7),
+            token => FetchAsync<T>(path, artworkFields, settings.ApiKey, token), cancellationToken);
+    }
+
+    private async Task<ProviderRefreshResult<T?>> FetchAsync<T>(string path, string[] artworkFields, string apiKey, CancellationToken token)
+    {
+        var failures = new ProviderFailureCache(_cache, "fanart", _httpClient.BaseAddress, apiKey);
         if (failures.Get(DateTimeOffset.UtcNow) is { } deferred) return Failed<T>(deferred);
+        var payloadFailures = new ProviderFailureCache(_cache, "fanart-payload", _httpClient.BaseAddress,
+            OptionalProviderResponseCache.Partition(_httpClient.BaseAddress, apiKey, path));
+        if (payloadFailures.Get(DateTimeOffset.UtcNow) is { } payloadDeferred) return Failed<T>(payloadDeferred);
+        ProviderRefreshResult<T?> Invalid(string category)
+        {
+            var failure = new ProviderFailure("invalid_response", 200, DateTimeOffset.UtcNow.AddMinutes(1));
+            payloadFailures.Remember(failure, DateTimeOffset.UtcNow);
+            return Failed<T>(failure, category);
+        }
         try
         {
-            var requestPath = $"{path}?api_key={Uri.EscapeDataString(settings.ApiKey)}";
             using var response = await ProviderHttpRetry.SendAsync(_httpClient,
-                () => new HttpRequestMessage(HttpMethod.Get, requestPath), cancellationToken);
-            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-            {
-                _cache.Set<T?>(cacheKey, default, TimeSpan.FromDays(7));
-                return new(default, true);
-            }
+                () => new HttpRequestMessage(HttpMethod.Get, $"{path}?api_key={Uri.EscapeDataString(apiKey)}"), token);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return new(default, true);
             if (!response.IsSuccessStatusCode)
             {
                 var failure = ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow);
                 failures.Remember(failure, DateTimeOffset.UtcNow);
                 return Failed<T>(failure);
             }
-            using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+            using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(token), cancellationToken: token);
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || root.TryGetProperty("error", out _)
-                || !(HasIdentity(root) || artworkFields.Any(field => root.TryGetProperty(field, out var array) && array.ValueKind == JsonValueKind.Array)))
-                return Failed<T>(new("invalid_response", 200));
+            if (root.ValueKind != JsonValueKind.Object) return Invalid("payload_non_object");
+            // Fanart explicitly documents this legacy v3 missing-resource response.
+            if (!root.EnumerateObject().Any() && IsLegacyV3Endpoint())
+            {
+                ProviderOutcomeDiagnostics.Record(_telemetry, "fanart", "absent", "legacy_empty_object");
+                return new(default, true);
+            }
+            if (root.TryGetProperty("error", out _)) return Invalid("payload_error_object");
+            if (!(HasIdentity(root) || artworkFields.Any(field => root.TryGetProperty(field, out var array) && array.ValueKind == JsonValueKind.Array)))
+                return Invalid("payload_unrecognized_object");
+            foreach (var field in artworkFields)
+                if (root.TryGetProperty(field, out var array) && (array.ValueKind != JsonValueKind.Array
+                    || array.EnumerateArray().Any(value => value.ValueKind != JsonValueKind.Object)))
+                    return Invalid("payload_invalid_artwork");
             var value = root.Deserialize<T>(JsonOptions);
-            if (value is null) return Failed<T>(new("invalid_response", 200));
-            _cache.Set(cacheKey, value, TimeSpan.FromDays(7));
-            return new(value, true);
+            return value is null ? Invalid("payload_null") : new(value, true);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception exception) when (exception is OperationCanceledException or HttpRequestException or JsonException)
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (JsonException) { return Invalid("payload_invalid_json"); }
+        catch (Exception exception) when (exception is OperationCanceledException or HttpRequestException)
         {
             var failure = ProviderFailure.FromException(exception);
             failures.Remember(failure, DateTimeOffset.UtcNow);
             return Failed<T>(failure);
         }
     }
+
+    private bool IsLegacyV3Endpoint()
+        => _httpClient.BaseAddress?.AbsolutePath.TrimEnd('/').EndsWith("/v3", StringComparison.OrdinalIgnoreCase) == true;
 
     private static bool HasIdentity(JsonElement root)
     {
@@ -103,11 +129,11 @@ public sealed class FanartClient : IFanartClient
         return false;
     }
 
-    private ProviderRefreshResult<T?> Failed<T>(ProviderFailure failure)
+    private ProviderRefreshResult<T?> Failed<T>(ProviderFailure failure, string? payloadCategory = null)
     {
         _telemetry?.RecordDiagnostic("provider.outcome", _telemetry.CaptureDiagnosticContext(), new()
         {
-            Provider = "fanart", Outcome = "failed", Reason = failure.Reason,
+            Provider = "fanart", Outcome = "failed", Reason = failure.Reason, Stage = payloadCategory,
             StatusCode = failure.StatusCode, RetryAtUtc = failure.RetryAtUtc, FromCache = failure.IsLocal
         });
         return new(default, false, failure);

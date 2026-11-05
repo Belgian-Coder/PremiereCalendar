@@ -4363,6 +4363,7 @@ public sealed partial class PremiereServiceTests
         public TimeSpan? TvDetailDelay { get; init; }
         public TimeSpan? MovieDelay { get; init; }
         public TimeSpan? MovieDetailDelay { get; init; }
+        public Func<int, CancellationToken, Task<TmdbDetailsWithExtras?>>? MovieDetailOverride { get; init; }
         public IReadOnlyList<TmdbKeyword> KeywordResults { get; init; } = [];
         public Dictionary<int, TmdbDetailsWithExtras> TvDetailsById { get; } = [];
         public Dictionary<int, TmdbDetailsWithExtras> MovieDetailsById { get; } = [];
@@ -4570,6 +4571,7 @@ public sealed partial class PremiereServiceTests
         public async Task<TmdbDetailsWithExtras?> GetMovieDetailsAsync(int id, CancellationToken cancellationToken, bool forceRefresh = false)
         {
             MovieDetailCalls.Add(new DetailCall(id, forceRefresh));
+            if (MovieDetailOverride is { } getDetails) return await getDetails(id, cancellationToken);
             if (MovieDetailDelay is { } delay) await Task.Delay(delay, cancellationToken);
             if (MovieDetailExceptions.TryGetValue(id, out var exception))
             {

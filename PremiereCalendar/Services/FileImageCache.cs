@@ -27,6 +27,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
     private readonly ILogger<FileImageCache> _logger;
     private readonly ProviderRequestThrottler _requestThrottler;
     private readonly ImageDecodeLimiter _decodeLimiter;
+    private readonly ImageRefreshQueue? _refreshQueue;
 
     public FileImageCache(
         HttpClient httpClient,
@@ -34,7 +35,8 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         IWebHostEnvironment environment,
         ILogger<FileImageCache> logger,
         ProviderRequestThrottler? requestThrottler = null,
-        ImageDecodeLimiter? decodeLimiter = null)
+        ImageDecodeLimiter? decodeLimiter = null,
+        ImageRefreshQueue? refreshQueue = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
@@ -42,6 +44,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         _logger = logger;
         _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
         _decodeLimiter = decodeLimiter ?? new ImageDecodeLimiter(options);
+        _refreshQueue = refreshQueue;
     }
 
     public async Task<CachedImage> GetOrAddAsync(
@@ -51,12 +54,36 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
         int? width = null,
         ImageCacheFormat format = ImageCacheFormat.Original)
     {
+        return await GetOrAddCoreAsync(sourceUrl, forceRefresh, cancellationToken, width, format, allowBackgroundRefresh: true);
+    }
+
+    private async Task<CachedImage> GetOrAddCoreAsync(
+        string sourceUrl, bool forceRefresh, CancellationToken cancellationToken,
+        int? width, ImageCacheFormat format, bool allowBackgroundRefresh)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         var sourceUri = ValidateSourceUrl(sourceUrl);
         var targetWidth = NormalizeWidth(width);
         format = targetWidth is > 0 ? format : ImageCacheFormat.Original;
         var cacheKey = CacheKey(sourceUri, targetWidth, format);
         var metadataPath = MetadataPath(cacheKey);
         var browserMaxAge = TimeSpan.FromDays(Math.Max(1, _options.CacheDays));
+        // Immutable generation paths can be served without waiting for a refresh that
+        // already owns this key. Legacy entries still migrate under the key gate below.
+        if (!forceRefresh && allowBackgroundRefresh && _refreshQueue is not null
+            && TryReadAnyMetadata(metadataPath, out var available)
+            && available.BodyGenerationVersion == BodyGenerationVersion
+            && TryGetBodyPath(cacheKey, available, out var availablePath))
+        {
+            var stale = !IsFresh(available);
+            if (stale)
+            {
+                _refreshQueue.TryEnqueue(metadataPath, token => GetOrAddCoreAsync(
+                    sourceUrl, false, token, width, format, allowBackgroundRefresh: false));
+            }
+            return await ReadCachedImageAsync(availablePath, available, metadataPath, cacheKey,
+                stale ? TimeSpan.FromMinutes(1) : browserMaxAge, cancellationToken, stale);
+        }
         var cacheKeyLock = AcquireCacheKeyGate(cacheKey);
 
         try
@@ -275,9 +302,11 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             return false;
         }
 
-        var maxAge = TimeSpan.FromDays(Math.Max(1, _options.CacheDays));
-        return DateTimeOffset.UtcNow - metadata.FetchedUtc <= maxAge;
+        return IsFresh(metadata);
     }
+
+    private bool IsFresh(ImageCacheMetadata metadata)
+        => DateTimeOffset.UtcNow - metadata.FetchedUtc <= TimeSpan.FromDays(Math.Max(1, _options.CacheDays));
 
     private static bool TryReadAnyMetadata(string metadataPath, out ImageCacheMetadata metadata)
     {

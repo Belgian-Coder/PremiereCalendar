@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO.Compression;
 using System.Runtime.CompilerServices;
@@ -17,6 +18,9 @@ public sealed class TmdbClient : ITmdbClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const int TmdbMaximumPage = 500;
+    private const int MaximumNotFoundEntries = 256;
+    private static readonly TimeSpan NotFoundLifetime = TimeSpan.FromMinutes(15);
+    private static readonly ConditionalWeakTable<IMemoryCache, ReuseState> ReuseStates = new();
 
     private readonly HttpClient _httpClient;
     private readonly IMemoryCache _cache;
@@ -27,6 +31,11 @@ public sealed class TmdbClient : ITmdbClient
     private readonly ISingleFlightCoordinator _singleFlight;
     private readonly ProviderResponseCache? _responseCache;
     private readonly PremiereTelemetry? _telemetry;
+    private readonly object _reuseLock;
+    private readonly Dictionary<string, DiscoveryFlight> _discoveryFlights;
+    private readonly Dictionary<string, ReusePublicationState> _reusePublications;
+    private readonly Dictionary<string, LinkedListNode<NotFoundEntry>> _notFound;
+    private readonly LinkedList<NotFoundEntry> _notFoundLru;
 
     public TmdbClient(
         HttpClient httpClient,
@@ -48,6 +57,12 @@ public sealed class TmdbClient : ITmdbClient
         _singleFlight = singleFlight ?? new SingleFlightCoordinator();
         _responseCache = responseCache;
         _telemetry = telemetry;
+        var reuse = ReuseStates.GetValue(cache, static _ => new ReuseState());
+        _reuseLock = reuse.Gate;
+        _discoveryFlights = reuse.DiscoveryFlights;
+        _reusePublications = reuse.Publications;
+        _notFound = reuse.NotFound;
+        _notFoundLru = reuse.NotFoundLru;
     }
 
     public async Task<IReadOnlyList<TmdbTvDiscoverItem>> DiscoverTvAsync(
@@ -140,13 +155,13 @@ public sealed class TmdbClient : ITmdbClient
             return Task.FromResult<IReadOnlyList<TmdbTvDiscoverItem>>([]);
         }
 
-        var cacheKey = $"tmdb:discover-tv-networks:{start:yyyyMMdd}:{end:yyyyMMdd}:{NetworkKey(filteredNetworkIds)}";
+        var cacheKey = DiscoverPagingKey($"tmdb:discover-tv-networks:{start:yyyyMMdd}:{end:yyyyMMdd}:{NetworkKey(filteredNetworkIds)}");
         return GetOrCreateRequiredAsync(
             cacheKey,
             TimeSpan.FromHours(6),
             token => GetPagedAsync<TmdbTvDiscoverItem>(
                 page => TmdbQueryBuilder.BuildDiscoverTvByNetworksPath(start, end, filteredNetworkIds, page),
-                token),
+                token, forceRefresh: forceRefresh),
             cancellationToken,
             forceRefresh);
     }
@@ -162,7 +177,7 @@ public sealed class TmdbClient : ITmdbClient
                 TmdbQueryBuilder.BuildTvDetailsPath(id),
                 "TMDb TV details",
                 token,
-                notFoundReturnsNull: true),
+                notFoundReturnsNull: true, verifyNotFound: true),
             cancellationToken,
             forceRefresh,
             persistentRequestKey: $"details-v1:{_options.BaseUrl}:{TmdbQueryBuilder.BuildTvDetailsPath(id)}");
@@ -188,7 +203,7 @@ public sealed class TmdbClient : ITmdbClient
                 TmdbQueryBuilder.BuildTvSeasonDetailsPath(id, seasonNumber),
                 "TMDb TV season details",
                 token,
-                notFoundReturnsNull: true),
+                notFoundReturnsNull: true, verifyNotFound: true),
             cancellationToken,
             forceRefresh,
             persistentRequestKey: $"season-v1:{_options.BaseUrl}:{TmdbQueryBuilder.BuildTvSeasonDetailsPath(id, seasonNumber)}");
@@ -205,7 +220,7 @@ public sealed class TmdbClient : ITmdbClient
                 TmdbQueryBuilder.BuildMovieDetailsPath(id),
                 "TMDb movie details",
                 token,
-                notFoundReturnsNull: true),
+                notFoundReturnsNull: true, verifyNotFound: true),
             cancellationToken,
             forceRefresh,
             persistentRequestKey: $"details-v1:{_options.BaseUrl}:{TmdbQueryBuilder.BuildMovieDetailsPath(id)}");
@@ -483,7 +498,7 @@ public sealed class TmdbClient : ITmdbClient
             TimeSpan.FromHours(1),
             token => GetPagedAsync<TmdbChangedItem>(
                 page => TmdbQueryBuilder.BuildChangesPath(mediaType, start, end, page),
-                token, requireComplete: true),
+                token, requireComplete: true, forceRefresh: forceRefresh),
             cancellationToken,
             forceRefresh);
     }
@@ -491,9 +506,11 @@ public sealed class TmdbClient : ITmdbClient
     private async Task<IReadOnlyList<T>> GetPagedAsync<T>(
         Func<int, string> pathFactory,
         CancellationToken cancellationToken,
-        bool requireComplete = false)
+        bool requireComplete = false,
+        bool forceRefresh = false)
     {
-        var firstPage = await FetchDiscoverPageAsync<T>(pathFactory, 1, cancellationToken);
+        var flightScope = forceRefresh ? Guid.NewGuid().ToString("N") : null;
+        var firstPage = await FetchDiscoverPageAsync<T>(pathFactory, 1, cancellationToken, flightScope);
         if (firstPage is null)
         {
             if (requireComplete) throw new ExternalApiException("TMDb changes returned no first page.");
@@ -533,7 +550,7 @@ public sealed class TmdbClient : ITmdbClient
 
                 try
                 {
-                    return (Page: page, Response: await FetchDiscoverPageAsync<T>(pathFactory, page, cancellationToken));
+                    return (Page: page, Response: await FetchDiscoverPageAsync<T>(pathFactory, page, cancellationToken, flightScope));
                 }
                 finally
                 {
@@ -563,72 +580,116 @@ public sealed class TmdbClient : ITmdbClient
         [EnumeratorCancellation] CancellationToken cancellationToken,
         bool forceRefresh)
     {
-        if (!forceRefresh && _cache.TryGetValue(cacheKey, out IReadOnlyList<T>? cached) && cached is not null)
+        cancellationToken.ThrowIfCancellationRequested();
+        cacheKey = SourceCacheKey(DiscoverPagingKey(cacheKey));
+        DiscoveryFlight? flight = null;
+        ReusePublication? publication = null;
+        long waiterId = 0;
+        IReadOnlyList<T>? cached = null;
+        lock (_reuseLock)
         {
-            yield return new TmdbDiscoverBatch<T>(1, 1, 1, cached.Count, cached);
+            if (forceRefresh || !_cache.TryGetValue(cacheKey, out cached) || cached is null)
+            {
+                publication = BeginReusePublication(cacheKey, forceRefresh);
+                if (forceRefresh || !_discoveryFlights.TryGetValue(cacheKey, out flight) || !flight.CanJoin)
+                {
+                    flight = new DiscoveryFlight();
+                    if (!forceRefresh) _discoveryFlights[cacheKey] = flight;
+                }
+                flight.References++;
+                waiterId = flight.AddWaiter(ProviderExecutionContext.CapturePriorityAccessor(), cancellationToken);
+            }
+        }
+        if (flight is null)
+        {
+            yield return new TmdbDiscoverBatch<T>(1, 1, 1, cached!.Count, cached);
             yield break;
         }
 
-        var firstPage = await FetchDiscoverPageAsync<T>(pathFactory, 1, cancellationToken);
-        if (firstPage is null)
+        try
         {
-            yield break;
-        }
+            var firstPage = await flight.GetOrAdd(1, token => FetchDiscoverPageAsync<T>(pathFactory, 1, token, flight.Id))
+                .WaitAsync(cancellationToken);
+            if (firstPage is null)
+            {
+                yield break;
+            }
 
-        var totalPages = Math.Clamp(Math.Max(1, firstPage.TotalPages), 1, TmdbMaximumPage);
-        var configuredMaxPages = IsBroadDiscoverQuery(firstPage, pathFactory)
-            ? _options.MaxUnfilteredPagesPerQuery
-            : _options.MaxPagesPerQuery;
-        var maxPages = Math.Clamp(configuredMaxPages, 1, TmdbMaximumPage);
-        var pagesToFetch = Math.Min(totalPages, maxPages);
-        if (firstPage.TotalPages > maxPages)
-        {
-            _logger.LogWarning(
-                "TMDb discover query returned {TotalPages} pages; fetching configured cap of {MaxPagesPerQuery} pages.",
-                firstPage.TotalPages,
-                maxPages);
-        }
+            var totalPages = Math.Clamp(Math.Max(1, firstPage.TotalPages), 1, TmdbMaximumPage);
+            var configuredMaxPages = IsBroadDiscoverQuery(firstPage, pathFactory)
+                ? _options.MaxUnfilteredPagesPerQuery
+                : _options.MaxPagesPerQuery;
+            var maxPages = Math.Clamp(configuredMaxPages, 1, TmdbMaximumPage);
+            var pagesToFetch = Math.Min(totalPages, maxPages);
+            if (firstPage.TotalPages > maxPages)
+            {
+                _logger.LogWarning(
+                    "TMDb discover query returned {TotalPages} pages; fetching configured cap of {MaxPagesPerQuery} pages.",
+                    firstPage.TotalPages,
+                    maxPages);
+            }
 
-        var accumulated = new List<T>(firstPage.Results);
-        yield return new TmdbDiscoverBatch<T>(
-            firstPage.Page > 0 ? firstPage.Page : 1,
-            firstPage.Page > 0 ? firstPage.Page : 1,
-            totalPages,
-            firstPage.TotalResults,
-            firstPage.Results);
-
-        if (pagesToFetch <= 1)
-        {
-            _cache.Set(cacheKey, accumulated.ToArray(), cacheDuration);
-            yield break;
-        }
-
-        var pageBatchSize = Math.Clamp(_options.PageBatchSize, 1, 50);
-        for (var pageStart = 2; pageStart <= pagesToFetch; pageStart += pageBatchSize)
-        {
-            var pageEnd = Math.Min(pagesToFetch, pageStart + pageBatchSize - 1);
-            var fetchedPages = await FetchPageRangeAsync<T>(pathFactory, pageStart, pageEnd, cancellationToken);
-            var results = fetchedPages
-                .SelectMany(page => page.Results)
-                .ToArray();
-
-            accumulated.AddRange(results);
+            var accumulated = new List<T>(firstPage.Results);
             yield return new TmdbDiscoverBatch<T>(
-                pageStart,
-                pageEnd,
+                firstPage.Page > 0 ? firstPage.Page : 1,
+                firstPage.Page > 0 ? firstPage.Page : 1,
                 totalPages,
                 firstPage.TotalResults,
-                results);
-        }
+                firstPage.Results);
 
-        _cache.Set(cacheKey, accumulated.ToArray(), cacheDuration);
+            if (pagesToFetch <= 1)
+            {
+                publication!.TryPublish(() => _cache.Set(cacheKey, accumulated.ToArray(), cacheDuration));
+                yield break;
+            }
+
+            var pageBatchSize = Math.Clamp(_options.PageBatchSize, 1, 50);
+            for (var pageStart = 2; pageStart <= pagesToFetch; pageStart += pageBatchSize)
+            {
+                var pageEnd = Math.Min(pagesToFetch, pageStart + pageBatchSize - 1);
+                var rangeStart = pageStart;
+                var fetchedPages = await flight.GetOrAdd(rangeStart,
+                    token => FetchPageRangeAsync<T>(pathFactory, rangeStart, pageEnd, token, flight.Id))
+                    .WaitAsync(cancellationToken);
+                var results = fetchedPages
+                    .SelectMany(page => page.Results)
+                    .ToArray();
+
+                accumulated.AddRange(results);
+                yield return new TmdbDiscoverBatch<T>(
+                    pageStart,
+                    pageEnd,
+                    totalPages,
+                    firstPage.TotalResults,
+                    results);
+            }
+
+            publication!.TryPublish(() => _cache.Set(cacheKey, accumulated.ToArray(), cacheDuration));
+        }
+        finally
+        {
+            flight.RemoveWaiter(waiterId);
+            publication!.Dispose();
+            var release = false;
+            lock (_reuseLock)
+            {
+                if (--flight.References == 0)
+                {
+                    if (_discoveryFlights.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, flight))
+                        _discoveryFlights.Remove(cacheKey);
+                    release = true;
+                }
+            }
+            if (release) await flight.StopAsync();
+        }
     }
 
     private async Task<IReadOnlyList<TmdbPagedResponse<T>>> FetchPageRangeAsync<T>(
         Func<int, string> pathFactory,
         int pageStart,
         int pageEnd,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? flightScope = null)
     {
         var pageCount = Math.Max(0, pageEnd - pageStart + 1);
         if (pageCount == 0)
@@ -645,7 +706,7 @@ public sealed class TmdbClient : ITmdbClient
 
                 try
                 {
-                    return await FetchDiscoverPageAsync<T>(pathFactory, page, cancellationToken);
+                    return await FetchDiscoverPageAsync<T>(pathFactory, page, cancellationToken, flightScope);
                 }
                 finally
                 {
@@ -687,11 +748,12 @@ public sealed class TmdbClient : ITmdbClient
     private Task<TmdbPagedResponse<T>?> FetchDiscoverPageAsync<T>(
         Func<int, string> pathFactory,
         int page,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? flightScope = null)
     {
         var path = pathFactory(page);
         return _singleFlight.RunAsync(
-            $"tmdb:discover-page:{path}",
+            SourceCacheKey($"tmdb:discover-page:{flightScope ?? "normal"}:{path}"),
             token => SendJsonAsync<TmdbPagedResponse<T>>(
                 path,
                 "TMDb discover",
@@ -709,7 +771,7 @@ public sealed class TmdbClient : ITmdbClient
         string? persistentRequestKey = null,
         Func<T, TimeSpan>? lifetimeSelector = null)
         => TraceLookupAsync(cacheKey, forceRefresh, () => GetOrCreateScopedAsync(
-            cacheKey, duration, factory, cancellationToken, forceRefresh, persistentRequestKey, lifetimeSelector));
+            SourceCacheKey(cacheKey), duration, factory, cancellationToken, forceRefresh, persistentRequestKey, lifetimeSelector));
 
     private Task<T?> GetOrCreateScopedAsync<T>(
         string cacheKey,
@@ -746,6 +808,11 @@ public sealed class TmdbClient : ITmdbClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         var memoryStarted = Stopwatch.GetTimestamp();
+        if (!forceRefresh && IsNotFoundCached(cacheKey))
+        {
+            RecordMemoryLookup(cacheKey, "verified_not_found", memoryStarted);
+            return default;
+        }
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? cached))
         {
             RecordMemoryLookup(cacheKey, "hit", memoryStarted);
@@ -760,12 +827,15 @@ public sealed class TmdbClient : ITmdbClient
             async token =>
             {
                 var flightMemoryStarted = Stopwatch.GetTimestamp();
+                if (!forceRefresh && IsNotFoundCached(cacheKey))
+                    return default;
                 if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? flightCached))
                 {
                     RecordMemoryLookup(cacheKey, "shared_hit", flightMemoryStarted);
                     return flightCached;
                 }
 
+                using var memoryPublication = BeginReusePublication(cacheKey, forceRefresh);
                 using var publication = persistentRequestKey is null ? null : _responseCache?.BeginOperation("tmdb", persistentRequestKey, forceRefresh);
                 if (!forceRefresh && persistentRequestKey is not null && _responseCache is not null)
                 {
@@ -775,13 +845,34 @@ public sealed class TmdbClient : ITmdbClient
                         return await publication!.PublishAsync(current =>
                         {
                             if (_cache.TryGetValue(cacheKey, out T? latest)) return Task.FromResult(latest);
-                            if (current) _cache.Set(cacheKey, persisted.Value, persisted.ExpiresAtUtc);
+                            if (current) memoryPublication.TryPublish(() => _cache.Set(cacheKey, persisted.Value, persisted.ExpiresAtUtc));
                             return Task.FromResult<T?>(persisted.Value);
                         }, token);
                     }
                 }
 
-                var value = await factory(token);
+                T? value;
+                try { value = await factory(token); }
+                catch (VerifiedNotFoundException)
+                {
+                    if (publication is not null)
+                    {
+                        return await publication.PublishAsync(async current =>
+                        {
+                            if (current && memoryPublication.TryPublish(() => RememberNotFound(cacheKey)))
+                            {
+                                // A typed tombstone invalidates an older persisted success. The
+                                // short negative itself stays bounded in this client, not on disk.
+                                await _responseCache!.SaveAsync("tmdb", persistentRequestKey!, new TmdbResponseInvalidation(), token);
+                            }
+                            else if (!forceRefresh && _cache.TryGetValue(cacheKey, out T? latest)) return latest;
+                            return default;
+                        }, token);
+                    }
+                    if (!memoryPublication.TryPublish(() => RememberNotFound(cacheKey))
+                        && !forceRefresh && _cache.TryGetValue(cacheKey, out T? latest)) return latest;
+                    return default;
+                }
                 if (value is not null)
                 {
                     var effectiveDuration = lifetimeSelector?.Invoke(value) ?? duration;
@@ -789,9 +880,12 @@ public sealed class TmdbClient : ITmdbClient
                     {
                         return await publication.PublishAsync(async current =>
                         {
-                            if (current)
+                            if (current && memoryPublication.TryPublish(() =>
                             {
+                                ForgetNotFound(cacheKey);
                                 _cache.Set(cacheKey, value, effectiveDuration);
+                            }))
+                            {
                                 await _responseCache!.SaveAsync("tmdb", persistentRequestKey!, value, token,
                                     invalidateOversized: forceRefresh, lifetime: effectiveDuration);
                             }
@@ -800,7 +894,11 @@ public sealed class TmdbClient : ITmdbClient
                         }, token);
                     }
 
-                    _cache.Set(cacheKey, value, effectiveDuration);
+                    if (!memoryPublication.TryPublish(() =>
+                    {
+                        ForgetNotFound(cacheKey);
+                        _cache.Set(cacheKey, value, effectiveDuration);
+                    }) && !forceRefresh && _cache.TryGetValue(cacheKey, out T? latest)) return latest;
                 }
 
                 return value;
@@ -815,7 +913,7 @@ public sealed class TmdbClient : ITmdbClient
         CancellationToken cancellationToken,
         bool forceRefresh)
         => TraceLookupAsync(cacheKey, forceRefresh, () => GetOrCreateRequiredCoreAsync(
-            cacheKey, duration, factory, cancellationToken, forceRefresh));
+            SourceCacheKey(cacheKey), duration, factory, cancellationToken, forceRefresh));
 
     private async Task<T> GetOrCreateRequiredCoreAsync<T>(
         string cacheKey,
@@ -845,8 +943,10 @@ public sealed class TmdbClient : ITmdbClient
                     return flightCached;
                 }
 
+                using var publication = BeginReusePublication(cacheKey, forceRefresh);
                 var value = await factory(token);
-                _cache.Set(cacheKey, value, duration);
+                if (!publication.TryPublish(() => _cache.Set(cacheKey, value, duration))
+                    && !forceRefresh && _cache.TryGetValue(cacheKey, out T? latest) && latest is not null) return latest;
                 return value;
             },
             cancellationToken);
@@ -856,7 +956,8 @@ public sealed class TmdbClient : ITmdbClient
         string path,
         string operation,
         CancellationToken cancellationToken,
-        bool notFoundReturnsNull)
+        bool notFoundReturnsNull,
+        bool verifyNotFound = false)
     {
         try
         {
@@ -864,6 +965,20 @@ public sealed class TmdbClient : ITmdbClient
 
             if (notFoundReturnsNull && response.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
+                if (verifyNotFound)
+                {
+                    try
+                    {
+                        var error = await ReadJsonContentAsync<JsonElement>(response.Content, cancellationToken);
+                        if (error.ValueKind == JsonValueKind.Object
+                            && error.TryGetProperty("status_code", out var code) && code.ValueKind == JsonValueKind.Number
+                            && code.TryGetInt32(out var status)
+                            && status is 6 or 34
+                            && error.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
+                            throw new VerifiedNotFoundException();
+                    }
+                    catch (JsonException) { /* An unverified 404 is never retained as a negative. */ }
+                }
                 return default;
             }
 
@@ -1052,4 +1167,167 @@ public sealed class TmdbClient : ITmdbClient
     {
         return networkIds.Count == 0 ? "all" : string.Join('|', networkIds);
     }
+
+    private string SourceCacheKey(string key) => $"tmdb-source:{_httpClient.BaseAddress?.AbsoluteUri ?? _options.BaseUrl}:{key}";
+
+    private string DiscoverPagingKey(string key) => $"pages:{Math.Clamp(_options.MaxPagesPerQuery, 1, TmdbMaximumPage)}:"
+        + $"{Math.Clamp(_options.MaxUnfilteredPagesPerQuery, 1, TmdbMaximumPage)}:{Math.Clamp(_options.PageBatchSize, 1, 50)}:{key}";
+
+    private sealed class ReuseState
+    {
+        public object Gate { get; } = new();
+        public Dictionary<string, DiscoveryFlight> DiscoveryFlights { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, ReusePublicationState> Publications { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, LinkedListNode<NotFoundEntry>> NotFound { get; } = new(StringComparer.Ordinal);
+        public LinkedList<NotFoundEntry> NotFoundLru { get; } = new();
+    }
+
+    // Retain completed batches only while callers are enumerating this query. A slow
+    // subscriber replays the same pages, and the last subscriber cancels pending I/O.
+    private sealed class DiscoveryFlight
+    {
+        private readonly object _gate = new();
+        private readonly CancellationTokenSource _cancellation = new();
+        private readonly Dictionary<int, Task> _batches = new();
+        private readonly ConcurrentDictionary<long, PriorityWaiter> _waiters = new();
+        private long _nextWaiterId;
+        private int _failed;
+        public string Id { get; } = Guid.NewGuid().ToString("N");
+        public bool CanJoin => Volatile.Read(ref _failed) == 0;
+        public int References;
+
+        public Task<T> GetOrAdd<T>(int pageStart, Func<CancellationToken, Task<T>> factory)
+        {
+            lock (_gate)
+            {
+                if (!_batches.TryGetValue(pageStart, out var task))
+                    _batches[pageStart] = task = RunBatchAsync(factory);
+                return (Task<T>)task;
+            }
+        }
+
+        public long AddWaiter(Func<ProviderWorkPriority> priority, CancellationToken cancellationToken)
+        {
+            var id = Interlocked.Increment(ref _nextWaiterId);
+            _waiters[id] = new PriorityWaiter(priority, cancellationToken);
+            return id;
+        }
+
+        public void RemoveWaiter(long id) => _waiters.TryRemove(id, out _);
+
+        private async Task<T> RunBatchAsync<T>(Func<CancellationToken, Task<T>> factory)
+        {
+            // Admission queues retain this accessor and reevaluate it when selecting
+            // work, so a foreground subscriber can promote an already queued page.
+            using var priority = ProviderExecutionContext.Push(CurrentPriority);
+            try { return await factory(_cancellation.Token); }
+            catch
+            {
+                // Existing subscribers retain their ordered batches, but a later
+                // caller must make a fresh attempt rather than replay this failure.
+                Volatile.Write(ref _failed, 1);
+                throw;
+            }
+        }
+
+        private ProviderWorkPriority CurrentPriority() => _waiters
+            .Where(pair => !pair.Value.Token.IsCancellationRequested)
+            .Select(pair => pair.Value.Priority()).DefaultIfEmpty(ProviderWorkPriority.Maintenance).Min();
+
+        private sealed record PriorityWaiter(Func<ProviderWorkPriority> Priority, CancellationToken Token);
+
+        public async Task StopAsync()
+        {
+            try { await _cancellation.CancelAsync(); }
+            catch (Exception) { /* Cleanup must not replace caller cancellation or a provider failure. */ }
+            Task[] tasks;
+            lock (_gate) tasks = _batches.Values.ToArray();
+            try { await Task.WhenAll(tasks); }
+            catch (Exception) { /* Observe every pending page before releasing its cancellation source. */ }
+            _cancellation.Dispose();
+        }
+    }
+
+    private ReusePublication BeginReusePublication(string key, bool forceRefresh)
+    {
+        lock (_reuseLock)
+        {
+            if (!_reusePublications.TryGetValue(key, out var state))
+                _reusePublications[key] = state = new ReusePublicationState();
+            state.References++;
+            if (forceRefresh) state.Generation++;
+            return new ReusePublication(this, key, state, forceRefresh);
+        }
+    }
+
+    private sealed class ReusePublicationState
+    {
+        public long Generation;
+        public int References;
+    }
+
+    private sealed class ReusePublication(TmdbClient owner, string key, ReusePublicationState state, bool forceRefresh) : IDisposable
+    {
+        private long _generation = state.Generation;
+
+        public bool TryPublish(Action publish)
+        {
+            lock (owner._reuseLock)
+            {
+                if (state.Generation != _generation) return false;
+                publish();
+                // Fence normal operations that began while the refresh was fetching.
+                if (forceRefresh) _generation = ++state.Generation;
+                return true;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (owner._reuseLock)
+            {
+                if (--state.References == 0) owner._reusePublications.Remove(key);
+            }
+        }
+    }
+
+    private bool IsNotFoundCached(string key)
+    {
+        lock (_reuseLock)
+        {
+            if (!_notFound.TryGetValue(key, out var entry)) return false;
+            if (entry.Value.ExpiresUtc <= DateTimeOffset.UtcNow)
+            {
+                ForgetNotFound(key);
+                return false;
+            }
+            _notFoundLru.Remove(entry);
+            _notFoundLru.AddFirst(entry);
+            return true;
+        }
+    }
+
+    private void RememberNotFound(string key)
+    {
+        lock (_reuseLock)
+        {
+            ForgetNotFound(key);
+            _cache.Remove(key);
+            _notFound[key] = _notFoundLru.AddFirst(new NotFoundEntry(key, DateTimeOffset.UtcNow + NotFoundLifetime));
+            while (_notFound.Count > MaximumNotFoundEntries)
+                ForgetNotFound(_notFoundLru.Last!.Value.Key);
+        }
+    }
+
+    private void ForgetNotFound(string key)
+    {
+        lock (_reuseLock)
+        {
+            if (_notFound.Remove(key, out var entry)) _notFoundLru.Remove(entry);
+        }
+    }
+
+    private sealed record NotFoundEntry(string Key, DateTimeOffset ExpiresUtc);
+    private sealed class VerifiedNotFoundException : Exception { }
+    private sealed record TmdbResponseInvalidation(bool Invalidated = true);
 }

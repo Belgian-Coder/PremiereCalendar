@@ -17,7 +17,8 @@ public sealed class ItemEnrichmentCacheBackfillService(
     IOptions<CalendarWarmupOptions> warmupOptions,
     TimeProvider clock,
     ILogger<ItemEnrichmentCacheBackfillService> logger,
-    PremiereTelemetry telemetry) : BackgroundService
+    PremiereTelemetry telemetry,
+    DatabaseRecoveryState? databaseState = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -36,6 +37,7 @@ public sealed class ItemEnrichmentCacheBackfillService(
 
     internal async Task RunOnceAsync(CancellationToken cancellationToken)
     {
+        if (databaseState is not null) await databaseState.WaitUntilHealthyAsync(cancellationToken);
         var marker = "itemcache:backfill:v1:" + coordinator.Partition;
         if (await appState.GetValueAsync(marker, cancellationToken) is not null) return;
         var started = Stopwatch.GetTimestamp();

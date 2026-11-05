@@ -12,7 +12,7 @@ public sealed partial class ProviderWorkSchedulerTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ReattachingToAdjacentExecutionPreservesItsClaimAndPromotesLastWatcherCancellation(bool beginBeforeAttach)
+    public async Task ReattachingToAdjacentExecutionPreservesItsClaimWithoutLastWatcherCancellation(bool beginBeforeAttach)
     {
         var request = new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "reattach-background", ProviderWorkPriority.Foreground, "{}");
         var handle = await _scheduler.EnqueueAsync(request);
@@ -41,7 +41,7 @@ public sealed partial class ProviderWorkSchedulerTests
             await first.DisposeAsync();
             Assert.False(execution.IsCancellationRequested);
             await second.DisposeAsync();
-            Assert.True(execution.IsCancellationRequested);
+            Assert.False(execution.IsCancellationRequested);
         }
         finally { if (execution is not null) _scheduler.EndExecution(job, execution); }
         Assert.Equal(ProviderWorkPriority.Foreground, ProviderExecutionContext.CapturePriorityAccessor()());
@@ -52,7 +52,7 @@ public sealed partial class ProviderWorkSchedulerTests
     [InlineData(false, true)]
     [InlineData(true, false)]
     [InlineData(true, true)]
-    public async Task DifferentForegroundJobPreemptsAdjacentClaimBeforeOrAfterBegin(bool beginBeforeEnqueue, bool attachExistingQueuedJob)
+    public async Task DifferentForegroundJobPreemptsDemotedCalendarClaimBeforeOrAfterBegin(bool beginBeforeEnqueue, bool attachExistingQueuedJob)
     {
         await _scheduler.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "background-claim", ProviderWorkPriority.Adjacent, "{}"));
         var job = (await _scheduler.ClaimNextAsync(false, "background-worker", CancellationToken.None))!;

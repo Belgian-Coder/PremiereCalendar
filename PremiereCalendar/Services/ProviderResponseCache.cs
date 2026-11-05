@@ -26,6 +26,9 @@ public sealed class ProviderResponseCache(
     private long _tmdbBackoffUntilUtcTicks;
     private long _rottenTomatoesBackoffUntilUtcTicks;
     private long _cleanupBackoffUntilUtcTicks;
+    private long _fanartBackoffUntilUtcTicks;
+    private long _watchmodeBackoffUntilUtcTicks;
+    private long _tvmazeBackoffUntilUtcTicks;
 
     public PublicationOperation BeginOperation(string provider, string requestKey, bool forceRefresh)
     {
@@ -100,7 +103,12 @@ public sealed class ProviderResponseCache(
         }
     }
 
+    // Compatibility callers retain their nullable cache-hit contract.
     public async Task<CachedProviderResponse<T>?> GetAsync<T>(
+        string provider, string requestKey, TimeSpan lifetime, CancellationToken cancellationToken)
+        => (await ReadAsync<T>(provider, requestKey, lifetime, cancellationToken)).Response;
+
+    public async Task<ProviderResponseCacheRead<T>> ReadAsync<T>(
         string provider, string requestKey, TimeSpan lifetime, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -111,11 +119,11 @@ public sealed class ProviderResponseCache(
         budget.CancelAfter(IoBudget);
         try
         {
-            if (IsBackingOff(provider))
+            if (BackoffDeadline(provider) is { } deadline)
             {
                 outcome = "skipped";
                 reason = "backoff_active";
-                return null;
+                return new(ProviderResponseCacheReadStatus.StorageUnavailable, RetryAtUtc: deadline);
             }
             var state = await store.GetAsync(Namespace(provider), ProviderCacheScope.Item, Hash(requestKey), budget.Token);
             cancellationToken.ThrowIfCancellationRequested();
@@ -123,25 +131,27 @@ public sealed class ProviderResponseCache(
             if (state is null || string.IsNullOrWhiteSpace(state.MetadataJson)
                 || Encoding.UTF8.GetByteCount(state.MetadataJson) > MaximumPayloadBytes)
             {
-                return null;
+                return new(ProviderResponseCacheReadStatus.Miss);
             }
 
-            var expiresAt = state.LastCheckedUtc + lifetime;
             var now = _timeProvider.GetUtcNow();
+            DateTimeOffset expiresAt;
+            try { expiresAt = state.LastCheckedUtc + lifetime; }
+            catch (ArgumentOutOfRangeException) { return new(ProviderResponseCacheReadStatus.Miss); }
             if (state.LastCheckedUtc > now || expiresAt <= now)
             {
-                return null;
+                return new(ProviderResponseCacheReadStatus.Miss);
             }
 
             var envelope = JsonSerializer.Deserialize<ResponseEnvelope<T>>(state.MetadataJson, JsonOptions);
             if (envelope?.FreshUntilUtc is { } explicitExpiry && explicitExpiry < expiresAt)
                 expiresAt = explicitExpiry;
-            if (expiresAt <= now) return null;
+            if (expiresAt <= now) return new(ProviderResponseCacheReadStatus.Miss);
             var result = envelope is { Version: EnvelopeVersion, Value: not null } && envelope.Type == typeof(T).FullName
                 ? new CachedProviderResponse<T>(envelope.Value, expiresAt)
                 : null;
             outcome = result is null ? "miss" : "hit";
-            return result;
+            return new(result is null ? ProviderResponseCacheReadStatus.Miss : ProviderResponseCacheReadStatus.Hit, result);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -153,17 +163,27 @@ public sealed class ProviderResponseCache(
             cancellationToken.ThrowIfCancellationRequested();
             outcome = "failed";
             reason = "budget_exceeded";
-            BackOff(provider);
-            return null;
+            return new(ProviderResponseCacheReadStatus.StorageUnavailable, RetryAtUtc: BackOff(provider));
         }
-        catch (Exception ex)
+        catch (OperationCanceledException)
+        {
+            outcome = "canceled";
+            throw;
+        }
+        catch (JsonException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            outcome = "miss";
+            reason = "invalid_payload";
+            return new(ProviderResponseCacheReadStatus.Miss);
+        }
+        catch (Exception)
         {
             outcome = "failed";
             cancellationToken.ThrowIfCancellationRequested();
-            if (budget.IsCancellationRequested) reason = "budget_exceeded";
-            if (ex is not JsonException) BackOff(provider);
+            reason = budget.IsCancellationRequested ? "budget_exceeded" : "storage_unavailable";
             logger.LogWarning("Unable to read persistent provider response cache.");
-            return null;
+            return new(ProviderResponseCacheReadStatus.StorageUnavailable, RetryAtUtc: BackOff(provider));
         }
         finally
         {
@@ -298,12 +318,25 @@ public sealed class ProviderResponseCache(
         }
     }
 
-    private bool IsBackingOff(string provider) => _timeProvider.GetUtcNow().UtcTicks < Volatile.Read(ref BackoffSlot(provider));
-    private void BackOff(string provider) => Interlocked.Exchange(ref BackoffSlot(provider), _timeProvider.GetUtcNow().Add(FailureBackoff).UtcTicks);
+    private bool IsBackingOff(string provider) => BackoffDeadline(provider) is not null;
+    private DateTimeOffset? BackoffDeadline(string provider)
+    {
+        var ticks = Volatile.Read(ref BackoffSlot(provider));
+        return ticks > _timeProvider.GetUtcNow().UtcTicks ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
+    }
+    private DateTimeOffset BackOff(string provider)
+    {
+        var until = _timeProvider.GetUtcNow().Add(FailureBackoff);
+        Interlocked.Exchange(ref BackoffSlot(provider), until.UtcTicks);
+        return until;
+    }
     private ref long BackoffSlot(string provider)
     {
         if (provider == "tmdb") return ref _tmdbBackoffUntilUtcTicks;
         if (provider == "rottentomatoes") return ref _rottenTomatoesBackoffUntilUtcTicks;
+        if (provider == "fanart") return ref _fanartBackoffUntilUtcTicks;
+        if (provider == "watchmode") return ref _watchmodeBackoffUntilUtcTicks;
+        if (provider == "tvmaze") return ref _tvmazeBackoffUntilUtcTicks;
         return ref _cleanupBackoffUntilUtcTicks;
     }
 
@@ -311,7 +344,7 @@ public sealed class ProviderResponseCache(
         => telemetry?.RecordDiagnostic("providerresponsecache", details: new()
         {
             Stage = stage,
-            Provider = provider is "tmdb" or "rottentomatoes" ? provider : "other",
+            Provider = provider is "tmdb" or "rottentomatoes" or "fanart" or "watchmode" or "tvmaze" ? provider : "other",
             Cache = "persistent_response",
             CacheKey = Hash(requestKey)[3..],
             Outcome = outcome,
@@ -322,3 +355,8 @@ public sealed class ProviderResponseCache(
 }
 
 public sealed record CachedProviderResponse<T>(T Value, DateTimeOffset ExpiresAtUtc);
+
+public enum ProviderResponseCacheReadStatus { Hit, Miss, StorageUnavailable }
+
+public sealed record ProviderResponseCacheRead<T>(ProviderResponseCacheReadStatus Status,
+    CachedProviderResponse<T>? Response = null, DateTimeOffset? RetryAtUtc = null);

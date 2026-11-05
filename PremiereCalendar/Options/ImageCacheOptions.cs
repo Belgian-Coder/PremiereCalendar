@@ -9,6 +9,8 @@ public sealed class ImageCacheOptions
     public int MaxConcurrentDownloads { get; init; } = 4;
     public int MaxConcurrentDecodes { get; init; } = 2;
     public long MaxDecodedPixels { get; init; } = 40_000_000;
+    public int BackgroundRefreshConcurrency { get; init; } = 2;
+    public int BackgroundRefreshQueueCapacity { get; init; } = 64;
     public int RequestTimeoutSeconds { get; init; } = 20;
     public string[] AllowedHosts { get; init; } =
     [

@@ -230,18 +230,22 @@ public sealed partial class PremiereService
         if (details is null && discoveredItem is not null && _itemEnrichmentAttempt.Value?.PreviousMetadata is { } previousMetadata)
             return await RefreshItemRatingsAsync(previousMetadata.Apply(discoveredItem), cancellationToken);
 
+        var startedTasks = new List<Task>(5);
+        try
+        {
         var ratingsTask = GetExternalRatingsAsync(details?.ExternalIds?.ImdbId, cancellationToken, forceRefresh);
         var tvmazeTask = GetTvSeriesEnrichmentAsync(details?.ExternalIds, item.Name, cancellationToken, forceRefresh);
-        await Task.WhenAll(ratingsTask, tvmazeTask);
-        var ratings = await ratingsTask;
-        var tvmaze = await tvmazeTask;
-        var rottenTomatoesScores = await GetRottenTomatoesScoresAsync(
+        var rottenTomatoesTask = GetRottenTomatoesScoresAsync(
             PremiereMediaType.Series,
             item.Name,
             premiereDate.Year,
             details?.ExternalIds?.WikidataId,
             cancellationToken,
             forceRefresh);
+        startedTasks.AddRange([ratingsTask, tvmazeTask, rottenTomatoesTask]);
+        await Task.WhenAll(ratingsTask, tvmazeTask);
+        var ratings = await ratingsTask;
+        var tvmaze = await tvmazeTask;
         var bestBackdropPath = CoalesceText(
             item.BackdropPath,
             details?.BackdropPath,
@@ -255,7 +259,7 @@ public sealed partial class PremiereService
             tmdbBackdropUrl = previousBackdrop;
             backdropAttempt.BackdropReused = true;
         }
-        var artwork = await ResolveArtworkAsync(
+        var artworkTask = ResolveArtworkAsync(
             tmdbPosterUrl,
             ratings.PosterUrl,
             tvmaze.ImageUrl,
@@ -269,16 +273,22 @@ public sealed partial class PremiereService
                 item.Name),
             cancellationToken,
             forceRefresh);
+        startedTasks.Add(artworkTask);
         var baseSources = EnrichmentSourceEntries(details, _options.SourceRegions, tvmaze.NetworkName, tvmaze.WebChannelName);
-        var sources = allowWatchmodeAvailabilityFallback
-            ? await SourceEntriesWithWatchmodeFallbackAsync(
+        var sourcesTask = allowWatchmodeAvailabilityFallback
+            ? SourceEntriesWithWatchmodeFallbackAsync(
                 baseSources,
                 PremiereMediaType.Series,
                 item.Id,
                 details?.ExternalIds?.ImdbId,
                 cancellationToken,
                 forceRefresh)
-            : baseSources;
+            : Task.FromResult(baseSources);
+        startedTasks.Add(sourcesTask);
+        await Task.WhenAll(artworkTask, sourcesTask, rottenTomatoesTask);
+        var artwork = await artworkTask;
+        var sources = await sourcesTask;
+        var rottenTomatoesScores = await rottenTomatoesTask;
         var tmdbRuntime = details?.EpisodeRunTime.FirstOrDefault(runtime => runtime > 0);
         if (_itemEnrichmentAttempt.Value is { } runtimeAttempt) runtimeAttempt.RuntimeFromTvmaze = tmdbRuntime is not > 0;
         var dateSemantics = BuildSeriesDateSemantics(
@@ -340,6 +350,12 @@ public sealed partial class PremiereService
             OfficialSiteUrl = tvmaze.OfficialSiteUrl,
             TvmazeUrl = tvmaze.TvmazeUrl
         };
+        }
+        catch
+        {
+            await ObserveStartedEnrichmentTasksAsync(startedTasks);
+            throw;
+        }
     }
 
     private async Task<PremiereItem?> MapMovieUncachedCoreAsync(
@@ -348,7 +364,7 @@ public sealed partial class PremiereService
         bool forceRefresh,
         IReadOnlyDictionary<string, PremiereItem>? cachedEnrichment = null,
         bool allowWatchmodeAvailabilityFallback = true,
-        MediaDiscoveryCriteria? requestedMovieCriteria = null)
+        MediaDiscoveryCriteria? requestedMovieCriteria = null, bool coreOnly = false)
     {
         var releaseDateValue = CoalesceText(item.ReleaseDate, item.PrimaryReleaseDate);
         if (item.Id <= 0
@@ -370,7 +386,32 @@ public sealed partial class PremiereService
             item.Id,
             cancellationToken));
         if (details is null && discoveredItem is not null && _itemEnrichmentAttempt.Value?.PreviousMetadata is { } previousMetadata)
-            return await RefreshItemRatingsAsync(previousMetadata.Apply(discoveredItem), cancellationToken);
+            return coreOnly ? previousMetadata.Apply(discoveredItem) : await RefreshItemRatingsAsync(previousMetadata.Apply(discoveredItem), cancellationToken);
+
+        PremiereItem? CoreMetadata()
+        {
+            if (details is null) return discoveredItem;
+            var sources = EnrichmentSourceEntries(details, _options.SourceRegions);
+            var poster = BuildImageUrl(_options.PosterSize, CoalesceText(item.PosterPath, details.PosterPath, SelectBestImagePath(details.Images?.Posters)));
+            return discoveredItem! with
+            {
+                ImdbId = details.ExternalIds?.ImdbId, WikidataId = details.ExternalIds?.WikidataId,
+                Title = CoalesceText(item.Title, details.Title, details.OriginalTitle) ?? item.Title,
+                OriginalTitle = CoalesceText(item.OriginalTitle, details.OriginalTitle),
+                Overview = CoalesceText(item.Overview, details.Overview),
+                PosterUrl = poster, ImageSource = poster is null ? null : "TMDb poster",
+                BackdropUrl = BuildImageUrl(_options.BackdropSize, CoalesceText(item.BackdropPath, details.BackdropPath, SelectBestImagePath(details.Images?.Backdrops))),
+                TrailerUrl = _trailerSelector.SelectBestYouTubeTrailer(details.Videos?.Results),
+                ImdbUrl = BuildImdbUrl(details.ExternalIds?.ImdbId),
+                OriginalLanguage = CoalesceText(item.OriginalLanguage, details.OriginalLanguage) ?? "",
+                OriginCountries = ProductionCountriesOrFallback(details, item.OriginCountry),
+                Sources = sources, SourceNames = SourceNames(sources), GenreIds = GenreIdsOrFallback(details, item.GenreIds),
+                Genres = GenreNames(details), Keywords = KeywordNames(details.Keywords),
+                MovieReleaseTypes = MovieReleaseTypes(details, _options.SourceRegions),
+                Certifications = MovieCertifications(details, _options.SourceRegions), RuntimeMinutes = details.Runtime
+            };
+        }
+        if (coreOnly) return CoreMetadata();
 
         if (requestedMovieCriteria is not null)
         {
@@ -399,6 +440,11 @@ public sealed partial class PremiereService
                     Reason = "request_filter",
                     ItemId = item.Id
                 });
+                if (_itemEnrichmentAttempt.Value is { MetadataSucceeded: true } rejected)
+                {
+                    rejected.CoreMetadataOnly = true;
+                    return CoreMetadata();
+                }
                 return null;
             }
         }
@@ -725,6 +771,13 @@ public sealed partial class PremiereService
     {
         var attempt = _itemEnrichmentAttempt.Value;
         var started = Stopwatch.GetTimestamp();
+        if (attempt is not null && _itemCacheSession.Value is { } session)
+        {
+            attempt.ExternalIdentity = ItemEnrichmentCacheCoordinator.ItemEnrichmentSession.ComponentIdentity("omdb", imdbId);
+            var identity = new ItemEnrichmentIdentity(attempt.MediaType ?? PremiereMediaType.Movie, attempt.ItemId);
+            attempt.ExternalRetryAllowed = attempt.ExplicitForceRefresh || session.ComponentRetryAllowed(identity, "omdb", attempt.ExternalIdentity);
+            attempt.DatasetRetryAllowed = attempt.ExplicitForceRefresh || session.ComponentRetryAllowed(identity, "imdb_dataset", attempt.ExternalIdentity);
+        }
         if (string.IsNullOrWhiteSpace(imdbId))
         {
             if (attempt is not null)
@@ -743,7 +796,7 @@ public sealed partial class PremiereService
             var datasetStarted = Stopwatch.GetTimestamp();
             try
             {
-                var rating = await _imdbRatingsStore.GetByImdbIdAsync(imdbId, cancellationToken);
+                var rating = await ImdbRatingLookupBatcher.GetAsync(_imdbRatingsStore, imdbId, cancellationToken);
                 dataset = new(imdbId, rating?.AverageRating, rating?.VoteCount, attempt?.CurrentUtc ?? DateTimeOffset.UtcNow);
                 if (attempt is not null)
                 {
@@ -836,6 +889,13 @@ public sealed partial class PremiereService
     {
         var attempt = _itemEnrichmentAttempt.Value;
         var started = Stopwatch.GetTimestamp();
+        if (attempt is not null && _itemCacheSession.Value is { } session)
+        {
+            attempt.TomatoesIdentity = ItemEnrichmentCacheCoordinator.ItemEnrichmentSession.ComponentIdentity("rottentomatoes",
+                wikidataId: wikidataId, title: title, year: year);
+            attempt.TomatoesRetryAllowed = attempt.ExplicitForceRefresh || session.ComponentRetryAllowed(
+                new(attempt.MediaType ?? mediaType, attempt.ItemId), "rottentomatoes", attempt.TomatoesIdentity);
+        }
         if (_rottenTomatoesClient is null && attempt is not null)
         {
             attempt.TomatoesNotRequired = true;
@@ -931,6 +991,24 @@ public sealed partial class PremiereService
             Reason = reason, StatusCode = statusCode, RetryAtUtc = retryAtUtc,
             DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
         };
+        if (_itemCacheSession.Value is { } session && details.ItemId is > 0 && _itemEnrichmentAttempt.Value?.MediaType is { } type)
+        {
+            var identity = new ItemEnrichmentIdentity(type, details.ItemId.Value);
+            var component = stage == "artwork" ? "artwork" : provider;
+            var componentIdentity = component switch
+            {
+                "omdb" or "imdb_dataset" => _itemEnrichmentAttempt.Value.ExternalIdentity,
+                "rottentomatoes" => _itemEnrichmentAttempt.Value.TomatoesIdentity,
+                "tvmaze" => _itemEnrichmentAttempt.Value.TvmazeIdentity,
+                _ => null
+            };
+            if (outcome == "preserved_failed"
+                && (reason is not ("local_backoff" or "local_circuit") || retryAtUtc > _itemEnrichmentAttempt.Value.CurrentUtc))
+                session.RecordComponentOutcome(identity, component, false, retryAtUtc, componentIdentity);
+            else if (outcome is "provider_fetch_success" or "provider_verified_empty"
+                && !(stage == "artwork" && _itemEnrichmentAttempt.Value.ArtworkFailed))
+                session.RecordComponentOutcome(identity, component, true, componentIdentity: componentIdentity);
+        }
         _telemetry.RecordDiagnostic("item_cache.component", details: details);
         if (outcome == "preserved_failed" && (retryAtUtc > DateTimeOffset.UtcNow || reason is "local_backoff" or "local_circuit"))
             _telemetry.RecordDiagnostic("item_cache.component.deferred", details: details with { Outcome = "deferred" });
@@ -950,22 +1028,23 @@ public sealed partial class PremiereService
         var currentAttempt = _itemEnrichmentAttempt.Value;
         if (currentAttempt?.PreviousMetadata is { PosterUrl: not null } owned)
         {
-            if (owned.ImageSource == "TMDb poster" && currentAttempt.MetadataSucceeded)
+            if (owned.ImageSource == "TMDb poster" && currentAttempt.CoreMetadataVerified)
                 currentAttempt.PosterOwnerVerifiedEmpty = string.IsNullOrWhiteSpace(tmdbPosterUrl);
-            else if (owned.ImageSource == "TMDb backdrop" && currentAttempt.MetadataSucceeded)
+            else if (owned.ImageSource == "TMDb backdrop" && currentAttempt.CoreMetadataVerified)
                 currentAttempt.PosterOwnerVerifiedEmpty = string.IsNullOrWhiteSpace(tmdbBackdropUrl);
             else if (owned.ImageSource == "OMDb poster" && currentAttempt.ExternalSucceeded)
                 currentAttempt.PosterOwnerVerifiedEmpty = string.IsNullOrWhiteSpace(omdbPosterUrl);
             else if (owned.ImageSource == ArtworkSources.TvmazeImage && currentAttempt.TvmazeSucceeded)
                 currentAttempt.PosterOwnerVerifiedEmpty = string.IsNullOrWhiteSpace(tvmazeEnrichmentImageUrl);
         }
-        var refreshedBackdropPoster = currentAttempt is { MetadataSucceeded: true } && !string.IsNullOrWhiteSpace(tmdbBackdropUrl)
+        var refreshedBackdropPoster = currentAttempt is { CoreMetadataVerified: true } && !string.IsNullOrWhiteSpace(tmdbBackdropUrl)
             && (currentAttempt.PreviousMetadata?.ImageSource == "TMDb backdrop" || currentAttempt.PosterOwnerVerifiedEmpty);
         if (currentAttempt is { } retry && (retry.PreviousMetadata?.ArtworkComplete == false || retry.PosterOwnerVerifiedEmpty))
         {
             forceRefresh = true;
-            if (!retry.MetadataSucceeded) tmdbPosterUrl = null;
-            if (!retry.ExternalSucceeded) omdbPosterUrl = null;
+            if (!retry.CoreMetadataVerified) tmdbPosterUrl = null;
+            if (!retry.ExternalSucceeded && !(retry.ExternalReused && !retry.PosterOwnerVerifiedEmpty
+                && retry.PreviousMetadata is { CoreMetadataOnly: true, CoreOmdbCoverReusable: true })) omdbPosterUrl = null;
             if (!retry.TvmazeSucceeded) tvmazeEnrichmentImageUrl = null;
         }
         var knownCover = ArtworkResolver.ResolveKnownCover(
@@ -989,6 +1068,15 @@ public sealed partial class PremiereService
             return new ArtworkCandidate(cachedPoster, metadata.ImageSource ?? "Cached artwork");
         }
 
+        if (currentAttempt is { ExplicitForceRefresh: false } deferredArtwork && _itemCacheSession.Value is { } artworkSession
+            && !artworkSession.ComponentRetryAllowed(new(request.MediaType, request.TmdbId), "artwork"))
+        {
+            deferredArtwork.ArtworkFailed = true;
+            deferredArtwork.ArtworkReused = true;
+            RecordItemComponent("cache", "artwork", "deferred", started, "failure_retry_pending");
+            return deferredArtwork.PreviousMetadata is { PosterUrl: { } poster } retained
+                ? new ArtworkCandidate(poster, retained.ImageSource ?? "Cached artwork") : null;
+        }
         var allProvidersSkipped = _artworkProviders.Count > 0;
         foreach (var provider in _artworkProviders)
         {
@@ -1002,7 +1090,7 @@ public sealed partial class PremiereService
         }
         if (_itemEnrichmentAttempt.Value is { } artworkAttempt) artworkAttempt.ArtworkSkipped = allProvidersSkipped;
 
-        if (refreshedBackdropPoster || currentAttempt is { MetadataSucceeded: true, PosterOwnerVerifiedEmpty: true }
+        if (refreshedBackdropPoster || currentAttempt is { CoreMetadataVerified: true, PosterOwnerVerifiedEmpty: true }
             && !string.IsNullOrWhiteSpace(tmdbBackdropUrl))
         {
             currentAttempt!.PosterOwnerVerifiedEmpty = false;
@@ -1024,7 +1112,7 @@ public sealed partial class PremiereService
             currentAttempt.PosterOwnerVerifiedEmpty = false;
             if (!string.IsNullOrWhiteSpace(tmdbBackdropUrl))
             {
-                if (currentAttempt.MetadataSucceeded) currentAttempt.ArtworkSkipped = false;
+                if (currentAttempt.CoreMetadataVerified) currentAttempt.ArtworkSkipped = false;
                 else currentAttempt.ArtworkReused = true;
             }
         }
@@ -1090,7 +1178,20 @@ public sealed partial class PremiereService
     {
         var attempt = _itemEnrichmentAttempt.Value;
         var started = Stopwatch.GetTimestamp();
+        if (attempt is not null)
+            attempt.TvmazeIdentity = ItemEnrichmentCacheCoordinator.ItemEnrichmentSession.ComponentIdentity("tvmaze",
+                imdbId: externalIds?.ImdbId, tvdbId: externalIds?.TvdbId);
         forceRefresh |= attempt?.ForceMetadata == true;
+        if (attempt is { ExplicitForceRefresh: false } deferred && _itemCacheSession.Value is { } session
+            && !session.ComponentRetryAllowed(new(deferred.MediaType ?? PremiereMediaType.Series, deferred.ItemId), "tvmaze", deferred.TvmazeIdentity))
+        {
+            deferred.TvmazeFailed = deferred.OptionalMetadataFailed = true;
+            RecordItemComponent("tvmaze", "tvmaze", "deferred", started, "failure_retry_pending");
+            return deferred.PreviousMetadata is { } prior
+                ? new(prior.NetworkName, prior.WebChannelName, prior.TvmazeAverageRuntimeMinutes, prior.TvmazeRating,
+                    prior.OfficialSiteUrl, prior.TvmazeUrl, prior.Overview, prior.ImageSource == ArtworkSources.TvmazeImage ? prior.PosterUrl : null)
+                : EmptyTvSeriesEnrichment;
+        }
         TvmazeShow? show = null;
         TvmazeShow? imageShow = null;
         var failed = false;
@@ -1300,6 +1401,13 @@ public sealed partial class PremiereService
             return sources;
         }
 
+        if (_itemCacheSession.Value is { } session && _itemEnrichmentAttempt.Value is { } deferred
+            && !session.ComponentRetryAllowed(new(mediaType, tmdbId), "watchmode") && !deferred.ExplicitForceRefresh)
+        {
+            deferred.AvailabilityFailed = true;
+            RecordItemComponent("watchmode", "availability", "deferred", started, "failure_retry_pending");
+            return deferred.PreviousMetadata?.Sources ?? sources;
+        }
         IReadOnlyList<PremiereSource> watchmodeSources;
         try
         {

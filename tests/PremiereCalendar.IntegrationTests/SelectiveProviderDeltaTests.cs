@@ -25,15 +25,22 @@ public sealed class SelectiveProviderDeltaTests
         });
         var state = new StateStore();
         var items = new ItemStore { Known = [42] };
-        var service = Service(Tmdb(handler), Tvmaze(new(_ => StubHttpMessageHandler.Json("{}")), false), state, items);
+        var clock = new Clock();
+        var service = Service(Tmdb(handler), Tvmaze(new(_ => StubHttpMessageHandler.Json("{}")), false), state, items, clock: clock);
         await service.RunOnceAsync(default);
+        Assert.Equal(Now, (await state.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", default))!.LastCheckedUtc);
+        await service.RunOnceAsync(default);
+        Assert.Single(handler.Requests, request => request.Uri.AbsolutePath == "/3/movie/42/changes");
+        // Successful feeds keep their own cadence; replay the overlapping window
+        // once that cadence is due, rather than requesting an immediate duplicate.
+        clock.UtcNow = Now.AddHours(1);
         await service.RunOnceAsync(default);
         Assert.Equal(1, items.InvalidationChanges);
         Assert.Equal(DateTimeOffset.Parse("2026-05-16T10:00:00Z"), items.Invalidated[42]);
         Assert.Equal(2, handler.Requests.Count(request => request.Uri.AbsolutePath == "/3/movie/42/changes"));
         Assert.DoesNotContain(handler.Requests, request => request.Uri.AbsolutePath.Contains("99999"));
         var marker = await state.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", default);
-        Assert.Equal(Now, marker!.LastCheckedUtc);
+        Assert.Equal(Now.AddHours(1), marker!.LastCheckedUtc);
     }
 
     [Theory]
@@ -44,10 +51,11 @@ public sealed class SelectiveProviderDeltaTests
         var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath switch
         {
             "/3/movie/changes" => StubHttpMessageHandler.Json("""{"page":1,"total_pages":1,"results":[{"id":42}]}"""),
+            "/3/tv/changes" => StubHttpMessageHandler.Json("""{"page":1,"total_pages":1,"results":[]}"""),
             "/3/movie/42/changes" => StubHttpMessageHandler.Json(failInvalidation
                 ? """{"changes":[{"key":"overview","items":[{"time":"2026-05-16 10:00:00 UTC"}]}]}"""
                 : """{"changes":[{"key":"overview","items":[{"time":"invalid"}]}]}"""),
-            _ => throw new InvalidOperationException("A failed media stream must not advance to other feeds")
+            _ => throw new InvalidOperationException("Unexpected request outside the targeted media feeds")
         });
         var state = new StateStore();
         var previous = new ProviderCacheState("tmdb", ProviderCacheScope.Global, "movie-changes", Now.AddDays(-1), null, "old", 0, null);
@@ -56,6 +64,7 @@ public sealed class SelectiveProviderDeltaTests
         var service = Service(Tmdb(handler), Tvmaze(new(_ => StubHttpMessageHandler.Json("{}")), false), state, items);
         await Assert.ThrowsAsync<ExternalApiException>(() => service.RunOnceAsync(default));
         Assert.Equal(previous, await state.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", default));
+        Assert.Equal(Now, (await state.GetAsync("tmdb", ProviderCacheScope.Global, "tv-changes", default))!.LastCheckedUtc);
     }
 
     [Fact]
@@ -107,7 +116,7 @@ public sealed class SelectiveProviderDeltaTests
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"123":1778925600}"""));
         var state = new StateStore();
         await state.SaveAsync(new("tvmaze", ProviderCacheScope.Global, "show-updates", Now.AddDays(-5), null, "day", 0, null), default);
-        var items = new ItemStore();
+        var items = new ItemStore { KnownTvmaze = [123] };
         await Service(Tmdb(new(_ => throw new InvalidOperationException())), Tvmaze(handler, true), state, items,
             useTmdb: false, useTvmaze: true).RunOnceAsync(default);
         Assert.Contains("since=week", Assert.Single(handler.Requests).Uri.Query);
@@ -128,9 +137,9 @@ public sealed class SelectiveProviderDeltaTests
     }
 
     private static ProviderDeltaSyncService Service(ITmdbClient tmdb, ITvmazeClient tvmaze, StateStore state, ItemStore items,
-        bool useTmdb = true, bool useTvmaze = false) => new(tmdb, tvmaze, state,
+        bool useTmdb = true, bool useTvmaze = false, Clock? clock = null) => new(tmdb, tvmaze, state,
         new Monitor<ProviderDeltaSyncOptions>(new() { UseTmdbChanges = useTmdb, UseTvmazeUpdates = useTvmaze }),
-        new Clock(), NullLogger<ProviderDeltaSyncService>.Instance, itemEnrichmentStore: items);
+        clock ?? new Clock(), NullLogger<ProviderDeltaSyncService>.Instance, itemEnrichmentStore: items);
 
     private static TmdbClient Tmdb(StubHttpMessageHandler handler, int maxPages = 500) => new(
         new HttpClient(handler) { BaseAddress = new("https://api.themoviedb.org/3/") }, new MemoryCache(new MemoryCacheOptions()),
@@ -141,7 +150,11 @@ public sealed class SelectiveProviderDeltaTests
         new HttpClient(handler) { BaseAddress = new("https://api.tvmaze.com/") }, new MemoryCache(new MemoryCacheOptions()),
         Microsoft.Extensions.Options.Options.Create(new TvmazeOptions { Enabled = enabled }));
 
-    private sealed class Clock : TimeProvider { public override DateTimeOffset GetUtcNow() => Now; }
+    private sealed class Clock : TimeProvider
+    {
+        public DateTimeOffset UtcNow { get; set; } = Now;
+        public override DateTimeOffset GetUtcNow() => UtcNow;
+    }
     private sealed class Monitor<T>(T value) : IOptionsMonitor<T>
     {
         public T CurrentValue => value;
@@ -160,11 +173,14 @@ public sealed class SelectiveProviderDeltaTests
     private sealed class ItemStore : IItemEnrichmentStore
     {
         public HashSet<int> Known { get; init; } = [];
+        public HashSet<int> KnownTvmaze { get; init; } = [];
         public Dictionary<int, DateTimeOffset> Invalidated { get; } = [];
         public List<string> TvmazeOrder { get; } = [];
         public bool FailInvalidation { get; init; }
         public int InvalidationChanges { get; private set; }
         public Task<IReadOnlySet<int>> FindKnownTmdbIdsAsync(PremiereMediaType media, IReadOnlyCollection<int> ids, CancellationToken token) => Task.FromResult<IReadOnlySet<int>>(ids.Where(Known.Contains).ToHashSet());
+        public Task<IReadOnlySet<int>> FindKnownTvmazeIdsAsync(IReadOnlyCollection<int> ids, CancellationToken token)
+            => Task.FromResult<IReadOnlySet<int>>(ids.Where(KnownTvmaze.Contains).ToHashSet());
         public Task<int> InvalidateTmdbAsync(PremiereMediaType media, IReadOnlyCollection<int> ids, DateTimeOffset changedAt, CancellationToken token)
         {
             if (FailInvalidation) throw new IOException("Simulated interrupted invalidation");

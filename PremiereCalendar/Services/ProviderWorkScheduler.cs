@@ -96,6 +96,12 @@ public interface IProviderWorkScheduler
         CancellationToken cancellationToken = default);
 
     Task<ProviderWorkSnapshot?> GetAsync(string jobId, CancellationToken cancellationToken = default);
+
+    Task RetireObsoletePrefetchAsync(IReadOnlyCollection<string> activeKeys, CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
+
+    Task ReleaseForegroundInterestAsync(string jobId, CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
 }
 
 public sealed record ProviderWorkSnapshot(
@@ -117,6 +123,12 @@ public sealed record ProviderWorkSnapshot(
 internal sealed class ProviderWorkLeaseLostException(string jobId)
     : OperationCanceledException($"Provider work claim {jobId} is no longer owned by this worker.");
 
+internal sealed class ProviderWorkContinuationException(DateTimeOffset retryAtUtc)
+    : Exception("Provider work saved progress and will continue in a later bounded cycle.")
+{
+    public DateTimeOffset RetryAtUtc { get; } = retryAtUtc;
+}
+
 public sealed class ProviderWorkScheduler : IProviderWorkScheduler
 {
     private readonly ProviderWorkStore _store;
@@ -128,7 +140,11 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     private readonly ConcurrentDictionary<string, ExecutionCheckpoint> _executions = new(StringComparer.Ordinal);
     private readonly object _broadcastGate = new();
     private readonly HashSet<string> _detachedJobs = new(StringComparer.Ordinal);
-    private readonly SemaphoreSlim _signal = new(0);
+    private readonly object _signalGate = new();
+    private TaskCompletionSource _signal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly SemaphoreSlim _countGate = new(1, 1);
+    private long? _lastCountTimestamp;
+    private readonly CancellationToken _applicationStopping;
     // Keep dispatch and claim registration ordered across the database await.
     // Provider execution never holds this gate; both workers still run concurrently.
     private readonly SemaphoreSlim _dispatchGate = new(1, 1);
@@ -139,13 +155,15 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         TimeProvider timeProvider,
         IOptions<ProviderSchedulerOptions> options,
         PremiereTelemetry? telemetry = null,
-        IOptions<CalendarCacheOptions>? cacheOptions = null)
+        IOptions<CalendarCacheOptions>? cacheOptions = null,
+        IHostApplicationLifetime? applicationLifetime = null)
     {
         _store = store;
         _timeProvider = timeProvider;
         _options = options.Value;
         _cacheOptions = cacheOptions?.Value ?? new CalendarCacheOptions();
         _telemetry = telemetry ?? new PremiereTelemetry();
+        _applicationStopping = applicationLifetime?.ApplicationStopping ?? CancellationToken.None;
     }
 
     public async Task<ProviderWorkHandle> EnqueueAsync(
@@ -162,7 +180,8 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         await _dispatchGate.WaitAsync(cancellationToken);
         try
         {
-            result = await _store.EnqueueAsync(request, _timeProvider.GetUtcNow(), cancellationToken);
+            result = await _store.EnqueueAsync(request, _timeProvider.GetUtcNow(), cancellationToken,
+                resumeCheckpointFactory: ReusableSourceCheckpointFactory(request));
             if (request.Priority <= ProviderWorkPriority.ActiveWeek)
             {
                 lock (_broadcastGate)
@@ -189,9 +208,36 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             Stage = "enqueue", JobKind = request.Kind.ToString(), Outcome = result.Created ? "created" : "attached",
             DurationMilliseconds = _timeProvider.GetElapsedTime(enqueueStarted).TotalMilliseconds
         });
-        if (result.Created) _signal.Release();
+        SignalWork();
         if (result.Created) await RefreshCountsAsync(cancellationToken);
         return result;
+    }
+
+    private Func<ProviderWorkSnapshot, string?>? ReusableSourceCheckpointFactory(ProviderWorkRequest request)
+    {
+        if (request.Kind is not (ProviderWorkKind.CalendarForeground or ProviderWorkKind.AdjacentWeekPrefetch)) return null;
+        CalendarProviderWorkPayload? payload;
+        try { payload = JsonSerializer.Deserialize<CalendarProviderWorkPayload>(request.PayloadJson); }
+        catch (JsonException) { return null; }
+        if (payload is null || payload.ForceRefresh || payload.Start == default || payload.End < payload.Start) return null;
+        return BuildReusableSourceCheckpoint;
+    }
+
+    private string? BuildReusableSourceCheckpoint(ProviderWorkSnapshot previous)
+    {
+        var checkpoint = ReadResumeCheckpoint(previous);
+        if (checkpoint is null || checkpoint.CompletedSources.Count == 0
+            || previous.State == ProviderWorkState.Completed && checkpoint.CalendarProgress?.HasSourceErrors != true) return null;
+        return ProviderWorkCheckpointCodec.Encode(checkpoint with
+        {
+            Message = "Resuming fresh successful source coverage from the previous calendar attempt.",
+            CalendarProgress = checkpoint.CalendarProgress is { } calendar
+                ? calendar with { IsFinal = false, Phase = "cache", IsStaleCache = true } : null,
+            SourceSummaries = checkpoint.SourceSummaries.Where(pair =>
+                    pair.Value.CalendarProgress is { HasSourceErrors: false, CheckpointKey: { } key }
+                    && checkpoint.CompletedSources.ContainsKey(key))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal)
+        }).Json;
     }
 
     public async IAsyncEnumerable<ProviderWorkProgress> WatchAsync(
@@ -201,17 +247,25 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         JobBroadcast broadcast;
         ChannelReader<ProviderWorkProgress> reader;
         var missingJob = false;
+        var observation = CalendarObservationScope.Current;
+        IDisposable? observationLease = null;
         lock (_broadcastGate)
         {
             broadcast = _broadcasts.GetOrAdd(handle.JobId, _ => new JobBroadcast(_timeProvider));
-            reader = broadcast.Subscribe();
+            reader = broadcast.Subscribe(observation?.IsPassive != true);
             _detachedJobs.Remove(handle.JobId);
             foreach (var execution in _executions.Values.Where(value => value.JobId == handle.JobId))
-                if (execution.Kind == ProviderWorkKind.CalendarForeground) execution.Promote(ProviderWorkPriority.Foreground);
+                if (execution.Kind == ProviderWorkKind.CalendarForeground)
+                {
+                    if (broadcast.ForegroundSubscriberCount > 0) execution.Promote(ProviderWorkPriority.Foreground);
+                    else execution.Demote();
+                }
         }
         try
         {
-            await _store.SetForegroundInterestAsync(handle.JobId, true, cancellationToken);
+            if (observation is not null)
+                observationLease = await observation.AttachAsync(token => ReleaseObserverInterestAsync(handle.JobId, broadcast, reader, token), cancellationToken);
+            await RefreshQueuedForegroundInterestAsync(handle.JobId, cancellationToken);
             var snapshot = await _store.GetAsync(handle.JobId, cancellationToken);
             if (snapshot is null)
             {
@@ -219,7 +273,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
                 yield break;
             }
             broadcast.Seed(snapshot);
-            _signal.Release();
+            SignalWork();
             await foreach (var update in reader.ReadAllAsync(cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -229,6 +283,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }
         finally
         {
+            observationLease?.Dispose();
             bool lastSubscriber;
             lock (_broadcastGate)
             {
@@ -242,24 +297,79 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
                         // Remember an explicit detach across the claim/start gap. A
                         // freshly enqueued job may start before its first watcher.
                         _detachedJobs.Add(handle.JobId);
-                        foreach (var execution in _executions.Values.Where(value => value.JobId == handle.JobId))
-                        {
-                            if (execution.Cancellation is not { } cancellation) continue;
-                            if (execution.Kind == ProviderWorkKind.CalendarForeground
-                                && execution.Priority <= ProviderWorkPriority.ActiveWeek) cancellation.Cancel();
-                        }
                     }
                 }
+                if (broadcast.ForegroundSubscriberCount == 0)
+                    foreach (var execution in _executions.Values.Where(value => value.JobId == handle.JobId)) execution.Demote();
             }
-            if (lastSubscriber)
-            {
-                await RefreshQueuedForegroundInterestAsync(handle.JobId);
-            }
+            await RefreshQueuedForegroundInterestAsync(handle.JobId);
+            await PreemptPassiveForPendingForegroundAsync();
         }
     }
 
     public Task<ProviderWorkSnapshot?> GetAsync(string jobId, CancellationToken cancellationToken = default)
         => _store.GetAsync(jobId, cancellationToken);
+
+    public async Task ReleaseForegroundInterestAsync(string jobId, CancellationToken cancellationToken = default)
+    {
+        // Job-wide callers cannot release another browser's active observation.
+        await RefreshQueuedForegroundInterestAsync(jobId, cancellationToken);
+    }
+
+    private async Task ReleaseObserverInterestAsync(string jobId, JobBroadcast broadcast,
+        ChannelReader<ProviderWorkProgress> reader, CancellationToken cancellationToken)
+    {
+        lock (_broadcastGate)
+        {
+            broadcast.ReleaseForegroundInterest(reader);
+            if (!_broadcasts.TryGetValue(jobId, out var current) || current.ForegroundSubscriberCount == 0)
+                foreach (var execution in _executions.Values.Where(value => value.JobId == jobId)) execution.Demote();
+        }
+        await RefreshQueuedForegroundInterestAsync(jobId, cancellationToken);
+        await PreemptPassiveForPendingForegroundAsync(cancellationToken);
+    }
+
+    private async Task PreemptPassiveForPendingForegroundAsync(CancellationToken cancellationToken = default)
+    {
+        lock (_broadcastGate)
+            if (!_executions.Values.Any(execution => execution.Priority > ProviderWorkPriority.ActiveWeek
+                && !execution.PreemptionRequested)) return;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_applicationStopping, cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(_options.ForegroundInterestTimeoutSeconds, 1, 30)));
+        try
+        {
+            await _dispatchGate.WaitAsync(timeout.Token);
+            try
+            {
+                if (!await _store.HasDueForegroundAsync(_timeProvider.GetUtcNow(), timeout.Token)) return;
+                lock (_broadcastGate)
+                {
+                    // A new active observer may have promoted this execution
+                    // while the database query awaited. Recheck its live demand.
+                    foreach (var execution in _executions.Values)
+                    {
+                        if (execution.Priority <= ProviderWorkPriority.ActiveWeek || execution.PreemptionRequested) continue;
+                        execution.PreemptionRequested = true;
+                        execution.Cancellation?.Cancel();
+                    }
+                }
+            }
+            finally { _dispatchGate.Release(); }
+        }
+        catch (Exception exception) when (exception is DbException or IOException or OperationCanceledException)
+        {
+            _telemetry.RecordDatabaseException(exception);
+            _telemetry.RecordDiagnostic("scheduler.preemption.reconcile.failed", details: new()
+            { Stage = "dispatch", Outcome = "failed", Reason = exception.GetType().Name });
+        }
+    }
+
+    public async Task RetireObsoletePrefetchAsync(IReadOnlyCollection<string> activeKeys, CancellationToken cancellationToken = default)
+    {
+        await _dispatchGate.WaitAsync(cancellationToken);
+        try { await _store.RetireObsoletePrefetchAsync(activeKeys, _timeProvider.GetUtcNow(), cancellationToken); }
+        finally { _dispatchGate.Release(); }
+    }
 
     internal async Task<ProviderWorkSnapshot?> ClaimNextAsync(bool foregroundOnly, string leaseOwner, CancellationToken cancellationToken)
     {
@@ -281,7 +391,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
                 lock (_broadcastGate)
                 {
                     if (job.Kind == ProviderWorkKind.CalendarForeground
-                        && _broadcasts.TryGetValue(job.JobId, out var broadcast) && broadcast.SubscriberCount > 0)
+                        && _broadcasts.TryGetValue(job.JobId, out var broadcast) && broadcast.ForegroundSubscriberCount > 0)
                         claimedExecution.Promote(ProviderWorkPriority.Foreground);
                     _executions[job.LeaseOwner!] = claimedExecution;
                 }
@@ -313,9 +423,8 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         lock (_broadcastGate)
         {
             checkpoint.Cancellation = linked;
-            if (checkpoint.PreemptionRequested
-                || _detachedJobs.Remove(job.JobId) && job.Kind == ProviderWorkKind.CalendarForeground
-                && checkpoint.Priority <= ProviderWorkPriority.ActiveWeek) linked.Cancel();
+            if (_detachedJobs.Remove(job.JobId)) checkpoint.Demote();
+            if (checkpoint.PreemptionRequested) linked.Cancel();
         }
         checkpoint.StartedTimestamp = _timeProvider.GetTimestamp();
         RecordDiagnostic(job, "scheduler.execution.started", new() { Stage = "execution", Outcome = "started" });
@@ -439,7 +548,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         _telemetry.RecordJob(job.Kind.ToString(), "preempted", Elapsed(job));
         Publish(job.JobId,
             new ProviderWorkProgress(job.JobId, ProviderWorkState.Queued, "Provider work was checkpointed for foreground activity."));
-        _signal.Release();
+        SignalWork();
     }
 
     internal async Task FailAsync(ProviderWorkSnapshot job, Exception error, CancellationToken cancellationToken)
@@ -485,7 +594,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             _telemetry.RecordJob(job.Kind.ToString(), "retry", Elapsed(job));
             Publish(job.JobId,
                 new ProviderWorkProgress(job.JobId, ProviderWorkState.RetryWaiting, "Provider work will retry.", Error: sanitized));
-            _signal.Release();
+            SignalWork();
             return;
         }
 
@@ -502,15 +611,57 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             new ProviderWorkProgress(job.JobId, ProviderWorkState.Failed, "Provider work failed.", Error: sanitized));
     }
 
-    internal async Task WaitForSignalAsync(CancellationToken cancellationToken)
+    internal async Task DeferContinuationAsync(ProviderWorkSnapshot job, DateTimeOffset retryAtUtc, CancellationToken cancellationToken)
     {
-        await _signal.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+        if (!await FlushAsync(job, cancellationToken)) return;
+        if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), _timeProvider.GetUtcNow(), retryAtUtc,
+                false, null, cancellationToken, retryWaiting: true))
+        { RecordLeaseLost(job, "continue"); return; }
+        RecordDiagnostic(job, "scheduler.job.deferred", new()
+        {
+            Stage = "durable", Outcome = "deferred", Reason = "budget_continuation", IsFinal = false,
+            WaitMilliseconds = (retryAtUtc - _timeProvider.GetUtcNow()).TotalMilliseconds
+        });
+        await RefreshQueuedForegroundInterestAsync(job.JobId);
+        await RefreshCountsAsync(cancellationToken);
+        _telemetry.RecordJob(job.Kind.ToString(), "deferred", Elapsed(job));
+        Publish(job.JobId, new ProviderWorkProgress(job.JobId, ProviderWorkState.RetryWaiting,
+            "Provider work saved progress and will continue in a later bounded cycle."));
+    }
+
+    internal Task WorkAvailable
+    {
+        get { lock (_signalGate) return _signal.Task; }
+    }
+
+    private void SignalWork()
+    {
+        lock (_signalGate)
+        {
+            var previous = _signal;
+            _signal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            previous.TrySetResult();
+        }
+    }
+
+    internal Task WaitForSignalAsync(CancellationToken cancellationToken)
+        => WaitForSignalAsync(WorkAvailable, false, cancellationToken);
+
+    internal async Task WaitForSignalAsync(Task signal, bool foregroundOnly, CancellationToken cancellationToken)
+    {
+        var deadline = await _store.GetNextAttemptUtcAsync(foregroundOnly, cancellationToken);
+        var delay = TimeSpan.FromSeconds(Math.Clamp(_options.IdlePollSeconds, 5, 300));
+        if (deadline is { } due)
+            delay = TimeSpan.FromMilliseconds(Math.Clamp((due - _timeProvider.GetUtcNow()).TotalMilliseconds, 1, delay.TotalMilliseconds));
+        try { await signal.WaitAsync(delay, _timeProvider, cancellationToken); }
+        catch (TimeoutException) { }
     }
 
     internal async Task RecoverAsync(CancellationToken cancellationToken)
     {
-        await _store.RecoverExpiredLeasesAsync(_timeProvider.GetUtcNow(), cancellationToken);
+        if (await _store.RecoverExpiredLeasesAsync(_timeProvider.GetUtcNow(), cancellationToken) > 0) SignalWork();
         await RefreshCountsAsync(cancellationToken);
+        await PreemptPassiveForPendingForegroundAsync(cancellationToken);
     }
 
     internal Task CleanupAsync(CancellationToken cancellationToken)
@@ -675,29 +826,34 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     {
         lock (_broadcastGate)
         {
-            if (IsTerminal(progress.State)) _detachedJobs.Remove(jobId);
+            if (IsTerminal(progress.State))
+            {
+                _detachedJobs.Remove(jobId);
+            }
             if (_broadcasts.TryGetValue(jobId, out var broadcast)) broadcast.Publish(progress);
         }
     }
 
-    private async Task RefreshQueuedForegroundInterestAsync(string jobId)
+    private async Task RefreshQueuedForegroundInterestAsync(string jobId, CancellationToken cancellationToken = default)
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_applicationStopping, cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(_options.ForegroundInterestTimeoutSeconds, 1, 30)));
         try
         {
-            while (true)
+            for (var attempt = 0; attempt < 3; attempt++)
             {
                 bool hasWatcher;
                 lock (_broadcastGate)
-                    hasWatcher = _broadcasts.TryGetValue(jobId, out var broadcast) && broadcast.SubscriberCount > 0;
-                await _store.SetForegroundInterestAsync(jobId, hasWatcher, CancellationToken.None);
+                    hasWatcher = _broadcasts.TryGetValue(jobId, out var broadcast) && broadcast.ForegroundSubscriberCount > 0;
+                await _store.SetForegroundInterestAsync(jobId, hasWatcher, timeout.Token);
                 lock (_broadcastGate)
                 {
-                    var current = _broadcasts.TryGetValue(jobId, out var broadcast) && broadcast.SubscriberCount > 0;
+                    var current = _broadcasts.TryGetValue(jobId, out var broadcast) && broadcast.ForegroundSubscriberCount > 0;
                     if (current == hasWatcher) return;
                 }
             }
         }
-        catch (Exception exception) when (exception is DbException or IOException)
+        catch (Exception exception) when (exception is DbException or IOException or OperationCanceledException)
         {
             // Requeue and view cleanup have already succeeded. Interest changes
             // are best effort and must not replace the delivered outcome.
@@ -722,6 +878,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         {
             if (priority < Priority) Volatile.Write(ref _priority, (int)priority);
         }
+        public void Demote() => Volatile.Write(ref _priority, (int)ProviderWorkPriority.Adjacent);
         public bool PreemptionRequested { get; set; }
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public Dictionary<string, IReadOnlyList<PremiereItem>> CompletedSources { get; } = checkpoint?.CompletedSources is { } sources
@@ -847,16 +1004,21 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
 
     private async Task RefreshCountsAsync(CancellationToken cancellationToken)
     {
+        if (!await _countGate.WaitAsync(0, cancellationToken)) return;
         try
         {
+            if (_lastCountTimestamp is { } last && _timeProvider.GetElapsedTime(last)
+                < TimeSpan.FromMilliseconds(Math.Clamp(_options.CountRefreshMilliseconds, 100, 30_000))) return;
             var counts = await _store.GetStateCountsAsync(cancellationToken);
             var queued = GetCount(counts, ProviderWorkState.Queued) + GetCount(counts, ProviderWorkState.RetryWaiting);
             _telemetry.SetSchedulerCounts(queued, GetCount(counts, ProviderWorkState.Running));
+            _lastCountTimestamp = _timeProvider.GetTimestamp();
         }
         catch (Exception exception) when (exception is DbException or OperationCanceledException)
         {
             _telemetry.RecordDatabaseException(exception);
         }
+        finally { _countGate.Release(); }
     }
 
     private static int GetCount(IReadOnlyDictionary<string, int> counts, ProviderWorkState state)
@@ -894,18 +1056,25 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         private long _sequence;
         private bool _terminal;
         public int SubscriberCount { get { lock (_gate) return _subscribers.Count; } }
+        public int ForegroundSubscriberCount { get { lock (_gate) return _subscribers.Count(subscriber => subscriber.ForegroundInterest); } }
         public bool HasTerminalState { get { lock (_gate) return _terminal; } }
 
-        public ChannelReader<ProviderWorkProgress> Subscribe()
+        public ChannelReader<ProviderWorkProgress> Subscribe(bool foregroundInterest = true)
         {
             lock (_gate)
             {
-                var subscriber = new Subscription(this);
+                var subscriber = new Subscription(this) { ForegroundInterest = foregroundInterest };
                 _subscribers.Add(subscriber);
                 foreach (var (key, progress) in _retained) subscriber.Pending[key] = progress;
                 subscriber.Notify();
                 return subscriber;
             }
+        }
+
+        public void ReleaseForegroundInterest(ChannelReader<ProviderWorkProgress> reader)
+        {
+            lock (_gate)
+                if (reader is Subscription subscriber && _subscribers.Contains(subscriber)) subscriber.ForegroundInterest = false;
         }
 
         public void Unsubscribe(ChannelReader<ProviderWorkProgress> reader)
@@ -1040,6 +1209,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             });
             public Dictionary<string, (long Sequence, ProviderWorkProgress Progress)> Pending { get; } = new(StringComparer.Ordinal);
             public bool Detached { get; set; }
+            public bool ForegroundInterest { get; set; }
             public void Notify() => _notifications.Writer.TryWrite(true);
 
             public override bool TryRead(out ProviderWorkProgress item)
@@ -1082,9 +1252,21 @@ public sealed class ProviderWorkSchedulerHostedService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!options.Value.Enabled) return;
-        if (!databaseState.Snapshot.IsHealthy) return;
-        await scheduler.RecoverAsync(stoppingToken);
-        await scheduler.CleanupAsync(stoppingToken);
+        await databaseState.WaitUntilHealthyAsync(stoppingToken);
+        while (true)
+        {
+            try
+            {
+                await scheduler.RecoverAsync(stoppingToken);
+                await scheduler.CleanupAsync(stoppingToken);
+                break;
+            }
+            catch (Exception exception) when (DatabaseConnectionFactory.IsTransient(exception))
+            {
+                logger.LogWarning(exception, "Provider work startup will retry after temporary database unavailability.");
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            }
+        }
         var owner = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
         await Task.WhenAll(
             RunWorkerAsync(owner + ":foreground", foregroundOnly: true, stoppingToken),
@@ -1120,10 +1302,11 @@ public sealed class ProviderWorkSchedulerHostedService(
         {
             try
             {
+                var signal = scheduler.WorkAvailable;
                 var job = await scheduler.ClaimNextAsync(foregroundOnly, owner, stoppingToken);
                 if (job is null)
                 {
-                    await scheduler.WaitForSignalAsync(stoppingToken);
+                    await scheduler.WaitForSignalAsync(signal, foregroundOnly, stoppingToken);
                     continue;
                 }
 
@@ -1153,6 +1336,11 @@ public sealed class ProviderWorkSchedulerHostedService(
                     await scheduler.PreemptAsync(job, CancellationToken.None);
                     return;
                 }
+                catch (ProviderWorkContinuationException continuation)
+                {
+                    scheduler.RecordExecutionFinished(job, "deferred", "budget_continuation");
+                    await scheduler.DeferContinuationAsync(job, continuation.RetryAtUtc, stoppingToken);
+                }
                 catch (Exception ex)
                 {
                     scheduler.RecordExecutionFinished(job, "failed", ex.GetType().Name);
@@ -1177,7 +1365,7 @@ public sealed class ProviderWorkSchedulerHostedService(
             {
                 // A competing short write must delay this worker, not stop the
                 // host through BackgroundServiceExceptionBehavior.StopHost.
-                logger.LogWarning(ex, "Provider worker {ProviderWorkOwner} encountered transient SQLite contention.", owner);
+                logger.LogWarning(ex, "Provider worker {ProviderWorkOwner} encountered temporary database unavailability or contention.", owner);
                 await Task.Delay(TimeSpan.FromMilliseconds(250), stoppingToken);
             }
         }
@@ -1281,6 +1469,53 @@ public sealed class ProviderWorkStore(
     private readonly AppDatabaseOptions _options = options.Value;
     private readonly CalendarCacheOptions _cacheOptions = cacheOptions?.Value ?? new CalendarCacheOptions();
 
+    public async Task RetireObsoletePrefetchAsync(IReadOnlyCollection<string> activeKeys, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        var keys = activeKeys.Distinct(StringComparer.Ordinal).ToArray();
+        var placeholders = keys.Select((_, index) => $"@key{index}").ToArray();
+        command.CommandText = $"""
+            UPDATE ProviderWorkJobs SET State = 'Cancelled', CompletedUtc = @now,
+                LastError = 'Adjacent prefetch superseded by calendar navigation.'
+            WHERE Kind = 'AdjacentWeekPrefetch' AND State IN ('Queued', 'RetryWaiting') AND Priority > 100
+                {(keys.Length == 0 ? string.Empty : $"AND DedupeKey NOT IN ({string.Join(",", placeholders)})")}
+            """;
+        DatabaseParameters.Add(command, "@now", Format(now));
+        for (var index = 0; index < keys.Length; index++) DatabaseParameters.Add(command, placeholders[index], keys[index]);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<DateTimeOffset?> GetNextAttemptUtcAsync(bool foregroundOnly, CancellationToken cancellationToken)
+    {
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT MIN(NextAttemptUtc) FROM ProviderWorkJobs
+            WHERE State IN ('Queued', 'RetryWaiting') AND NextAttemptUtc IS NOT NULL
+              {(foregroundOnly ? "AND Priority <= 100" : string.Empty)}
+            """;
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is null or DBNull ? null : Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!);
+    }
+
+    public async Task<bool> HasDueForegroundAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT CASE WHEN EXISTS (
+                SELECT 1 FROM ProviderWorkJobs WHERE State IN ('Queued', 'RetryWaiting') AND Priority <= 100
+                    AND (NextAttemptUtc IS NULL OR NextAttemptUtc <= @now)
+            ) THEN 1 ELSE 0 END
+            """;
+        DatabaseParameters.Add(command, "@now", Format(now));
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) != 0;
+    }
+
     public async Task<IReadOnlyDictionary<string, int>> GetStateCountsAsync(CancellationToken cancellationToken)
     {
         await using var connection = CreateConnection();
@@ -1296,7 +1531,9 @@ public sealed class ProviderWorkStore(
     public async Task<ProviderWorkHandle> EnqueueAsync(
         ProviderWorkRequest request,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? resumeCheckpointJson = null,
+        Func<ProviderWorkSnapshot, string?>? resumeCheckpointFactory = null)
     {
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
@@ -1309,8 +1546,8 @@ public sealed class ProviderWorkStore(
             insert.Transaction = transaction;
             insert.CommandText = """
                 INSERT INTO ProviderWorkJobs (
-                    JobId, Kind, DedupeKey, Priority, PayloadJson, State, AttemptCount, EnqueuedUtc)
-                VALUES (@id, @kind, @dedupeKey, @priority, @payload, 'Queued', 0, @now)
+                    JobId, Kind, DedupeKey, Priority, PayloadJson, CheckpointJson, State, AttemptCount, EnqueuedUtc)
+                VALUES (@id, @kind, @dedupeKey, @priority, @payload, @checkpoint, 'Queued', 0, @now)
                 ON CONFLICT (DedupeKey) WHERE State IN ('Queued', 'Running', 'RetryWaiting') DO NOTHING
                 """;
             DatabaseParameters.Add(insert, "@id", id);
@@ -1318,9 +1555,24 @@ public sealed class ProviderWorkStore(
             DatabaseParameters.Add(insert, "@dedupeKey", request.DedupeKey);
             DatabaseParameters.Add(insert, "@priority", (int)request.Priority);
             DatabaseParameters.Add(insert, "@payload", request.PayloadJson);
+            DatabaseParameters.Add(insert, "@checkpoint", System.Data.DbType.String).Value = (object?)resumeCheckpointJson ?? DBNull.Value;
             DatabaseParameters.Add(insert, "@now", Format(now));
             if (await insert.ExecuteNonQueryAsync(cancellationToken) == 1)
             {
+                // The active-key insertion waits for any competing prior job to
+                // finish before selecting its newest terminal checkpoint. Seed
+                // inside this transaction so no worker can claim an unseeded job.
+                if (resumeCheckpointFactory is not null
+                    && await GetLatestTerminalAsync(connection, transaction, request, cancellationToken) is { } previous
+                    && resumeCheckpointFactory(previous) is { } inherited)
+                {
+                    await using var seed = connection.CreateCommand();
+                    seed.Transaction = transaction;
+                    seed.CommandText = "UPDATE ProviderWorkJobs SET CheckpointJson = @checkpoint WHERE JobId = @id";
+                    DatabaseParameters.Add(seed, "@checkpoint", inherited);
+                    DatabaseParameters.Add(seed, "@id", id);
+                    await seed.ExecuteNonQueryAsync(cancellationToken);
+                }
                 await transaction.CommitAsync(cancellationToken);
                 return new ProviderWorkHandle(id, true);
             }
@@ -1355,6 +1607,26 @@ public sealed class ProviderWorkStore(
         }
     }
 
+    private static async Task<ProviderWorkSnapshot?> GetLatestTerminalAsync(DbConnection connection, DbTransaction transaction,
+        ProviderWorkRequest request, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT JobId, Kind, DedupeKey, Priority, PayloadJson, CheckpointJson, State,
+                   AttemptCount, EnqueuedUtc, StartedUtc, CompletedUtc, NextAttemptUtc, LastError, LeaseOwner
+            FROM ProviderWorkJobs
+            WHERE DedupeKey = @dedupeKey AND Kind = @kind AND PayloadJson = @payload
+                AND State IN ('Completed', 'Failed')
+            ORDER BY CompletedUtc DESC, EnqueuedUtc DESC LIMIT 1
+            """;
+        DatabaseParameters.Add(command, "@dedupeKey", request.DedupeKey);
+        DatabaseParameters.Add(command, "@kind", request.Kind.ToString());
+        DatabaseParameters.Add(command, "@payload", request.PayloadJson);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? Read(reader) : null;
+    }
+
     public async Task<ProviderWorkSnapshot?> ClaimNextAsync(
         bool foregroundOnly,
         string owner,
@@ -1375,7 +1647,7 @@ public sealed class ProviderWorkStore(
             WHERE State IN ('Queued', 'RetryWaiting')
               AND (NextAttemptUtc IS NULL OR NextAttemptUtc <= @now)
               {(foregroundOnly ? "AND Priority <= 100" : string.Empty)}
-            ORDER BY Priority, EnqueuedUtc
+            ORDER BY Priority, COALESCE(NextAttemptUtc, EnqueuedUtc), EnqueuedUtc
             LIMIT 1
             {(DatabaseConnectionFactory.IsPostgreSql(connection) ? "FOR UPDATE SKIP LOCKED" : string.Empty)}
             """;
@@ -1560,7 +1832,7 @@ public sealed class ProviderWorkStore(
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task RecoverExpiredLeasesAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    public async Task<int> RecoverExpiredLeasesAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
@@ -1579,8 +1851,16 @@ public sealed class ProviderWorkStore(
                     AND job.State = 'Running' AND job.LeaseOwner = ProviderWorkLeases.LeaseOwner);
             """;
         DatabaseParameters.Add(command, "@now", Format(now));
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        var recovered = await command.ExecuteNonQueryAsync(cancellationToken);
+        // The five-second recovery pass also observes work inserted by another
+        // process, without making both idle workers poll the queue repeatedly.
+        await using var due = connection.CreateCommand();
+        due.Transaction = transaction;
+        due.CommandText = "SELECT CASE WHEN EXISTS (SELECT 1 FROM ProviderWorkJobs WHERE State IN ('Queued', 'RetryWaiting') AND (NextAttemptUtc IS NULL OR NextAttemptUtc <= @now)) THEN 1 ELSE 0 END";
+        DatabaseParameters.Add(due, "@now", Format(now));
+        var hasDueWork = Convert.ToInt32(await due.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         await transaction.CommitAsync(cancellationToken);
+        return recovered + hasDueWork;
     }
 
     public async Task DeleteCompletedBeforeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken)

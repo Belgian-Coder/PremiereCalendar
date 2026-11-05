@@ -287,23 +287,22 @@ public sealed class SimklClientIntegrationTests
     }
 
     [Fact]
-    public async Task GetCalendarAsync_BoundsRangeScopedCalendarCache()
+    public async Task GetCalendarAsync_BoundsFeedScopedCalendarCache()
     {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("[]"));
         var client = CreateClient(handler, new FakeSimklSyncStateStore());
 
         for (var offset = 0; offset < 5; offset++)
         {
-            var day = today.AddDays(offset);
+            var day = new DateOnly(2020, 1, 1).AddMonths(offset);
             await client.GetCalendarAsync(day, day, CancellationToken.None);
         }
 
-        Assert.Equal(10, handler.Requests.Count);
-
-        await client.GetCalendarAsync(today, today, CancellationToken.None);
-
         Assert.Equal(12, handler.Requests.Count);
+
+        await client.GetCalendarAsync(new(2020, 1, 1), new(2020, 1, 1), CancellationToken.None);
+
+        Assert.Equal(14, handler.Requests.Count);
     }
 
     private static SimklClient CreateClient(

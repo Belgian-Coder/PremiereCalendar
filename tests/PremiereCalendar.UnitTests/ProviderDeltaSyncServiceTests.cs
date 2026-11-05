@@ -6,7 +6,7 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-public sealed class ProviderDeltaSyncServiceTests
+public sealed partial class ProviderDeltaSyncServiceTests
 {
     [Fact]
     public async Task RunOnceAsync_TmdbTimeoutFailsDurableJobForBoundedRetry()
@@ -237,6 +237,10 @@ public sealed class ProviderDeltaSyncServiceTests
 
     private sealed class RecordingTmdbClient : ITmdbClient
     {
+        public IReadOnlyList<TmdbChangedItem> MovieChanges { get; init; } = [];
+        public Func<int, CancellationToken, Task<DateTimeOffset?>>? History { get; init; }
+        public int MovieCalls { get; private set; }
+        public int TvCalls { get; private set; }
         public DateOnly? MovieStart { get; private set; }
 
         public DateOnly? MovieEnd { get; private set; }
@@ -251,9 +255,10 @@ public sealed class ProviderDeltaSyncServiceTests
             CancellationToken cancellationToken,
             bool forceRefresh = false)
         {
+            MovieCalls++;
             MovieStart = start;
             MovieEnd = end;
-            return Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
+            return Task.FromResult(MovieChanges);
         }
 
         public Task<IReadOnlyList<TmdbChangedItem>> GetChangedTvIdsAsync(
@@ -262,10 +267,15 @@ public sealed class ProviderDeltaSyncServiceTests
             CancellationToken cancellationToken,
             bool forceRefresh = false)
         {
+            TvCalls++;
             TvStart = start;
             TvEnd = end;
             return Task.FromResult<IReadOnlyList<TmdbChangedItem>>([]);
         }
+
+        public Task<DateTimeOffset?> GetLastMetadataChangeUtcAsync(PremiereMediaType mediaType, int id,
+            DateOnly start, DateOnly end, CancellationToken cancellationToken)
+            => History?.Invoke(id, cancellationToken) ?? Task.FromResult<DateTimeOffset?>(null);
 
         public Task<IReadOnlyList<TmdbTvDiscoverItem>> DiscoverTvAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
         public IAsyncEnumerable<TmdbDiscoverBatch<TmdbTvDiscoverItem>> StreamDiscoverTvAsync(DateOnly start, DateOnly end, TmdbDiscoverFilters filters, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();
@@ -286,12 +296,15 @@ public sealed class ProviderDeltaSyncServiceTests
 
     private sealed class EmptyTvmazeClient : ITvmazeClient
     {
+        public IReadOnlyList<TvmazeShowUpdate> Updates { get; init; } = [];
+        public int Calls { get; private set; }
         public Task<IReadOnlyList<TvmazeShowUpdate>> GetShowUpdatesAsync(
             TvmazeUpdateWindow since,
             CancellationToken cancellationToken,
             bool forceRefresh = false)
         {
-            return Task.FromResult<IReadOnlyList<TvmazeShowUpdate>>([]);
+            Calls++;
+            return Task.FromResult(Updates);
         }
 
         public Task<TvmazeShow?> LookupShowAsync(int? tvdbId, string? imdbId, CancellationToken cancellationToken, bool forceRefresh = false) => throw new NotImplementedException();

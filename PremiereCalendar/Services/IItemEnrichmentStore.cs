@@ -34,7 +34,14 @@ public sealed record ItemEnrichmentWrite(
     int? TvmazeShowId = null,
     DateTimeOffset? TmdbObservedUtc = null,
     long? ExpectedMetadataRevision = null,
-    string? ExpectedRatingsJson = null);
+    string? ExpectedRatingsJson = null,
+    string? ExpectedTvmazeReservationToken = null);
+
+public interface IItemEnrichmentLookupLease : IAsyncDisposable
+{
+    string Token { get; }
+    DateTimeOffset ExpiresUtc { get; }
+}
 
 public interface IItemEnrichmentStore
 {
@@ -50,6 +57,28 @@ public interface IItemEnrichmentStore
         string partition,
         IReadOnlyList<ItemEnrichmentWrite> writes,
         CancellationToken cancellationToken);
+
+    // Validation must not refresh retention or take reservation write locks.
+    Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>> ReadCurrentManyAsync(
+        string partition, IReadOnlyCollection<ItemEnrichmentIdentity> identities, CancellationToken cancellationToken)
+        => ReadManyAsync(partition, identities, false, cancellationToken);
+
+    async Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>> WriteAcceptedAsync(
+        string partition, IReadOnlyList<ItemEnrichmentWrite> writes, CancellationToken cancellationToken)
+    {
+        await WriteManyAsync(partition, writes, cancellationToken);
+        return await ReadCurrentManyAsync(partition, writes.Select(write => write.Identity).Distinct().ToArray(), cancellationToken);
+    }
+
+    Task<IReadOnlySet<int>> FindKnownTvmazeIdsAsync(IReadOnlyCollection<int> candidateIds, CancellationToken cancellationToken)
+        // Legacy adapters retain conservative invalidation coverage. Concrete
+        // stores narrow this set to locally retained identities.
+        => Task.FromResult<IReadOnlySet<int>>(candidateIds.Where(id => id > 0).ToHashSet());
+
+    // Only skip a history request if every retained partition is already dirty.
+    Task<IReadOnlySet<int>> FindDirtyTmdbIdsAsync(PremiereMediaType mediaType,
+        IReadOnlyCollection<int> candidateIds, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlySet<int>>(new HashSet<int>());
 
     Task<IReadOnlySet<int>> FindKnownTmdbIdsAsync(
         PremiereMediaType mediaType,
@@ -91,10 +120,23 @@ public interface IItemEnrichmentStore
         return updated;
     }
 
+    // Hold through publication (or session disposal), not just provider completion.
+    // Stamp its token and captured metadata revision on writes. A bounded validity
+    // window retires abandoned markers; expired tokens cannot publish their results.
+    // Distinct leases protect overlapping lookups across stores and processes.
+    Task<IAsyncDisposable> ReserveTvmazeLookupAsync(string partition, ItemEnrichmentIdentity identity,
+        CancellationToken cancellationToken) => Task.FromResult<IAsyncDisposable>(EmptyItemEnrichmentLease.Instance);
+
     // A first lookup has no show ID to match against a TVmaze update feed yet.
-    // Fence unmapped rows before targeted updates without making saved metadata stale.
+    // Fence unresolved and active lookup reservations without rewriting saved idle metadata.
     Task<int> FenceUnmappedTvmazeReservationsAsync(DateTimeOffset epochUtc, CancellationToken cancellationToken) =>
         Task.FromResult(0);
 
     Task<int> CleanupAsync(DateTimeOffset cutoffUtc, CancellationToken cancellationToken);
+}
+
+internal sealed class EmptyItemEnrichmentLease : IAsyncDisposable
+{
+    internal static readonly EmptyItemEnrichmentLease Instance = new();
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

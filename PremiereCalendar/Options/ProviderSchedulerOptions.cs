@@ -9,4 +9,7 @@ public sealed class ProviderSchedulerOptions
     public int RetryBaseMilliseconds { get; set; } = 500;
     public int RetryMaximumSeconds { get; set; } = 30;
     public int AcceptableLatencyMilliseconds { get; set; } = 1_500;
+    public int IdlePollSeconds { get; set; } = 60;
+    public int CountRefreshMilliseconds { get; set; } = 1_000;
+    public int ForegroundInterestTimeoutSeconds { get; set; } = 5;
 }

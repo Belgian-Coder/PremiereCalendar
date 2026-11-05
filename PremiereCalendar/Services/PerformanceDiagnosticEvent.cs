@@ -73,7 +73,27 @@ internal sealed record PerformanceDiagnosticEvent(
     string? RequestId,
     string? TraceId,
     string? SpanId,
-    PerformanceDiagnosticDetails? Details);
+    PerformanceDiagnosticDetails? Details)
+{
+    // Includes record/object overhead and every retained string. The fixed schema
+    // makes this an upper bound without allocating JSON on a producer thread.
+    internal int EstimatedSnapshotBytes
+    {
+        get
+        {
+            long characters = 0;
+            Add(InstanceId); Add(Event); Add(LoadId); Add(JobId); Add(SourceKey);
+            Add(OperationId); Add(RequestId); Add(TraceId); Add(SpanId);
+            if (Details is { } details)
+            {
+                Add(details.Stage); Add(details.Provider); Add(details.Outcome); Add(details.Reason);
+                Add(details.Cache); Add(details.CacheKey); Add(details.JobKind); Add(details.SourceKey); Add(details.MediaType);
+            }
+            return (int)Math.Min(int.MaxValue, 2048 + characters * 2);
+            void Add(string? value) => characters += value?.Length ?? 0;
+        }
+    }
+}
 
 public sealed record PerformanceDiagnosticHealth(
     bool Enabled,
@@ -90,7 +110,14 @@ public sealed record PerformanceDiagnosticHealth(
     long FlushTimeouts = 0,
     bool ShutdownTimedOut = false,
     bool WriterStalled = false,
-    double ActiveIoMs = 0);
+    double ActiveIoMs = 0,
+    long QueuedBytes = 0,
+    long QueueByteCapacity = 0,
+    long SerializationFailures = 0,
+    long ArchiveFailures = 0,
+    bool ArchiveActive = false,
+    int ArchivePending = 0,
+    bool ArchiveWorkerRunning = false);
 
 internal static class DiagnosticIdentifier
 {

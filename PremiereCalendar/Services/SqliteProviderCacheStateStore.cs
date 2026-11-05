@@ -143,6 +143,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
                 SELECT Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark, ItemCount, MetadataJson
                 FROM ProviderCacheState
                 WHERE Provider NOT LIKE 'responsecache-%'
+                  AND Provider <> 'item-cache.tvmaze-lookup'
                 ORDER BY LastCheckedUtc DESC
                 LIMIT @take
                 """;
@@ -204,12 +205,15 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             command.Transaction = transaction;
             command.CommandText = """
                 DELETE FROM ProviderCacheState
-                WHERE Provider IN (@tmdb, @rottenTomatoes)
+                WHERE Provider IN (@tmdb, @rottenTomatoes, @fanart, @watchmode, @tvmaze)
                   AND Scope = @scope
                   AND LastCheckedUtc < @cutoffUtc
                 """;
             DatabaseParameters.Add(command, "@tmdb", "responsecache-tmdb");
             DatabaseParameters.Add(command, "@rottenTomatoes", "responsecache-rottentomatoes");
+            DatabaseParameters.Add(command, "@fanart", "responsecache-fanart");
+            DatabaseParameters.Add(command, "@watchmode", "responsecache-watchmode");
+            DatabaseParameters.Add(command, "@tvmaze", "responsecache-tvmaze");
             DatabaseParameters.Add(command, "@scope", ProviderCacheScope.Item.ToString());
             DatabaseParameters.Add(command, "@cutoffUtc", cutoffUtc.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
             var removed = await command.ExecuteNonQueryAsync(cancellationToken);
@@ -304,7 +308,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         => DatabaseConnectionFactory.IsPostgreSql(_options) && IsResponseCacheProvider(provider) ? _responseGate : _gate;
 
     private static bool IsResponseCacheProvider(string provider)
-        => Normalize(provider) is "responsecache-tmdb" or "responsecache-rottentomatoes";
+        => Normalize(provider) is "responsecache-tmdb" or "responsecache-rottentomatoes" or "responsecache-fanart" or "responsecache-watchmode" or "responsecache-tvmaze";
 
     private static void ConfigureResponseCacheConnection(DbConnection connection, bool responseCacheOperation)
     {

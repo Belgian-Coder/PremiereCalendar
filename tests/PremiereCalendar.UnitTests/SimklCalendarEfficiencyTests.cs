@@ -44,8 +44,10 @@ public sealed class SimklCalendarEfficiencyTests
         Assert.Equal(3, handler.Paths.Count);
     }
 
-    [Fact]
-    public async Task ConcurrentCalendarCallsNeverExceedTwoFeedRequestsAndDoNotWaitForFeedOrderToRefillSlots()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConcurrentCalendarCallsNeverExceedTwoFeedRequestsAndDoNotWaitForFeedOrderToRefillSlots(bool acrossInstances)
     {
         var firstFeed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var laterFeed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -55,9 +57,11 @@ public sealed class SimklCalendarEfficiencyTests
             if (path == AllPaths[2]) laterFeed.TrySetResult();
             return Json("[]");
         });
-        var client = CreateClient(handler);
+        using var memory = new MemoryCache(new MemoryCacheOptions());
+        var client = CreateClient(handler, memory);
+        var secondClient = acrossInstances ? CreateClient(handler, memory) : client;
         var first = client.GetCalendarAsync(Start, End, CancellationToken.None, forceRefresh: true);
-        var second = client.GetCalendarAsync(Start, End, CancellationToken.None, forceRefresh: true);
+        var second = secondClient.GetCalendarAsync(Start, End, CancellationToken.None, forceRefresh: true);
 
         // The free slot starts an archive feed while the first feed is still pending.
         await laterFeed.Task.WaitAsync(TimeSpan.FromSeconds(10));
@@ -411,6 +415,103 @@ public sealed class SimklCalendarEfficiencyTests
             Assert.Equal(HttpStatusCode.NotFound, failure.StatusCode);
         }
         Assert.Equal(2, handler.Paths.Count(path => path == AllPaths[0]));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AdjacentWeeksReuseTheCompleteMonthAndFilterItsItemsLocally(bool acrossInstances)
+    {
+        var payload = """[{"title":"First week","date":"2020-09-08T00:00:00Z","ids":{"simkl_id":1}},{"title":"Second week","date":"2020-09-15T00:00:00Z","ids":{"simkl_id":2}}]""";
+        var handler = new CalendarHandler((_, _) => Task.FromResult(Json(payload)));
+        using var memory = new MemoryCache(new MemoryCacheOptions());
+        var client = CreateClient(handler, memory);
+        var nextClient = acrossInstances ? CreateClient(handler, memory) : client;
+
+        var first = await client.GetCalendarAsync(new(2020, 9, 7), new(2020, 9, 13), false, true, CancellationToken.None);
+        var second = await nextClient.GetCalendarAsync(new(2020, 9, 14), new(2020, 9, 20), false, true, CancellationToken.None);
+
+        Assert.Equal("First week", Assert.Single(first).Title);
+        Assert.Equal("Second week", Assert.Single(second).Title);
+        Assert.Equal(["/calendar/2020/9/movie_release.json", "/calendar/movie_release.json"], handler.Paths.Order());
+        Assert.Equal(2, client.CalendarCacheEntryCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConcurrentNormalWeeksFetchEachMonthFeedOnce(bool acrossInstances)
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new CalendarHandler(async (path, token) =>
+        {
+            if (path == "/calendar/tv.json")
+            {
+                started.TrySetResult();
+                await release.Task.WaitAsync(token);
+            }
+            return Json("[]");
+        });
+        using var memory = new MemoryCache(new MemoryCacheOptions());
+        var client = CreateClient(handler, memory);
+        var nextClient = acrossInstances ? CreateClient(handler, memory) : client;
+        var first = client.GetCalendarAsync(new(2020, 9, 7), new(2020, 9, 13), true, false, CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var second = nextClient.GetCalendarAsync(new(2020, 9, 14), new(2020, 9, 20), true, false, CancellationToken.None);
+        release.SetResult();
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(2, handler.Paths.Count);
+        Assert.Single(handler.Paths.Where(path => path == "/calendar/2020/9/tv.json"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ForcedFeedRefreshBypassesFullMonthCacheAndCannotBeOverwrittenByOlderNormalFeed(bool acrossInstances)
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tvCalls = 0;
+        var handler = new CalendarHandler(async (path, token) =>
+        {
+            if (path != "/calendar/tv.json") return Json("[]");
+            var call = Interlocked.Increment(ref tvCalls);
+            if (call == 1)
+            {
+                started.SetResult();
+                await release.Task.WaitAsync(token);
+            }
+            return Json(Payload(($"Version {call}", 1, null)));
+        });
+        using var memory = new MemoryCache(new MemoryCacheOptions());
+        var client = CreateClient(handler, memory);
+        var refreshClient = acrossInstances ? CreateClient(handler, memory) : client;
+        var normal = client.GetCalendarAsync(Start, End, true, false, CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var refreshed = await refreshClient.GetCalendarAsync(Start, End, true, false, CancellationToken.None, forceRefresh: true)
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("Version 2", Assert.Single(refreshed).Title);
+        release.SetResult();
+        Assert.Equal("Version 1", Assert.Single(await normal).Title);
+        Assert.Equal("Version 2", Assert.Single(await client.GetCalendarAsync(Start, End, true, false, CancellationToken.None)).Title);
+        Assert.Equal(2, tvCalls);
+    }
+
+    [Fact]
+    public async Task FailedForcedFeedRefreshKeepsThePreviousCompleteFeed()
+    {
+        var fail = false;
+        var handler = new CalendarHandler((path, _) => Task.FromResult(path == "/calendar/tv.json"
+            ? fail ? Json("{}", HttpStatusCode.ServiceUnavailable) : Json(Payload(("Preserved", 1, null)))
+            : Json("[]")));
+        var client = CreateClient(handler);
+        Assert.Equal("Preserved", Assert.Single(await client.GetCalendarAsync(Start, End, true, false, CancellationToken.None)).Title);
+        fail = true;
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.GetCalendarAsync(Start, End, true, false, CancellationToken.None, forceRefresh: true));
+        Assert.Equal("Preserved", Assert.Single(await client.GetCalendarAsync(Start, End, true, false, CancellationToken.None)).Title);
+        Assert.Equal(2, handler.Paths.Count(path => path == "/calendar/tv.json"));
     }
 
     private static SimklClient CreateClient(CalendarHandler handler, IMemoryCache? cache = null)

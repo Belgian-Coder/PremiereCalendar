@@ -247,7 +247,7 @@ public sealed partial class PremiereService
 
         return await MapWithLimitedConcurrencyAsync(
             rawItems,
-            (item, token) => MapMovieAsync(item, token, forceRefresh),
+            (item, token) => MapMovieAsync(item, token, forceRefresh, requestedMovieCriteria: criteria.Movies),
             cancellationToken);
     }
 
@@ -284,7 +284,7 @@ public sealed partial class PremiereService
 
             await foreach (var mappedBatch in MapInProgressBatchesAsync(
                     rawBatch.Results,
-                    (item, token) => MapMovieAsync(item, token, forceRefresh, cachedEnrichment),
+                    (item, token) => MapMovieAsync(item, token, forceRefresh, cachedEnrichment, requestedMovieCriteria: criteria.Movies),
                     cancellationToken)
                 .WithCancellation(cancellationToken))
             {
