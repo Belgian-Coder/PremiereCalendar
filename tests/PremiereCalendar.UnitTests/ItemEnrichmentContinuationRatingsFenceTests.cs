@@ -252,6 +252,295 @@ public sealed partial class PremiereServiceTests
         }
     }
 
+    [Theory]
+    [InlineData("none")]
+    [InlineData("winner-passes")]
+    [InlineData("winner-fails")]
+    public async Task OrdinaryMetadataWithoutRatingsPreservesConcurrentRepairThroughForceAllStages(string scoreFilter)
+    {
+        var date = new DateOnly(2026, 11, 2);
+        var clock = new ItemCacheClock();
+        var memory = new MemoryItemEnrichmentStore(clock);
+        var store = new CoreContinuationStore(memory);
+        var coordinator = new ItemEnrichmentCacheCoordinator(store,
+            Microsoft.Extensions.Options.Options.Create(new ItemEnrichmentCacheOptions()),
+            Microsoft.Extensions.Options.Options.Create(new TmdbOptions()), NullLogger<ItemEnrichmentCacheCoordinator>.Instance,
+            timeProvider: clock);
+        var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
+        var cachedScore = scoreFilter == "winner-fails" ? 9.0 : 7.0;
+        var repairedScore = scoreFilter == "winner-fails" ? 7.0 : 9.0;
+        var fetched = clock.GetUtcNow().AddHours(-2);
+        var cachedRatings = new ItemEnrichmentRatings(cachedScore, 7000, 70, 71, 72,
+            "tt0000901", "Q901", "Cached movie", 2026);
+        var cachedMetadata = new ItemEnrichmentMetadata { Title = "Cached movie", ImdbId = "tt0000901", WikidataId = "Q901",
+            OriginalLanguage = "en", RuntimeMinutes = 112, CoreMetadataOnly = false,
+            PosterUrl = "https://fixture.invalid/cached.jpg", ImageSource = ArtworkSources.Fanart,
+            ArtworkComplete = true, OptionalMetadataComplete = true, AvailabilityComplete = true };
+        await memory.ReadManyAsync(coordinator.Partition, [identity], true, default);
+        await memory.WriteManyAsync(coordinator.Partition,
+            [new(identity, 0, JsonSerializer.Serialize(cachedMetadata), fetched, JsonSerializer.Serialize(cachedRatings), fetched,
+                ExpectedMetadataRevision: 0)], default);
+        var initial = Assert.Single(memory.Records.Values);
+        Assert.Equal(1, initial.MetadataRevision);
+        Assert.False(cachedMetadata.CoreMetadataOnly);
+        var repairedRatings = cachedRatings with { ImdbScore = repairedScore, FreshnessVerified = false };
+        var repairedJson = JsonSerializer.Serialize(repairedRatings);
+        var repairedClock = fetched.AddMinutes(1);
+        var repairs = 0;
+        store.BeforeWrite = (writes, _) =>
+        {
+            var write = Assert.Single(writes);
+            if (repairs == 0 && write.MetadataJson is not null)
+            {
+                // No concurrent metadata writer or revision advancement. Both
+                // failed providers produced no ratings payload for this refresh.
+                Assert.Equal(initial.MetadataRevision, write.ExpectedMetadataRevision);
+                Assert.Null(write.RatingsJson);
+                Assert.Null(write.ExpectedRatingsBaseline);
+                Assert.Null(write.CoreContinuation);
+                var pair = Assert.Single(memory.Records);
+                memory.Records[pair.Key] = pair.Value with { RatingsJson = repairedJson, RatingsFetchedUtc = repairedClock };
+                Assert.Equal(initial.MetadataRevision, memory.Records[pair.Key].MetadataRevision);
+                repairs++;
+            }
+            return Task.CompletedTask;
+        };
+        var omdb = new FakeOmdbClient { ThrowOnGet = true };
+        var tomatoes = new ComponentTomatoesClient { Successful = false };
+        var artwork = new OptionalOwnershipArtwork { Candidate = new("https://fixture.invalid/fresh.jpg", ArtworkSources.Fanart) };
+        var watchmode = new FakeWatchmodeClient { Sources = [new() { Id = 19, Name = "Available", Kind = "flatrate" }] };
+        var backfill = new ScoreBackfillService(null, omdb, new RatingMapper(), tomatoes,
+            NullLogger<ScoreBackfillService>.Instance);
+        var tmdb = ItemCacheMovie(date);
+        var cache = new FakeCalendarCache();
+        var reports = new List<PremiereLoadProgress>();
+        var filters = new CalendarFilters { ShowSeries = false, ScoreSource = ScoreSource.Imdb,
+            MinScore = scoreFilter == "none" ? 0 : 8, IncludeUnknownScores = false,
+            MovieFilters = { OriginalLanguages = ["en"] } };
+        var service = CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes, artworkProviders: [artwork],
+            watchmode: watchmode, scoreBackfill: backfill, calendarCache: cache, itemEnrichmentCache: coordinator);
+        var items = await service.GetPremieresAsync(date, date, default, forceRefresh: true, filters: filters,
+            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+
+        Assert.Equal(1, repairs);
+        if (scoreFilter == "winner-fails") Assert.Empty(items);
+        else Assert.Equal(repairedScore, Assert.Single(items).ImdbScore);
+        Assert.Equal(items.Select(item => item.ImdbScore), Assert.Single(reports, report => report.IsFinal).Items.Select(item => item.ImdbScore));
+        Assert.Equal(items.Select(item => item.ImdbScore), cache.SetCalls.Last().Items.Select(item => item.ImdbScore));
+        var accepted = Assert.Single(memory.Records.Values);
+        Assert.Equal(repairedJson, accepted.RatingsJson);
+        Assert.Equal(repairedClock, accepted.RatingsFetchedUtc);
+        Assert.Equal(initial.MetadataRevision + 1, accepted.MetadataRevision);
+        var metadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(accepted.MetadataJson!)!;
+        Assert.False(metadata.CoreMetadataOnly);
+        Assert.Equal("https://fixture.invalid/fresh.jpg", metadata.PosterUrl);
+        Assert.True(metadata.AvailabilityOwnedByWatchmode);
+        Assert.Single(store.Attempts); // Ordinary write only: no core preflight or continuation retry.
+        Assert.Single(tmdb.MovieDetailCalls);
+        Assert.Single(omdb.Calls);
+        Assert.Equal(1, tomatoes.Calls);
+    }
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("winner-passes")]
+    [InlineData("winner-fails")]
+    public async Task PersistedCoreOnlyFailedRefreshPreservesObservedRatingsWinner(string scoreFilter)
+    {
+        var date = new DateOnly(2026, 11, 2);
+        var clock = new ItemCacheClock();
+        var memory = new MemoryItemEnrichmentStore(clock);
+        var store = new CoreContinuationStore(memory);
+        var coordinator = new ItemEnrichmentCacheCoordinator(store,
+            Microsoft.Extensions.Options.Options.Create(new ItemEnrichmentCacheOptions()),
+            Microsoft.Extensions.Options.Options.Create(new TmdbOptions()), NullLogger<ItemEnrichmentCacheCoordinator>.Instance,
+            timeProvider: clock);
+        var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
+        var fetched = clock.GetUtcNow().AddHours(-2);
+        var cachedScore = scoreFilter == "winner-fails" ? 9.0 : 7.0;
+        var repairedScore = scoreFilter == "winner-fails" ? 7.0 : 9.0;
+        var cachedRatings = new ItemEnrichmentRatings(cachedScore, 7000, 70, 71, 72,
+            "tt0000901", "Q901", "Cached movie", 2026);
+        var core = new ItemEnrichmentMetadata { Title = "Cached movie", ImdbId = "tt0000901", WikidataId = "Q901",
+            OriginalLanguage = "en", RuntimeMinutes = 20, Overview = "Stored core fallback", CoreMetadataOnly = true,
+            ArtworkComplete = false, OptionalMetadataComplete = false, AvailabilityComplete = false,
+            TmdbVotes = new(6.0, 6000, fetched) };
+        await memory.ReadManyAsync(coordinator.Partition, [identity], true, default);
+        await memory.WriteManyAsync(coordinator.Partition,
+            [new(identity, 0, JsonSerializer.Serialize(core), fetched, JsonSerializer.Serialize(cachedRatings), fetched,
+                TmdbObservedUtc: fetched, ExpectedMetadataRevision: 0)], default);
+        var repairedJson = JsonSerializer.Serialize(cachedRatings with { ImdbScore = repairedScore, FreshnessVerified = false });
+        var repairedClock = fetched.AddMinutes(1);
+        var repairs = 0;
+        store.BeforeWrite = (writes, _) =>
+        {
+            var write = Assert.Single(writes);
+            if (repairs == 0)
+            {
+                Assert.Equal(1, write.ExpectedMetadataRevision);
+                Assert.True(JsonSerializer.Deserialize<ItemEnrichmentMetadata>(write.MetadataJson!)!.CoreMetadataOnly);
+                Assert.Null(write.RatingsJson);
+                var pair = Assert.Single(memory.Records);
+                memory.Records[pair.Key] = pair.Value with { RatingsJson = repairedJson, RatingsFetchedUtc = repairedClock };
+                repairs++;
+            }
+            return Task.CompletedTask;
+        };
+        var template = ItemCacheMovie(date);
+        var discovery = Assert.Single(template.MovieItems) with { VoteAverage = 8.2, VoteCount = 8200 };
+        var tmdb = new FakeTmdbClient { MovieItems = [discovery],
+            MovieDetailOverride = (_, _) => Task.FromResult<TmdbDetailsWithExtras?>(null) };
+        var omdb = new FakeOmdbClient { ThrowOnGet = true };
+        var tomatoes = new ComponentTomatoesClient { Successful = false };
+        var artwork = new OptionalOwnershipArtwork();
+        var watchmode = new FakeWatchmodeClient();
+        var backfill = new ScoreBackfillService(null, omdb, new RatingMapper(), tomatoes, NullLogger<ScoreBackfillService>.Instance);
+        var cache = new FakeCalendarCache();
+        var reports = new List<PremiereLoadProgress>();
+        var filters = new CalendarFilters { ShowSeries = false, ScoreSource = ScoreSource.Imdb,
+            MinScore = scoreFilter == "none" ? 0 : 8, IncludeUnknownScores = false,
+            MovieFilters = { OriginalLanguages = ["en"], RuntimeMaxMinutes = 60 } };
+        var items = await CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes, artworkProviders: [artwork], watchmode: watchmode,
+            scoreBackfill: backfill, calendarCache: cache, itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default,
+                forceRefresh: true, filters: filters, progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+
+        Assert.Equal(1, repairs);
+        if (scoreFilter == "winner-fails") Assert.Empty(items);
+        else Assert.Equal(repairedScore, Assert.Single(items).ImdbScore);
+        Assert.Equal(items.Select(item => item.ImdbScore), Assert.Single(reports, report => report.IsFinal).Items.Select(item => item.ImdbScore));
+        Assert.Equal(items.Select(item => item.ImdbScore), cache.SetCalls.Last().Items.Select(item => item.ImdbScore));
+        var accepted = Assert.Single(memory.Records.Values);
+        Assert.Equal(repairedJson, accepted.RatingsJson);
+        Assert.Equal(repairedClock, accepted.RatingsFetchedUtc);
+        Assert.Equal(fetched, accepted.MetadataFetchedUtc); // Failed details cannot renew the stored core proof.
+        Assert.Equal(clock.GetUtcNow(), accepted.TmdbObservedUtc);
+        var metadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(accepted.MetadataJson!)!;
+        Assert.Equal(20, metadata.RuntimeMinutes);
+        Assert.Equal(8.2, metadata.TmdbVotes!.TmdbScore);
+        Assert.False(metadata.ArtworkComplete);
+        Assert.False(metadata.AvailabilityComplete);
+        Assert.Single(tmdb.MovieDetailCalls);
+        Assert.Single(omdb.Calls);
+        Assert.Equal(1, tomatoes.Calls);
+        Assert.Equal(0, artwork.Calls);
+        Assert.Empty(watchmode.SourceCalls);
+    }
+
+    [Fact]
+    public async Task OrdinaryProviderMergeProjectsNewerCompetingRatingsWinner()
+    {
+        var date = new DateOnly(2026, 11, 2);
+        var clock = new ItemCacheClock();
+        var submittedClock = clock.GetUtcNow();
+        var oldClock = submittedClock.AddHours(-2);
+        var memory = new MemoryItemEnrichmentStore(clock);
+        var store = new CoreContinuationStore(memory);
+        var coordinator = new ItemEnrichmentCacheCoordinator(store,
+            Microsoft.Extensions.Options.Options.Create(new ItemEnrichmentCacheOptions()),
+            Microsoft.Extensions.Options.Options.Create(new TmdbOptions()), NullLogger<ItemEnrichmentCacheCoordinator>.Instance,
+            timeProvider: clock);
+        var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
+        var metadata = new ItemEnrichmentMetadata { Title = "Cached movie", ImdbId = "tt0000901", WikidataId = "Q901",
+            OriginalLanguage = "en", RuntimeMinutes = 112, ArtworkComplete = true, OptionalMetadataComplete = true, AvailabilityComplete = true };
+        var seed = new ItemEnrichmentRatings(5.0, 5000, 60, 61, 62, "tt0000901", "Q901", metadata.Title, 2026)
+        {
+            ProviderFreshnessTracked = true, ExternalFetchedUtc = oldClock, TomatoesFetchedUtc = oldClock,
+            ExternalValues = new(ImdbScore: 5.0, ImdbVoteCount: 5000, MetacriticScore: 62),
+            TomatoesValues = new(RottenTomatoesScore: 60, RottenTomatoesAudienceScore: 61)
+        };
+        await memory.ReadManyAsync(coordinator.Partition, [identity], true, default);
+        await memory.WriteManyAsync(coordinator.Partition,
+            [new(identity, 0, JsonSerializer.Serialize(metadata), oldClock, JsonSerializer.Serialize(seed), oldClock,
+                ExpectedMetadataRevision: 0)], default);
+        DateTimeOffset? competingClock = null;
+        store.BeforeWrite = (writes, _) =>
+        {
+            if (competingClock is null)
+            {
+                var write = Assert.Single(writes);
+                Assert.Equal(1, write.ExpectedMetadataRevision);
+                Assert.Null(write.ExpectedRatingsBaseline); // Ordinary provider-clock merge stays independent.
+                var submitted = JsonSerializer.Deserialize<ItemEnrichmentRatings>(write.RatingsJson!)!;
+                Assert.Equal(7.0, submitted.ImdbScore);
+                clock.Advance(TimeSpan.FromMinutes(1));
+                competingClock = clock.GetUtcNow();
+                var competing = seed with { ImdbScore = 9.0, ImdbVoteCount = 9000, ExternalFetchedUtc = competingClock,
+                    ExternalValues = new(ImdbScore: 9.0, ImdbVoteCount: 9000, MetacriticScore: 79) };
+                var pair = Assert.Single(memory.Records);
+                memory.Records[pair.Key] = pair.Value with { RatingsJson = JsonSerializer.Serialize(competing), RatingsFetchedUtc = competingClock };
+            }
+            return Task.CompletedTask;
+        };
+        var omdb = ItemCacheOmdb("7.0");
+        var tomatoes = new ComponentTomatoesClient { Result = new(94, 96) };
+        var cache = new FakeCalendarCache();
+        var reports = new List<PremiereLoadProgress>();
+        var items = await CreateService(ItemCacheMovie(date), omdb: omdb, rottenTomatoes: tomatoes, calendarCache: cache,
+            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default, forceRefresh: true,
+                filters: new CalendarFilters { ShowSeries = false, ScoreSource = ScoreSource.Imdb, MinScore = 8,
+                    IncludeUnknownScores = false, MovieFilters = { OriginalLanguages = ["en"] } },
+                progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+        var item = Assert.Single(items);
+        Assert.Equal(9.0, item.ImdbScore);
+        Assert.Equal(94, item.RottenTomatoesScore);
+        Assert.Equal(9.0, Assert.Single(Assert.Single(reports, report => report.IsFinal).Items).ImdbScore);
+        Assert.Equal(9.0, Assert.Single(cache.SetCalls.Last().Items).ImdbScore);
+        var accepted = Assert.Single(memory.Records.Values);
+        var ratings = JsonSerializer.Deserialize<ItemEnrichmentRatings>(accepted.RatingsJson!)!;
+        Assert.Equal(9.0, ratings.ExternalValues!.ImdbScore);
+        Assert.Equal(competingClock, ratings.ExternalFetchedUtc);
+        Assert.Equal(94, ratings.TomatoesValues!.RottenTomatoesScore);
+        Assert.Equal(submittedClock, ratings.TomatoesFetchedUtc);
+        Assert.Equal(competingClock, accepted.RatingsFetchedUtc);
+        Assert.Equal(2, accepted.MetadataRevision);
+        Assert.Single(store.Attempts);
+        Assert.Single(omdb.Calls);
+        Assert.Equal(1, tomatoes.Calls);
+    }
+
+    [Fact]
+    public async Task PreservedRatingsDropQueuedPayloadAndAllowLateMetadataCompletion()
+    {
+        await using var fixture = await AtomicRatingsFixture.CreateAsync(fresh: false, "payload");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lateRatings = fixture.Session.GetAsync(fixture.Identity, false, async (_, _, _, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return new(null, fixture.Ratings with { ImdbScore = 7.0 }, RefreshMetadataClock: false);
+        }, default, ratingsOnly: true, refreshVariant: "held-ratings");
+        ItemEnrichmentRatingsBaseline? repair = null;
+        fixture.Store.BeforeWrite = async (writes, _) =>
+        {
+            if (Assert.Single(writes).ExpectedMetadataRevision != 0) return;
+            await fixture.Session.GetAsync(fixture.Identity, false, (_, _, _, _) =>
+                Task.FromResult(new ItemEnrichmentRefresh(null, fixture.Ratings with { ImdbScore = 7.7 }, RefreshMetadataClock: false)),
+                default, ratingsOnly: true, refreshVariant: "queued-ratings");
+            Assert.True(fixture.Session.HasPendingWrites);
+            repair = fixture.RepairRatings();
+        };
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await fixture.Session.FlushAsync(default);
+        }
+        finally { release.TrySetResult(); }
+        var protectedRatings = await lateRatings.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(9.9, protectedRatings.Ratings!.ImdbScore);
+        Assert.False(fixture.Session.HasPendingWrites); // The older queued payload is gone, not merely hidden.
+        Assert.Equal(repair!.Json, fixture.Current.RatingsJson);
+        fixture.Store.BeforeWrite = null;
+        var completed = await fixture.Session.GetAsync(fixture.Identity, false, (_, _, _, _) =>
+            Task.FromResult(new ItemEnrichmentRefresh(fixture.Complete, null, RefreshMetadataClock: false, RefreshRatingsClock: false)), default);
+        Assert.Equal(0, completed.Record.MetadataRevision); // Producer revision is not rebased to the accepted core's revision1.
+        Assert.Equal(fixture.Complete.PosterUrl, completed.Metadata!.PosterUrl);
+        await fixture.Session.FlushAsync(default);
+        fixture.AssertRepairAndMetadata(repair);
+        Assert.Null(Assert.Single(fixture.Store.Attempts.Last()).RatingsJson);
+        Assert.Equal(0, Assert.Single(fixture.Store.Attempts.Last()).CoreContinuation!.MetadataRevision);
+    }
+
     [Fact]
     public void RatingsOriginDoesNotConstrainOrdinaryIndependentProviderMerges()
     {

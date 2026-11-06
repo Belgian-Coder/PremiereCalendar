@@ -47,17 +47,18 @@ premieres. Priming is excluded.
 
 | Scenario | Completion before → after | Change | Every current row visible before → after |
 |---|---:|---:|---:|
-| Refresh sources, enrichment fresh | 2,714 → 667 ms | 4.07× faster | 2,703 → 664 ms |
-| Stale movie week | 7,496 → 3,333 ms | 2.25× faster | 7,467 → 3,131 ms |
-| Update movie snapshot | 10,465 → 5,526 ms | 1.89× faster | 10,331 → 5,221 ms |
-| Force every movie component through the legacy API | 2,814 → 3,077 ms | 9% slower | 2,782 → 2,812 ms |
-| Force every All/new-series component through the legacy API | 4,070 → 4,625 ms | 14% slower | 3,947 → 4,335 ms |
+| Refresh sources, enrichment fresh | 2,714 → 493 ms | 5.51× faster | 2,703 → 489 ms |
+| Stale movie week | 7,496 → 2,357 ms | 3.18× faster | 7,467 → 2,173 ms |
+| Update movie snapshot | 10,465 → 3,686 ms | 2.84× faster | 10,331 → 3,468 ms |
+| Force every movie component through the legacy API | 2,814 → 2,924 ms | 4% slower | 2,782 → 2,743 ms |
+| Force every All/new-series component through the legacy API | 4,070 → 3,546 ms | 15% faster | 3,947 → 3,332 ms |
 
 These are one recorded control run and a later final-candidate run on the same
 SDK and fixture, not production percentiles. Host scheduling and cold setup
-vary. There is no demonstrated cold/force-all completion gain; the intended
-large gain comes from the approved release-list refresh and avoiding redundant
-old-row enrichment.
+vary. Force-all results are mixed, so no broad cold/force-all gain is claimed.
+The earlier cap-two candidate took 667 ms for warm refresh and was 9–14% slower
+for the two force-all scenarios. Both comparisons are retained. The intended
+gain comes from release-list refresh and avoiding redundant old-row enrichment.
 
 The warm button still made all 14 discovery requests. Each enrichment provider
 went from 28 requests to zero, including TMDb details. Stale/Update scenarios
@@ -81,8 +82,9 @@ normal failure retries.
 
 Raw evidence is retained under
 `D:\Projects\PremiereCalendar.Build.FullRefresh20261106\snapshots-20261106-175823-337`:
-`results-v4/baseline/1`, final `results-v7/candidate/1` and
-`comparison-final-v7.json`. Earlier v4/v6 candidate timings used an experimental
+`results-v4/baseline/1`, final `results-v13-perf/candidate/1` and
+`comparison-final-v13.json`. The earlier cap-two comparison remains in v7.
+Earlier v4/v6 candidate timings used an experimental
 12-source fanout that was rejected after review; they are historical trial
 evidence and are not the release candidate's performance claim. No real provider
 traffic was used for these measurements.
@@ -109,8 +111,8 @@ does not explain the speedup.
 
 ## Release acceptance
 
-The current test roster has 1,825 passing cases and one expected Linux file-lock
-skip: 1,075 unit, 191 component and 559 integration passes, including isolated
+The current test roster has 1,833 passing cases and one expected Linux file-lock
+skip: 1,083 unit, 191 component and 559 integration passes, including isolated
 SQLite and PostgreSQL coverage. Evidence combines the broad run with affected
 reruns; earlier failures and their exact passing replacements remain recorded.
 All 426 fingerprinted source/config inputs match the tested snapshot.
@@ -126,8 +128,20 @@ failures are retained.
 Concurrent ratings repairs are protected by a JSON-and-clock precondition checked
 inside the store transaction. Proven equivalent metadata can still publish.
 The accepted scores survive source filtering, final synchronization and hydration,
-including provider failures that return no new ratings payload. The focused
-59-case correction run passed without provider network access.
+including provider failures that return no new ratings payload. Accepted
+provider-clock merge winners also drive source filtering. Preserving ratings
+does not discard a later valid metadata proposal or advance its original
+revision proof. Metadata-only writes carry their known ratings provenance;
+obsolete queued ratings cannot undo an accepted winner. All eight added cases
+first failed against the earlier handling. The focused 67-case correction run
+and all five repeated performance scenarios passed without provider access.
+
+The broader core/cache run passed 456 cases. Its remaining fixture held the
+clock constant across two independent forced refreshes, so the store correctly
+retained the earlier equal-clock rating. The fixture now advances one minute,
+well within the freshness window; its unchanged new-score and forced-request
+assertions pass. That original failure is retained with its passing replacement.
+All eight affected SQLite/PostgreSQL persistence cases also passed again.
 
 Implementation validation, final independent reviews, local security scans and
 installed acceptance are recorded separately in the release evidence. Pending

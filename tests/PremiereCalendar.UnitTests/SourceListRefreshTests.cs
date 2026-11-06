@@ -100,6 +100,9 @@ public sealed partial class PremiereServiceTests
         var cache = new FakeCalendarCache();
         await CreateService(SourceListTmdb(date, 901), omdb: ItemCacheOmdb("7.1"), calendarCache: cache,
             itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default, forceRefresh: true, filters: SourceListFilters());
+        // A later independent refresh has a newer observation time while all
+        // enrichment remains fresh; equal provider clocks retain the store winner.
+        clock.Advance(TimeSpan.FromMinutes(1));
         var tmdb = SourceListTmdb(date, 901);
         var omdb = ItemCacheOmdb("8.2");
         var item = Assert.Single(await CreateService(tmdb, omdb: omdb, calendarCache: cache, itemEnrichmentCache: coordinator)

@@ -284,16 +284,20 @@ public sealed class ItemEnrichmentCacheCoordinator
             if (observation == current.Metadata.TmdbVotes) return;
             var metadata = current.Metadata with { TmdbVotes = observation };
             var updated = current with { Metadata = metadata };
-            _records[identity] = updated;
-            if (_completed.ContainsKey(identity)) _completed[identity] = updated;
+            updated = _records.AddOrUpdate(identity, updated, (_, existing) => PreserveAcceptedRatings(updated, existing));
+            if (_completed.ContainsKey(identity)) updated = _completed.AddOrUpdate(identity, updated, (_, existing) =>
+                PreserveAcceptedRatings(updated, _records.GetValueOrDefault(identity) ?? existing));
             if (current.Record.Generation < 0) return;
             var write = new ItemEnrichmentWrite(identity, current.Record.Generation,
                     JsonSerializer.Serialize(metadata), current.Record.MetadataFetchedUtc, TvmazeShowId: metadata.TvmazeShowId,
-                    TmdbObservedUtc: metadata.TmdbVotes?.TmdbObservedUtc, ExpectedMetadataRevision: current.Record.MetadataRevision);
+                    TmdbObservedUtc: metadata.TmdbVotes?.TmdbObservedUtc, ExpectedMetadataRevision: current.Record.MetadataRevision)
+            { RatingsOrigin = current.RatingsReadOrigin };
             _writes.AddOrUpdate(identity, write,
                 (_, previous) => previous.ExpectedMetadataRevision != current.Record.MetadataRevision ? write : previous with
                 { MetadataJson = write.MetadataJson, MetadataFetchedUtc = write.MetadataFetchedUtc, TmdbObservedUtc = write.TmdbObservedUtc,
-                    ExpectedMetadataRevision = current.Record.MetadataRevision, CoreContinuation = null, FreshMovieCore = null });
+                    ExpectedMetadataRevision = current.Record.MetadataRevision, CoreContinuation = null, FreshMovieCore = null,
+                    RatingsOrigin = previous.RatingsJson is not null ? previous.RatingsOrigin : write.RatingsOrigin });
+            if (Find(identity) is { PreserveRatings: true }) DropPendingRatings(identity);
         }
 
         public void RememberFirstEpisodeDate(ItemEnrichmentIdentity identity, long generation, FirstEpisodeValidation validation)
@@ -303,15 +307,19 @@ public sealed class ItemEnrichmentCacheCoordinator
                 || current.Record.Generation < 0 || current.Record.Generation != generation) return;
             var metadata = current.Metadata with { FirstEpisodeDateChecked = true, FirstEpisodeDate = validation.Date };
             var updated = current with { Metadata = metadata };
-            _records[identity] = updated;
-            if (_completed.ContainsKey(identity)) _completed[identity] = updated;
+            updated = _records.AddOrUpdate(identity, updated, (_, existing) => PreserveAcceptedRatings(updated, existing));
+            if (_completed.ContainsKey(identity)) updated = _completed.AddOrUpdate(identity, updated, (_, existing) =>
+                PreserveAcceptedRatings(updated, _records.GetValueOrDefault(identity) ?? existing));
             var write = new ItemEnrichmentWrite(identity, current.Record.Generation,
                     JsonSerializer.Serialize(metadata), current.Record.MetadataFetchedUtc, TvmazeShowId: metadata.TvmazeShowId,
-                    TmdbObservedUtc: metadata.TmdbVotes?.TmdbObservedUtc, ExpectedMetadataRevision: current.Record.MetadataRevision);
+                    TmdbObservedUtc: metadata.TmdbVotes?.TmdbObservedUtc, ExpectedMetadataRevision: current.Record.MetadataRevision)
+            { RatingsOrigin = current.RatingsReadOrigin };
             _writes.AddOrUpdate(identity, write,
                 (_, previous) => previous.ExpectedMetadataRevision != current.Record.MetadataRevision ? write : previous with
                 { MetadataJson = write.MetadataJson, MetadataFetchedUtc = write.MetadataFetchedUtc, TmdbObservedUtc = write.TmdbObservedUtc,
-                    ExpectedMetadataRevision = current.Record.MetadataRevision, CoreContinuation = null, FreshMovieCore = null });
+                    ExpectedMetadataRevision = current.Record.MetadataRevision, CoreContinuation = null, FreshMovieCore = null,
+                    RatingsOrigin = previous.RatingsJson is not null ? previous.RatingsOrigin : write.RatingsOrigin });
+            if (Find(identity) is { PreserveRatings: true }) DropPendingRatings(identity);
         }
 
         public IReadOnlyList<PremiereItem> ApplyPreservedRatings(IReadOnlyList<PremiereItem> items)
@@ -375,7 +383,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                         ratingsChanged ? ratingsJson : null, ratingsChanged ? current.Record.RatingsFetchedUtc : null, metadata.TvmazeShowId,
                         metadata.TmdbVotes?.TmdbObservedUtc, current.Record.MetadataRevision,
                         ExpectedRatingsJson: ratingsChanged ? current.Record.RatingsJson ?? "null" : null)
-                    { RatingsOrigin = ratingsChanged ? current.RatingsReadOrigin : null };
+                    { RatingsOrigin = current.RatingsReadOrigin };
                 }
                 else if (!owner.RatingsFresh(current)) _completed.TryRemove(identity, out _);
             }
@@ -452,7 +460,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                     metadataChanged ? metadataClock : null,
                     ratingsChanged ? JsonSerializer.Serialize(ratings) : null, ratingsChanged ? ratingsClock : null,
                     metadata?.TvmazeShowId, metadata?.TmdbVotes?.TmdbObservedUtc, current.Record.MetadataRevision)
-                { RatingsOrigin = ratingsChanged ? current.RatingsReadOrigin : null };
+                { RatingsOrigin = current.RatingsReadOrigin };
                 _writes.AddOrUpdate(identity, write, (_, previous) => previous.ExpectedMetadataRevision != write.ExpectedMetadataRevision ? write : write with
                 {
                     MetadataJson = write.MetadataJson ?? previous.MetadataJson, MetadataFetchedUtc = write.MetadataFetchedUtc ?? previous.MetadataFetchedUtc,
@@ -535,7 +543,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                             ratings is not null ? JsonSerializer.Serialize(ratings) : null,
                             ratings is not null ? seed.LastUpdatedUtc : null, metadata.TvmazeShowId,
                             metadata.TmdbVotes?.TmdbObservedUtc, record.MetadataRevision)
-                        { RatingsOrigin = ratings is not null ? snapshot.RatingsReadOrigin : null };
+                        { RatingsOrigin = snapshot.RatingsReadOrigin };
                         _writes[identity] = write;
                         snapshot = new(record with
                         {
@@ -719,19 +727,18 @@ public sealed class ItemEnrichmentCacheCoordinator
                 outcome = outcome with { Metadata = observedMetadata with { TmdbVotes = observed },
                     Record = outcome.Record with { TmdbObservedUtc = observed?.TmdbObservedUtc } };
             }
-            // A mapper that began before a guarded loss must not erase the
-            // accepted repair marker when its shared result arrives later.
-            outcome = _records.AddOrUpdate(identity, outcome, (_, existing) =>
-                existing.PreserveRatings || outcome.PreserveRatings ? existing : outcome);
+            // Retain accepted ratings without discarding the producer's metadata
+            // or the revision/proofs required to publish that metadata safely.
+            outcome = _records.AddOrUpdate(identity, outcome, (_, existing) => PreserveAcceptedRatings(outcome, existing));
             if (!ratingsOnly && !metadataOnly) outcome = _completed.AddOrUpdate(identity, outcome, (_, existing) =>
-                existing.PreserveRatings || outcome.PreserveRatings ? existing : outcome);
-            if (outcome.PreserveRatings) return outcome;
+                PreserveAcceptedRatings(outcome, _records.GetValueOrDefault(identity) ?? existing));
+            if (outcome.PreserveRatings) DropPendingRatings(identity);
             if (current.Record.Generation >= 0)
             {
                 var metadataChanged = outcome.Record.MetadataFetchedUtc != current.Record.MetadataFetchedUtc
                     || JsonSerializer.Serialize(outcome.Metadata) != JsonSerializer.Serialize(current.Metadata);
-                var ratingsChanged = outcome.Record.RatingsFetchedUtc != current.Record.RatingsFetchedUtc
-                    || JsonSerializer.Serialize(outcome.Ratings) != JsonSerializer.Serialize(current.Ratings);
+                var ratingsChanged = !outcome.PreserveRatings && (outcome.Record.RatingsFetchedUtc != current.Record.RatingsFetchedUtc
+                    || JsonSerializer.Serialize(outcome.Ratings) != JsonSerializer.Serialize(current.Ratings));
                 if (ratingsChanged)
                     _ratingChanges.AddOrUpdate(identity, new RatingProjectionChange(current.Ratings, outcome.Ratings),
                         (_, previous) => new RatingProjectionChange(previous.Before, outcome.Ratings));
@@ -753,19 +760,57 @@ public sealed class ItemEnrichmentCacheCoordinator
                         (_, previous) => previous.ExpectedMetadataRevision != current.Record.MetadataRevision ? write : new(identity, current.Record.Generation,
                             metadataChanged ? JsonSerializer.Serialize(outcome.Metadata) : previous.MetadataJson,
                             metadataChanged ? outcome.Record.MetadataFetchedUtc : previous.MetadataFetchedUtc,
-                            ratingsChanged ? JsonSerializer.Serialize(outcome.Ratings) : previous.RatingsJson,
-                            ratingsChanged ? outcome.Record.RatingsFetchedUtc : previous.RatingsFetchedUtc,
+                            outcome.PreserveRatings ? null : ratingsChanged ? JsonSerializer.Serialize(outcome.Ratings) : previous.RatingsJson,
+                            outcome.PreserveRatings ? null : ratingsChanged ? outcome.Record.RatingsFetchedUtc : previous.RatingsFetchedUtc,
                             outcome.Metadata?.TvmazeShowId ?? previous.TvmazeShowId,
                             outcome.Metadata?.TmdbVotes?.TmdbObservedUtc ?? previous.TmdbObservedUtc, current.Record.MetadataRevision)
                         { CoreContinuation = metadataChanged ? coreContinuation : previous.CoreContinuation,
                             FreshMovieCore = metadataChanged ? outcome.FreshMovieCore : previous.FreshMovieCore,
-                            RatingsOrigin = ratingsChanged ? outcome.RatingsReadOrigin
+                            RatingsOrigin = outcome.PreserveRatings || ratingsChanged ? outcome.RatingsReadOrigin
                                 : previous.RatingsJson is not null ? previous.RatingsOrigin : write.RatingsOrigin,
-                            ExpectedRatingsBaseline = ratingsChanged || previous.RatingsJson is null
+                            ExpectedRatingsBaseline = outcome.PreserveRatings || ratingsChanged || previous.RatingsJson is null
                                 ? write.ExpectedRatingsBaseline : previous.ExpectedRatingsBaseline });
                 }
             }
+            // Accept may have established preservation while this producer was
+            // queueing. Either side removes stale pending ratings, without an IO lock.
+            if (Find(identity) is { PreserveRatings: true })
+            {
+                outcome = _records.AddOrUpdate(identity, outcome, (_, existing) => PreserveAcceptedRatings(outcome, existing));
+                if (!ratingsOnly && !metadataOnly) outcome = _completed.AddOrUpdate(identity, outcome, (_, existing) =>
+                    PreserveAcceptedRatings(outcome, _records.GetValueOrDefault(identity) ?? existing));
+                DropPendingRatings(identity);
+            }
             return outcome;
+        }
+
+        private static ItemEnrichmentSnapshot PreserveAcceptedRatings(ItemEnrichmentSnapshot incoming, ItemEnrichmentSnapshot accepted)
+        {
+            if (!accepted.PreserveRatings) return incoming.PreserveRatings ? accepted : incoming;
+            var compatible = incoming.Record.Generation == accepted.Record.Generation
+                && string.Equals(incoming.Metadata?.ImdbId, accepted.Metadata?.ImdbId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(incoming.Metadata?.WikidataId, accepted.Metadata?.WikidataId, StringComparison.OrdinalIgnoreCase)
+                && incoming.Metadata?.TvdbId == accepted.Metadata?.TvdbId
+                && string.Equals(incoming.Metadata?.Title, accepted.Metadata?.Title, StringComparison.OrdinalIgnoreCase);
+            if (!compatible) return accepted;
+            return incoming with
+            {
+                Ratings = accepted.Ratings, RatingsReadOrigin = accepted.RatingsReadOrigin, PreserveRatings = true,
+                Record = incoming.Record with { RatingsJson = accepted.Record.RatingsJson, RatingsFetchedUtc = accepted.Record.RatingsFetchedUtc }
+            };
+        }
+
+        private void DropPendingRatings(ItemEnrichmentIdentity identity)
+        {
+            _ratingChanges.TryRemove(identity, out _);
+            while (_writes.TryGetValue(identity, out var pending) && pending.RatingsJson is not null)
+            {
+                if (pending.MetadataJson is null)
+                {
+                    if (((ICollection<KeyValuePair<ItemEnrichmentIdentity, ItemEnrichmentWrite>>)_writes).Remove(new(identity, pending))) return;
+                }
+                else if (_writes.TryUpdate(identity, pending with { RatingsJson = null, RatingsFetchedUtc = null }, pending)) return;
+            }
         }
 
         private ItemEnrichmentWrite TagLookupWrite(ItemEnrichmentWrite write)
@@ -1032,10 +1077,16 @@ public sealed class ItemEnrichmentCacheCoordinator
                         Reason = record.Generation != write.ExpectedGeneration ? "metadata_generation_changed"
                             : !metadataAccepted || !ratingsAccepted && !ratingsReused ? "component_revision_changed" : null, Sequence = record.MetadataRevision,
                         DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds });
-                    var guardedRatingsLost = generationMatches && write.ExpectedRatingsBaseline is { } ratingsBaseline
-                        && (write.RatingsJson is not null
-                            ? record.RatingsJson != write.RatingsJson || record.RatingsFetchedUtc != write.RatingsFetchedUtc
-                            : record.RatingsJson != ratingsBaseline.Json || record.RatingsFetchedUtc != ratingsBaseline.FetchedUtc);
+                    // A metadata refresh with no new ratings still carries cached
+                    // source scores. Preserve a repair that won during that write.
+                    var ratingsBaseline = write.ExpectedRatingsBaseline
+                        ?? (write.MetadataJson is not null && write.RatingsJson is null ? write.RatingsOrigin?.Baseline : null);
+                    var submittedRatingsLost = write.RatingsJson is not null
+                        && (record.RatingsJson != write.RatingsJson || record.RatingsFetchedUtc != write.RatingsFetchedUtc);
+                    var cachedRatingsLost = write.RatingsJson is null && ratingsBaseline is { } baseline
+                        && (record.RatingsJson != baseline.Json || record.RatingsFetchedUtc != baseline.FetchedUtc);
+                    var guardedRatingsLost = generationMatches && write.RatingsOrigin is not null
+                        && (submittedRatingsLost || cachedRatingsLost);
                     Accept(record, guardedRatingsLost ? write.RatingsOrigin : null);
                 }
                 outcome = conflicted ? "generation_conflict" : "accepted_or_rebased";
@@ -1090,6 +1141,7 @@ public sealed class ItemEnrichmentCacheCoordinator
             { RatingsReadOrigin = preservedRatingsOrigin, PreserveRatings = true };
             _records[record.Identity] = accepted;
             if (_completed.ContainsKey(record.Identity)) _completed[record.Identity] = accepted;
+            if (accepted.PreserveRatings) DropPendingRatings(record.Identity);
             if (record.Identity.MediaType == PremiereMediaType.Series && current?.Record.Generation != record.Generation)
                 foreach (var key in FirstEpisodeDates.Keys.Where(key => key.TmdbId == record.Identity.TmdbId && key.Generation != record.Generation))
                     FirstEpisodeDates.TryRemove(key, out _);
