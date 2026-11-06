@@ -111,7 +111,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         DateOnly end,
         bool forceRefresh = false,
         CalendarFilters? filters = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default, bool refreshSourceLists = false)
     {
         using var activity = _telemetry.StartActivity("calendar.load");
         var started = Stopwatch.GetTimestamp();
@@ -122,7 +122,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
         if (_workScheduler is null)
         {
-            await foreach (var progress in StreamCoreAsync(start, end, forceRefresh, filters, null, cancellationToken)
+            await foreach (var progress in StreamCoreAsync(start, end, forceRefresh, filters, refreshSourceLists
+                               ? new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(), null)
+                                   { RefreshCalendarSnapshot = true, RefreshSourceLists = true } : null, cancellationToken)
                                .WithCancellation(cancellationToken))
             {
                 if (!firstResultRecorded)
@@ -137,7 +139,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             yield break;
         }
 
-        if (!forceRefresh)
+        if (!forceRefresh && !refreshSourceLists)
         {
             var snapshot = await ReadCalendarCacheAsync(start, end, filters, cancellationToken);
             if (snapshot.Items is { } cached)
@@ -176,10 +178,10 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         }
 
         var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
-        var payload = new CalendarProviderWorkPayload(start, end, forceRefresh, filters is null ? null : CalendarFilterState.Clone(filters));
+        var payload = new CalendarProviderWorkPayload(start, end, forceRefresh, filters is null ? null : CalendarFilterState.Clone(filters)) { RefreshSourceLists = refreshSourceLists };
         var request = new ProviderWorkRequest(
             ProviderWorkKind.CalendarForeground,
-            $"foreground:{start:yyyyMMdd}:{end:yyyyMMdd}:{forceRefresh}:{criteria.CacheKey()}",
+            $"foreground:{start:yyyyMMdd}:{end:yyyyMMdd}:{(refreshSourceLists ? "sources" : forceRefresh.ToString())}:{criteria.CacheKey()}",
             ProviderWorkPriority.Foreground,
             JsonSerializer.Serialize(payload));
         var handle = await _workScheduler.EnqueueAsync(request, cancellationToken);
@@ -246,9 +248,27 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     yield return WithDegradedCoverage(CreateProgress("Week cache", filtered, filtered, isFinal: true, fromCache: true), snapshot.UnavailableSources, true);
                     yield break;
                 }
-                var metadataHydration = await HydrateSharedItemMetadataAsync(cached, start, end, cancellationToken);
-                var hydrated = await TraceEnrichmentStageAsync("cache.hydration",
-                    () => HydrateCachedImdbRatingsAsync(metadataHydration.Items, filters, cancellationToken));
+                // Discovery will enrich rediscovered media. Fresh media retained
+                // from a shared cache still needs its normal metadata/ratings repair.
+                var refreshSnapshot = resumeState?.RefreshCalendarSnapshot == true;
+                bool Rediscovered(PremiereItem item) => refreshSnapshot || !snapshot.IsComplete
+                    && (item.MediaType == PremiereMediaType.Series ? !snapshot.HasFreshSeries : !snapshot.HasFreshMovies);
+                var rediscoveredItems = cached.Where(Rediscovered).ToArray();
+                var retainedItems = cached.Where(item => !Rediscovered(item)).ToArray();
+                var metadataHydration = await TraceEnrichmentStageAsync("cache.metadata_hydration",
+                    () => HydrateSharedItemMetadataAsync(retainedItems, start, end, cancellationToken));
+                if (rediscoveredItems.Length > 0)
+                    _telemetry.RecordDiagnostic("enrichment.skipped", details: new()
+                    {
+                        Stage = "cache.metadata_hydration", Outcome = "skipped",
+                        Reason = "fresh_discovery_pending", Count = rediscoveredItems.Length
+                    });
+                var hydrated = await TraceEnrichmentStageAsync("cache.hydration", async () =>
+                {
+                    var retained = await HydrateCachedImdbRatingsAsync(metadataHydration.Items, filters, cancellationToken);
+                    var rediscovered = await HydrateCachedImdbRatingsAsync(rediscoveredItems, filters, cancellationToken, allowRemote: false);
+                    return (IReadOnlyList<PremiereItem>)retained.Concat(rediscovered).ToArray();
+                });
                 var cachedItems = ApplyRequestedFilters(hydrated, filters);
                 if (_itemCacheSession.Value is { } cachedSession)
                 {
@@ -1319,7 +1339,10 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
 
             lastItemBatch = itemBatch;
             var previousItemCount = accumulated.Count;
-            accumulated.AddRange(itemBatch?.Items ?? []);
+            var sourceItems = itemBatch?.Items ?? [];
+            if (itemBatch?.IsMetadataProgress != true && _itemCacheSession.Value is { } itemSession)
+                sourceItems = itemSession.ApplyPreservedRatings(sourceItems);
+            accumulated.AddSourceProgress(sourceItems, itemBatch?.IsMetadataProgress == true);
             var completedWork = itemBatch?.CompletedWork ?? 0;
             var madeProgress = accumulated.Count > previousItemCount || completedWork > furthestCompletedWork;
             if (madeProgress)
@@ -1971,21 +1994,60 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         private readonly Dictionary<string, PremiereItem> _mergedByCanonicalId = new(StringComparer.Ordinal);
         private readonly HashSet<string> _dirtyCanonicalIds = new(StringComparer.Ordinal);
 
+        private Dictionary<(string CanonicalId, DateOnly PremiereDate), List<PremiereItem>>? _provisionalSourceItems;
+        private HashSet<(string CanonicalId, DateOnly PremiereDate)>? _completedSourceOccurrences;
+
         public int Count => _itemsByCanonicalId.Count;
 
         public void AddRange(IEnumerable<PremiereItem> items)
         {
+            foreach (var item in items) Add(item);
+        }
+
+        public void AddSourceProgress(IEnumerable<PremiereItem> items, bool isMetadataProgress)
+        {
+            _provisionalSourceItems ??= [];
+            _completedSourceOccurrences ??= [];
             foreach (var item in items)
             {
-                if (!_itemsByCanonicalId.TryGetValue(item.CanonicalId, out var existingItems))
+                var occurrence = (item.CanonicalId, item.PremiereDate);
+                if (isMetadataProgress)
                 {
-                    existingItems = [];
-                    _itemsByCanonicalId[item.CanonicalId] = existingItems;
+                    // A late discovery/core hint cannot replace this source's
+                    // completed occurrence. Other dates keep their own evidence.
+                    if (_completedSourceOccurrences.Contains(occurrence)) continue;
+                    if (!_provisionalSourceItems.TryGetValue(occurrence, out var provisional))
+                        _provisionalSourceItems[occurrence] = provisional = [];
+                    provisional.Add(item);
                 }
-
-                existingItems.Add(item);
-                _dirtyCanonicalIds.Add(item.CanonicalId);
+                else
+                {
+                    _completedSourceOccurrences.Add(occurrence);
+                    if (_provisionalSourceItems.Remove(occurrence, out var provisional)
+                        && _itemsByCanonicalId.TryGetValue(item.CanonicalId, out var existing))
+                    {
+                        var replacementIndex = existing.IndexOf(provisional[0]);
+                        foreach (var hint in provisional) existing.Remove(hint);
+                        if (replacementIndex >= 0)
+                        {
+                            // Keep the occurrence's original position among
+                            // legitimate duplicates and other discovery dates.
+                            existing.Insert(Math.Min(replacementIndex, existing.Count), item);
+                            _dirtyCanonicalIds.Add(item.CanonicalId);
+                            continue;
+                        }
+                    }
+                }
+                Add(item);
             }
+        }
+
+        private void Add(PremiereItem item)
+        {
+            if (!_itemsByCanonicalId.TryGetValue(item.CanonicalId, out var existingItems))
+                _itemsByCanonicalId[item.CanonicalId] = existingItems = [];
+            existingItems.Add(item);
+            _dirtyCanonicalIds.Add(item.CanonicalId);
         }
 
         public List<PremiereItem> ToMergedItems()

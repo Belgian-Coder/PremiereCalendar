@@ -11,10 +11,10 @@ public sealed partial class PremiereService
     private Task<PremiereItem?> MapMovieAsync(
         TmdbMovieDiscoverItem item, CancellationToken cancellationToken, bool forceRefresh,
         IReadOnlyDictionary<string, PremiereItem>? cachedEnrichment = null, bool allowWatchmodeAvailabilityFallback = true,
-        MediaDiscoveryCriteria? requestedMovieCriteria = null)
+        MediaDiscoveryCriteria? requestedMovieCriteria = null, Action<PremiereItem>? coreMetadataAvailable = null)
         => TraceItemEnrichmentAsync("movie", item.Id, () => MapMovieCoreAsync(
             item, cancellationToken, forceRefresh, cachedEnrichment, allowWatchmodeAvailabilityFallback,
-            requestedMovieCriteria));
+            requestedMovieCriteria, coreMetadataAvailable));
 
     private Task<PremiereItem?> MapSeriesAsync(
         TmdbTvDiscoverItem item, CancellationToken cancellationToken, bool forceRefresh,
@@ -41,16 +41,21 @@ public sealed partial class PremiereService
         CancellationToken cancellationToken = default)
         => TraceCalendarStream(start, end, forceRefresh, filters, null, false, cancellationToken);
 
+    public IAsyncEnumerable<PremiereLoadProgress> StreamSourceRefreshAsync(
+        DateOnly start, DateOnly end, CalendarFilters? filters = null,
+        CancellationToken cancellationToken = default)
+        => TraceCalendarStream(start, end, false, filters, null, false, cancellationToken, refreshSourceLists: true);
+
     public IAsyncEnumerable<PremiereLoadProgress> StreamCoreAsync(
         DateOnly start, DateOnly end, bool forceRefresh = false, CalendarFilters? filters = null,
         ProviderWorkResumeState? resumeState = null, CancellationToken cancellationToken = default)
         => WithRefreshScope(TraceCalendarStream(start, end, forceRefresh, filters, resumeState, true, cancellationToken),
-            cancellationToken);
+            cancellationToken, forceDiscoveryRefresh: resumeState?.RefreshSourceLists == true);
 
     private async IAsyncEnumerable<T> WithRefreshScope<T>(
-        IAsyncEnumerable<T> source, [EnumeratorCancellation] CancellationToken cancellationToken)
+        IAsyncEnumerable<T> source, [EnumeratorCancellation] CancellationToken cancellationToken, bool forceDiscoveryRefresh = false)
     {
-        var scope = ProviderRefreshScope.Create();
+        var scope = ProviderRefreshScope.Create(forceDiscoveryRefresh);
         var itemSession = _itemEnrichmentCache is null ? null : await _itemEnrichmentCache.CreateSessionAsync(cancellationToken);
         IAsyncEnumerator<T> enumerator;
         using (ProviderRefreshScope.Use(scope))
@@ -94,7 +99,7 @@ public sealed partial class PremiereService
 
     private IAsyncEnumerable<PremiereLoadProgress> TraceCalendarStream(
         DateOnly start, DateOnly end, bool forceRefresh, CalendarFilters? filters,
-        ProviderWorkResumeState? resumeState, bool core, CancellationToken cancellationToken)
+        ProviderWorkResumeState? resumeState, bool core, CancellationToken cancellationToken, bool refreshSourceLists = false)
     {
         var context = _telemetry.CaptureDiagnosticContext() ?? _telemetry.CreateDiagnosticContext();
         return _telemetry.WithDiagnosticContext(ObserveCalendarStreamAsync(), context, cancellationToken);
@@ -112,11 +117,11 @@ public sealed partial class PremiereService
             _telemetry.RecordDiagnostic(prefix + ".started", details: new()
             {
                 WeekStart = start, WeekEnd = end, CacheKey = criteria.CacheKey(),
-                Reason = forceRefresh ? "forced" : "normal"
+                Reason = refreshSourceLists || resumeState?.RefreshSourceLists == true ? "source_lists" : forceRefresh ? "forced" : "normal"
             });
             await using var enumerator = (core
                 ? StreamCoreTrackedAsync(start, end, forceRefresh, filters, resumeState, token)
-                : StreamPremieresTrackedAsync(start, end, forceRefresh, filters, token)).GetAsyncEnumerator(token);
+                : StreamPremieresTrackedAsync(start, end, forceRefresh, filters, token, refreshSourceLists)).GetAsyncEnumerator(token);
             try
             {
                 while (true)

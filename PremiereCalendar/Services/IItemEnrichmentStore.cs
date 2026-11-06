@@ -35,7 +35,36 @@ public sealed record ItemEnrichmentWrite(
     DateTimeOffset? TmdbObservedUtc = null,
     long? ExpectedMetadataRevision = null,
     string? ExpectedRatingsJson = null,
-    string? ExpectedTvmazeReservationToken = null);
+    string? ExpectedTvmazeReservationToken = null)
+{
+    // Session-local proof for continuing an uncommitted core-only projection.
+    // Stores still enforce the ordinary generation and metadata revision CAS.
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal ItemEnrichmentCoreContinuation? CoreContinuation { get; init; }
+
+    // A new matching details response verified this exact raw core before optional work.
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal ItemEnrichmentFreshMovieCore? FreshMovieCore { get; init; }
+
+    // Ratings retain their producer's authoritative read independently of metadata.
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal ItemEnrichmentRatingsOrigin? RatingsOrigin { get; init; }
+
+    // Checked under the store row lock only when metadata revision is advanced.
+    // A present baseline containing nulls explicitly requires empty saved ratings.
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal ItemEnrichmentRatingsBaseline? ExpectedRatingsBaseline { get; init; }
+}
+
+internal sealed record ItemEnrichmentRatingsBaseline(string? Json, DateTimeOffset? FetchedUtc);
+internal sealed record ItemEnrichmentRatingsOrigin(long Generation, long MetadataRevision, ItemEnrichmentRatingsBaseline Baseline);
+
+internal sealed record ItemEnrichmentCoreContinuation(long Generation, long MetadataRevision,
+    string MetadataJson, DateTimeOffset? MetadataFetchedUtc, DateTimeOffset? MetadataInvalidatedUtc);
+
+internal sealed record ItemEnrichmentFreshMovieCore(long Generation, long MetadataRevision,
+    string MetadataJson, DateTimeOffset MetadataFetchedUtc, DateTimeOffset? MetadataInvalidatedUtc,
+    string? RatingsJson, DateTimeOffset? RatingsFetchedUtc);
 
 public interface IItemEnrichmentLookupLease : IAsyncDisposable
 {

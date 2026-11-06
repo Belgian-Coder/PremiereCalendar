@@ -59,7 +59,10 @@ public sealed record CalendarProviderWorkPayload(
     DateOnly Start,
     DateOnly End,
     bool ForceRefresh,
-    CalendarFilters? Filters);
+    CalendarFilters? Filters)
+{
+    public bool RefreshSourceLists { get; init; }
+}
 
 public sealed record ProviderWorkResumeState(
     IReadOnlyDictionary<string, IReadOnlyList<PremiereItem>> CompletedSources,
@@ -67,6 +70,7 @@ public sealed record ProviderWorkResumeState(
 {
     // Rebuild the normalized week while retaining provider TTLs and cached enrichment.
     public bool RefreshCalendarSnapshot { get; init; }
+    public bool RefreshSourceLists { get; init; }
 
     // The callback may publish local cache files only. Provider/network work and
     // other database connections must stay outside its ownership transaction.
@@ -219,7 +223,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         CalendarProviderWorkPayload? payload;
         try { payload = JsonSerializer.Deserialize<CalendarProviderWorkPayload>(request.PayloadJson); }
         catch (JsonException) { return null; }
-        if (payload is null || payload.ForceRefresh || payload.Start == default || payload.End < payload.Start) return null;
+        if (payload is null || payload.ForceRefresh || payload.RefreshSourceLists || payload.Start == default || payload.End < payload.Start) return null;
         return BuildReusableSourceCheckpoint;
     }
 
@@ -1387,6 +1391,8 @@ public sealed class ProviderWorkSchedulerHostedService(
                     checkpoint?.CompletedSources ?? new Dictionary<string, IReadOnlyList<PremiereItem>>(StringComparer.Ordinal),
                     checkpoint?.CalendarProgress)
                 {
+                    RefreshCalendarSnapshot = payload.RefreshSourceLists,
+                    RefreshSourceLists = payload.RefreshSourceLists,
                     PublishCacheAsync = (publish, token) => scheduler.PublishOwnedCacheAsync(job, publish, token)
                 };
                 if (checkpoint?.CalendarProgress is { IsFinal: false } persisted)

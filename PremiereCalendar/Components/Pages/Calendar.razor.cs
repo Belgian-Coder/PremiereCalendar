@@ -790,10 +790,8 @@ public partial class Calendar
         RecalculateVisibleItems(
             preserveCurrentOrder: _visibleItems.Count > 0,
             retainMissingItems: true);
-        _refreshImageCache = forceRefresh;
-        _imageCacheVersion = forceRefresh
-            ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)
-            : null;
+        _refreshImageCache = false;
+        _imageCacheVersion = null;
 
         var observation = new CalendarObservationScope();
         var completion = ObserveLoadCompletionAsync(ConsumeLoadAsync());
@@ -862,7 +860,9 @@ public partial class Calendar
                 {
                     // The service captures this context synchronously. Never retain an AsyncLocal
                     // scope while yielding to the renderer or another page load.
-                    stream = PremiereService.StreamPremieresAsync(start, end, forceRefresh, loadFilters, token);
+                    stream = forceRefresh
+                        ? PremiereService.StreamSourceRefreshAsync(start, end, loadFilters, token)
+                        : PremiereService.StreamPremieresAsync(start, end, false, loadFilters, token);
                 }
                 await foreach (var update in stream.WithCancellation(token))
                 {
@@ -3219,7 +3219,7 @@ public partial class Calendar
             _pageMode.ToString().ToLowerInvariant(), PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey());
         _pageLoadDiagnostic = diagnostic;
         _pendingPageRenderDiagnostic = null;
-        RecordPageDiagnostic(diagnostic, "started", new() { Reason = forceRefresh ? "forced" : "normal" });
+        RecordPageDiagnostic(diagnostic, "started", new() { Reason = forceRefresh ? "source_lists" : "normal" });
         return diagnostic;
     }
 

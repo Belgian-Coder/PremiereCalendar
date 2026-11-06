@@ -235,9 +235,9 @@ Fanart.tv is used only as artwork fallback when TMDb has no poster. The app pref
 
 ## Trakt
 
-Trakt discovery is active by default once a free Trakt app client ID is configured on the Settings page.
+Trakt discovery is disabled by default, even after a client ID is configured. Enable it on the Settings page to opt in. A saved `Sources.Trakt.Enabled` value in the local integration settings takes precedence over `Trakt:Enabled`; the configuration value (including the `Trakt__Enabled` environment variable) is used when no saved value exists.
 
-Trakt calendar rows are candidate rows only. The app accepts them only when a TMDb movie/TV ID is already present or can be resolved through TMDb external-ID lookup. Set `Trakt:Enabled` to `false` to keep Trakt disabled even when a client ID is present.
+Trakt calendar rows are candidate rows only. The app accepts them only when a TMDb movie/TV ID is already present or can be resolved through TMDb external-ID lookup.
 
 ## Watchmode
 

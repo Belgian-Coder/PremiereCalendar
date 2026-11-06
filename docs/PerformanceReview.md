@@ -1,6 +1,6 @@
 # Performance Review
 
-Last reviewed: 2026-11-05. v1.2.15 is installed on the NAS from source `6f8d1bc`; local image/backup gates, installed health and both requested high-effort reviews passed. Cached revisit was 486 ms, but the observed full durable refresh still took 108.95 seconds and remained partial under provider restrictions.
+Last reviewed: 2026-11-06. The installed v1.2.15 baseline from source `6f8d1bc` returned cached rows quickly, but its observed full durable refresh took 108.95 seconds and remained partial under provider restrictions. The [new full-week comparison](FullRefreshPerformance-20261106.md) separately measures source-list refresh with fresh enrichment reuse, stale snapshots and the unchanged force-all API. Release evidence records installation status; fixture gains alone do not establish production timing.
 
 ## November 5 candidate
 

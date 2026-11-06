@@ -159,18 +159,22 @@ public sealed partial class PremiereServiceTests
         var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseEligible = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var detailCalls = 0;
         var tmdb = new FakeTmdbClient { MovieItems = template.MovieItems, MovieDetailOverride = async (_, token) =>
         {
-            if (Interlocked.Increment(ref detailCalls) == 1) firstEntered.TrySetResult();
+            var call = Interlocked.Increment(ref detailCalls);
+            if (call == 1) firstEntered.TrySetResult();
             else secondEntered.TrySetResult();
-            await release.Task.WaitAsync(token);
+            await (call == 1 ? release.Task : releaseEligible.Task).WaitAsync(token);
             return template.MovieDetailsById[901] with { Runtime = 20 };
         } };
         var omdb = ItemCacheOmdb("8.4");
+        omdb.ItemsByImdbId["tt0000901"] = omdb.ItemsByImdbId["tt0000901"] with
+        { Plot = "Eligible OMDb plot" };
         var tomatoes = new ComponentTomatoesClient { Result = new(94, 96) };
-        var artwork = new OptionalOwnershipArtwork();
-        var watchmode = new FakeWatchmodeClient();
+        var artwork = new OptionalOwnershipArtwork { Candidate = new("https://cover.example/eligible.jpg", ArtworkSources.Fanart) };
+        var watchmode = new FakeWatchmodeClient { Sources = [new() { Id = 19, Name = "Available", Kind = "flatrate" }] };
         PremiereService Service() => CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes,
             artworkProviders: [artwork], watchmode: watchmode, itemEnrichmentCache: coordinator);
         var rejectedFilters = new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 45 } };
@@ -187,10 +191,33 @@ public sealed partial class PremiereServiceTests
             release.SetResult();
             Assert.Empty(await first.WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.Empty(await sameCriteria.WaitAsync(TimeSpan.FromSeconds(5)));
+            var preflight = Assert.Single(store.Records.Values);
+            Assert.True(JsonSerializer.Deserialize<ItemEnrichmentMetadata>(preflight.MetadataJson!)!.CoreMetadataOnly);
+            Assert.Null(preflight.RatingsJson);
+            Assert.Equal(1, preflight.MetadataRevision);
+            releaseEligible.SetResult();
             var result = Assert.Single(await eligible.WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.Equal(20, result.RuntimeMinutes);
             Assert.Equal(94, result.RottenTomatoesScore);
             Assert.Equal(8.4, result.ImdbScore);
+            Assert.Equal("https://cover.example/eligible.jpg", result.PosterUrl);
+            Assert.Equal(19, Assert.Single(result.Sources).Id);
+            var persisted = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(Assert.Single(store.Records.Values).MetadataJson!)!;
+            Assert.False(persisted.CoreMetadataOnly);
+            Assert.True(persisted.AvailabilityComplete);
+            Assert.True(persisted.AvailabilityOwnedByWatchmode);
+            Assert.True(persisted.ArtworkComplete);
+            Assert.True(persisted.OptionalMetadataComplete);
+            Assert.Equal(clock.GetUtcNow(), persisted.AvailabilityFetchedUtc);
+            Assert.Equal(clock.GetUtcNow(), persisted.ArtworkFetchedUtc);
+            Assert.Equal(result.PosterUrl, persisted.PosterUrl);
+            Assert.Equal(19, Assert.Single(persisted.Sources).Id);
+            Assert.Equal("Eligible OMDb plot", persisted.OmdbPlot);
+            Assert.Null(persisted.OmdbPosterUrl);
+            var following = Assert.Single(await Service().GetPremieresAsync(date, date, default,
+                filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } }));
+            Assert.Equal(result.PosterUrl, following.PosterUrl);
+            Assert.Equal(19, Assert.Single(following.Sources).Id);
             Assert.Equal(2, detailCalls);
             Assert.Single(omdb.Calls);
             Assert.Equal(1, tomatoes.Calls);
@@ -200,6 +227,7 @@ public sealed partial class PremiereServiceTests
         finally
         {
             release.TrySetResult();
+            releaseEligible.TrySetResult();
             await first.WaitAsync(TimeSpan.FromSeconds(10));
             if (sameCriteria is not null) await sameCriteria.WaitAsync(TimeSpan.FromSeconds(10));
             if (eligible is not null) await eligible.WaitAsync(TimeSpan.FromSeconds(10));

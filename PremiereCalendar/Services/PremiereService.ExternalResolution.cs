@@ -5,6 +5,7 @@ using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -1244,7 +1245,8 @@ public sealed partial class PremiereService
     private async IAsyncEnumerable<PremiereItemBatch> MapInProgressBatchesAsync<T>(
         IEnumerable<T> rawItems,
         Func<T, CancellationToken, Task<PremiereItem?>> mapItem,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        Func<T, CancellationToken, Action<PremiereItem>, Task<PremiereItem?>>? mapWithCoreMetadata = null)
     {
         var concurrency = Math.Clamp(_options.MaxEnrichmentConcurrency, 1, 32);
         var progressBatchSize = Math.Clamp(_options.EnrichmentProgressBatchSize, 1, 100);
@@ -1253,6 +1255,11 @@ public sealed partial class PremiereService
         using var mapperCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var mapToken = mapperCancellation.Token;
         var pending = new List<Task<PremiereItem?>>(concurrency);
+        // Only the source enabling this callback owns the queue. Each pending
+        // mapping reports at most once; completed rows still arrive normally.
+        var coreProgress = mapWithCoreMetadata is null ? null : Channel.CreateBounded<PremiereItem>(new BoundedChannelOptions(concurrency)
+        { SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.DropOldest });
+        Task<bool>? coreReady = null;
         var batch = new List<PremiereItem>(progressBatchSize);
         var hasMore = true;
         var completedWork = 0;
@@ -1285,7 +1292,15 @@ public sealed partial class PremiereService
                 }
 
                 var item = enumerator.Current;
-                pending.Add(mapItem(item, mapToken));
+                if (mapWithCoreMetadata is null) pending.Add(mapItem(item, mapToken));
+                else
+                {
+                    var reported = 0;
+                    pending.Add(mapWithCoreMetadata(item, mapToken, core =>
+                    {
+                        if (Interlocked.Exchange(ref reported, 1) == 0) coreProgress!.Writer.TryWrite(core);
+                    }));
+                }
             }
         }
 
@@ -1295,7 +1310,26 @@ public sealed partial class PremiereService
 
             while (pending.Count > 0)
             {
-                var completed = await Task.WhenAny(pending);
+                if (coreProgress is not null && coreProgress.Reader.TryRead(out var firstCore))
+                {
+                    var cores = new List<PremiereItem> { firstCore };
+                    while (coreProgress.Reader.TryRead(out var core)) cores.Add(core);
+                    coreReady = null;
+                    yield return new PremiereItemBatch(cores, completedWork, totalWork, IsMetadataProgress: true);
+                    continue;
+                }
+                var mappingReady = Task.WhenAny(pending);
+                if (coreProgress is not null)
+                {
+                    coreReady ??= coreProgress.Reader.WaitToReadAsync(mapToken).AsTask();
+                    if (await Task.WhenAny(mappingReady, coreReady) == coreReady)
+                    {
+                        await coreReady;
+                        coreReady = null;
+                        continue;
+                    }
+                }
+                var completed = await mappingReady;
                 pending.Remove(completed);
 
                 PremiereItem? mapped;
@@ -1346,6 +1380,11 @@ public sealed partial class PremiereService
         {
             mapperCancellation.Cancel();
             await ObservePendingMappingsAsync(pending);
+            if (coreReady is not null)
+            {
+                try { await coreReady; }
+                catch (OperationCanceledException) { }
+            }
             _telemetry.RecordDiagnostic("mapping.batch.finished", mappingContext, new()
             {
                 Stage = mappingStage,
@@ -1397,8 +1436,9 @@ public sealed partial class PremiereService
         {
             // Discovery metadata is available, but this batch's enrichment work
             // has not completed yet. Keep its subsequent progress monotonic.
-            CompletedWork = completedRawItemsBeforeBatch,
+            CompletedWork = completedRawItemsBeforeBatch + (batch.CompletedWork ?? 0),
             TotalWork = total,
+            IsMetadataProgress = true,
             ProgressText = $"{TmdbPageText(rawBatch)} · metadata {Math.Min(completed, total):N0} of {total:N0} rows"
         };
     }

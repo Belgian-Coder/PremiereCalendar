@@ -364,7 +364,8 @@ public sealed partial class PremiereService
         bool forceRefresh,
         IReadOnlyDictionary<string, PremiereItem>? cachedEnrichment = null,
         bool allowWatchmodeAvailabilityFallback = true,
-        MediaDiscoveryCriteria? requestedMovieCriteria = null, bool coreOnly = false)
+        MediaDiscoveryCriteria? requestedMovieCriteria = null, bool coreOnly = false,
+        Action<PremiereItem>? coreMetadataAvailable = null)
     {
         var releaseDateValue = CoalesceText(item.ReleaseDate, item.PrimaryReleaseDate);
         if (item.Id <= 0
@@ -447,6 +448,22 @@ public sealed partial class PremiereService
                 }
                 return null;
             }
+        }
+
+        // Capture the verified raw core before optional providers can replace
+        // artwork, availability or OMDb fields. Failed/cached/mismatched details
+        // cannot authorize a later metadata revision retry.
+        if (details?.Id == item.Id && _itemEnrichmentAttempt.Value is { MetadataSucceeded: true } fresh
+            && CoreMetadata() is { } freshCore)
+            fresh.FreshMovieCoreJson = JsonSerializer.Serialize(CaptureCoreMovieMetadata(fresh, freshCore, fresh.PreviousMetadata));
+
+        // The existing details request has established core fields. Optional
+        // ratings, availability and artwork can finish after this visible row.
+        if (details is not null && details.Id == item.Id && coreMetadataAvailable is not null)
+        {
+            var verifiedCore = discoveredItem! with { RuntimeMinutes = details.Runtime,
+                OriginalLanguage = CoalesceText(item.OriginalLanguage, details.OriginalLanguage) ?? "" };
+            if (MovieMatchesKnownCriteria(verifiedCore, requestedMovieCriteria)) coreMetadataAvailable(verifiedCore);
         }
 
         var startedTasks = new List<Task>(4);
@@ -1779,7 +1796,8 @@ public sealed partial class PremiereService
         int? CompletedWork = null,
         int? TotalWork = null,
         string? ProgressText = null,
-        int? UnmappedCount = null);
+        int? UnmappedCount = null,
+        bool IsMetadataProgress = false);
 
     private sealed record PremiereSourceBatch(
         string Name,

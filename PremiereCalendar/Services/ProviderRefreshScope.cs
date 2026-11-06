@@ -11,9 +11,11 @@ public sealed class ProviderRefreshScope
     private readonly SingleFlightCoordinator _flights = new();
     private int _entryCount;
 
-    private ProviderRefreshScope() { }
+    private ProviderRefreshScope(bool forceDiscoveryRefresh) => ForceDiscoveryRefresh = forceDiscoveryRefresh;
 
-    public static ProviderRefreshScope Create() => new();
+    public bool ForceDiscoveryRefresh { get; }
+
+    public static ProviderRefreshScope Create(bool forceDiscoveryRefresh = false) => new(forceDiscoveryRefresh);
 
     public static ProviderRefreshScope? Current => Ambient.Value;
 

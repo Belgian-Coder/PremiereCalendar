@@ -172,15 +172,32 @@ public sealed partial class PremiereServiceTests
     [Fact]
     public async Task GetPremieresAsync_RetainsProgressAndCompletesWhenAllSlowExternalMoviesFailRequestedCriteria()
     {
-        const int candidateCount = 128;
+        const int candidateCount = 256;
         const int firstTmdbId = 10_000;
         var start = new DateOnly(2026, 5, 4);
-        var tmdb = new FakeTmdbClient { MovieDetailDelay = TimeSpan.FromMilliseconds(200) };
+        var timer = new Stopwatch();
+        var detailTimings = new System.Collections.Concurrent.ConcurrentQueue<(int Id, string Stage, double Milliseconds)>();
+        var responses = new Dictionary<int, TmdbDetailsWithExtras>();
+        var tmdb = new FakeTmdbClient { MovieDetailOverride = async (id, token) =>
+        {
+            detailTimings.Enqueue((id, "start", timer.Elapsed.TotalMilliseconds));
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200), token);
+                detailTimings.Enqueue((id, "complete", timer.Elapsed.TotalMilliseconds));
+                return responses[id];
+            }
+            catch (OperationCanceledException)
+            {
+                detailTimings.Enqueue((id, "cancel", timer.Elapsed.TotalMilliseconds));
+                throw;
+            }
+        } };
         var candidates = new ExternalPremiereCandidate[candidateCount];
         for (var index = 0; index < candidateCount; index++)
         {
             var tmdbId = firstTmdbId + index;
-            tmdb.MovieDetailsById[tmdbId] = MovieDetails(tmdbId, "fr", 90);
+            responses[tmdbId] = MovieDetails(tmdbId, "fr", 90);
             candidates[index] = new ExternalPremiereCandidate(
                 PremiereMediaType.Movie,
                 start.AddDays(index % 7),
@@ -197,20 +214,40 @@ public sealed partial class PremiereServiceTests
             tmdb,
             discoveryProviders: [discovery],
             calendarCache: cache,
-            sourceTimeoutSeconds: 1,
+            sourceTimeoutSeconds: 2,
             enrichmentProgressBatchSize: 25);
         var reports = new List<PremiereLoadProgress>();
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var timer = Stopwatch.StartNew();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        timer.Start();
 
-        var items = await service.GetPremieresAsync(
-            start,
-            start.AddDays(6),
-            cancellation.Token,
-            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
-            filters: MovieRequestFilters());
+        IReadOnlyList<PremiereItem> items;
+        try
+        {
+            items = await service.GetPremieresAsync(
+                start,
+                start.AddDays(6),
+                cancellation.Token,
+                progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
+                filters: MovieRequestFilters());
+        }
+        catch (Exception exception)
+        {
+            var events = detailTimings.OrderBy(entry => entry.Milliseconds).ToArray();
+            var largestGap = events.Zip(events.Skip(1), (before, after) => after.Milliseconds - before.Milliseconds)
+                .DefaultIfEmpty().Max();
+            var boundedEvents = events.Take(48).Concat(events.Skip(Math.Max(48, events.Length - 16)));
+            var timeline = string.Join("; ", boundedEvents.Select(entry =>
+                $"{entry.Id}:{entry.Stage}@{entry.Milliseconds:F1}ms"));
+            throw new InvalidOperationException(
+                $"Filtered-source timing: elapsed={timer.Elapsed.TotalMilliseconds:F1}ms, "
+                + $"started={events.Count(entry => entry.Stage == "start")}, "
+                + $"completed={events.Count(entry => entry.Stage == "complete")}, "
+                + $"canceled={events.Count(entry => entry.Stage == "cancel")}, largest-event-gap={largestGap:F1}ms. {timeline}",
+                exception);
+        }
 
-        Assert.True(timer.Elapsed > TimeSpan.FromSeconds(1));
+        Assert.True(timer.Elapsed > TimeSpan.FromSeconds(2));
+        Assert.Equal(candidateCount, detailTimings.Count(entry => entry.Stage == "complete"));
         Assert.Empty(items);
         Assert.Contains(reports, report => report.SourceName == "Simkl external movies"
             && report.CompletedWork is >= candidateCount

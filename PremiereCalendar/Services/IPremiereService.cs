@@ -11,6 +11,12 @@ public interface IPremiereService
         CalendarFilters? filters = null,
         CancellationToken cancellationToken = default);
 
+    // Refresh membership while preserving the normal freshness of enrichment.
+    IAsyncEnumerable<PremiereLoadProgress> StreamSourceRefreshAsync(
+        DateOnly start, DateOnly end, CalendarFilters? filters = null,
+        CancellationToken cancellationToken = default)
+        => StreamPremieresAsync(start, end, true, filters, cancellationToken);
+
     Task<IReadOnlyList<PremiereItem>> GetPremieresAsync(
         DateOnly start,
         DateOnly end,

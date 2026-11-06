@@ -78,6 +78,24 @@ public sealed class TraktClientIntegrationTests
     }
 
     [Fact]
+    public async Task Calendars_SkipRequestsByDefaultEvenWhenClientIdIsConfigured()
+    {
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("Trakt should be disabled by default."));
+        var client = new TraktClient(
+            new HttpClient(handler) { BaseAddress = new Uri("https://api.trakt.tv/") },
+            new MemoryCache(new MemoryCacheOptions()),
+            Microsoft.Extensions.Options.Options.Create(new TraktOptions { ClientId = "test-client-id" }));
+
+        var movies = await client.GetMovieCalendarAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 10),
+            CancellationToken.None);
+
+        Assert.Empty(movies);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Calendars_ReadClientIdFromLocalSettingsStore()
     {
         var handler = new StubHttpMessageHandler(request =>
@@ -89,7 +107,7 @@ public sealed class TraktClientIntegrationTests
         var client = new TraktClient(
             new HttpClient(handler) { BaseAddress = new Uri("https://api.trakt.tv/") },
             new MemoryCache(new MemoryCacheOptions()),
-            Microsoft.Extensions.Options.Options.Create(new TraktOptions { ClientId = null, ApiVersion = "2" }),
+            Microsoft.Extensions.Options.Options.Create(new TraktOptions { Enabled = true, ClientId = null, ApiVersion = "2" }),
             new FakeIntegrationSettingsStore(new IntegrationSettings
             {
                 Sources = new SourceIntegrationSettings
@@ -179,6 +197,7 @@ public sealed class TraktClientIntegrationTests
             new MemoryCache(new MemoryCacheOptions()),
             Microsoft.Extensions.Options.Options.Create(new TraktOptions
             {
+                Enabled = true,
                 ClientId = clientId,
                 ApiVersion = "2"
             }));

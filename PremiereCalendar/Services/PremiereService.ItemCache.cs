@@ -7,11 +7,12 @@ public sealed partial class PremiereService
     private async Task<PremiereItem?> MapMovieCoreAsync(TmdbMovieDiscoverItem item,
         CancellationToken cancellationToken, bool forceRefresh,
         IReadOnlyDictionary<string, PremiereItem>? cachedEnrichment = null,
-        bool allowWatchmodeAvailabilityFallback = true, MediaDiscoveryCriteria? requestedMovieCriteria = null)
+        bool allowWatchmodeAvailabilityFallback = true, MediaDiscoveryCriteria? requestedMovieCriteria = null,
+        Action<PremiereItem>? coreMetadataAvailable = null)
     {
         if (_itemCacheSession.Value is not { } session)
             return await MapMovieUncachedCoreAsync(item, cancellationToken, forceRefresh, cachedEnrichment,
-                allowWatchmodeAvailabilityFallback, requestedMovieCriteria);
+                allowWatchmodeAvailabilityFallback, requestedMovieCriteria, coreMetadataAvailable: coreMetadataAvailable);
         var discovered = MapMovieMetadata(item);
         if (discovered is null) return null;
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, item.Id);
@@ -41,6 +42,12 @@ public sealed partial class PremiereService
         // Core metadata is shared across filter profiles; optional work is only for eligible rows.
         if (!forceRefresh && session.Find(identity)?.Metadata is { } known
             && !MovieMatchesKnownCriteria(known.Apply(discovered), requestedMovieCriteria)) return null;
+        if (!forceRefresh && coreMetadataAvailable is not null && session.MetadataFresh(identity)
+            && session.Find(identity)?.Metadata is { } verified)
+        {
+            var core = verified.Apply(discovered);
+            coreMetadataAvailable(discovered with { RuntimeMinutes = core.RuntimeMinutes, OriginalLanguage = core.OriginalLanguage });
+        }
         var forceVariant = forceRefresh && needsEligibilityCheck
             ? FormattableString.Invariant($"movie-eligibility:{requestedMovieCriteria!.RuntimeMinMinutes}:{requestedMovieCriteria.RuntimeMaxMinutes}:")
                 + string.Join('|', requestedMovieCriteria.OriginalLanguages.Select(value => value.Trim().ToUpperInvariant()).Distinct().Order(StringComparer.Ordinal))
@@ -64,14 +71,15 @@ public sealed partial class PremiereService
                 {
                     // Every producer of the shared entry checks the same availability providers.
                     var mapped = await MapMovieUncachedCoreAsync(item, token, attempt.ForceMetadata, null, allowWatchmodeAvailabilityFallback: true,
-                        requestedMovieCriteria: forceRefresh ? requestedMovieCriteria : null);
+                        requestedMovieCriteria: forceRefresh ? requestedMovieCriteria : null, coreMetadataAvailable: coreMetadataAvailable);
                     var metadata = mapped is not null && attempt.MetadataSucceeded
                         ? attempt.CoreMetadataOnly ? CaptureCoreMovieMetadata(attempt, mapped, previous.Metadata)
                         : attempt.CaptureMetadata(mapped) with { AvailabilityComplete = !attempt.AvailabilityFailed,
                             OptionalMetadataComplete = !attempt.OptionalMetadataFailed, ArtworkComplete = !attempt.ArtworkFailed } : null;
                     return new(metadata, mapped is null || attempt.CoreMetadataOnly ? null : attempt.CaptureRatings(mapped),
                         RefreshMetadataClock: attempt.MetadataSucceeded, MetadataFailed: !attempt.MetadataSucceeded, RatingsFailed: attempt.RatingsFailed,
-                        AvailabilityFailed: attempt.AvailabilityFailed, OptionalMetadataFailed: attempt.OptionalMetadataFailed, RefreshRatingsClock: attempt.RatingsSucceeded);
+                        AvailabilityFailed: attempt.AvailabilityFailed, OptionalMetadataFailed: attempt.OptionalMetadataFailed, RefreshRatingsClock: attempt.RatingsSucceeded,
+                        FreshMovieCoreJson: attempt.FreshMovieCoreJson);
                 }
                 var ratingsTask = RefreshItemRatingsAsync(previous.Apply(discovered), token);
                 var optionalTask = CompleteCachedOptionalMetadataAsync(previous, discovered, token,
@@ -458,7 +466,8 @@ public sealed partial class PremiereService
         => _itemCacheSession.Value?.PrepareAsync(ids.Select(id => new ItemEnrichmentIdentity(mediaType, id)),
             cachedEnrichment?.Values, cancellationToken) ?? Task.CompletedTask;
 
-    private bool ForceDiscoveryRefresh(bool requested) => requested || _itemCacheSession.Value?.ForceDiscoveryRefresh == true;
+    private bool ForceDiscoveryRefresh(bool requested) => requested || _itemCacheSession.Value?.ForceDiscoveryRefresh == true
+            || ProviderRefreshScope.Current?.ForceDiscoveryRefresh == true;
 
     private async Task PrepareExternalItemEnrichmentAsync(IReadOnlyList<ExternalPremiereCandidate> candidates,
         bool forceRefresh, IReadOnlyDictionary<string, PremiereItem> cachedEnrichment, CancellationToken cancellationToken)
@@ -511,6 +520,7 @@ public sealed partial class PremiereService
         public ItemEnrichmentMetadata? PreviousMetadata { get; } = previousMetadata;
         public bool MetadataSucceeded;
         public bool CoreMetadataOnly;
+        public string? FreshMovieCoreJson;
         public bool CoreMetadataVerified => MetadataSucceeded || PreviousMetadata?.CoreMetadataOnly == true;
         public DateTimeOffset? CoreMetadataProofUtc => MetadataSucceeded ? CurrentUtc
             : PreviousMetadata?.CoreMetadataOnly == true ? previousMetadataFetchedUtc : null;

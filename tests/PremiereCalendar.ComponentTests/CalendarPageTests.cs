@@ -390,21 +390,28 @@ public sealed class CalendarPageTests : BunitContext
     }
 
     [Fact]
-    public void CalendarPage_RefreshButtonForcesFreshLoad()
+    public void CalendarPage_RefreshButtonRereadsListsAndReusesCachedImages()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
 
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
         component.WaitForAssertion(() => Assert.Single(service.Calls));
+        string? originalPoster = null;
+        component.WaitForAssertion(() => originalPoster = component.Find("img[data-lazy-src]").GetAttribute("data-lazy-src"));
+        Assert.StartsWith("/cached-image?url=", originalPoster);
 
-        component.Find("button[title='Refresh sources from providers']").Click();
+        component.Find("button[title='Refresh release lists and reuse fresh ratings and artwork']").Click();
 
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
-        Assert.True(service.Calls[1].ForceRefresh);
+        Assert.True(service.Calls[1].RefreshSourceLists);
+        Assert.False(service.Calls[1].ForceRefresh);
         component.WaitForAssertion(() =>
         {
-            Assert.Contains("refresh=true", component.Markup);
+            var refreshedPoster = component.Find("img[data-lazy-src]").GetAttribute("data-lazy-src");
+            Assert.Equal(originalPoster, refreshedPoster);
+            Assert.DoesNotContain("refresh=true", refreshedPoster);
+            Assert.DoesNotContain("&v=", refreshedPoster);
             Assert.DoesNotContain("_imageCacheVersion", component.Markup);
             Assert.DoesNotContain("ImageCacheVersion", component.Markup);
         });
@@ -426,7 +433,7 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() =>
         {
-            var refresh = component.Find("button[title='Refresh sources from providers']");
+            var refresh = component.Find("button[title='Refresh release lists and reuse fresh ratings and artwork']");
             Assert.Null(refresh.GetAttribute("disabled"));
             Assert.Contains("Updating", component.Find("[data-testid='refreshing']").TextContent);
         });
@@ -583,7 +590,7 @@ public sealed class CalendarPageTests : BunitContext
             Assert.Empty(service.Calls);
         });
 
-        component.Find("button[title='Refresh sources from providers']").Click();
+        component.Find("button[title='Refresh release lists and reuse fresh ratings and artwork']").Click();
 
         component.WaitForAssertion(() =>
         {
@@ -2623,7 +2630,7 @@ public sealed class CalendarPageTests : BunitContext
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
         component.Find("button[data-day-target='premiere-day-20260505']").Click();
-        component.Find("button[title='Refresh sources from providers']").Click();
+        component.Find("button[title='Refresh release lists and reuse fresh ratings and artwork']").Click();
 
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.Equal(new DateOnly(2026, 5, 5), service.Calls.Last().PriorityDate);
@@ -2650,10 +2657,12 @@ public sealed class CalendarPageTests : BunitContext
         component.Find("button[title='Update visible week']").Click();
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 2));
         Assert.False(service.Calls.Last().ForceRefresh);
+        Assert.False(service.Calls.Last().RefreshSourceLists);
 
-        component.Find("button[title='Refresh sources from providers']").Click();
+        component.Find("button[title='Refresh release lists and reuse fresh ratings and artwork']").Click();
         component.WaitForAssertion(() => Assert.True(service.Calls.Count >= 3));
-        Assert.True(service.Calls.Last().ForceRefresh);
+        Assert.True(service.Calls.Last().RefreshSourceLists);
+        Assert.False(service.Calls.Last().ForceRefresh);
     }
 
     [Fact]
@@ -3212,7 +3221,7 @@ public sealed class CalendarPageTests : BunitContext
 
     private sealed class FakePremiereService : IPremiereService
     {
-        public List<(DateOnly Start, DateOnly End, bool ForceRefresh, DateOnly? PriorityDate)> Calls { get; } = [];
+        public List<(DateOnly Start, DateOnly End, bool ForceRefresh, DateOnly? PriorityDate, bool RefreshSourceLists)> Calls { get; } = [];
 
         public List<CalendarFilters?> FilterSnapshots { get; } = [];
 
@@ -3251,14 +3260,23 @@ public sealed class CalendarPageTests : BunitContext
             return GetPremieresCoreAsync(start, end, cancellationToken, forceRefresh, progress, filters);
         }
 
-        public async IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(
+        public IAsyncEnumerable<PremiereLoadProgress> StreamPremieresAsync(
             DateOnly start,
             DateOnly end,
             bool forceRefresh = false,
             CalendarFilters? filters = null,
-            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default)
+            => StreamRecordedAsync(start, end, forceRefresh, false, filters, cancellationToken);
+
+        public IAsyncEnumerable<PremiereLoadProgress> StreamSourceRefreshAsync(
+            DateOnly start, DateOnly end, CalendarFilters? filters = null, CancellationToken cancellationToken = default)
+            => StreamRecordedAsync(start, end, false, true, filters, cancellationToken);
+
+        private async IAsyncEnumerable<PremiereLoadProgress> StreamRecordedAsync(
+            DateOnly start, DateOnly end, bool forceRefresh, bool refreshSourceLists, CalendarFilters? filters,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            Calls.Add((start, end, forceRefresh, filters?.PriorityDate));
+            Calls.Add((start, end, forceRefresh, filters?.PriorityDate, refreshSourceLists));
             FilterSnapshots.Add(filters is null ? null : CalendarFilterState.Clone(filters));
             var items = BuildItems(start);
 

@@ -285,11 +285,15 @@ public sealed partial class PremiereService
             await foreach (var mappedBatch in MapInProgressBatchesAsync(
                     rawBatch.Results,
                     (item, token) => MapMovieAsync(item, token, forceRefresh, cachedEnrichment, requestedMovieCriteria: criteria.Movies),
-                    cancellationToken)
+                    cancellationToken,
+                    mapWithCoreMetadata: (item, token, reportCore) => MapMovieAsync(item, token, forceRefresh, cachedEnrichment,
+                        requestedMovieCriteria: criteria.Movies, coreMetadataAvailable: reportCore))
                 .WithCancellation(cancellationToken))
             {
-                if (_itemCacheSession.Value is { } batchSession) await batchSession.FlushAsync(cancellationToken);
-                yield return WithTmdbProgress(mappedBatch, rawBatch, completedRawItems);
+                if (!mappedBatch.IsMetadataProgress && _itemCacheSession.Value is { } batchSession) await batchSession.FlushAsync(cancellationToken);
+                yield return mappedBatch.IsMetadataProgress
+                    ? WithTmdbMetadataProgress(mappedBatch, rawBatch, completedRawItems)
+                    : WithTmdbProgress(mappedBatch, rawBatch, completedRawItems);
             }
 
             if (_itemCacheSession.Value is { } session) await session.FlushAsync(cancellationToken);

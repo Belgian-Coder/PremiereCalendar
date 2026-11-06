@@ -184,7 +184,7 @@ public sealed class SqliteIntegrationSettingsStore : IIntegrationSettingsStore
                 },
                 Trakt = new TraktSourceSettings
                 {
-                    Enabled = GetBool(values, "Sources.Trakt.Enabled", GetConfigBool("Trakt:Enabled", true)),
+                    Enabled = GetBool(values, "Sources.Trakt.Enabled", GetConfigBool("Trakt:Enabled", false)),
                     ClientId = GetStringAllowEmpty(values, "Sources.Trakt.ClientId", "")
                 },
                 Omdb = new OmdbSourceSettings

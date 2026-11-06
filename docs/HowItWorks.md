@@ -4,6 +4,12 @@ Premiere Calendar is a server-rendered Blazor application that builds a weekly p
 
 The calendar's series scope is first debut, excluding returning seasons and later episodes. New sessions default to English/Dutch, movies at least 45 minutes long, and no series runtime minimum. Week/day navigation preserves the complete selected filter state, including explicit all-language or zero-runtime overrides.
 
+**Update** repairs the current snapshot using normal provider freshness.
+**Refresh sources** rereads release lists while reusing fresh ratings, artwork,
+availability and core metadata. Missing or expired components still refresh.
+Cached poster URLs are reused. The programmatic `forceRefresh: true` API keeps
+its stronger force-every-component behavior. See the [full-week measurements](FullRefreshPerformance-20261106.md).
+
 ## Mental Model
 
 The application has one source of truth for calendar rows:
@@ -57,7 +63,7 @@ TVmaze is optional and enabled by default. It enriches TV rows through exact The
 
 Fanart.tv is optional and uses a free API key configured in Settings. It enriches missing posters from TMDb movie IDs and TV TheTVDB IDs. English artwork wins, then Dutch, then neutral-language assets, with likes used as a tie-breaker.
 
-Trakt is optional and uses a free app client ID configured in Settings. It contributes candidate movie and new-show calendar rows once the client ID is configured. Candidates that resolve to TMDb become normal verified cards; unresolved candidates can appear as unverified cards.
+Trakt is disabled by default. Enable it on Settings after configuring a free app client ID. When enabled, it contributes candidate movie and new-show calendar rows. Candidates that resolve to TMDb become normal verified cards; unresolved candidates can appear as unverified cards.
 
 Watchmode is optional and uses an API key configured in Settings. It is used only as a fallback for missing streaming availability when TMDb has no provider data. Release discovery is not part of the default calendar pipeline because the free API is too request-limited for reliable broad-week refreshes.
 

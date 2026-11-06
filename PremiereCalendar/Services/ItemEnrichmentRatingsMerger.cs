@@ -31,6 +31,10 @@ internal static class ItemEnrichmentRatingsMerger
         ratingsRevisionAuthorized = false;
         if (current.Generation != incoming.ExpectedGeneration || incoming.RatingsFetchedUtc is null)
             return incoming;
+        if (incoming.ExpectedRatingsBaseline is { } baseline
+            && (current.RatingsJson != baseline.Json || current.RatingsFetchedUtc != baseline.FetchedUtc
+                || incoming.RatingsOrigin is { } origin && origin.Generation != current.Generation))
+            return incoming with { RatingsJson = null, RatingsFetchedUtc = null };
         if (incoming.ExpectedRatingsJson is not null)
             return incoming.ExpectedRatingsJson == current.RatingsJson && incoming.ExpectedMetadataRevision == current.MetadataRevision
                 ? incoming : incoming with { RatingsJson = null, RatingsFetchedUtc = null };
