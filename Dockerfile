@@ -35,6 +35,8 @@ LABEL org.opencontainers.image.title="PremiereCalendar" \
       org.opencontainers.image.version="$VERSION" \
       org.opencontainers.image.revision="$SOURCE_REVISION" \
       org.opencontainers.image.created="$BUILD_TIME_UTC"
+# The pinned runtime predates Alpine's CVE-2026-4738 fix.
+RUN apk add --no-cache --upgrade zlib=1.4-r0
 WORKDIR /app
 ENV Urls=http://0.0.0.0:8080 \
     HOME=/tmp \

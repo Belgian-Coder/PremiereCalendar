@@ -35,3 +35,9 @@ cache disabled. The corrected implementation retains local hydrated ratings for
 unprocessed rows; a regression covers rating-filter eligibility through every
 batch. Raw failed runs and subsequent passing replacements are retained rather
 than counted as additional passing cases.
+
+Local source validation: 1,854 passed and one expected Linux skip. All 11 new
+focused cases pass. Independent Astra high and Claude CLI Opus 5.5 high reviews
+are clean after fixes. Initial container rejected for newly reported zlib
+CVE-2026-4738; replacement pins the Alpine security-fixed 1.4-r0 package.
+Container and installed acceptance remain separate checks.
