@@ -41,3 +41,35 @@ focused cases pass. Independent Astra high and Claude CLI Opus 5.5 high reviews
 are clean after fixes. Initial container rejected for newly reported zlib
 CVE-2026-4738; replacement pins the Alpine security-fixed 1.4-r0 package.
 Container and installed acceptance remain separate checks.
+
+## Installed acceptance — 7 November 2026
+
+v1.2.17 is installed from source `8dcbcbb89e441a7d81bd082543b63f636a75f228`,
+digest-pinned to `sha256:476dce14f0b886fada4694475849dedd0a2e3c5a7bfe238605d41d95d7587da7`
+on stack 20 revision 16, schema 4. PostgreSQL and backup container identities and
+start times are unchanged. No production restore occurred. Fresh scans report
+zero vulnerabilities, secrets and misconfigurations; the fixed runtime upgrade
+changed only zlib (1.3.2-r1 to 1.4-r0).
+
+For the reported 12–18 October movie week, Update visibly showed “Calendar ready ·
+Updating details” within 623 ms, with no loading spinner and all 188 titles
+available. Saved server traces put readiness at 120.94 ms, before enrichment
+completed (final results at 2.16 s). Final coverage remained 188 titles. The
+current provider freshness differs from the earlier 35.45-second operation, so
+these observations do not establish a matched provider-throughput speedup.
+Held-provider regressions independently prove readiness and intermediate updates
+before optional completion.
+
+Day switches took 524–526 ms including automation observation, after enrichment
+finished. The page rendered ten cards and 405–420 DOM nodes, with no overflow or
+browser warnings/errors. Fine-grained traces and screenshots are retained in the
+local/NAS release bundle. Final diagnostics report zero dropped events,
+writer/serialization/archive/logging failures and queued events. The next actual
+02:00 Europe/Brussels nightly execution has not been observed.
+
+The new OMDb categories identify the current failures on the same 24 movie IDs
+as the earlier investigation: 18 `Error getting data.` responses and six
+`Incorrect IMDb ID.` responses. These are provider error payloads returned with
+HTTP 200, rather than malformed JSON. Prior good values are preserved. This is
+a diagnosis of the current responses; the earlier raw payloads were not retained.
+Twelve incremental hydration batches kept the final 188-title result set.
