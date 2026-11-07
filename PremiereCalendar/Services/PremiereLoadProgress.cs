@@ -23,6 +23,9 @@ public sealed record PremiereLoadProgress(
     public int? UnmappedCount { get; init; }
     public int? NetNewCount { get; init; } = SourceItemCount;
     public bool IsBackground { get; init; }
+    // Presentation readiness is independent of terminal durable-work completion.
+    public bool IsCalendarReady { get; init; }
+    public bool IsEnriching { get; init; }
     public IReadOnlyList<PremiereItem> SourceItems { get; init; } = Items;
     public bool IsStaleCache { get; init; }
     public bool HasSourceErrors { get; init; }

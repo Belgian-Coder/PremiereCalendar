@@ -43,6 +43,8 @@ public partial class Calendar
     private string? _sourceProgressFilter;
     private DateOnly? _selectedDay;
     private bool _isLoading = true;
+    private bool _isEnriching;
+    private bool _hasCalendarReadySnapshot;
     private bool _isRefreshingStaleCache;
     private bool _isQueryProgressExpanded;
     private bool _isCommandPaletteOpen;
@@ -752,9 +754,9 @@ public partial class Calendar
         // Keep the original stream/watch alive after the foreground presentation budget.
         // Reopening the service stream could enqueue another provider refresh.
         var loadCancellation = CancellationTokenSource.CreateLinkedTokenSource(_disposeCancellation.Token);
-        var foregroundDeadline = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var budgetRegistration = budgetCancellation.Token.Register(() => foregroundDeadline.TrySetResult(false));
-        using var staleBudgetRegistration = staleCacheBudgetCancellation.Token.Register(() => foregroundDeadline.TrySetResult(true));
+        var foregroundDeadline = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var budgetRegistration = budgetCancellation.Token.Register(() => foregroundDeadline.TrySetResult("foreground_budget"));
+        using var staleBudgetRegistration = staleCacheBudgetCancellation.Token.Register(() => foregroundDeadline.TrySetResult("stale_cache_budget"));
         var isForeground = true;
         var staleDeadlineStarted = false;
         _loadCancellation = loadCancellation;
@@ -763,6 +765,7 @@ public partial class Calendar
         CalendarFilters? prefetchFilters = null;
         var hasAuthoritativeResult = false;
         var hasFinalResult = false;
+        var hasCalendarReadyResult = false;
         var firstResult = true;
         var firstNonemptyResult = true;
         var firstCachedFreshnessStarted = false;
@@ -780,6 +783,8 @@ public partial class Calendar
         var token = loadCancellation.Token;
 
         _isLoading = true;
+        _isEnriching = false;
+        _hasCalendarReadySnapshot = false;
         _isRefreshingStaleCache = false;
         _error = null;
         _unavailableSources = [];
@@ -813,7 +818,7 @@ public partial class Calendar
             RecordPageDiagnostic(diagnostic, "foreground_handoff", new()
             {
                 Outcome = hasFinalResult ? "final_metadata_pending" : "background_watch",
-                Reason = foregroundDeadline.Task.Result ? "stale_cache_budget" : "foreground_budget",
+                Reason = foregroundDeadline.Task.Result,
                 Limit = hasFinalResult ? null : backgroundCompletionBudgetSeconds
             });
             // Final data can arrive before slow usage/freshness writes finish. Only a live
@@ -821,20 +826,25 @@ public partial class Calendar
             if (!hasFinalResult)
             {
                 loadCancellation.CancelAfter(TimeSpan.FromSeconds(backgroundCompletionBudgetSeconds));
-                FinalizeOpenProgressEntries();
-                if (foregroundDeadline.Task.Result)
+                // Readiness releases foreground demand without marking unfinished optional
+                // providers complete or adding a timeout warning.
+                if (!hasCalendarReadyResult)
                 {
-                    AddBackgroundRefreshProgressEntry(staleCacheBudgetSeconds);
-                }
-                else
-                {
-                    AddLoadBudgetProgressEntry(budgetSeconds);
+                    FinalizeOpenProgressEntries();
+                    if (foregroundDeadline.Task.Result == "stale_cache_budget")
+                    {
+                        AddBackgroundRefreshProgressEntry(staleCacheBudgetSeconds);
+                    }
+                    else
+                    {
+                        AddLoadBudgetProgressEntry(budgetSeconds);
+                    }
                 }
             }
             _isLoading = false;
             _isRefreshingStaleCache = false;
             _hasLoadedAtLeastOnce = true;
-            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
+            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: !hasCalendarReadyResult);
             CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
             RequestPageRender(diagnostic, "foreground_handoff");
         });
@@ -875,6 +885,16 @@ public partial class Calendar
                         }
 
                         _items = update.Items;
+                        if (update.IsCalendarReady)
+                        {
+                            hasCalendarReadyResult = true;
+                            _hasCalendarReadySnapshot = true;
+                            _isLoading = false;
+                            _isRefreshingStaleCache = false;
+                            _isEnriching = update.IsEnriching && !update.IsFinal;
+                            _hasLoadedAtLeastOnce = true;
+                            foregroundDeadline.TrySetResult("calendar_ready");
+                        }
                         if (diagnostic is not null) diagnostic.ItemCount = update.Items.Count;
                         if (firstResult)
                         {
@@ -911,6 +931,8 @@ public partial class Calendar
                         if (update.IsFinal)
                         {
                             hasFinalResult = true;
+                            loadCancellation.CancelAfter(Timeout.InfiniteTimeSpan);
+                            _isEnriching = false;
                             _unavailableSources = update.UnavailableSources;
                             hasAuthoritativeResult = !update.HasSourceErrors && !update.IsStaleCache;
                             loadOutcome = update.IsDegradedResult ? "degraded" : update.RetryAfterUtc > DateTimeOffset.UtcNow ? "cooldown"
@@ -956,6 +978,7 @@ public partial class Calendar
                             ? TimeSpan.FromMilliseconds(750)
                             : TimeSpan.FromMilliseconds(250);
                         if (!renderedFirstUpdate
+                            || update.IsCalendarReady
                             || update.IsFinal
                             || now - lastUiUpdateUtc >= minimumUiUpdateInterval)
                         {
@@ -965,8 +988,8 @@ public partial class Calendar
                             // A calendar load can stream many differently ordered provider batches.
                             // Keep existing cards in place, update matching cards, and append discoveries so
                             // the page fills progressively without rebuilding or reshuffling the whole grid.
-                            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: true);
-                            CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: isForeground && !update.IsFinal, _visibleItems.Count);
+                            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: !update.IsCalendarReady);
+                            CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: isForeground && !hasCalendarReadyResult && !update.IsFinal, _visibleItems.Count);
                             RequestPageRender(diagnostic, renderReason);
                         }
                     });
@@ -1059,6 +1082,7 @@ public partial class Calendar
                         if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
                         {
                             _isLoading = false;
+                            _isEnriching = false;
                             _isRefreshingStaleCache = false;
                             CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
                             _loadCancellation = null;
@@ -1481,6 +1505,8 @@ public partial class Calendar
         InvalidateLoadProgressCache();
         _sourceProgressFilter = null;
         _isLoading = true;
+        _isEnriching = false;
+        _hasCalendarReadySnapshot = false;
         _isRefreshingStaleCache = false;
         _preserveStreamedItemOrder = false;
         _error = null;
@@ -1549,13 +1575,26 @@ public partial class Calendar
             .LastOrDefault(progress => string.Equals(progress.SourceName, _sourceProgressFilter, StringComparison.OrdinalIgnoreCase));
         if (groupedEntry is not null)
         {
-            return groupedEntry.SourceItems;
+            return CurrentSourceItems(groupedEntry.SourceItems);
         }
 
         var entry = _loadProgress
             .LastOrDefault(progress => string.Equals(progress.SourceName, _sourceProgressFilter, StringComparison.OrdinalIgnoreCase));
 
-        return entry is null ? _items : entry.SourceItems;
+        return entry is null ? _items : CurrentSourceItems(entry.SourceItems);
+
+        IReadOnlyList<PremiereItem> CurrentSourceItems(IReadOnlyList<PremiereItem> sourceItems)
+        {
+            if (!_hasCalendarReadySnapshot)
+            {
+                return sourceItems;
+            }
+
+            // Keep source membership while applying the latest authoritative details and
+            // removals, so a selected source cannot revive an outdated filtered card.
+            var sourceIds = sourceItems.Select(item => item.CanonicalId).ToHashSet(StringComparer.Ordinal);
+            return _items.Where(item => sourceIds.Contains(item.CanonicalId)).ToArray();
+        }
     }
 
     private IReadOnlyList<LoadProgressEntry> GroupedLoadProgressEntries()

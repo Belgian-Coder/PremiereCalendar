@@ -267,6 +267,62 @@ public sealed class OmdbClientIntegrationTests
         Assert.Single(handler.Requests);
     }
 
+    [Theory]
+    [InlineData("Incorrect IMDb ID.", "payload_invalid_imdb_id")]
+    [InlineData(" incorrect imdb id. ", "payload_invalid_imdb_id")]
+    [InlineData("Error getting data.", "payload_data_error")]
+    [InlineData(null, "payload_missing_error")]
+    [InlineData(" ", "payload_missing_error")]
+    [InlineData("private-title https://private.example/?token=private-api-value", "payload_unrecognized_error")]
+    public async Task FalsePayloadDiagnosticsClassifySafelyAndPreserveVerifiedMetadata(string? error, string category)
+    {
+        var root = CreateRoot();
+        try
+        {
+            using var diagnostics = new PerformanceDiagnosticStore(new(), root);
+            var telemetry = new PremiereTelemetry(diagnostics);
+            var store = CreateCacheStore(root);
+            var calls = 0;
+            var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls == 1
+                ? Fixture.Read("omdb/by-imdb-id-success.json")
+                : System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })));
+            var client = CreateOmdbClient(handler, true, store, telemetry);
+            var good = await client.GetByImdbIdWithStatusAsync("tt-private-id", default);
+            var saved = await store.GetAsync("tt-private-id", default);
+
+            var failed = await client.GetByImdbIdWithStatusAsync("tt-private-id", default, forceRefresh: true);
+
+            Assert.False(failed.Successful);
+            Assert.Equal("invalid_response", failed.Failure?.Reason);
+            Assert.NotNull(failed.Failure?.RetryAtUtc);
+            Assert.Equal(good.Value!.ImdbRating, failed.Value!.ImdbRating);
+            Assert.Equal(saved!.CachedAtUtc, (await store.GetAsync("tt-private-id", default))!.CachedAtUtc);
+            Assert.Null((await store.GetProviderStateAsync(default)).RateLimitedUntilUtc);
+            Assert.True((await client.GetByImdbIdWithStatusAsync("tt-private-id", default)).Successful);
+            Assert.Equal(2, handler.Requests.Count);
+
+            telemetry.FlushDiagnostics();
+            var lines = Directory.GetFiles(Path.Combine(root, "App_Data", "logs", "performance"), "performance-*.ndjson")
+                .SelectMany(path =>
+                {
+                    using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var reader = new StreamReader(stream);
+                    return reader.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                }).ToArray();
+            var events = lines.Select(line => System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(line)).ToArray();
+            var outcome = Assert.Single(events, item => item.GetProperty("event").GetString() == "provider.outcome"
+                && item.GetProperty("details").GetProperty("outcome").GetString() == "failed");
+            Assert.Equal(category, outcome.GetProperty("details").GetProperty("stage").GetString());
+            var log = string.Join('\n', lines);
+            Assert.DoesNotContain("tt-private-id", log);
+            Assert.DoesNotContain("test-key", log);
+            Assert.DoesNotContain("private-title", log);
+            Assert.DoesNotContain("private.example", log);
+            Assert.DoesNotContain("private-api-value", log);
+        }
+        finally { TryDelete(root); }
+    }
+
     [Fact]
     public async Task PersistedQuotaDeadlineSurvivesAnUnrelatedRequestFailure()
     {
@@ -302,7 +358,8 @@ public sealed class OmdbClientIntegrationTests
     private static OmdbClient CreateOmdbClient(
         HttpMessageHandler handler,
         bool enabled,
-        IOmdbCacheStore? cacheStore = null)
+        IOmdbCacheStore? cacheStore = null,
+        PremiereTelemetry? telemetry = null)
     {
         return new OmdbClient(
             new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") },
@@ -315,7 +372,8 @@ public sealed class OmdbClientIntegrationTests
                 EmptyResponseCacheHours = 1,
                 RateLimitBackoffHours = 12
             }),
-            cacheStore: cacheStore);
+            cacheStore: cacheStore,
+            telemetry: telemetry);
     }
 
     [Fact]

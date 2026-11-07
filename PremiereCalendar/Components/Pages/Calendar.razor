@@ -53,6 +53,12 @@
                         : "Updating visible premieres…")
                 </span>
             }
+            @if (_isEnriching)
+            {
+                <span class="calendar-refresh-status" data-testid="calendar-enrichment" role="status" aria-live="polite">
+                    Calendar ready · Updating details
+                </span>
+            }
 
         </div>
 

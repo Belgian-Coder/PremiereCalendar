@@ -165,8 +165,12 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     FromCache = true, IsFinal = isFinal
                 });
                 var progress = CreateProgress(snapshot.IsComplete ? "Week cache" : "Expired week cache",
-                    items, items, isFinal: isFinal, fromCache: true, isStaleCache: !snapshot.IsComplete);
-                if (isFinal || items.Count > 0)
+                    items, items, isFinal: isFinal, fromCache: true, isStaleCache: !snapshot.IsComplete) with
+                {
+                    IsCalendarReady = snapshot.IsComplete,
+                    IsEnriching = snapshot.IsComplete && !isFinal
+                };
+                if (snapshot.IsComplete || items.Count > 0)
                 {
                     _telemetry.RecordCalendarFirstResult(Stopwatch.GetElapsedTime(started), true);
                     firstResultRecorded = true;
@@ -255,20 +259,60 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     && (item.MediaType == PremiereMediaType.Series ? !snapshot.HasFreshSeries : !snapshot.HasFreshMovies);
                 var rediscoveredItems = cached.Where(Rediscovered).ToArray();
                 var retainedItems = cached.Where(item => !Rediscovered(item)).ToArray();
-                var metadataHydration = await TraceEnrichmentStageAsync("cache.metadata_hydration",
-                    () => HydrateSharedItemMetadataAsync(retainedItems, start, end, cancellationToken));
+                IReadOnlyList<PremiereItem> localCached = cached;
+                if (snapshot.IsComplete && !refreshSnapshot)
+                {
+                    localCached = await HydrateCachedImdbRatingsAsync(cached, filters, cancellationToken, allowRemote: false);
+                    var available = ApplyRequestedFilters(localCached, filters);
+                    yield return CreateProgress("Week cache", available, available, fromCache: true) with
+                    {
+                        IsCalendarReady = true,
+                        IsEnriching = true
+                    };
+                }
+                var retainedHydration = localCached.Where(item => !Rediscovered(item)).ToArray();
+                var discoveryChanged = false;
+                var rediscoveredHydration = await HydrateCachedImdbRatingsAsync(rediscoveredItems, filters,
+                    cancellationToken, allowRemote: false);
+                // Publish accepted repairs in bounded batches instead of holding every
+                // card behind two whole-week enrichment barriers. Keep provider limits
+                // unchanged and finish/persist the durable job only after all work.
+                foreach (var indexes in Enumerable.Range(0, retainedItems.Length)
+                             .Chunk(Math.Clamp(_options.MaxEnrichmentConcurrency, 1, 32)))
+                {
+                    var batch = indexes.Select(index => retainedHydration[index]).ToArray();
+                    var metadata = await TraceEnrichmentStageAsync("cache.metadata_hydration",
+                        () => HydrateSharedItemMetadataAsync(batch, start, end, cancellationToken));
+                    discoveryChanged |= metadata.DiscoveryChanged;
+                    var repaired = await TraceEnrichmentStageAsync("cache.hydration",
+                        () => HydrateCachedImdbRatingsAsync(metadata.Items, filters, cancellationToken,
+                            hydrateDataset: !snapshot.IsComplete || refreshSnapshot));
+                    if (_itemCacheSession.Value is { } patchSession)
+                    {
+                        var accepted = await patchSession.ReconcileAsync(repaired, includeConsumed: false, cancellationToken);
+                        repaired = accepted.Items;
+                        discoveryChanged |= accepted.DirtyMedia.Count > 0;
+                        if (accepted.DirtyMedia.Count > 0) patchSession.ForceDiscoveryRefresh = true;
+                    }
+                    for (var index = 0; index < indexes.Length; index++)
+                        retainedHydration[indexes[index]] = repaired[index];
+                    var patchItems = ApplyRequestedFilters(retainedHydration.Concat(rediscoveredHydration).ToArray(), filters);
+                    yield return CreateProgress("Updating details", patchItems, patchItems, fromCache: true,
+                        isStaleCache: !snapshot.IsComplete) with
+                    {
+                        Phase = "enrichment",
+                        IsCalendarReady = snapshot.IsComplete && !discoveryChanged && !refreshSnapshot,
+                        IsEnriching = true
+                    };
+                }
+                var metadataHydration = (Items: (IReadOnlyList<PremiereItem>)retainedHydration, DiscoveryChanged: discoveryChanged);
                 if (rediscoveredItems.Length > 0)
                     _telemetry.RecordDiagnostic("enrichment.skipped", details: new()
                     {
                         Stage = "cache.metadata_hydration", Outcome = "skipped",
                         Reason = "fresh_discovery_pending", Count = rediscoveredItems.Length
                     });
-                var hydrated = await TraceEnrichmentStageAsync("cache.hydration", async () =>
-                {
-                    var retained = await HydrateCachedImdbRatingsAsync(metadataHydration.Items, filters, cancellationToken);
-                    var rediscovered = await HydrateCachedImdbRatingsAsync(rediscoveredItems, filters, cancellationToken, allowRemote: false);
-                    return (IReadOnlyList<PremiereItem>)retained.Concat(rediscovered).ToArray();
-                });
+                var hydrated = (IReadOnlyList<PremiereItem>)retainedHydration.Concat(rediscoveredHydration).ToArray();
                 var cachedItems = ApplyRequestedFilters(hydrated, filters);
                 if (_itemCacheSession.Value is { } cachedSession)
                 {
@@ -1395,7 +1439,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         IReadOnlyList<PremiereItem> items,
         CalendarFilters? filters,
         CancellationToken cancellationToken,
-        bool allowRemote = true)
+        bool allowRemote = true,
+        bool hydrateDataset = true)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (_itemEnrichmentCache is not null)
@@ -1408,7 +1453,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         List<PremiereItem>? hydratedItems = null;
         IReadOnlyDictionary<string, ImdbRatingRecord> ratingsByImdbId =
             new Dictionary<string, ImdbRatingRecord>(StringComparer.OrdinalIgnoreCase);
-        if (_imdbRatingsStore is not null)
+        if (_imdbRatingsStore is not null && hydrateDataset)
         {
             var imdbIds = items
                 .Where(HasCachedImdbId)
@@ -1430,7 +1475,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             cancellationToken.ThrowIfCancellationRequested();
             var item = items[index];
             var hydratedItem = item;
-            if (_imdbRatingsStore is not null && HasCachedImdbId(item))
+            if (_imdbRatingsStore is not null && hydrateDataset && HasCachedImdbId(item))
             {
                 var imdbId = item.ImdbId!.Trim();
                 ratingsByImdbId.TryGetValue(imdbId, out var rating);
@@ -2127,6 +2172,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             elapsedMilliseconds)
         {
             ProviderKey = ProviderKeyForSource(sourceName),
+            IsCalendarReady = isFinal,
             Phase = isFinal || isSourceComplete ? "complete" : fromCache ? "cache" : "loading",
             SourceItems = diagnosticSourceItems,
             IsStaleCache = isStaleCache,

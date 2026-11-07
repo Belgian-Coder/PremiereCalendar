@@ -13,7 +13,7 @@ using System.Text.Json;
 
 namespace PremiereCalendar.ComponentTests;
 
-public sealed class CalendarPageTests : BunitContext
+public sealed partial class CalendarPageTests : BunitContext
 {
     private readonly FakeAdjacentWeekPrefetcher _prefetcher = new();
     private readonly FakeViewSyncService _viewSyncService = new();

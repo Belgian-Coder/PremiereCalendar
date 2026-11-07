@@ -236,7 +236,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         {
             Message = "Resuming fresh successful source coverage from the previous calendar attempt.",
             CalendarProgress = checkpoint.CalendarProgress is { } calendar
-                ? calendar with { IsFinal = false, Phase = "cache", IsStaleCache = true } : null,
+                ? calendar with { IsFinal = false, Phase = "cache", IsStaleCache = true, IsCalendarReady = false, IsEnriching = false } : null,
             SourceSummaries = checkpoint.SourceSummaries.Where(pair =>
                     pair.Value.CalendarProgress is { HasSourceErrors: false, CheckpointKey: { } key }
                     && checkpoint.CompletedSources.ContainsKey(key))
@@ -491,7 +491,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     internal void ReplayPersistedProgress(ProviderWorkSnapshot job, PremiereLoadProgress persisted)
         => Publish(job.JobId, new ProviderWorkProgress(job.JobId, ProviderWorkState.Running,
             "Resumed persisted provider progress.", persisted.CompletedWork, persisted.TotalWork,
-            persisted with { IsFinal = false, Phase = "cache", IsStaleCache = true }));
+            persisted with { IsFinal = false, Phase = "cache", IsStaleCache = true, IsCalendarReady = false, IsEnriching = false }));
 
     internal async Task CompleteAsync(ProviderWorkSnapshot job, CancellationToken cancellationToken)
     {
@@ -759,7 +759,10 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         var checkpointStarted = _timeProvider.GetTimestamp();
         var checkpoint = ProviderWorkCheckpointCodec.Encode(new ProviderWorkCheckpoint(
             latest.Message, latest.CompletedWork, latest.TotalWork,
-            latest.CalendarProgress is { } calendar ? calendar with { SourceItems = [] } : null,
+            latest.CalendarProgress is { } calendar ? calendar with
+            {
+                SourceItems = [], IsCalendarReady = calendar.IsFinal && calendar.IsCalendarReady, IsEnriching = false
+            } : null,
             execution.CompletedSources)
         {
             SourceCompletedUtc = execution.SourceCompletedUtc,
@@ -996,11 +999,17 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
 
     private static PremiereLoadProgress? NormalizeDeferredProgress(
         PremiereLoadProgress? progress, ProviderWorkSnapshot snapshot, DateTimeOffset now)
-        => progress is { IsFinal: true, RetryAfterUtc: { } deadline }
+    {
+        // Readiness is a live validation result, not a durable assertion that a
+        // later subscriber can reuse after expiry, preemption or invalidation.
+        if (progress is { IsFinal: false } && (progress.IsCalendarReady || progress.IsEnriching))
+            return progress with { IsCalendarReady = false, IsEnriching = false };
+        return progress is { IsFinal: true, RetryAfterUtc: { } deadline }
             && (snapshot.State is ProviderWorkState.Running or ProviderWorkState.Queued
                 || snapshot.State == ProviderWorkState.RetryWaiting && deadline <= now)
-                ? progress with { IsFinal = false, Phase = "cache", IsStaleCache = true }
+                ? progress with { IsFinal = false, Phase = "cache", IsStaleCache = true, IsCalendarReady = false, IsEnriching = false }
                 : progress;
+    }
 
     private TimeSpan Elapsed(ProviderWorkSnapshot job) => job.StartedUtc is { } started
         ? _timeProvider.GetUtcNow() - started

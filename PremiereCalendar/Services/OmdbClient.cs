@@ -211,8 +211,7 @@ public sealed class OmdbClient : IOmdbClient
                             : error.Contains("key", StringComparison.OrdinalIgnoreCase)
                                 ? new ProviderFailure("authentication_denied", 200, _timeProvider.GetUtcNow().AddMinutes(15))
                                 : new ProviderFailure("invalid_response", 200, _timeProvider.GetUtcNow().AddMinutes(1));
-                        var payloadCategory = string.IsNullOrWhiteSpace(item.Response) ? "payload_missing_response"
-                            : string.Equals(item.Response, "False", StringComparison.OrdinalIgnoreCase) ? "payload_unrecognized_error" : "payload_invalid_response_marker";
+                        var payloadCategory = PayloadFailureCategory(item, failure);
                         if (failure.Reason == "invalid_response")
                         {
                             payloadFailures.Remember(failure, _timeProvider.GetUtcNow());
@@ -275,6 +274,24 @@ public sealed class OmdbClient : IOmdbClient
                 && string.Equals(item.Error?.Trim(), "Movie not found!", StringComparison.OrdinalIgnoreCase)
             || string.Equals(item.Response, "True", StringComparison.OrdinalIgnoreCase)
                 && string.IsNullOrWhiteSpace(item.Error));
+
+    private static string PayloadFailureCategory(OmdbItem item, ProviderFailure failure)
+    {
+        if (string.IsNullOrWhiteSpace(item.Response)) return "payload_missing_response";
+        if (!string.Equals(item.Response, "False", StringComparison.OrdinalIgnoreCase))
+            return "payload_invalid_response_marker";
+
+        // Only fixed categories enter diagnostics. Provider error text can contain
+        // request details and must never become a diagnostic identifier.
+        if (failure.Reason == "rate_limited") return "payload_rate_limited";
+        if (failure.Reason == "authentication_denied") return "payload_authentication_denied";
+        if (string.IsNullOrWhiteSpace(item.Error)) return "payload_missing_error";
+        if (string.Equals(item.Error.Trim(), "Incorrect IMDb ID.", StringComparison.OrdinalIgnoreCase))
+            return "payload_invalid_imdb_id";
+        if (string.Equals(item.Error.Trim(), "Error getting data.", StringComparison.OrdinalIgnoreCase))
+            return "payload_data_error";
+        return "payload_unrecognized_error";
+    }
 
     private async Task<OmdbCacheEntry?> GetPersistedAsync(string imdbId, CancellationToken cancellationToken)
     {

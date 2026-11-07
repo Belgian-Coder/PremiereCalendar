@@ -167,3 +167,9 @@ The calendar renders one selected day at a time. Every day starts with 10 cards 
 ## Follow-up implementation
 
 See [follow-up validation](FollowUpPerformanceValidation.md) for the cache-maintenance race correction, concurrent bulk IMDb import, reduced progressive merging work, page completion/reconnect recovery, and measured limits.
+
+## Progressive cached-calendar readiness
+
+See [v1.2.17 readiness validation](ProgressiveCalendarReadiness-20261107.md) for
+separate calendar readiness and enrichment completion, incremental SignalR card
+updates, filter preservation, and the reported 35.45-second Update investigation.
