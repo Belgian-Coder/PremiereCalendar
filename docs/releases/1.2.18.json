@@ -1,0 +1,673 @@
+{
+  "schemaVersion": 1,
+  "version": "1.2.18",
+  "tag": "v1.2.18",
+  "sourceRevision": "57988e69da677fcb2be8f04e42616fb420016341",
+  "createdUtc": "2026-11-12T17:29:41Z",
+  "distribution": "docker-archive",
+  "platform": "linux/amd64",
+  "imageConfigurationDigest": "sha256:ed154263df482956d9fffaa44d59b9703a8859b7f6f1040e420433bf35c78c7f",
+  "ociIndexDigest": "sha256:3b8b41fe85cae754eb3d18fcac4345618e841fab5d32e94caead95ade8402121",
+  "archive": "premierecalendar-1.2.18.tar",
+  "archiveBytes": 185633280,
+  "archiveSha256": "60f741712561da19adea700b1a4a4b287edcf64a6ae090d339b88ba671c1c751",
+  "databaseSchemaVersion": 4,
+  "status": "installed",
+  "acceptance": {
+    "tests": [
+      {
+        "suite": "unit",
+        "passed": 1185,
+        "failed": 0,
+        "skipped": 1,
+        "sourceRevision": "57988e69da677fcb2be8f04e42616fb420016341",
+        "testedSourceFingerprintsSha256": "e395cdaa68a79be6c1569d468cd4da96517edb9082d6358edf5069d305826e52",
+        "evidence": "evidence/tests/Unit.trx",
+        "missingEvidence": []
+      },
+      {
+        "suite": "component",
+        "passed": 225,
+        "failed": 0,
+        "skipped": 0,
+        "sourceRevision": "57988e69da677fcb2be8f04e42616fb420016341",
+        "testedSourceFingerprintsSha256": "e395cdaa68a79be6c1569d468cd4da96517edb9082d6358edf5069d305826e52",
+        "evidence": "evidence/tests/Component.trx",
+        "missingEvidence": []
+      },
+      {
+        "suite": "integration",
+        "passed": 592,
+        "failed": 0,
+        "skipped": 0,
+        "sourceRevision": "57988e69da677fcb2be8f04e42616fb420016341",
+        "testedSourceFingerprintsSha256": "e395cdaa68a79be6c1569d468cd4da96517edb9082d6358edf5069d305826e52",
+        "evidence": "evidence/tests/Integration.trx",
+        "missingEvidence": []
+      }
+    ],
+    "sourceReview": {
+      "version": "1.2.18",
+      "sourceRevision": "57988e69da677fcb2be8f04e42616fb420016341",
+      "baseCommit": "cea72514c4d50e8f200ea63a225f2a3ce35cdfed",
+      "inputManifestSha256": "4aac44365e349ed5534179bac4320996d5860dbebc2a770b38a45c7084b15652",
+      "reviewedDiffSha256": "a157add41ddd777d6de9a2a08cfc8fd44902fd691ca25d21162a89099b214fe7",
+      "openP0P2": 0,
+      "astra": {
+        "model": "gpt-6-astra",
+        "effort": "high",
+        "status": "not-performed",
+        "reason": "The owner requested a Claude Opus 5.5 High adversarial review for this release; no GPT-6 Astra review was available in this session. Deviation from the v1.2.17 gate, stated in the release notes."
+      },
+      "claude": {
+        "model": "claude-opus-5-5",
+        "effort": "high",
+        "status": "completed",
+        "actualModelVerified": false,
+        "invocation": "Claude Code subagents started with model=opus and effort=high (read-only adversarial reviewers); the model is as requested from the harness, not independently verified from usage metadata.",
+        "rounds": [
+          {
+            "scope": "calendar/UI/URL/view-sync/poster warm-up/language fixes",
+            "round": 1,
+            "findings": "1 P1, 3 P2, P3s",
+            "disposition": "all P1/P2 fixed"
+          },
+          {
+            "scope": "calendar/UI fixes",
+            "round": 2,
+            "findings": "N1 P2 (shared last-seen record), N2-N7 P3",
+            "disposition": "N1-N5 and N7 fixed; N6 accepted (one poster queue for all circuits)"
+          },
+          {
+            "scope": "calendar/UI fixes",
+            "round": 3,
+            "findings": "1 P2 (filter catalog not loaded on early-return first render), P3s",
+            "disposition": "P2 fixed and re-verified CLOSED"
+          },
+          {
+            "scope": "cold discovery and OMDb (7-8 November work)",
+            "round": 1,
+            "findings": "no P0/P1; B1 P2 (readiness reconcile accepted foreign rows), P3s",
+            "disposition": "B1 and B2 fixed, timing-sensitive tests stabilised"
+          },
+          {
+            "scope": "cold discovery readiness fix",
+            "round": 2,
+            "findings": "no P0-P2; 4 P3",
+            "disposition": "P3 follow-ups deferred to v1.2.19"
+          },
+          {
+            "scope": ".NET 11 RC3 to 11.0.0 GA upgrade (global.json, Dockerfile, four Microsoft packages)",
+            "round": 1,
+            "findings": "no P0/P1; P2 obsolete zlib pin in Dockerfile; P2 smoke timezone probe built on RC3; P2 Windows host needs SDK 11.0.100 (pre-existing, not a regression)",
+            "disposition": "zlib pin removed; probe rebuilt on the GA SDK; host SDK requirement recorded in release notes"
+          }
+        ],
+        "deferredP3": [
+          "readiness probe read failure forces a partial load",
+          "single-update seed flicker after a later source error",
+          "shared constant for the item-cache-validation marker",
+          "test guard that the readiness probe ran before the final reconcile",
+          "OMDb response-cache dependence",
+          "recently-warmed poster set evicts by first insertion",
+          "wasted catalog request when TMDb settings are missing",
+          "csproj comment that the Internal.Assets pin moves with the SDK/runtime images",
+          "stale RC3 mentions in historical performance docs"
+        ]
+      },
+      "recordedUtc": "2026-11-12T18:27:33.396112+01:00",
+      "candidate": 2
+    },
+    "scanSummary": {
+      "sourceRevision": "57988e69da677fcb2be8f04e42616fb420016341",
+      "archiveSha256": "60f741712561da19adea700b1a4a4b287edcf64a6ae090d339b88ba671c1c751",
+      "trivy": {
+        "results": 4,
+        "vulnerabilities": 0,
+        "bySeverity": {},
+        "fixableBySeverity": {},
+        "misconfigurations": 0,
+        "secrets": 0
+      },
+      "sbom": {
+        "format": "CycloneDX",
+        "specVersion": "1.7",
+        "components": 488
+      },
+      "checks": {
+        "trivyZeroVulnerabilities": true,
+        "trivyZeroMisconfigurations": true,
+        "trivyZeroSecrets": true,
+        "cycloneDx17Nonempty": true,
+        "archiveIdentityPass": true,
+        "nugetNoVulnerablePackages": true
+      },
+      "allChecksPass": true
+    },
+    "schema4BackupCompatibility": {
+      "beforeSchemaVersion": 4,
+      "afterSchemaVersion": 4,
+      "beforePublicTableCounts": {
+        "appparameters": 435,
+        "calendarfilterusage": 8,
+        "imdbdatasetstate": 3,
+        "imdbratings": 1731223,
+        "itemenrichments": 17634,
+        "omdbcache": 14193,
+        "omdbproviderstate": 3,
+        "provideradaptivestate": 12,
+        "providercachestate": 582708,
+        "providerworkjobs": 1176,
+        "providerworkleases": 0,
+        "schemamigrations": 4,
+        "simklsyncstate": 0,
+        "viewsyncdevices": 347,
+        "viewsyncgroups": 1,
+        "viewsyncgroupstate": 3
+      },
+      "afterPublicTableCounts": {
+        "appparameters": 435,
+        "calendarfilterusage": 8,
+        "imdbdatasetstate": 3,
+        "imdbratings": 1731223,
+        "itemenrichments": 17634,
+        "omdbcache": 14193,
+        "omdbproviderstate": 3,
+        "provideradaptivestate": 12,
+        "providercachestate": 582708,
+        "providerworkjobs": 1176,
+        "providerworkleases": 0,
+        "schemamigrations": 4,
+        "simklsyncstate": 0,
+        "viewsyncdevices": 347,
+        "viewsyncgroups": 1,
+        "viewsyncgroupstate": 3
+      },
+      "migrationHistory1to4": {
+        "1": {
+          "name": "baseline-current-schema",
+          "checksum": "09bf8d563bf3afdf18c79cbf1931e22268a3b16e215202e420d7c971e3edb6e5"
+        },
+        "2": {
+          "name": "durable-provider-scheduler",
+          "checksum": "d296a5952fccd5272d6ae79a837299ff5cff79c82bb40d5128220f9c9ba166d2"
+        },
+        "3": {
+          "name": "scheduler-leases-and-centralized-stores",
+          "checksum": "ce2f893674ad83eb5f89d1d9eee95642dee7238fe2368bf23d3735b926910a63"
+        },
+        "4": {
+          "name": "normalized-item-enrichment-cache",
+          "checksum": "0e19b8ff266839912986b0e1c4f65c5a70ae973227fb1fa0032ac117a8088458"
+        }
+      },
+      "preferenceFingerprints": {
+        "appparameters": {
+          "rows": 435,
+          "md5": "e47b26ba3db26ade336bf3afde648335"
+        },
+        "calendarfilterusage": {
+          "rows": 8,
+          "md5": "1b0bb884b2674085098aef55ef75cbd8"
+        },
+        "viewsyncgroups": {
+          "rows": 1,
+          "md5": "5acb8f7b1d53efa13fd05b13baae8698"
+        },
+        "viewsyncdevices": {
+          "rows": 347,
+          "md5": "16b8a05fa5e52204ea5fce9b286623a8"
+        },
+        "viewsyncgroupstate": {
+          "rows": 3,
+          "md5": "f998495bca1c824dfd5a6f60638afa26"
+        },
+        "simklsyncstate": {
+          "rows": 0,
+          "md5": "d41d8cd98f00b204e9800998ecf8427e"
+        }
+      },
+      "retainedItemEnrichmentsBefore": {
+        "rows": 17634,
+        "md5": "180fd18dba5713759d3b7fa7f0fef512"
+      },
+      "retainedItemEnrichmentsAfter": {
+        "rows": 17634,
+        "md5": "180fd18dba5713759d3b7fa7f0fef512"
+      },
+      "tableCountChanges": {},
+      "preferenceFingerprintChanges": {},
+      "checks": {
+        "backupSchema4": true,
+        "postStartupSchema4": true,
+        "migrationHistory1to4Preserved": true,
+        "allPublicTableCountsPreserved": true,
+        "preferenceFingerprintsPreserved": true,
+        "retainedItemEnrichmentsPresentBeforeAndAfter": true,
+        "retainedItemEnrichmentsUnchanged": true
+      },
+      "allChecksPass": true,
+      "dataPolicy": "Counts, migration metadata, and one-way row fingerprints only; no row payload stored.",
+      "backupSha256": "c3448849a7a7102b7f4b654d59039b315ff4019b7177c8a3d5b42f0544b6b17d",
+      "backupBytes": 44373284
+    },
+    "backupRestore": {
+      "version": "1.2.18",
+      "backupSha256": "C3448849A7A7102B7F4B654D59039B315FF4019B7177C8A3D5B42F0544B6B17D",
+      "backupBytes": 44373284,
+      "destinationContainer": "premiere138c_backup_db",
+      "destinationDatabase": "premierecalendar",
+      "destinationNetwork": "premiere138c_backup_net",
+      "destinationInternalNetwork": true,
+      "destinationPersistentMounts": 0,
+      "destinationPublishedPorts": 0,
+      "restoreExitCode": 0,
+      "elapsedMilliseconds": 45288,
+      "inputPipeFailed": false,
+      "timedOut": false,
+      "stdoutBytes": 0,
+      "stderrLineCount": 0,
+      "dataPolicy": "Raw dump streamed read-only; no database payload, configuration or restore output persisted."
+    },
+    "traktSettings": {
+      "version": "1.2.18",
+      "sourceRevision": "57988e69da677fcb2be8f04e42616fb420016341",
+      "after": "false",
+      "readOnly": true,
+      "oldAppRestarted": false,
+      "oldAppContainer": "8997c7fc264b741089bcf530667be3fd656602d0f40c3b0bdc762d3c7a4de1f6",
+      "verifiedUtc": "2026-11-12T18:48:56.4192416+01:00"
+    },
+    "installedHealth": {
+      "private": "passed",
+      "direct": "passed"
+    },
+    "httpChecks": 6
+  },
+  "installation": {
+    "installedUtc": "2026-11-12T17:49:57.176865192Z",
+    "stackId": 20,
+    "stackFileVersion": 17,
+    "appContainer": "711b32a6b2badf4da60a048a8cfcfa0bdb1f8d47b2d50185fe99d998739af888",
+    "previousAppContainer": "8997c7fc264b741089bcf530667be3fd656602d0f40c3b0bdc762d3c7a4de1f6",
+    "databaseContainer": "47e2c0c19b625113b0b88b6e734ae8a2cb1745b0c89fa9ad098abc79c35e4f16",
+    "backupContainer": "e5e41753ec9617eddd12d9921370b7cf88d7f0aeec2955d46a253e3bdcde2ed6",
+    "diagnosticDroppedEvents": 0,
+    "diagnosticWriterFailures": 0,
+    "operationalLoggingFailures": 0
+  },
+  "backup": {
+    "PreparedUtc": "2026-11-12T17:03:07.0113722+01:00",
+    "StackId": 20,
+    "StackRevision": 16,
+    "PreviousImage": "sha256:476dce14f0b886fada4694475849dedd0a2e3c5a7bfe238605d41d95d7587da7",
+    "DatabaseDumpFileName": "premierecalendar-20261112T160250Z-8345.dump",
+    "DatabaseDumpBytes": 44373284,
+    "DatabaseDumpSha256": "c3448849a7a7102b7f4b654d59039b315ff4019b7177c8a3d5b42f0544b6b17d",
+    "NativeEntries": 276,
+    "NativeSha256": "2d3fcf6202e008ff77e21f5986eb92a860953112c3b2942ae0849b9ecb69d7a1"
+  },
+  "rollback": {
+    "schema4CapableImageRequired": true,
+    "featureFallback": "ItemEnrichmentCache__Enabled=false",
+    "oldSchema3ImageDirectRollbackSupported": false,
+    "automaticDatabaseRestorePerformed": false
+  },
+  "assets": [
+    {
+      "name": "backup-compat-health.json",
+      "bytes": 1214,
+      "sha256": "3f9f7e59e98095c518a912190edd479f0dd438b7241edde9b49603b1444f95b2"
+    },
+    {
+      "name": "backup-compat-image.json",
+      "bytes": 207,
+      "sha256": "ed1b578b132980ff5d53a848a3bad60dc51ad501469c3b06eeddc65243821fb6"
+    },
+    {
+      "name": "backup-compat-security.txt",
+      "bytes": 117,
+      "sha256": "bdc3991b9d613bbbd2cc1a7dd9b1ca05b297887b18396d0ee22b9e53564211a0"
+    },
+    {
+      "name": "backup-restore.json",
+      "bytes": 656,
+      "sha256": "9611456ff7347f429247a50a340903e87d6f424ac38417716742fe16ba315579"
+    },
+    {
+      "name": "backup-schema4-after.txt",
+      "bytes": 2458,
+      "sha256": "f9b511e0c4d104034d92d2ac4201a7adc4707ba9c590d279e35e4b8c423aec54"
+    },
+    {
+      "name": "backup-schema4-before.txt",
+      "bytes": 2458,
+      "sha256": "f9b511e0c4d104034d92d2ac4201a7adc4707ba9c590d279e35e4b8c423aec54"
+    },
+    {
+      "name": "build-metadata.json",
+      "bytes": 1424,
+      "sha256": "200cd4b4138a8d63a2e3b642268e1e9db8633e673807c24b44717b53f1c47eca"
+    },
+    {
+      "name": "build.log",
+      "bytes": 6005,
+      "sha256": "4e96a9b0e1527a1dcfc3110a1ebc43e18a396de487b5cc505e49b2d700280fb8"
+    },
+    {
+      "name": "evidence/execution.json",
+      "bytes": 939,
+      "sha256": "6398d1cacc78b0ffe4800d04d1b53ed49cf29fcdcc4bdedda55567324e8ae543"
+    },
+    {
+      "name": "evidence/rejected-first-candidate/build-metadata.json",
+      "bytes": 1413,
+      "sha256": "7ce04806b1eb3dc950fcebe650ebc82dbfbdcb0af77d35907078e468f1f2b6e7"
+    },
+    {
+      "name": "evidence/rejected-first-candidate/CANDIDATE-REJECTED.json",
+      "bytes": 747,
+      "sha256": "e9e689522fbd59ab96b346db2e1c49c906b1e11e6bcd29b3c64c1c1f6940396a"
+    },
+    {
+      "name": "evidence/rejected-first-candidate/release-1.2.18-scan-summary.json",
+      "bytes": 743,
+      "sha256": "d12b3a06a6bb36a3fea3e89f582ffcafdbc6a79154ea860770701ae5742133db"
+    },
+    {
+      "name": "evidence/snapshot.json",
+      "bytes": 78014,
+      "sha256": "fca4b6c422bd48be373ed99aabd552369ffe7b07654e8d8325ff24cade2392f2"
+    },
+    {
+      "name": "evidence/tests/Component-restore.log",
+      "bytes": 306,
+      "sha256": "d32721bcce49505793b5c666e59230e2fd616678d85e17b733c0f25c3282288e"
+    },
+    {
+      "name": "evidence/tests/Component.log",
+      "bytes": 559,
+      "sha256": "d2b218aa46b30601bf124daf3262e3f2ca55ee6801ec6ba1f167232135118c9c"
+    },
+    {
+      "name": "evidence/tests/Component.trx",
+      "bytes": 318642,
+      "sha256": "9f5babe4b39412822933ace28fcf3694b45074163cb583187f43a9cfce498ee7"
+    },
+    {
+      "name": "evidence/tests/Integration-restore.log",
+      "bytes": 308,
+      "sha256": "cfb3e8e25b7f30669ff104853b457c2442099413a60aeb7e85a84fa9b928151f"
+    },
+    {
+      "name": "evidence/tests/Integration.log",
+      "bytes": 576,
+      "sha256": "5389b1d776e62b6e9c3ebb9deaf82c6f609b3736334f11fb71ffeb2f971c781c"
+    },
+    {
+      "name": "evidence/tests/Integration.trx",
+      "bytes": 1005849,
+      "sha256": "3c7d93faca0a268700a5fa280072bf2d79bf98a58e119d4042b166e36de687c7"
+    },
+    {
+      "name": "evidence/tests/launcher.log",
+      "bytes": 1183,
+      "sha256": "038c8a6c78532270150acd74da213829d8d0a910ba265e0eb55d2531c8ab3c96"
+    },
+    {
+      "name": "evidence/tests/Unit-restore.log",
+      "bytes": 416,
+      "sha256": "96b831acd8fea2011996e34f74522805649e6682019fd1b4eb7891a2dd0186f2"
+    },
+    {
+      "name": "evidence/tests/Unit.log",
+      "bytes": 1741,
+      "sha256": "760c048bd52e274998e99a790a4bc767134f18f045d27046ea77bc0a3d07b801"
+    },
+    {
+      "name": "evidence/tests/Unit.trx",
+      "bytes": 1739875,
+      "sha256": "d53cc5b1b19b7e6583f6b56d51ba174c9247a2d348b627154338da3e1787c725"
+    },
+    {
+      "name": "installed/activation.json",
+      "bytes": 465,
+      "sha256": "9c8b63d253fd853c7992ccb5bc43f7532d15127153ff0805e6dee79bc2c79e10"
+    },
+    {
+      "name": "installed/backup-summary-public.json",
+      "bytes": 534,
+      "sha256": "8773bf32d7414a9148c51aa8481037cd82a452543b91d4ca53021a53148bbd8d"
+    },
+    {
+      "name": "installed/browser-observations.json",
+      "bytes": 1851,
+      "sha256": "aab23c66e3314862fc20ac5842e006b35de3192b2893d5627d6d21b293d2f721"
+    },
+    {
+      "name": "installed/containers-after.json",
+      "bytes": 895,
+      "sha256": "9de0967252b13ec4591c837e84315716e586e503bc818fe4d99bca102d35934e"
+    },
+    {
+      "name": "installed/containers-before.json",
+      "bytes": 895,
+      "sha256": "d4a7f5a4fb3c22510b5ee0ce59a77de3b408ff26e9646ff6bd9df2681a2c835f"
+    },
+    {
+      "name": "installed/health-direct.json",
+      "bytes": 1492,
+      "sha256": "9998753a3e1198071b7fafe70ff8b534356c776297b06f123a3e9e7348dcd70b"
+    },
+    {
+      "name": "installed/health-private.json",
+      "bytes": 1492,
+      "sha256": "9998753a3e1198071b7fafe70ff8b534356c776297b06f123a3e9e7348dcd70b"
+    },
+    {
+      "name": "installed/http-checks.json",
+      "bytes": 656,
+      "sha256": "7558640c28ca4e19eeb066c06eb8a952d360e59f31b44b9931e4225588bbdfd5"
+    },
+    {
+      "name": "installed/image-load.json",
+      "bytes": 346,
+      "sha256": "2d418522dd95ccf181dab60b98401e99e6a0328b6462491ed40a7d29045f2025"
+    },
+    {
+      "name": "installed/release-notes-final.md",
+      "bytes": 5809,
+      "sha256": "4eca91623defd7bf778f2be1569ba45ba77699e0c8f2d000526f904597b3ba03"
+    },
+    {
+      "name": "installed/trakt-verified.json",
+      "bytes": 310,
+      "sha256": "76ce4eecb20ecf495b2346e9e4c761ea564548ec4e4eae6ec2c3678d814fb68a"
+    },
+    {
+      "name": "operations/Close138.ps1",
+      "bytes": 12647,
+      "sha256": "210b02039eae20b75ae236daed69671c127edf55f0e062fff3351e35d3938e91"
+    },
+    {
+      "name": "operations/Deploy138.ps1",
+      "bytes": 8908,
+      "sha256": "f2f1807a7dece2838ffd44db06dbc402dd1600faccbed971731c407463104fb4"
+    },
+    {
+      "name": "operations/ReleaseGates.ps1",
+      "bytes": 2726,
+      "sha256": "4d28027f6b11bbaded56f63b9fd7144360866f7583b75f5e9e235c8d71093d34"
+    },
+    {
+      "name": "operations/ReleaseOps.ps1",
+      "bytes": 2835,
+      "sha256": "48c1b5e76a1a144703e31085c73d6c5c7272f90680a2af897906967b95156826"
+    },
+    {
+      "name": "operations/verify-reviewed-source-138.py",
+      "bytes": 7106,
+      "sha256": "218b70a442891408a1270c65d99d1f1f78c5d3037c361ddbb53309cd9ea0ff74"
+    },
+    {
+      "name": "premierecalendar-1.2.18.tar",
+      "bytes": 185633280,
+      "sha256": "60f741712561da19adea700b1a4a4b287edcf64a6ae090d339b88ba671c1c751"
+    },
+    {
+      "name": "release-1.2.18-audit.json",
+      "bytes": 3731,
+      "sha256": "8ab9297e38b6f38f27fcc23e01be9dcb14d3e5d5f061eac88bf897f594e6d622"
+    },
+    {
+      "name": "release-1.2.18-sbom.cdx.json",
+      "bytes": 301307,
+      "sha256": "56b4d96565327c50a26318945052d8d6028950449c053ddb3d2967401cd978b7"
+    },
+    {
+      "name": "release-1.2.18-scan-summary.json",
+      "bytes": 660,
+      "sha256": "e99e3bbca288af1a4f7371a02622bafaff89378b7d6c0d39a2a241e343e120ab"
+    },
+    {
+      "name": "release-1.2.18-smoke.log",
+      "bytes": 663,
+      "sha256": "1f5407bbec900687bf96df0fbc43f4259357ed3705dba6bc1e802d1500315191"
+    },
+    {
+      "name": "release-1.2.18-trivy.json",
+      "bytes": 60490,
+      "sha256": "55421f7a0f3fcdb366a8d030f96c058d58a7b7ddd65858965434b03b966af33e"
+    },
+    {
+      "name": "release-notes.md",
+      "bytes": 4531,
+      "sha256": "facc27f28bcd8173a99b1904d6e497945063ea02d5a467f176dd5b0e4b4a1663"
+    },
+    {
+      "name": "release-nuget-audit.log",
+      "bytes": 487,
+      "sha256": "4ee539b0030194a537e74466c74459ca847399a184fdfdc0c8b6c0964cb5195d"
+    },
+    {
+      "name": "release-syft.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "release-trivy.log",
+      "bytes": 37014,
+      "sha256": "4e205d322318a4c84c4b91c09b566f6f5df37f6f520ccd40db5679bc60dc20d8"
+    },
+    {
+      "name": "review-inputs-manifest.json",
+      "bytes": 205611,
+      "sha256": "4aac44365e349ed5534179bac4320996d5860dbebc2a770b38a45c7084b15652"
+    },
+    {
+      "name": "review-source.patch",
+      "bytes": 351410,
+      "sha256": "a157add41ddd777d6de9a2a08cfc8fd44902fd691ca25d21162a89099b214fe7"
+    },
+    {
+      "name": "schema4-backup-compatibility.json",
+      "bytes": 3125,
+      "sha256": "2039629cea627d11da589fd653f25ca24266db5ca1a6591b7bfa222a5a24cf85"
+    },
+    {
+      "name": "smoke-blazor.web.js",
+      "bytes": 246229,
+      "sha256": "cecdad0d9c99678c254a2416c5b9c684c79384811f9454b1c95be5181b1f8b3c"
+    },
+    {
+      "name": "smoke-downgrade-command.json",
+      "bytes": 76,
+      "sha256": "ce0a67c168cade0162866e4e52bba6c9ee7000d1173aa4118dc023b4addb5ff5"
+    },
+    {
+      "name": "smoke-health.json",
+      "bytes": 1245,
+      "sha256": "90184d5bba0dcd1b9978f00408c9afce73338fea600521abc8e890cbaf6b5ad9"
+    },
+    {
+      "name": "smoke-nightly-planner.log",
+      "bytes": 747,
+      "sha256": "e61f35c5aebb09873fb02a07f01b75b0f4577b08213d0070c24567453c138d11"
+    },
+    {
+      "name": "smoke-root.html",
+      "bytes": 23608,
+      "sha256": "b6048f0bdf150d456ed0c48558ac6d6c7d986765df0ce122fb6dd3ed5c2837cb"
+    },
+    {
+      "name": "smoke-runtime.log",
+      "bytes": 2944,
+      "sha256": "daded6a55db521e7973587d6a7e2f9adfa01379a80682e59c07bcd38aa580583"
+    },
+    {
+      "name": "smoke-security.log",
+      "bytes": 438,
+      "sha256": "f558ca24957d64ef30c769fd56fde3a3a17be76f32d7e3444be05416166db61b"
+    },
+    {
+      "name": "smoke-timezone-probe-build.log",
+      "bytes": 213,
+      "sha256": "64dfd94fd266a82091b296a09f04f8b02e8bb7e09e70dcf7bfe2c6b1d2f2fa8a"
+    },
+    {
+      "name": "smoke-timezone-probe.cs",
+      "bytes": 1559,
+      "sha256": "f02d3f9641a44d06417f4b78187397cb43aa1057a2c42e2653a50495bb01eb43"
+    },
+    {
+      "name": "smoke-timezone-probe.csproj",
+      "bytes": 238,
+      "sha256": "f957a0d08801f9c2d977d1b0c1c5ae08637218690f59d0e00b933021cada0c75"
+    },
+    {
+      "name": "smoke-timezone-probe.log",
+      "bytes": 401,
+      "sha256": "7e3d1b2b7d4efc7ee84d55a214fe600b5623c74d55d9a4f0763997a39a585a7e"
+    },
+    {
+      "name": "smoke-zoneinfo.log",
+      "bytes": 47,
+      "sha256": "1e2610091575d0ad79ea50a8dd9f2916c78e56b91e380d771a38ca1f6739bcab"
+    },
+    {
+      "name": "source-1.2.18.tar",
+      "bytes": 17827840,
+      "sha256": "f7e31953ac23bae100e5542a9aff8f846e843a1f34f36bdc859623b61899211e"
+    },
+    {
+      "name": "source-archive-verification.json",
+      "bytes": 158635,
+      "sha256": "6d4f8fcbdce9a97ce3c45f2372d2c564a071d7efa92128f56e452cbc1268279e"
+    },
+    {
+      "name": "source-review.json",
+      "bytes": 3299,
+      "sha256": "d129c78562290aa0a950a79cf3d868a7ef097b90dae66079e5d1d3ab5f39b6ad"
+    },
+    {
+      "name": "suite-execution-receipts.json",
+      "bytes": 1302,
+      "sha256": "9ce1b652d19174399be802439f64e359fe039cc199ab6b6c9c5375b5f64255f6"
+    },
+    {
+      "name": "test-evidence-map.json",
+      "bytes": 688214,
+      "sha256": "de061c03ce86b0a192036adbefebc31c61a89bc2fcecf2b6e080f29637e916ba"
+    },
+    {
+      "name": "test-summary.json",
+      "bytes": 1003,
+      "sha256": "dc9e4109d4e2544052f54c22a802b01b622f202af59a97b1dbba58a71618801e"
+    },
+    {
+      "name": "tested-source-fingerprints.json",
+      "bytes": 63718,
+      "sha256": "e395cdaa68a79be6c1569d468cd4da96517edb9082d6358edf5069d305826e52"
+    }
+  ]
+}
