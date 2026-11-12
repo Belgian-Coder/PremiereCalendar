@@ -730,7 +730,11 @@ public sealed partial class PremiereServiceTests
         var date = new DateOnly(2026, 11, 2);
         var clock = new ItemCacheClock();
         var store = new MemoryItemEnrichmentStore(clock);
-        var coordinator = ItemCacheCoordinator(store, clock);
+        var diagnosticDirectory = Path.Combine(Path.GetTempPath(), "premiere-calendar-flight", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(diagnosticDirectory);
+        using var diagnosticStore = new PerformanceDiagnosticStore(new TelemetryOptions(), diagnosticDirectory);
+        var telemetry = new PremiereTelemetry(diagnosticStore);
+        var coordinator = ItemCacheCoordinator(store, clock, telemetry: telemetry);
         var item = new TmdbMovieDiscoverItem { Id = 901, Title = "Shared flight", ReleaseDate = date.ToString("yyyy-MM-dd") };
         var firstTmdb = new FakeTmdbClient { MovieItems = [item], MovieDetailDelay = TimeSpan.FromMilliseconds(150) };
         var secondTmdb = new FakeTmdbClient { MovieItems = [item with { ReleaseDate = date.AddDays(7).ToString("yyyy-MM-dd") }], MovieDetailDelay = TimeSpan.FromMilliseconds(150) };
@@ -738,16 +742,171 @@ public sealed partial class PremiereServiceTests
             tmdb.MovieDetailsById[901] = new TmdbDetailsWithExtras { Id = 901, Runtime = 112, ExternalIds = new TmdbExternalIds { ImdbId = "tt0000901" } };
         var omdb = ItemCacheOmdb("7.1");
 
-        var loads = await Task.WhenAll(
-            CreateService(firstTmdb, omdb: omdb, itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, CancellationToken.None,
-                filters: new CalendarFilters { ShowSeries = false }),
-            CreateService(secondTmdb, omdb: omdb, itemEnrichmentCache: coordinator).GetPremieresAsync(date.AddDays(7), date.AddDays(7), CancellationToken.None,
-                filters: new CalendarFilters { ShowSeries = false }));
+        try
+        {
+            var loads = await Task.WhenAll(
+                CreateService(firstTmdb, omdb: omdb, itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, CancellationToken.None,
+                    filters: new CalendarFilters { ShowSeries = false }),
+                CreateService(secondTmdb, omdb: omdb, itemEnrichmentCache: coordinator).GetPremieresAsync(date.AddDays(7), date.AddDays(7), CancellationToken.None,
+                    filters: new CalendarFilters { ShowSeries = false }));
 
-        Assert.Equal(1, firstTmdb.MovieDetailCalls.Count + secondTmdb.MovieDetailCalls.Count);
-        Assert.Single(omdb.Calls);
-        Assert.Equal(date, Assert.Single(loads[0]).PremiereDate);
-        Assert.Equal(date.AddDays(7), Assert.Single(loads[1]).PremiereDate);
+            Assert.Equal(1, firstTmdb.MovieDetailCalls.Count + secondTmdb.MovieDetailCalls.Count);
+            Assert.Single(omdb.Calls);
+            Assert.Equal(date, Assert.Single(loads[0]).PremiereDate);
+            Assert.Equal(date.AddDays(7), Assert.Single(loads[1]).PremiereDate);
+            Assert.Equal(0, coordinator.RetainedCoreProposalCohortCount);
+        }
+        finally
+        {
+            telemetry.FlushDiagnostics();
+            diagnosticStore.Dispose();
+            foreach (var file in Directory.GetFiles(Path.Combine(diagnosticDirectory, "App_Data", "logs", "performance")))
+                foreach (var line in File.ReadLines(file))
+                    if (line.Contains("\"item_cache.flight\"", StringComparison.Ordinal)) _evidence.WriteLine(line);
+            Directory.Delete(diagnosticDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentWeeksShareOptionalProposalBeforeEitherFullWriteIsAccepted()
+    {
+        var date = new DateOnly(2026, 11, 2);
+        var clock = new ItemCacheClock();
+        var store = new MemoryItemEnrichmentStore(clock);
+        var directory = Path.Combine(Path.GetTempPath(), "premiere-calendar-proposal-flight", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        using var diagnostics = new PerformanceDiagnosticStore(new TelemetryOptions(), directory);
+        var telemetry = new PremiereTelemetry(diagnostics);
+        var coordinator = ItemCacheCoordinator(store, clock, telemetry: telemetry);
+        var firstFullWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondFullWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fullWrites = 0;
+        var coreWrites = 0;
+        store.BeforeWriteBatch = async (writes, token) =>
+        {
+            if (writes.Any(write => write.MetadataJson is { } coreJson
+                && JsonSerializer.Deserialize<ItemEnrichmentMetadata>(coreJson) is { CoreMetadataOnly: true })
+                && Interlocked.Increment(ref coreWrites) == 2)
+            {
+                // Keep the peer behind its core flush until the first optional
+                // producer has ended and reached its still-unaccepted full write.
+                await firstFullWrite.Task.WaitAsync(token);
+            }
+            if (!writes.Any(write => write.MetadataJson is { } json
+                && JsonSerializer.Deserialize<ItemEnrichmentMetadata>(json) is { CoreMetadataOnly: false })) return;
+            if (Interlocked.Increment(ref fullWrites) == 1)
+            {
+                firstFullWrite.TrySetResult();
+                await releaseFirst.Task.WaitAsync(token);
+            }
+            else secondFullWrite.TrySetResult();
+        };
+        var item = new TmdbMovieDiscoverItem { Id = 901, Title = "Shared flight", ReleaseDate = date.ToString("yyyy-MM-dd") };
+        var firstTmdb = new FakeTmdbClient { MovieItems = [item], MovieDetailDelay = TimeSpan.FromMilliseconds(150) };
+        var secondTmdb = new FakeTmdbClient { MovieItems = [item with { ReleaseDate = date.AddDays(7).ToString("yyyy-MM-dd") }], MovieDetailDelay = TimeSpan.FromMilliseconds(150) };
+        foreach (var tmdb in new[] { firstTmdb, secondTmdb })
+            tmdb.MovieDetailsById[901] = new TmdbDetailsWithExtras
+            { Id = 901, Runtime = 112, ExternalIds = new TmdbExternalIds { ImdbId = "tt0000901" } };
+        var omdb = ItemCacheOmdb("7.1");
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var loads = Task.WhenAll(
+            CreateService(firstTmdb, omdb: omdb, itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, budget.Token,
+                filters: new CalendarFilters { ShowSeries = false }),
+            CreateService(secondTmdb, omdb: omdb, itemEnrichmentCache: coordinator).GetPremieresAsync(date.AddDays(7), date.AddDays(7), budget.Token,
+                filters: new CalendarFilters { ShowSeries = false }));
+        try
+        {
+            await firstFullWrite.Task.WaitAsync(budget.Token);
+            await secondFullWrite.Task.WaitAsync(budget.Token);
+            releaseFirst.TrySetResult();
+            var results = await loads.WaitAsync(budget.Token);
+            Assert.Equal(1, firstTmdb.MovieDetailCalls.Count + secondTmdb.MovieDetailCalls.Count);
+            Assert.Single(omdb.Calls);
+            Assert.Equal(date, Assert.Single(results[0]).PremiereDate);
+            Assert.Equal(date.AddDays(7), Assert.Single(results[1]).PremiereDate);
+            Assert.All(results, result => Assert.Equal(7.1, Assert.Single(result).ImdbScore));
+            Assert.Equal(0, coordinator.RetainedCoreProposalCohortCount);
+        }
+        finally
+        {
+            firstFullWrite.TrySetResult();
+            releaseFirst.TrySetResult();
+            try { await loads.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
+            telemetry.FlushDiagnostics();
+            diagnostics.Dispose();
+            foreach (var file in Directory.GetFiles(Path.Combine(directory, "App_Data", "logs", "performance")))
+                foreach (var line in File.ReadLines(file))
+                    if (line.Contains("\"item_cache.flight\"", StringComparison.Ordinal)) _evidence.WriteLine(line);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SharedCoreProposalLeaseSurvivesIndependentCallerCancellationAndAlwaysReleases()
+    {
+        var clock = new ItemCacheClock();
+        var coordinator = ItemCacheCoordinator(new MemoryItemEnrichmentStore(clock), clock);
+        var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
+        using var canceledCaller = new CancellationTokenSource();
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var first = await coordinator.CreateSessionAsync(canceledCaller.Token);
+        var second = await coordinator.CreateSessionAsync(budget.Token);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        async Task<ItemEnrichmentRefresh> Core(ItemEnrichmentSnapshot _, bool __, bool ___, CancellationToken token)
+        {
+            Interlocked.Increment(ref calls);
+            started.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return new(new ItemEnrichmentMetadata { Title = "Leased core", CoreMetadataOnly = true }, null, RefreshRatingsClock: false);
+        }
+        try
+        {
+            await first.PrepareAsync([identity], null, budget.Token);
+            await second.PrepareAsync([identity], null, budget.Token);
+            var firstRead = first.GetAsync(identity, false, Core, canceledCaller.Token, metadataOnly: true);
+            await started.Task.WaitAsync(budget.Token);
+            var secondRead = second.GetAsync(identity, false, Core, budget.Token, metadataOnly: true);
+            await canceledCaller.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstRead);
+            await first.DisposeAsync();
+            Assert.Equal(1, coordinator.RetainedCoreProposalCohortCount);
+            release.TrySetResult();
+            Assert.NotNull((await secondRead.WaitAsync(budget.Token)).Metadata);
+            Assert.Equal(1, calls);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await first.DisposeAsync();
+            await second.DisposeAsync();
+        }
+        Assert.Equal(0, coordinator.RetainedCoreProposalCohortCount);
+    }
+
+    [Fact]
+    public async Task CoreProposalLeaseReleasesEvenWhenItsPendingCoreFlushFails()
+    {
+        var clock = new ItemCacheClock();
+        var store = new MemoryItemEnrichmentStore(clock);
+        var coordinator = ItemCacheCoordinator(store, clock);
+        var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
+        var session = await coordinator.CreateSessionAsync(CancellationToken.None);
+        try
+        {
+            await session.PrepareAsync([identity], null, CancellationToken.None);
+            await session.GetAsync(identity, false, (_, _, _, _) => Task.FromResult(new ItemEnrichmentRefresh(
+                new ItemEnrichmentMetadata { Title = "Leased core", CoreMetadataOnly = true }, null, RefreshRatingsClock: false)),
+                CancellationToken.None, metadataOnly: true);
+            store.BeforeWriteBatch = (_, _) => throw new IOException("Fixture core write outage");
+            await session.FlushAsync(CancellationToken.None);
+            Assert.True(session.HasPendingWrites);
+            Assert.Equal(1, coordinator.RetainedCoreProposalCohortCount);
+        }
+        finally { await session.DisposeAsync(); }
+        Assert.Equal(0, coordinator.RetainedCoreProposalCohortCount);
     }
 
     [Fact]
@@ -1111,7 +1270,17 @@ public sealed partial class PremiereServiceTests
         public ConcurrentBag<ItemEnrichmentIdentity[]> ReadBatches { get; } = [];
         public ConcurrentBag<ItemEnrichmentIdentity[]> ReservedBatches { get; } = [];
         public Action? BeforeWrite;
+        public Func<IReadOnlyList<ItemEnrichmentWrite>, CancellationToken, Task>? BeforeWriteBatch;
+        // Runs before every validation read; lets a test inject a foreign write at an exact point.
+        public Action<IReadOnlyCollection<ItemEnrichmentIdentity>>? BeforeCurrentRead;
         private readonly object _gate = new();
+
+        public Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>> ReadCurrentManyAsync(string partition,
+            IReadOnlyCollection<ItemEnrichmentIdentity> identities, CancellationToken cancellationToken)
+        {
+            BeforeCurrentRead?.Invoke(identities);
+            return ReadManyAsync(partition, identities, false, cancellationToken);
+        }
 
         public Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>> ReadManyAsync(string partition,
             IReadOnlyCollection<ItemEnrichmentIdentity> identities, bool reserveMissing, CancellationToken cancellationToken)
@@ -1134,9 +1303,10 @@ public sealed partial class PremiereServiceTests
             }
         }
 
-        public Task<int> WriteManyAsync(string partition, IReadOnlyList<ItemEnrichmentWrite> writes, CancellationToken cancellationToken)
+        public async Task<int> WriteManyAsync(string partition, IReadOnlyList<ItemEnrichmentWrite> writes, CancellationToken cancellationToken)
         {
             Interlocked.Exchange(ref BeforeWrite, null)?.Invoke();
+            if (BeforeWriteBatch is { } beforeWrite) await beforeWrite(writes, cancellationToken);
             var updated = 0;
             lock (_gate)
             {
@@ -1168,7 +1338,7 @@ public sealed partial class PremiereServiceTests
                     updated++;
                 }
             }
-            return Task.FromResult(updated);
+            return updated;
         }
 
         public Task<int> InvalidateTmdbAsync(PremiereMediaType mediaType, IReadOnlyCollection<int> tmdbIds,

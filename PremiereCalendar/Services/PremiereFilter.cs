@@ -200,11 +200,17 @@ public static class PremiereFilter
 
     private static bool PassesOriginalLanguageFilter(PremiereItem item, IReadOnlyCollection<string> originalLanguages)
     {
-        return originalLanguages.Count == 0
-            || originalLanguages.Any(language => string.Equals(
-                item.OriginalLanguage,
-                language.Trim(),
-                StringComparison.OrdinalIgnoreCase));
+        if (originalLanguages.Count == 0)
+        {
+            return true;
+        }
+
+        var itemLanguage = LanguageCodes.Normalize(item.OriginalLanguage);
+        return itemLanguage is not null
+            && originalLanguages.Any(language => string.Equals(
+                itemLanguage,
+                LanguageCodes.Normalize(language),
+                StringComparison.Ordinal));
     }
 
     private static bool PassesOriginCountryFilter(PremiereItem item, IReadOnlyCollection<string> originCountries)
@@ -258,9 +264,9 @@ public static class PremiereFilter
     {
         return language switch
         {
-            LanguageFilter.English => string.Equals(item.OriginalLanguage, "en", StringComparison.OrdinalIgnoreCase),
-            LanguageFilter.Dutch => string.Equals(item.OriginalLanguage, "nl", StringComparison.OrdinalIgnoreCase),
-            LanguageFilter.French => string.Equals(item.OriginalLanguage, "fr", StringComparison.OrdinalIgnoreCase),
+            LanguageFilter.English => HasLanguage(item, "en"),
+            LanguageFilter.Dutch => HasLanguage(item, "nl"),
+            LanguageFilter.French => HasLanguage(item, "fr"),
             _ => true
         };
     }
@@ -273,9 +279,14 @@ public static class PremiereFilter
             OriginGroupFilter.UnitedStates => HasOriginCountry(item, "US"),
             OriginGroupFilter.UnitedKingdom => HasOriginCountry(item, "GB"),
             OriginGroupFilter.Australia => HasOriginCountry(item, "AU"),
-            OriginGroupFilter.DutchLanguage => string.Equals(item.OriginalLanguage, "nl", StringComparison.OrdinalIgnoreCase),
+            OriginGroupFilter.DutchLanguage => HasLanguage(item, "nl"),
             _ => true
         };
+    }
+
+    private static bool HasLanguage(PremiereItem item, string languageCode)
+    {
+        return string.Equals(LanguageCodes.Normalize(item.OriginalLanguage), languageCode, StringComparison.Ordinal);
     }
 
     private static bool HasOriginCountry(PremiereItem item, string country)

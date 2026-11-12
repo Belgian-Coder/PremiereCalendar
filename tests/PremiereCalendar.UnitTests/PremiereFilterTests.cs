@@ -279,4 +279,120 @@ public sealed class PremiereFilterTests
 
         Assert.Equal(["Dutch Series", "Streaming Movie"], result.Select(item => item.Title));
     }
+
+    [Theory]
+    [InlineData("nl", true)]
+    [InlineData("nl-BE", true)]
+    [InlineData("NL_nl", true)]
+    [InlineData("vls", true)]
+    [InlineData("Flemish", true)]
+    [InlineData("en-GB", true)]
+    [InlineData("fr-BE", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void Apply_MatchesRegionalAndDutchFlemishLanguageVariantsAgainstSelectedLanguages(string? itemLanguage, bool expected)
+    {
+        var item = new PremiereItem
+        {
+            CanonicalId = "movie:lang",
+            Title = "Language Probe",
+            MediaType = PremiereMediaType.Movie,
+            Type = PremiereItemType.MovieFirstRelease,
+            TmdbId = 9,
+            PremiereDate = new DateOnly(2026, 5, 4),
+            OriginalLanguage = itemLanguage!,
+            RuntimeMinutes = 100
+        };
+        var filters = CalendarFilters.CreateDefault();
+        filters.ShowSeries = true;
+        filters.ShowMovies = true;
+        filters.MovieFilters.OriginalLanguages = ["en", "nl"];
+
+        var result = PremiereFilter.Apply([item], filters);
+
+        Assert.Equal(expected, result.Count == 1);
+    }
+
+    [Fact]
+    public void Apply_NormalizesTheSelectedLanguageCodesToo()
+    {
+        var item = new PremiereItem
+        {
+            CanonicalId = "movie:lang2",
+            Title = "Language Probe",
+            MediaType = PremiereMediaType.Movie,
+            Type = PremiereItemType.MovieFirstRelease,
+            TmdbId = 10,
+            PremiereDate = new DateOnly(2026, 5, 4),
+            OriginalLanguage = "nl",
+            RuntimeMinutes = 100
+        };
+        var filters = CalendarFilters.CreateDefault();
+        filters.ShowSeries = true;
+        filters.ShowMovies = true;
+        filters.MovieFilters.OriginalLanguages = [" NL-BE "];
+
+        Assert.Single(PremiereFilter.Apply([item], filters));
+    }
+
+    [Theory]
+    [InlineData("nl-BE", true)]
+    [InlineData("nld", true)]
+    [InlineData("Flemish", true)]
+    [InlineData("fr-BE", false)]
+    [InlineData("", false)]
+    public void Apply_LegacyDutchLanguageAndOriginGroupFiltersAcceptDutchFlemishVariants(string itemLanguage, bool expected)
+    {
+        var item = new PremiereItem
+        {
+            CanonicalId = "movie:legacy",
+            Title = "Legacy Probe",
+            MediaType = PremiereMediaType.Movie,
+            Type = PremiereItemType.MovieFirstRelease,
+            TmdbId = 11,
+            PremiereDate = new DateOnly(2026, 5, 4),
+            OriginalLanguage = itemLanguage,
+            RuntimeMinutes = 100
+        };
+        var language = CalendarFilters.CreateDefault();
+        language.ShowSeries = true;
+        language.ShowMovies = true;
+        language.MovieFilters.OriginalLanguages = [];
+        language.Language = LanguageFilter.Dutch;
+        var origin = CalendarFilters.CreateDefault();
+        origin.ShowSeries = true;
+        origin.ShowMovies = true;
+        origin.MovieFilters.OriginalLanguages = [];
+        origin.OriginGroup = OriginGroupFilter.DutchLanguage;
+
+        Assert.Equal(expected, PremiereFilter.Apply([item], language).Count == 1);
+        Assert.Equal(expected, PremiereFilter.Apply([item], origin).Count == 1);
+    }
+
+    [Theory]
+    [InlineData("nl-BE", true)]
+    [InlineData("vls", true)]
+    [InlineData("fr-BE", false)]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    public void ExternalCandidateRequestFilter_NormalizesLanguagesAndKeepsUnknownCandidates(string? candidateLanguage, bool expected)
+    {
+        var filters = CalendarFilters.CreateDefault();
+        filters.SeriesFilters.OriginalLanguages = ["en", "NL"];
+        var criteria = PremiereDiscoveryCriteria.FromFilters(filters);
+        var candidate = new ExternalPremiereCandidate(
+            PremiereMediaType.Series,
+            new DateOnly(2026, 5, 4),
+            "Probe",
+            null,
+            null,
+            null,
+            "test",
+            OriginalLanguage: candidateLanguage);
+        var method = typeof(PremiereService).GetMethod(
+            "CandidateMatchesKnownRequestFilters",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        Assert.Equal(expected, (bool)method.Invoke(null, [candidate, criteria])!);
+    }
 }

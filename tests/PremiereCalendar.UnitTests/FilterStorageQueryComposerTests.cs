@@ -160,4 +160,57 @@ public sealed class FilterStorageQueryComposerTests
 
         Assert.False(result);
     }
+
+    [Theory]
+    [InlineData("?week=2026-05-04&day=2026-05-06&seriesLang=en%2Cnl&seriesRuntimeMin=0&seriesRuntimeMax=360")]
+    [InlineData("?week=2026-05-04&movieLang=en%2Cnl&movieRuntimeMin=45&movieRuntimeMax=360")]
+    [InlineData("?week=2026-05-04&seriesLang=all&seriesRuntimeMin=0&seriesRuntimeMax=360")]
+    public void HasMeaningfulFilterQuery_TreatsTheExplicitDefaultProfileAsAFilterQuery(string query)
+    {
+        Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery(query));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("?week=2026-05-04&day=2026-05-06")]
+    [InlineData("?week=2026-05-04&seriesRuntimeMin=0&seriesRuntimeMax=360")]
+    public void HasMeaningfulFilterQuery_KeepsPlainNavigationUrlsAmbiguous(string query)
+    {
+        Assert.False(FilterStorageQueryComposer.HasMeaningfulFilterQuery(query));
+    }
+
+    [Fact]
+    public void ComposeRestoredQuery_KeepsTheExplicitSavedProfileAndTheCurrentWeek()
+    {
+        var result = FilterStorageQueryComposer.ComposeRestoredQuery(
+            "?week=2026-05-11&day=2026-05-12",
+            "seriesLang=en%2Cnl&seriesRuntimeMin=0&seriesRuntimeMax=360");
+
+        var query = QueryHelpers.ParseQuery($"?{result}");
+
+        Assert.Equal("2026-05-11", query["week"].ToString());
+        Assert.Equal("2026-05-12", query["day"].ToString());
+        Assert.Equal("en,nl", query["seriesLang"].ToString());
+        Assert.Equal("0", query["seriesRuntimeMin"].ToString());
+        Assert.Equal("360", query["seriesRuntimeMax"].ToString());
+        Assert.True(FilterStorageQueryComposer.HasMeaningfulFilterQuery($"?{result}"));
+    }
+
+    [Fact]
+    public void ComposeAllQuery_KeepsExplicitProfilesOfBothMediaTypes()
+    {
+        var result = FilterStorageQueryComposer.ComposeAllQuery(
+            "seriesLang=en%2Cnl&seriesRuntimeMin=0&seriesRuntimeMax=360&movieLang=en%2Cnl&movieRuntimeMin=45&movieRuntimeMax=360",
+            "seriesLang=nl&seriesRuntimeMin=10&seriesRuntimeMax=100",
+            "movieLang=all&movieRuntimeMin=60&movieRuntimeMax=200");
+
+        var query = QueryHelpers.ParseQuery($"?{result}");
+
+        Assert.Equal("nl", query["seriesLang"].ToString());
+        Assert.Equal("10", query["seriesRuntimeMin"].ToString());
+        Assert.Equal("100", query["seriesRuntimeMax"].ToString());
+        Assert.Equal("all", query["movieLang"].ToString());
+        Assert.Equal("60", query["movieRuntimeMin"].ToString());
+        Assert.Equal("200", query["movieRuntimeMax"].ToString());
+    }
 }

@@ -210,6 +210,7 @@ public sealed class TvmazeScheduleDiscoveryProvider :
             "DUTCH" => "nl",
             "ENGLISH" => "en",
             "FINNISH" => "fi",
+            "FLEMISH" => "nl",
             "FRENCH" => "fr",
             "GERMAN" => "de",
             "GREEK" => "el",

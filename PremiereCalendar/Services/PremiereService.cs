@@ -413,7 +413,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     break;
                 }
 
-                var progressSeed = update.IsFinal && !update.HasSourceErrors
+                var progressSeed = (update.IsFinal || update.IsCalendarReady) && !update.HasSourceErrors
                     ? seededItems
                     : provisionalSeed;
                 if (progressSeed.Count > 0)
@@ -426,7 +426,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     else update = MergeProgressWithSeed(update, progressSeed);
                 }
 
-                progressHistory[update.CheckpointKey ?? update.SourceName] = update;
+                if (!string.Equals(update.Phase, "enrichment", StringComparison.Ordinal))
+                    progressHistory[update.CheckpointKey ?? update.SourceName] = update;
                 if (update.IsFinal)
                 {
                     finalItems = update.Items;
@@ -533,6 +534,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 IsDegradedResult = finalUpdate.IsDegradedResult && validation.DirtyMedia.Count == 0,
                 RetryAfterUtc = denialCannotDeferInvalidItems ? null : finalUpdate.RetryAfterUtc,
                 HasSourceErrors = finalUpdate.HasSourceErrors || validation.DirtyMedia.Count > 0,
+                IsCalendarReady = finalUpdate.IsCalendarReady && validation.DirtyMedia.Count == 0,
+                IsEnriching = false,
                 FailedSourceNames = validation.DirtyMedia.Count == 0 ? finalUpdate.FailedSourceNames
                     : finalUpdate.FailedSourceNames.Append("Item cache validation").Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
             };
@@ -937,6 +940,8 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         using var sourceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var sourceToken = sourceCancellation.Token;
         var sources = new List<PremiereSourceFactory>();
+        var coreFirst = CanDiscoverCoreFirst(forceRefresh, filters);
+        using var optionalGate = coreFirst ? new SemaphoreSlim(Math.Clamp(_options.MaxEnrichmentConcurrency, 1, 32)) : null;
 
         void AddStreamingSource(
             string name,
@@ -946,18 +951,20 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             string? keySuffix = null)
         {
             var key = SourceKey(name, sourceStart, sourceEnd, keySuffix);
+            var coreDiscovery = coreFirst ? new ColdDiscoverySource(optionalGate!) : null;
             sources.Add(new PremiereSourceFactory(
                 key,
                 name,
                 sourceStart,
                 sourceEnd,
-                () => GetSourceBatchStreamAsync(
+                () => WithColdDiscoverySource(GetSourceBatchStreamAsync(
                     name,
                     getItemBatches,
                     sourceStart,
                     sourceEnd,
                     filters,
-                    sourceToken)));
+                    sourceToken,
+                    coreDiscovery), coreDiscovery, sourceToken)) { CoreDiscovery = coreDiscovery });
         }
 
         foreach (var discoveryProvider in _discoveryProviders.Where(provider => ProviderMatchesRequestedMedia(provider, criteria)))
@@ -1040,9 +1047,13 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var latestBatchesByKey = new Dictionary<string, PremiereSourceBatch>(StringComparer.Ordinal);
         var currentItemsAccumulator = new SourceAwarePremiereMergeAccumulator();
         var errors = new List<Exception>();
+        var readinessValidationErrors = new List<Exception>();
         var failedSourceNames = new HashSet<string>(StringComparer.Ordinal);
         var active = new List<ActivePremiereSource>();
+        var activeCompletions = new List<ActivePremiereSource>();
+        var pendingCompletions = new List<PremiereSourceFactory>();
         var pendingSources = orderedSources.ToList();
+        var reusedSourceKeys = new HashSet<string>(StringComparer.Ordinal);
         if (resumeState is { CompletedSources.Count: > 0 })
         {
             var sourceKeys = orderedSources.Select(source => source.Key).ToHashSet(StringComparer.Ordinal);
@@ -1052,10 +1063,17 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             foreach (var completedSource in reusable)
             {
                 currentItemsAccumulator.ReplaceSource(completedSource.Key, completedSource.Value);
+                reusedSourceKeys.Add(completedSource.Key);
             }
             pendingSources.RemoveAll(source => reusable.ContainsKey(source.Key));
         }
         var sourceConcurrency = Math.Clamp(_options.SourceFetchConcurrency, 1, Math.Max(1, orderedSources.Length));
+        var sourceFactoriesByKey = orderedSources.ToDictionary(factory => factory.Key, StringComparer.Ordinal);
+        var discoveryReady = false;
+        var readinessChecked = false;
+        // Once readiness has been shown, later enrichment errors stay in the
+        // final classification but must not make the UI retain stale cards again.
+        var readinessEmitted = false;
 
         void StartPendingSources()
         {
@@ -1078,14 +1096,80 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             }
         }
 
+        void StartPendingCompletions()
+        {
+            while (activeCompletions.Count < sourceConcurrency && pendingCompletions.Count > 0)
+            {
+                var index = NextPendingSourceIndex(pendingCompletions, activeCompletions, sourceConcurrency);
+                if (index < 0) break;
+                var factory = pendingCompletions[index];
+                var state = sourceFactoriesByKey[factory.Key].CoreDiscovery!;
+                // A queued source has no inactivity clock yet. Reserve its
+                // first actual mapping slot before opening its timed iterator.
+                if (!state.Mappings.IsEmpty)
+                {
+                    if (!optionalGate!.Wait(0)) break;
+                    Interlocked.Exchange(ref state.ReservedOptionalPermit, 1);
+                }
+                pendingCompletions.RemoveAt(index);
+                var enumerator = TraceSourceBatchesAsync(factory, sourceToken).GetAsyncEnumerator(sourceToken);
+                activeCompletions.Add(new ActivePremiereSource(factory.Key, ProviderKeyForSource(factory.Name),
+                    enumerator, enumerator.MoveNextAsync().AsTask()));
+            }
+        }
+
         try
         {
             StartPendingSources();
 
-            while (active.Count > 0)
+            while (active.Count > 0 || activeCompletions.Count > 0 || pendingCompletions.Count > 0)
             {
-                var completed = await Task.WhenAny(active.Select(source => source.MoveNextTask));
-                var source = active.First(candidate => ReferenceEquals(candidate.MoveNextTask, completed));
+                if (coreFirst && !readinessChecked && active.Count == 0 && pendingSources.Count == 0)
+                {
+                    readinessChecked = true;
+                    if (_itemCacheSession.Value is { } coreSession && errors.Count == 0
+                        && orderedSources.All(factory => reusedSourceKeys.Contains(factory.Key)
+                            || factory.CoreDiscovery is { Exhausted: true, Error: null, UnverifiedCore: 0 }))
+                    {
+                        var flushed = true;
+                        try { await coreSession.FlushAsync(sourceToken); }
+                        catch (ItemEnrichmentInvalidatedException error)
+                        {
+                            flushed = false;
+                            discoveryReady = false;
+                            errors.Add(error);
+                            readinessValidationErrors.Add(error);
+                            failedSourceNames.Add("Item cache validation");
+                        }
+                        if (flushed)
+                        {
+                            var validation = await coreSession.ReconcileAsync(currentItemsAccumulator.ToMergedItems(),
+                                includeConsumed: true, sourceToken, windowStart: start, windowEnd: end, readOnly: true);
+                            // The probe does not accept store rows, so keep its evidence
+                            // durably in the session for the final classification.
+                            foreach (var dirtyMedia in validation.DirtyMedia) coreSession.MarkDiscoveryUnverified(dirtyMedia);
+                            if (validation.DirtyMedia.Count == 0)
+                            {
+                                discoveryReady = true;
+                                readinessEmitted = true;
+                                var readyItems = ApplyRequestedFilters(validation.Items, filters);
+                                yield return CreateProgress("Discovery", readyItems, readyItems,
+                                    progressText: "Discovery complete; enriching details") with
+                                { IsCalendarReady = true, IsEnriching = true, Phase = "enrichment" };
+                            }
+                        }
+                    }
+                    _telemetry.RecordDiagnostic("calendar.discovery.core_complete", details: new()
+                    {
+                        Stage = "core", Outcome = discoveryReady ? "ready" : "provisional",
+                        Count = currentItemsAccumulator.ToMergedItems().Count, Total = orderedSources.Length,
+                        DurationMilliseconds = Stopwatch.GetElapsedTime(fetchStarted).TotalMilliseconds
+                    });
+                }
+                var completed = await Task.WhenAny(active.Concat(activeCompletions).Select(source => source.MoveNextTask));
+                var source = active.FirstOrDefault(candidate => ReferenceEquals(candidate.MoveNextTask, completed));
+                var completing = source is null;
+                source ??= activeCompletions.First(candidate => ReferenceEquals(candidate.MoveNextTask, completed));
 
                 if (await completed)
                 {
@@ -1094,6 +1178,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     currentItemsAccumulator.ReplaceSource(source.Key, batch.Items);
                     if (batch.Error is not null)
                     {
+                        discoveryReady = false;
                         errors.Add(batch.Error);
                         failedSourceNames.Add(batch.Name);
                     }
@@ -1114,33 +1199,60 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                         unmappedCount: batch.UnmappedCount,
                         filteredCount: batch.FilteredCount,
                         checkpointKey: source.Key,
-                        retryAfterUtc: RetryDeadline(batch.Error));
+                        retryAfterUtc: RetryDeadline(batch.Error)) with
+                    { IsCalendarReady = discoveryReady || readinessEmitted, IsEnriching = discoveryReady };
 
                     source.MoveNextTask = source.Enumerator.MoveNextAsync().AsTask();
+                    StartPendingCompletions();
                     continue;
                 }
 
-                active.Remove(source);
+                (completing ? activeCompletions : active).Remove(source);
                 await DisposeActiveSourceAsync(source, cancellationToken);
+                var completedFactory = sourceFactoriesByKey[source.Key];
+                if (completing) completedFactory.CoreDiscovery?.ReleaseUnusedPermit();
+                if (!completing && completedFactory.CoreDiscovery is { Exhausted: true } state)
+                {
+                    pendingCompletions.Add(completedFactory with
+                    {
+                        CoreDiscovery = null,
+                        TraceStage = "enrichment",
+                        Open = () => GetSourceBatchStreamAsync(completedFactory.Name,
+                            token => CompleteColdDiscoverySourceAsync(state, criteria, cachedEnrichment, start, end, token),
+                            completedFactory.Start, completedFactory.End, filters, sourceToken, state, completingCoreDiscovery: true)
+                    });
+                }
+                else if (completing && completedFactory.CoreDiscovery is { } completedState)
+                {
+                    completedState.Mappings.Clear();
+                    completedState.DetailFailures.Clear();
+                    completedState.CompleteExternalFallbacks.Clear();
+                    completedState.CoreItems = [];
+                }
                 StartPendingSources();
+                StartPendingCompletions();
             }
         }
         finally
         {
             try { await sourceCancellation.CancelAsync(); }
             catch (Exception ex) { _logger.LogDebug(ex, "Source cancellation callback failed during cleanup."); }
-            await Task.WhenAll(active.Select(async source =>
+            await Task.WhenAll(active.Concat(activeCompletions).Select(async source =>
             {
                 try { await DisposeActiveSourceAsync(source, CancellationToken.None); }
                 catch (Exception ex) { _logger.LogDebug(ex, "Source {SourceKey} cleanup failed.", source.Key); }
             }));
+            foreach (var factory in orderedSources)
+                factory.CoreDiscovery?.ReleaseUnusedPermit();
         }
 
 
         var items = currentItemsAccumulator.ToMergedItems();
         var failedBatches = latestBatchesByKey.Values.Where(batch => batch.Error is not null).ToArray();
         var failures = failedBatches.SelectMany(batch => Unwrap(batch.Error!).Select(error =>
-            (Error: error, Notice: OptionalAccessDenial(batch.Name, error)))).ToArray();
+            (Error: error, Notice: OptionalAccessDenial(batch.Name, error))))
+            .Concat(readinessValidationErrors.SelectMany(validation => Unwrap(validation).Select(error =>
+                (Error: error, Notice: OptionalAccessDenial("Item cache validation", error))))).ToArray();
         var retryDeadline = errors.Select(RetryDeadline).Where(deadline => deadline is not null).Min();
         var deadlineFailures = failures.Where(failure => RetryDeadline(failure.Error) is not null).ToArray();
         // Optional access-denial deadlines must not keep an unrelated, non-deferred
@@ -1200,7 +1312,6 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             ? null
             : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sourceTimeoutCts.Token);
         var token = linkedCts?.Token ?? cancellationToken;
-
         try
         {
             var unfilteredItems = MergePremiereItems(await getItems(token));
@@ -1270,7 +1381,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         DateOnly start,
         DateOnly end,
         CalendarFilters? filters,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        ColdDiscoverySource? coreDiscovery = null,
+        bool completingCoreDiscovery = false)
     {
         var sourceTimeout = TimeSpan.FromSeconds(Math.Clamp(_options.SourceTimeoutSeconds, 1, 3600));
         using var sourceTimeoutCts = _options.SourceTimeoutSeconds > 0
@@ -1281,6 +1394,15 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sourceTimeoutCts.Token);
         var token = linkedCts?.Token ?? cancellationToken;
         var accumulated = new PremiereMergeAccumulator();
+        using var completionDeadline = completingCoreDiscovery
+            ? coreDiscovery?.TrackCompletionDeadline(sourceTimeoutCts, sourceTimeout) : null;
+        void SetSourceDeadline(TimeSpan due)
+        {
+            if (completingCoreDiscovery && coreDiscovery is not null) coreDiscovery.SetCompletionDeadline(due);
+            else sourceTimeoutCts?.CancelAfter(due);
+        }
+        if (completingCoreDiscovery && coreDiscovery is not null)
+            accumulated.AddSourceProgress(coreDiscovery.CoreItems, isMetadataProgress: true);
         var emitted = false;
         var startedAt = Stopwatch.GetTimestamp();
         var lastEmissionAt = startedAt;
@@ -1346,37 +1468,53 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             if (error is not null)
             {
                 var unfilteredErrorItems = accumulated.ToMergedItems();
+                if (coreDiscovery is not null && !completingCoreDiscovery)
+                {
+                    coreDiscovery.CoreItems = unfilteredErrorItems;
+                    coreDiscovery.Error = error;
+                    coreDiscovery.Exhausted = true;
+                }
+                else if (coreDiscovery?.Error is { } discoveryError)
+                    error = new AggregateException(discoveryError, error);
                 var filteredErrorItems = ApplyRequestedFilters(unfilteredErrorItems, filters);
                 var errorFilteredCount = CountFilteredOut(unfilteredErrorItems, filteredErrorItems);
                 yield return new PremiereSourceBatch(
                     name,
                     filteredErrorItems,
-                    error,
+                    coreDiscovery is not null && !completingCoreDiscovery ? null : error,
                     CompletedWork: lastItemBatch?.TotalWork ?? lastItemBatch?.CompletedWork ?? 0,
                     TotalWork: lastItemBatch?.TotalWork ?? lastItemBatch?.CompletedWork ?? 0,
                     ProgressText: ProgressTextWithFilteredCount(SourceFailureProgressText(error), errorFilteredCount),
                     ElapsedMilliseconds: ElapsedMilliseconds(),
-                    IsComplete: true,
+                    IsComplete: coreDiscovery is null || completingCoreDiscovery,
                     UnmappedCount: CountUnverified(filteredErrorItems),
-                    FilteredCount: errorFilteredCount);
+                    FilteredCount: errorFilteredCount,
+                    IsCoreComplete: coreDiscovery is not null && !completingCoreDiscovery);
                 yield break;
             }
 
             if (!hasNext)
             {
                 var unfilteredCompletionItems = accumulated.ToMergedItems();
+                if (coreDiscovery is not null && !completingCoreDiscovery)
+                {
+                    coreDiscovery.CoreItems = unfilteredCompletionItems;
+                    coreDiscovery.Exhausted = true;
+                }
                 var completionItems = ApplyRequestedFilters(unfilteredCompletionItems, filters);
                 var completionFilteredCount = CountFilteredOut(unfilteredCompletionItems, completionItems);
                 yield return new PremiereSourceBatch(
                     name,
                     completionItems,
+                    Error: completingCoreDiscovery ? coreDiscovery?.Error : null,
                     CompletedWork: lastItemBatch?.TotalWork is > 0 ? lastItemBatch.TotalWork : lastItemBatch?.CompletedWork ?? 0,
                     TotalWork: lastItemBatch?.TotalWork ?? 0,
                     ProgressText: SourceCompletionProgressText(completionItems.Count, lastItemBatch?.ProgressText, completionFilteredCount),
                     ElapsedMilliseconds: ElapsedMilliseconds(),
-                    IsComplete: true,
+                    IsComplete: coreDiscovery is null || completingCoreDiscovery,
                     UnmappedCount: CountUnverified(completionItems),
-                    FilteredCount: completionFilteredCount);
+                    FilteredCount: completionFilteredCount,
+                    IsCoreComplete: coreDiscovery is not null && !completingCoreDiscovery);
 
                 yield break;
             }
@@ -1393,7 +1531,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             {
                 // This is a per-progress-batch inactivity budget, not a total
                 // runtime cap on a finite source that continues making progress.
-                if (!token.IsCancellationRequested) sourceTimeoutCts?.CancelAfter(sourceTimeout);
+                if (!token.IsCancellationRequested) SetSourceDeadline(sourceTimeout);
                 furthestCompletedWork = Math.Max(furthestCompletedWork, completedWork);
                 _telemetry.RecordDiagnostic("source.deadline.renewed", details: new()
                 {
@@ -1413,7 +1551,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
             emitted = true;
             // A consumer persisting/rendering a real progress batch is not a
             // stalled provider. Do not spend its next inactivity budget here.
-            if (madeProgress) sourceTimeoutCts?.CancelAfter(Timeout.InfiniteTimeSpan);
+            if (madeProgress) SetSourceDeadline(Timeout.InfiniteTimeSpan);
             yield return new PremiereSourceBatch(
                 name,
                 filteredItems,
@@ -1424,7 +1562,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 IsComplete: false,
                 UnmappedCount: CountUnverified(filteredItems),
                 FilteredCount: filteredCount);
-            if (madeProgress && !token.IsCancellationRequested) sourceTimeoutCts?.CancelAfter(sourceTimeout);
+            if (madeProgress && !token.IsCancellationRequested) SetSourceDeadline(sourceTimeout);
         }
     }
 

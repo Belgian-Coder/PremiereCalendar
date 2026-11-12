@@ -322,7 +322,7 @@ public sealed partial class CalendarPageTests : BunitContext
     }
 
     [Fact]
-    public void CalendarPage_NextThenPreviousWeekRestoresOriginalWeekAndSelectedDay()
+    public void CalendarPage_NextThenPreviousWeekOpensTheFirstDayOfTheTargetWeek()
     {
         var service = new FakePremiereService();
         Services.AddSingleton<IPremiereService>(service);
@@ -338,9 +338,9 @@ public sealed partial class CalendarPageTests : BunitContext
         {
             var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
             Assert.Equal("2026-05-18", query["week"].ToString());
-            Assert.Equal("2026-05-20", query["day"].ToString());
+            Assert.Equal("2026-05-18", query["day"].ToString());
             Assert.Equal(new DateOnly(2026, 5, 18), service.Calls.Last().Start);
-            Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260520']").ClassName);
+            Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260518']").ClassName);
         });
 
         component.Find("button[title='Previous week']").Click();
@@ -349,9 +349,9 @@ public sealed partial class CalendarPageTests : BunitContext
         {
             var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
             Assert.Equal("2026-05-11", query["week"].ToString());
-            Assert.Equal("2026-05-13", query["day"].ToString());
+            Assert.Equal("2026-05-11", query["day"].ToString());
             Assert.Equal(new DateOnly(2026, 5, 11), service.Calls.Last().Start);
-            Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260513']").ClassName);
+            Assert.Contains("active", component.Find("button[data-day-target='premiere-day-20260511']").ClassName);
         });
     }
 
@@ -1496,7 +1496,7 @@ public sealed partial class CalendarPageTests : BunitContext
         });
 
         var query = QueryHelpers.ParseQuery(new Uri(navigation.Uri).Query);
-        Assert.False(query.ContainsKey("seriesLang"));
+        Assert.Equal("en,nl", query["seriesLang"].ToString());
     }
 
     [Theory]
@@ -2796,7 +2796,9 @@ public sealed partial class CalendarPageTests : BunitContext
         component.Find("button[data-day-target='premiere-day-20260505']").Click();
 
         component.WaitForAssertion(() =>
-            Assert.Contains("/series?week=2026-05-04&day=2026-05-05", _viewSyncService.PublishedUrls));
+            Assert.Contains(
+                "/series?week=2026-05-04&day=2026-05-05&seriesLang=en,nl&seriesRuntimeMin=0&seriesRuntimeMax=360",
+                _viewSyncService.PublishedUrls));
     }
 
     [Fact]
@@ -2885,7 +2887,7 @@ public sealed partial class CalendarPageTests : BunitContext
         component.WaitForAssertion(() =>
         {
             Assert.Contains(
-                "/series?week=2026-05-04&day=2026-05-06&seriesLang=en,nl",
+                "/series?week=2026-05-04&day=2026-05-06&seriesLang=en,nl&seriesRuntimeMin=0&seriesRuntimeMax=360",
                 _viewSyncService.PublishedUrls);
         });
     }

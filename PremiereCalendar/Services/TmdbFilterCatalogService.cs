@@ -189,12 +189,20 @@ public sealed class TmdbFilterCatalogService : IFilterCatalogService
                 var label = !string.IsNullOrWhiteSpace(language.EnglishName) && language.EnglishName != "No Language"
                     ? language.EnglishName!
                     : language.Name ?? language.Iso6391!;
-                return new FilterOption(language.Iso6391!, $"{label} ({language.Iso6391!.ToUpperInvariant()})");
+                return LanguageOption(language.Iso6391!, label);
             })
             .GroupBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
             .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    // TMDb has no separate Flemish code: "nl" covers Dutch and Flemish.
+    private static FilterOption LanguageOption(string code, string label)
+    {
+        return string.Equals(code, "nl", StringComparison.OrdinalIgnoreCase)
+            ? new FilterOption(code, "Dutch / Flemish (NL)")
+            : new FilterOption(code, $"{label} ({code.ToUpperInvariant()})");
     }
 
     private static IReadOnlyList<FilterOption> CountryOptions(IEnumerable<TmdbConfigurationCountry> countries)
@@ -287,7 +295,7 @@ public sealed class TmdbFilterCatalogService : IFilterCatalogService
         Languages =
         [
             new("en", "English (EN)"),
-            new("nl", "Dutch (NL)"),
+            LanguageOption("nl", "Dutch"),
             new("fr", "French (FR)")
         ],
         Countries =

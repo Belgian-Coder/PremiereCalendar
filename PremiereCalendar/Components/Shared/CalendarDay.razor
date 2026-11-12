@@ -27,7 +27,24 @@
     </header>
     <div class="day-separator" aria-hidden="true"></div>
 
-    @if (Items.Count == 0)
+    @if (Items.Count == 0 && IsUpdating)
+    {
+        <p class="day-loading-status" data-testid="loading">Loading premieres for the selected week… Empty days will appear after loading completes.</p>
+        <div class="day-items-grid day-items-skeleton" aria-hidden="true">
+            @for (var index = 0; index < 3; index++)
+            {
+                <div class="premiere-card premiere-card-skeleton" aria-hidden="true">
+                    <div class="poster-frame skeleton-block"></div>
+                    <div class="skeleton-lines">
+                        <span class="skeleton-block skeleton-title"></span>
+                        <span class="skeleton-block"></span>
+                        <span class="skeleton-block skeleton-short"></span>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+    else if (Items.Count == 0)
     {
         <p class="empty-day">No premieres</p>
     }
@@ -365,7 +382,7 @@
     {
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"{_itemsSignature}|{WindowScope}|{ScoreSource}|{ImageCacheVersion}|{RefreshImageCache}|{InitialVisibleCount}|{LoadBatchSize}|{MaxMountedItemCount}|{_windowStart}|{_visibleCount}|{_trimmedHeightPx}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}");
+            $"{_itemsSignature}|{WindowScope}|{ScoreSource}|{ImageCacheVersion}|{RefreshImageCache}|{InitialVisibleCount}|{LoadBatchSize}|{MaxMountedItemCount}|{_windowStart}|{_visibleCount}|{_trimmedHeightPx}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}|{Items.Count == 0 && IsUpdating}");
     }
 
     private string BuildItemsSignature()

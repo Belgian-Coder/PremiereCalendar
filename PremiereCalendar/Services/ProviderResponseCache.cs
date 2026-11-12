@@ -7,7 +7,7 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-/// <summary>Persists successful provider responses without extending their original freshness window.</summary>
+/// <summary>Persists provider responses and explicit retry outcomes without extending their original freshness window.</summary>
 public sealed class ProviderResponseCache(
     IProviderCacheStateStore store,
     ILogger<ProviderResponseCache> logger,
@@ -29,6 +29,7 @@ public sealed class ProviderResponseCache(
     private long _fanartBackoffUntilUtcTicks;
     private long _watchmodeBackoffUntilUtcTicks;
     private long _tvmazeBackoffUntilUtcTicks;
+    private long _omdbBackoffUntilUtcTicks;
 
     public PublicationOperation BeginOperation(string provider, string requestKey, bool forceRefresh)
     {
@@ -337,6 +338,7 @@ public sealed class ProviderResponseCache(
         if (provider == "fanart") return ref _fanartBackoffUntilUtcTicks;
         if (provider == "watchmode") return ref _watchmodeBackoffUntilUtcTicks;
         if (provider == "tvmaze") return ref _tvmazeBackoffUntilUtcTicks;
+        if (provider == "omdb") return ref _omdbBackoffUntilUtcTicks;
         return ref _cleanupBackoffUntilUtcTicks;
     }
 
@@ -344,7 +346,7 @@ public sealed class ProviderResponseCache(
         => telemetry?.RecordDiagnostic("providerresponsecache", details: new()
         {
             Stage = stage,
-            Provider = provider is "tmdb" or "rottentomatoes" or "fanart" or "watchmode" or "tvmaze" ? provider : "other",
+            Provider = provider is "tmdb" or "rottentomatoes" or "fanart" or "watchmode" or "tvmaze" or "omdb" ? provider : "other",
             Cache = "persistent_response",
             CacheKey = Hash(requestKey)[3..],
             Outcome = outcome,

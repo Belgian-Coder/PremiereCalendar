@@ -56,6 +56,8 @@ internal sealed class ProviderFailureCache(IMemoryCache cache, string provider, 
         => cache.TryGetValue(_key, out ProviderFailure? failure) && failure?.RetryAtUtc > now
             ? failure with { Reason = "local_backoff", IsLocal = true } : null;
 
+    internal void Clear() => cache.Remove(_key);
+
     internal void Remember(ProviderFailure failure, DateTimeOffset now)
     {
         if (failure.RetryAtUtc is not { } until || until <= now) return;

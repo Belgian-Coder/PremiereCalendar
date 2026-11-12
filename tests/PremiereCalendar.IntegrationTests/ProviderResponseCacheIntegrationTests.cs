@@ -329,6 +329,43 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         Assert.Equal(0, await Cache(CreateStore(), new TestTimeProvider(now)).CleanupAsync(CancellationToken.None));
     }
 
+    [Fact]
+    public async Task OmdbOutcomeRetentionRemovesOnlyExpiredItemsInItsExactNamespace()
+    {
+        var store = CreateStore();
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now.AddMonths(-3);
+        ProviderCacheState Row(string provider, ProviderCacheScope scope, string key, DateTimeOffset checkedAt) =>
+            new(provider, scope, key, checkedAt, null, null, null, "preserve metadata");
+        var expired = Row("responsecache-omdb", ProviderCacheScope.Item, "expired-outcome", cutoff.AddTicks(-1));
+        var preserved = new[]
+        {
+            Row("responsecache-omdb", ProviderCacheScope.Item, "boundary", cutoff),
+            Row("responsecache-omdb", ProviderCacheScope.Week, "other-scope", cutoff.AddDays(-1)),
+            Row("responsecache-omdb-other", ProviderCacheScope.Item, "other-namespace", cutoff.AddDays(-1)),
+            Row("omdb", ProviderCacheScope.Item, "legacy", cutoff.AddDays(-1))
+        };
+        await store.SaveManyAsync(preserved.Append(expired), default);
+        Assert.Equal(1, await Cache(CreateStore(), new TestTimeProvider(now)).CleanupAsync(default));
+        Assert.Null(await store.GetAsync(expired.Provider, expired.Scope, expired.Key, default));
+        foreach (var row in preserved)
+            Assert.Equal(row, await store.GetAsync(row.Provider, row.Scope, row.Key, default));
+    }
+
+    [Fact]
+    public async Task OmdbStorageBackoffDoesNotSuppressResponseRetention()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var inner = CreateStore();
+        await inner.SaveAsync(new("responsecache-omdb", ProviderCacheScope.Item, "expired-outcome",
+            now.AddMonths(-3).AddTicks(-1), null, null, null, "{}"), default);
+        var blocked = new InterceptingStore(inner) { BlockReads = true, BlockProvider = "responsecache-omdb" };
+        var cache = Cache(blocked, new TestTimeProvider(now));
+        Assert.Null(await cache.GetAsync<RottenTomatoesScores>("omdb", "blocked", TimeSpan.FromHours(1), default));
+        Assert.True(blocked.ReadCanceled);
+        Assert.Equal(1, await cache.CleanupAsync(default));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -594,6 +631,8 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     [Theory]
     [InlineData("tmdb", "rottentomatoes")]
     [InlineData("rottentomatoes", "tmdb")]
+    [InlineData("omdb", "tmdb")]
+    [InlineData("tmdb", "omdb")]
     public async Task ProviderIoBackoff_DoesNotSuppressOtherProvidersPersistence(string failedProvider, string healthyProvider)
     {
         var store = new InterceptingStore(CreateStore()) { BlockReads = true, BlockProvider = $"responsecache-{failedProvider}" };
@@ -718,5 +757,6 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         }
         public Task<IReadOnlyList<ProviderCacheState>> GetRecentAsync(int take, CancellationToken token) => inner.GetRecentAsync(take, token);
         public Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(string provider, int take, CancellationToken token) => inner.GetByProviderAsync(provider, take, token);
+        public Task<int> CleanupResponseCacheAsync(DateTimeOffset cutoffUtc, CancellationToken token) => inner.CleanupResponseCacheAsync(cutoffUtc, token);
     }
 }

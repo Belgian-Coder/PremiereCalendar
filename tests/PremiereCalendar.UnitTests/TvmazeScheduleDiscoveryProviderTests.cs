@@ -91,6 +91,40 @@ public sealed class TvmazeScheduleDiscoveryProviderTests
     }
 
     [Fact]
+    public async Task GetCandidatesAsync_MapsFlemishShowLanguageToDutchCode()
+    {
+        var client = new FakeTvmazeClient
+        {
+            ScheduleItems =
+            [
+                new TvmazeScheduleEpisode
+                {
+                    Season = 1,
+                    Number = 1,
+                    Airdate = "2026-05-04",
+                    Embedded = new TvmazeEmbedded
+                    {
+                        Show = new TvmazeShow
+                        {
+                            Name = "Flemish Premiere",
+                            Language = "Flemish",
+                            Externals = new TvmazeExternals { TheTvdb = 424242 }
+                        }
+                    }
+                }
+            ]
+        };
+
+        var candidates = await CreateProvider(client).GetCandidatesAsync(
+            new DateOnly(2026, 5, 4),
+            new DateOnly(2026, 5, 4),
+            CancellationToken.None);
+
+        Assert.All(candidates, candidate => Assert.Equal("nl", candidate.OriginalLanguage));
+        Assert.NotEmpty(candidates);
+    }
+
+    [Fact]
     public async Task GetCandidatesAsync_WhenScheduleDiscoveryDisabledSkipsClientCalls()
     {
         var client = new FakeTvmazeClient();

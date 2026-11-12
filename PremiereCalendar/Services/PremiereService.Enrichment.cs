@@ -645,18 +645,30 @@ public sealed partial class PremiereService
         CancellationToken cancellationToken)
     {
         var started = Stopwatch.GetTimestamp();
+        if (_coldDetailFailure.Value is { } failedCore
+            && failedCore.Identity.MediaType == mediaType && failedCore.Identity.TmdbId == tmdbId)
+        {
+            // Continue the original complete mapper with the same failed core
+            // observation; a speculative split must not retry the HTTP request.
+            if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
+            RecordItemComponent("tmdb", "metadata", "preserved_failed", started, "core_fallback",
+                itemId: tmdbId, mediaType: mediaType);
+            return failedCore.Details;
+        }
         try
         {
             var details = await getDetails();
             if (details is not null && details.Id == tmdbId && _itemEnrichmentAttempt.Value is { } attempt)
                 attempt.MetadataSucceeded = true;
             else if (_itemEnrichmentAttempt.Value is { } failed) failed.MetadataFailed = true;
+            if (details is null || details.Id != tmdbId) RememberColdDetailFailure(mediaType, tmdbId, details);
             RecordItemComponent("tmdb", "metadata", details is not null && details.Id == tmdbId ? "provider_fetch_success" : "preserved_failed",
                 started, itemId: tmdbId, mediaType: mediaType);
             return details;
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
+            RememberColdDetailFailure(mediaType, tmdbId, null);
             if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
             RecordItemComponent("tmdb", "metadata", "preserved_failed", started, "timeout", itemId: tmdbId, mediaType: mediaType);
             _logger.LogWarning(ex, "Skipping TMDb detail enrichment for {MediaType} {TmdbId} after a request timeout.", mediaType, tmdbId);
@@ -664,6 +676,7 @@ public sealed partial class PremiereService
         }
         catch (ExternalApiException ex)
         {
+            RememberColdDetailFailure(mediaType, tmdbId, null);
             if (_itemEnrichmentAttempt.Value is { } attempt) attempt.MetadataFailed = true;
             RecordItemComponent("tmdb", "metadata", "preserved_failed", started, "request_failed", itemId: tmdbId, mediaType: mediaType);
             _logger.LogWarning(ex, "Skipping TMDb detail enrichment for {MediaType} {TmdbId}.", mediaType, tmdbId);
@@ -1789,7 +1802,11 @@ public sealed partial class PremiereService
         string Name,
         DateOnly Start,
         DateOnly End,
-        Func<IAsyncEnumerable<PremiereSourceBatch>> Open);
+        Func<IAsyncEnumerable<PremiereSourceBatch>> Open)
+    {
+        public ColdDiscoverySource? CoreDiscovery { get; init; }
+        public string TraceStage { get; init; } = "discovery";
+    }
 
     private sealed record PremiereItemBatch(
         IReadOnlyList<PremiereItem> Items,
@@ -1809,5 +1826,6 @@ public sealed partial class PremiereService
         long? ElapsedMilliseconds = null,
         bool IsComplete = false,
         int? UnmappedCount = null,
-        int? FilteredCount = null);
+        int? FilteredCount = null,
+        bool IsCoreComplete = false);
 }

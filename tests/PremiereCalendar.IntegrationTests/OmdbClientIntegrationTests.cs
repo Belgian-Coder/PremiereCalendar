@@ -2,6 +2,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging.Abstractions;
 using PremiereCalendar.IntegrationTests.Support;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
@@ -260,7 +261,7 @@ public sealed class OmdbClientIntegrationTests
         var failed = await client.GetByImdbIdWithStatusAsync("tt1", CancellationToken.None);
         var deferred = await client.GetByImdbIdWithStatusAsync("tt1", CancellationToken.None);
         Assert.False(failed.Successful);
-        Assert.Equal("invalid_response", failed.Failure?.Reason);
+        Assert.Equal("provider_data_unavailable", failed.Failure?.Reason);
         Assert.False(deferred.Successful);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
         Assert.Null(deferred.Value);
@@ -268,13 +269,423 @@ public sealed class OmdbClientIntegrationTests
     }
 
     [Theory]
-    [InlineData("Incorrect IMDb ID.", "payload_invalid_imdb_id")]
-    [InlineData(" incorrect imdb id. ", "payload_invalid_imdb_id")]
-    [InlineData("Error getting data.", "payload_data_error")]
-    [InlineData(null, "payload_missing_error")]
-    [InlineData(" ", "payload_missing_error")]
-    [InlineData("private-title https://private.example/?token=private-api-value", "payload_unrecognized_error")]
-    public async Task FalsePayloadDiagnosticsClassifySafelyAndPreserveVerifiedMetadata(string? error, string category)
+    [InlineData("Error getting data.", "provider_data_unavailable", 1)]
+    [InlineData("Incorrect IMDb ID.", "invalid_imdb_id", 24)]
+    public async Task KnownProviderFailureDefersSameIdUntilDeadlineAndPreservesStaleMetadata(
+        string error, string reason, int retryHours)
+    {
+        var root = CreateRoot();
+        try
+        {
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var store = CreateCacheStore(root);
+            var originalClock = clock.GetUtcNow().AddDays(-91);
+            await store.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, originalClock, default);
+            var calls = 0;
+            var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls == 1
+                ? System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })
+                : """{"Response":"True","imdbRating":"8.1"}"""));
+            var client = CreateOmdbClient(handler, true, store, timeProvider: clock);
+
+            var failure = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.False(failure.Successful);
+            Assert.Equal(reason, failure.Failure?.Reason);
+            Assert.Equal(clock.GetUtcNow().AddHours(retryHours), failure.Failure?.RetryAtUtc);
+            Assert.Equal("7.4", failure.Value?.ImdbRating);
+            Assert.Equal(originalClock, (await store.GetAsync("tt49639968", default))!.CachedAtUtc);
+            Assert.Null((await store.GetProviderStateAsync(default)).RateLimitedUntilUtc);
+
+            clock.Advance(TimeSpan.FromHours(retryHours) - TimeSpan.FromSeconds(1));
+            var deferred = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.False(deferred.Successful);
+            Assert.Equal("local_backoff", deferred.Failure?.Reason);
+            Assert.Equal(failure.Failure?.RetryAtUtc, deferred.Failure?.RetryAtUtc);
+            Assert.Equal("7.4", deferred.Value?.ImdbRating);
+            Assert.Single(handler.Requests);
+
+            clock.Advance(TimeSpan.FromSeconds(1));
+            var recovered = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.True(recovered.Successful);
+            Assert.Equal("8.1", recovered.Value?.ImdbRating);
+            Assert.Equal(2, handler.Requests.Count);
+            Assert.Equal(clock.GetUtcNow(), (await store.GetAsync("tt49639968", default))!.CachedAtUtc);
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Theory]
+    [InlineData("Error getting data.")]
+    [InlineData("Incorrect IMDb ID.")]
+    public async Task KnownFailureIsIsolatedFromAnotherImdbIdAndExplicitForceCanRecover(string error)
+    {
+        var recover = false;
+        var handler = new StubHttpMessageHandler(request => StubHttpMessageHandler.Json(
+            QueryString.Parse(request.RequestUri!)["i"] == "tt49639968" && !recover
+                ? System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })
+                : """{"Response":"True","imdbRating":"7.9"}"""));
+        var client = CreateOmdbClient(handler, true);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+
+        var other = await client.GetByImdbIdWithStatusAsync("tt31091563", default);
+        Assert.True(other.Successful);
+        Assert.Equal("7.9", other.Value?.ImdbRating);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.Equal(2, handler.Requests.Count);
+
+        recover = true;
+        var forced = await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true);
+        Assert.True(forced.Successful);
+        Assert.Equal("7.9", forced.Value?.ImdbRating);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt31091563", default)).Successful);
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData("Error getting data.", 1)]
+    [InlineData("Incorrect IMDb ID.", 24)]
+    public async Task KnownFailureDeadlineSurvivesRestartWithoutReplacingGoodItem(string error, int hours)
+    {
+        var root = CreateRoot();
+        try
+        {
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var store = CreateCacheStore(root);
+            var originalClock = clock.GetUtcNow().AddDays(-91);
+            await store.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, originalClock, default);
+            var handler = new StubHttpMessageHandler(request => StubHttpMessageHandler.Json(
+                QueryString.Parse(request.RequestUri!)["i"] == "tt49639968"
+                    ? System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })
+                    : """{"Response":"True","imdbRating":"8.1"}"""));
+            var first = CreateOmdbClient(handler, true, store, timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            var failure = await first.GetByImdbIdWithStatusAsync("tt49639968", default);
+
+            var restarted = CreateOmdbClient(handler, true, CreateCacheStore(root), timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.False(deferred.Successful);
+            Assert.Equal("local_backoff", deferred.Failure?.Reason);
+            Assert.True(deferred.Failure?.IsLocal);
+            Assert.Equal(clock.GetUtcNow().AddHours(hours), deferred.Failure?.RetryAtUtc);
+            Assert.Equal(failure.Failure?.RetryAtUtc, deferred.Failure?.RetryAtUtc);
+            Assert.Equal("7.4", deferred.Value?.ImdbRating);
+            Assert.Equal(originalClock, (await store.GetAsync("tt49639968", default))!.CachedAtUtc);
+            Assert.Single(handler.Requests);
+            Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt31091563", default)).Successful);
+            Assert.Equal(2, handler.Requests.Count);
+
+            clock.Advance(TimeSpan.FromHours(hours));
+            Assert.False((await restarted.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+            Assert.Equal(3, handler.Requests.Count);
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Theory]
+    [InlineData("Error getting data.")]
+    [InlineData("Incorrect IMDb ID.")]
+    public async Task ForcedSuccessClearsPersistedFailureForRestartedClient(string error)
+    {
+        var root = CreateRoot();
+        try
+        {
+            CreateCacheStore(root);
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var calls = 0;
+            var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls == 1
+                ? System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })
+                : """{"Response":"True","imdbRating":"8.1"}"""));
+            var client = CreateOmdbClient(handler, true, timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+            Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+
+            var restarted = CreateOmdbClient(handler, true, timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+            Assert.Equal(3, handler.Requests.Count);
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Theory]
+    [InlineData("Error getting data.")]
+    [InlineData("Incorrect IMDb ID.")]
+    public async Task LateNormalFailureCannotRestoreCooldownAfterForcedSuccess(string error)
+    {
+        var root = CreateRoot();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            CreateCacheStore(root);
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var calls = 0;
+            var handler = new AsyncStubHttpMessageHandler(async _ =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    entered.SetResult();
+                    await release.Task;
+                    return StubHttpMessageHandler.Json(System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error }));
+                }
+                return StubHttpMessageHandler.Json("""{"Response":"True","imdbRating":"8.1"}""");
+            });
+            var client = CreateOmdbClient(handler, true, timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            var old = client.GetByImdbIdWithStatusAsync("tt49639968", default);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+            release.SetResult();
+            Assert.False((await old).Successful);
+
+            var restarted = CreateOmdbClient(handler, true, timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            var result = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.True(result.Successful);
+            Assert.Equal("8.1", result.Value?.ImdbRating);
+            Assert.Equal(3, calls);
+        }
+        finally { release.TrySetResult(); TryDelete(root); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task PersistentFailureDoesNotCrossCredentialsOrEndpoints(bool changeCredential)
+    {
+        var root = CreateRoot();
+        try
+        {
+            CreateCacheStore(root);
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var bad = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"Response":"False","Error":"Incorrect IMDb ID."}"""));
+            var first = CreateOmdbClient(bad, true, timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            Assert.False((await first.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+
+            var good = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"Response":"True","imdbRating":"8.1"}"""));
+            var restarted = new OmdbClient(new HttpClient(good)
+                { BaseAddress = new Uri(changeCredential ? "https://www.omdbapi.com/" : "https://replacement.example/omdb/") },
+                new MemoryCache(new MemoryCacheOptions()),
+                Microsoft.Extensions.Options.Options.Create(new OmdbOptions
+                    { Enabled = true, ApiKey = changeCredential ? "replacement-key" : "test-key" }),
+                timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+            Assert.Single(good.Requests);
+
+            var stateStore = new SqliteProviderCacheStateStore(
+                Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }), new FakeWebHostEnvironment(root));
+            var rows = await stateStore.GetByProviderAsync("responsecache-omdb", 10, default);
+            Assert.Equal(2, rows.Count);
+            foreach (var row in rows)
+            {
+                var saved = row.Key + row.MetadataJson;
+                Assert.DoesNotContain("test-key", saved);
+                Assert.DoesNotContain("replacement-key", saved);
+                Assert.DoesNotContain("tt49639968", saved);
+                Assert.DoesNotContain("https://", saved);
+            }
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ForcedEmptySuccessClearsMemoryFailureBeyondItsSixHourLifetime(bool absent)
+    {
+        var clock = new OmdbClock(DateTimeOffset.UtcNow);
+        using var memory = new MemoryCache(new MemoryCacheOptions { Clock = clock });
+        var calls = 0;
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls switch
+        {
+            1 => """{"Response":"False","Error":"Incorrect IMDb ID."}""",
+            2 => absent ? """{"Response":"False","Error":"Movie not found!"}""" : """{"Response":"True"}""",
+            _ => """{"Response":"True","imdbRating":"8.1"}"""
+        }));
+        var client = new OmdbClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") }, memory,
+            Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "test-key", EmptyResponseCacheHours = 6 }),
+            timeProvider: clock);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+        clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
+        var refreshed = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+        Assert.True(refreshed.Successful);
+        Assert.Equal("8.1", refreshed.Value?.ImdbRating);
+        Assert.Equal(3, calls);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task FailedOutcomeClearCannotReviveOlderFailureAfterRestartAndEmptyExpiry(bool seedGood, bool absent)
+    {
+        var root = CreateRoot();
+        try
+        {
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var tiedClock = clock.GetUtcNow();
+            var goodStore = CreateCacheStore(root);
+            if (seedGood)
+                await goodStore.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, tiedClock.AddDays(-91), default);
+            var baseline = await goodStore.GetAsync("tt49639968", default);
+            var outcomeStore = new FailingOmdbClearStore(CreateOutcomeStore(root));
+            var calls = 0;
+            var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls switch
+            {
+                1 => """{"Response":"False","Error":"Incorrect IMDb ID."}""",
+                2 => absent ? """{"Response":"False","Error":"Movie not found!"}""" : """{"Response":"True"}""",
+                _ => """{"Response":"True","imdbRating":"8.1"}"""
+            }));
+            var client = CreateOmdbClient(handler, true, goodStore, timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock, outcomeStore), emptyResponseCacheHours: 6);
+            var failed = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.False(failed.Successful);
+            Assert.Equal(tiedClock.AddHours(24), failed.Failure?.RetryAtUtc);
+            Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+            Assert.Equal(1, outcomeStore.FailedClears);
+            var newerGood = await goodStore.GetAsync("tt49639968", default);
+            Assert.Equal(tiedClock, newerGood!.CachedAtUtc);
+            Assert.NotNull(newerGood.SuccessObservationId);
+            Assert.NotEqual(baseline?.SuccessObservationId, newerGood.SuccessObservationId);
+
+            clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
+            var restarted = CreateOmdbClient(handler, true, CreateCacheStore(root), timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock), emptyResponseCacheHours: 6);
+            var refreshed = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.True(refreshed.Successful);
+            Assert.Equal("8.1", refreshed.Value?.ImdbRating);
+            Assert.Equal(3, calls);
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Fact]
+    public async Task NewFailureAfterSameClockSuccessStillDefersAfterRestartAndEmptyExpiry()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var tiedClock = clock.GetUtcNow();
+            var goodStore = CreateCacheStore(root);
+            var outcomeStore = new FailingOmdbClearStore(CreateOutcomeStore(root));
+            var calls = 0;
+            var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls == 2
+                ? """{"Response":"True"}"""
+                : """{"Response":"False","Error":"Incorrect IMDb ID."}"""));
+            var client = CreateOmdbClient(handler, true, goodStore, timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock, outcomeStore), emptyResponseCacheHours: 6);
+            Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+            Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+            Assert.Equal(1, outcomeStore.FailedClears);
+            var good = await goodStore.GetAsync("tt49639968", default);
+
+            // New response-cache instance removes only the storage-I/O backoff;
+            // all provider observations retain the exact same clock value.
+            var later = CreateOmdbClient(handler, true, CreateCacheStore(root), timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock), emptyResponseCacheHours: 6);
+            var failed = await later.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true);
+            Assert.False(failed.Successful);
+            Assert.Equal(tiedClock.AddHours(24), failed.Failure?.RetryAtUtc);
+            Assert.Equal(good!.SuccessObservationId, (await goodStore.GetAsync("tt49639968", default))!.SuccessObservationId);
+
+            clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
+            var restarted = CreateOmdbClient(handler, true, CreateCacheStore(root), timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock), emptyResponseCacheHours: 6);
+            var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.False(deferred.Successful);
+            Assert.Equal("local_backoff", deferred.Failure?.Reason);
+            Assert.Equal(tiedClock.AddHours(24), deferred.Failure?.RetryAtUtc);
+            Assert.Equal(3, calls);
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OtherScopeSuccessCannotSupersedeOwnFailureAfterRestartAndEmptyExpiry(bool changeCredential)
+    {
+        var root = CreateRoot();
+        try
+        {
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var goodStore = CreateCacheStore(root);
+            var failedHandler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(
+                """{"Response":"False","Error":"Incorrect IMDb ID."}"""));
+            var first = CreateOmdbClient(failedHandler, true, goodStore, timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock), emptyResponseCacheHours: 6);
+            var failure = await first.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.False(failure.Successful);
+
+            var goodHandler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"Response":"True"}"""));
+            var other = new OmdbClient(new HttpClient(goodHandler)
+                { BaseAddress = new Uri(changeCredential ? "https://www.omdbapi.com/" : "https://replacement.example/omdb/") },
+                new MemoryCache(new MemoryCacheOptions()),
+                Microsoft.Extensions.Options.Options.Create(new OmdbOptions
+                    { Enabled = true, ApiKey = changeCredential ? "replacement-key" : "test-key", EmptyResponseCacheHours = 6 }),
+                cacheStore: goodStore, timeProvider: clock, responseCache: CreateResponseCache(root, clock));
+            Assert.True((await other.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+            Assert.NotNull((await goodStore.GetAsync("tt49639968", default))!.SuccessObservationId);
+
+            clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
+            var liveDeferred = await first.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.False(liveDeferred.Successful);
+            Assert.Equal(failure.Failure?.RetryAtUtc, liveDeferred.Failure?.RetryAtUtc);
+            var restarted = CreateOmdbClient(failedHandler, true, CreateCacheStore(root), timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock), emptyResponseCacheHours: 6);
+            var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.False(deferred.Successful);
+            Assert.Equal("local_backoff", deferred.Failure?.Reason);
+            Assert.Equal(failure.Failure?.RetryAtUtc, deferred.Failure?.RetryAtUtc);
+            Assert.Single(failedHandler.Requests);
+            Assert.Single(goodHandler.Requests);
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OtherClientSameScopeSuccessSupersedesOldLiveMemoryFailureAfterEmptyExpiry(bool failClear)
+    {
+        var root = CreateRoot();
+        try
+        {
+            var clock = new OmdbClock(DateTimeOffset.UtcNow);
+            var goodStore = CreateCacheStore(root);
+            var calls = 0;
+            var liveHandler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls == 1
+                ? """{"Response":"False","Error":"Incorrect IMDb ID."}"""
+                : """{"Response":"True","imdbRating":"8.1"}"""));
+            var live = CreateOmdbClient(liveHandler, true, goodStore, timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock), emptyResponseCacheHours: 6);
+            Assert.False((await live.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+
+            var clearStore = new FailingOmdbClearStore(CreateOutcomeStore(root));
+            var goodHandler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"Response":"True"}"""));
+            var other = CreateOmdbClient(goodHandler, true, CreateCacheStore(root), timeProvider: clock,
+                responseCache: CreateResponseCache(root, clock, failClear ? clearStore : null), emptyResponseCacheHours: 6);
+            Assert.True((await other.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+            Assert.Equal(failClear ? 1 : 0, clearStore.FailedClears);
+
+            // Keep the original client and its independent memory cache alive.
+            clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
+            var refreshed = await live.GetByImdbIdWithStatusAsync("tt49639968", default);
+            Assert.True(refreshed.Successful);
+            Assert.Equal("8.1", refreshed.Value?.ImdbRating);
+            Assert.Equal(2, calls);
+            Assert.Single(goodHandler.Requests);
+        }
+        finally { TryDelete(root); }
+    }
+
+    [Theory]
+    [InlineData("Incorrect IMDb ID.", "payload_invalid_imdb_id", "invalid_imdb_id")]
+    [InlineData(" incorrect imdb id. ", "payload_invalid_imdb_id", "invalid_imdb_id")]
+    [InlineData("Error getting data.", "payload_data_error", "provider_data_unavailable")]
+    [InlineData(null, "payload_missing_error", "invalid_response")]
+    [InlineData(" ", "payload_missing_error", "invalid_response")]
+    [InlineData("private-title https://private.example/?token=private-api-value", "payload_unrecognized_error", "invalid_response")]
+    public async Task FalsePayloadDiagnosticsClassifySafelyAndPreserveVerifiedMetadata(string? error, string category, string reason)
     {
         var root = CreateRoot();
         try
@@ -293,7 +704,7 @@ public sealed class OmdbClientIntegrationTests
             var failed = await client.GetByImdbIdWithStatusAsync("tt-private-id", default, forceRefresh: true);
 
             Assert.False(failed.Successful);
-            Assert.Equal("invalid_response", failed.Failure?.Reason);
+            Assert.Equal(reason, failed.Failure?.Reason);
             Assert.NotNull(failed.Failure?.RetryAtUtc);
             Assert.Equal(good.Value!.ImdbRating, failed.Value!.ImdbRating);
             Assert.Equal(saved!.CachedAtUtc, (await store.GetAsync("tt-private-id", default))!.CachedAtUtc);
@@ -359,7 +770,10 @@ public sealed class OmdbClientIntegrationTests
         HttpMessageHandler handler,
         bool enabled,
         IOmdbCacheStore? cacheStore = null,
-        PremiereTelemetry? telemetry = null)
+        PremiereTelemetry? telemetry = null,
+        TimeProvider? timeProvider = null,
+        ProviderResponseCache? responseCache = null,
+        int emptyResponseCacheHours = 1)
     {
         return new OmdbClient(
             new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") },
@@ -369,11 +783,13 @@ public sealed class OmdbClientIntegrationTests
                 Enabled = enabled,
                 ApiKey = enabled ? "test-key" : null,
                 CacheDays = 90,
-                EmptyResponseCacheHours = 1,
+                EmptyResponseCacheHours = emptyResponseCacheHours,
                 RateLimitBackoffHours = 12
             }),
             cacheStore: cacheStore,
-            telemetry: telemetry);
+            timeProvider: timeProvider,
+            telemetry: telemetry,
+            responseCache: responseCache);
     }
 
     [Fact]
@@ -410,6 +826,14 @@ public sealed class OmdbClientIntegrationTests
             TimeProvider.System);
     }
 
+    private static IProviderCacheStateStore CreateOutcomeStore(string root)
+        => new SqliteProviderCacheStateStore(
+            Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }),
+            new FakeWebHostEnvironment(root));
+
+    private static ProviderResponseCache CreateResponseCache(string root, TimeProvider clock, IProviderCacheStateStore? store = null)
+        => new(store ?? CreateOutcomeStore(root), NullLogger<ProviderResponseCache>.Instance, clock);
+
     private static string CreateRoot()
     {
         var root = Path.Combine(Path.GetTempPath(), $"premiere-calendar-omdb-{Guid.NewGuid():N}");
@@ -440,6 +864,33 @@ public sealed class OmdbClientIntegrationTests
         {
             return responder(request);
         }
+    }
+
+    private sealed class OmdbClock(DateTimeOffset now) : TimeProvider, Microsoft.Extensions.Internal.ISystemClock
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+        public DateTimeOffset UtcNow => now;
+        public void Advance(TimeSpan duration) => now = now.Add(duration);
+    }
+
+    private sealed class FailingOmdbClearStore(IProviderCacheStateStore inner) : IProviderCacheStateStore
+    {
+        public int FailedClears { get; private set; }
+        public Task<ProviderCacheState?> GetAsync(string provider, ProviderCacheScope scope, string key, CancellationToken token)
+            => inner.GetAsync(provider, scope, key, token);
+        public Task SaveAsync(ProviderCacheState state, CancellationToken token)
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(state.MetadataJson!);
+            if (state.Provider == "responsecache-omdb"
+                && document.RootElement.GetProperty("value").GetProperty("failure").ValueKind == System.Text.Json.JsonValueKind.Null)
+            {
+                FailedClears++;
+                throw new IOException("Only the outcome-clear write fails.");
+            }
+            return inner.SaveAsync(state, token);
+        }
+        public Task<IReadOnlyList<ProviderCacheState>> GetRecentAsync(int take, CancellationToken token) => inner.GetRecentAsync(take, token);
+        public Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(string provider, int take, CancellationToken token) => inner.GetByProviderAsync(provider, take, token);
     }
 
     private sealed class FakeWebHostEnvironment(string contentRootPath) : IWebHostEnvironment

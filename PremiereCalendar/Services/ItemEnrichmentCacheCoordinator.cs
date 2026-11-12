@@ -20,6 +20,10 @@ public sealed class ItemEnrichmentCacheCoordinator
     private readonly SemaphoreSlim _legacyPartitionGate = new(1);
     private string? _legacyPartition;
     private readonly SingleFlightCoordinator _flights = new();
+    private const int MaximumCoreProposalCohorts = 2048;
+    private const int MaximumProposalsPerCoreCohort = 16;
+    private readonly object _coreProposalGate = new();
+    private readonly Dictionary<string, CoreProposalCohort> _coreProposalCohorts = new(StringComparer.Ordinal);
     private readonly PremiereTelemetry _telemetry;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _metadataRetryAfter = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _availabilityRetryAfter = new(StringComparer.Ordinal);
@@ -28,6 +32,65 @@ public sealed class ItemEnrichmentCacheCoordinator
     private long _storeRetryAfterTicks;
     public bool Enabled => _options.Enabled;
     public string Partition { get; }
+
+    internal int RetainedCoreProposalCohortCount
+    {
+        get { lock (_coreProposalGate) return _coreProposalCohorts.Count; }
+    }
+
+    // These are completed provider proposals, not accepted cache entries. Only
+    // sessions sharing the exact reserved core flight join this short lifetime;
+    // every consumer still stages and validates its own ordinary CAS writes.
+    private sealed class CoreProposalCohort
+    {
+        public int Leases;
+        private readonly object _gate = new();
+        private readonly Dictionary<string, ItemEnrichmentSnapshot> _proposals = new(StringComparer.Ordinal);
+        private bool _closed;
+
+        public ItemEnrichmentSnapshot? Find(string exactFlightKey)
+        {
+            lock (_gate) return !_closed ? _proposals.GetValueOrDefault(exactFlightKey) : null;
+        }
+
+        public void Remember(string exactFlightKey, ItemEnrichmentSnapshot proposal)
+        {
+            lock (_gate)
+                if (!_closed && _proposals.Count < MaximumProposalsPerCoreCohort)
+                    _proposals.TryAdd(exactFlightKey, proposal);
+        }
+
+        public void Close()
+        {
+            lock (_gate) { _closed = true; _proposals.Clear(); }
+        }
+    }
+
+    private CoreProposalCohort? LeaseCoreProposalCohort(string exactCoreFlightKey)
+    {
+        lock (_coreProposalGate)
+        {
+            if (!_coreProposalCohorts.TryGetValue(exactCoreFlightKey, out var cohort))
+            {
+                // Capacity only declines this optimization; it never drops work
+                // or evicts proposals still owned by an active session.
+                if (_coreProposalCohorts.Count >= MaximumCoreProposalCohorts) return null;
+                _coreProposalCohorts.Add(exactCoreFlightKey, cohort = new CoreProposalCohort());
+            }
+            cohort.Leases++;
+            return cohort;
+        }
+    }
+
+    private void ReleaseCoreProposalCohort(string key, CoreProposalCohort cohort)
+    {
+        lock (_coreProposalGate)
+        {
+            if (--cohort.Leases > 0) return;
+            if (_coreProposalCohorts.GetValueOrDefault(key) == cohort) _coreProposalCohorts.Remove(key);
+            cohort.Close();
+        }
+    }
 
     public ItemEnrichmentCacheCoordinator(IItemEnrichmentStore store,
         IOptions<ItemEnrichmentCacheOptions> options, IOptions<TmdbOptions> tmdbOptions,
@@ -169,16 +232,53 @@ public sealed class ItemEnrichmentCacheCoordinator
         private bool _storageUnavailable;
         private DateTimeOffset? _storageRetryAtUtc;
         private readonly ConcurrentDictionary<ItemEnrichmentIdentity, Lazy<Task<IAsyncDisposable>>> _lookupReservations = new();
+        private readonly ConcurrentDictionary<(ItemEnrichmentIdentity Identity, long Generation), DateTimeOffset> _providerObservationStarts = new();
+        private readonly object _coreProposalLeaseGate = new();
+        private readonly Dictionary<string, CoreProposalCohort> _coreProposalLeases = new(StringComparer.Ordinal);
+        private readonly Dictionary<(ItemEnrichmentIdentity Identity, long Generation), CoreProposalCohort> _coreProposalsByItem = new();
+
+        private CoreProposalCohort? JoinCoreProposalCohort(string key, ItemEnrichmentIdentity identity, long generation)
+        {
+            lock (_coreProposalLeaseGate)
+            {
+                if (_coreProposalLeases.TryGetValue(key, out var existing)) return existing;
+                var cohort = owner.LeaseCoreProposalCohort(key);
+                if (cohort is null) return null;
+                _coreProposalLeases.Add(key, cohort);
+                _coreProposalsByItem[(identity, generation)] = cohort;
+                return cohort;
+            }
+        }
+
+        private CoreProposalCohort? FindCoreProposalCohort(ItemEnrichmentIdentity identity, long generation)
+        {
+            lock (_coreProposalLeaseGate) return _coreProposalsByItem.GetValueOrDefault((identity, generation));
+        }
+
         public async ValueTask DisposeAsync()
         {
-            // Start all releases together: each store budget includes waiting
-            // for its gate, so an outage costs one deadline, not N deadlines.
-            await Task.WhenAll(_lookupReservations.Values.Where(reservation => reservation.IsValueCreated).Select(async reservation =>
+            try
             {
-                try { await (await reservation.Value).DisposeAsync(); }
-                catch (Exception ex) { owner._logger.LogWarning(ex, "Could not release TVmaze lookup reservation; retained fence remains conservative."); }
-            }));
-            _lookupReservations.Clear();
+                // Start all releases together: each store budget includes waiting
+                // for its gate, so an outage costs one deadline, not N deadlines.
+                await Task.WhenAll(_lookupReservations.Values.Where(reservation => reservation.IsValueCreated).Select(async reservation =>
+                {
+                    try { await (await reservation.Value).DisposeAsync(); }
+                    catch (Exception ex) { owner._logger.LogWarning(ex, "Could not release TVmaze lookup reservation; retained fence remains conservative."); }
+                }));
+            }
+            finally
+            {
+                _lookupReservations.Clear();
+                KeyValuePair<string, CoreProposalCohort>[] leases;
+                lock (_coreProposalLeaseGate)
+                {
+                    leases = _coreProposalLeases.ToArray();
+                    _coreProposalLeases.Clear();
+                    _coreProposalsByItem.Clear();
+                }
+                foreach (var lease in leases) owner.ReleaseCoreProposalCohort(lease.Key, lease.Value);
+            }
         }
 
         public bool HasPendingWrites => !_writes.IsEmpty;
@@ -636,6 +736,23 @@ public sealed class ItemEnrichmentCacheCoordinator
             if (!metadataDue && !ratingsDue && !availabilityDue && !optionalMetadataDue) return current;
             var ratingsBinding = metadataOnly ? "" : RatingsComponentIdentity(identity, ratingsInputs);
             var flightKey = $"{partition}:{identity.MediaType}:{identity.TmdbId}:{current.Record.Generation}:{current.Record.MetadataRevision}:{metadataDue}:{ratingsDue}:{availabilityDue}:{optionalMetadataDue}:{forceRefresh}:{metadataOnly}:{ratingsBinding}:{refreshVariant}";
+            var proposalCohort = metadataOnly && metadataDue && !forceRefresh
+                ? JoinCoreProposalCohort(flightKey, identity, current.Record.Generation)
+                : coreContinuation is not null ? FindCoreProposalCohort(identity, current.Record.Generation) : null;
+            var observationStarted = _providerObservationStarts.GetOrAdd((identity, current.Record.Generation), current.Record.LastSeenUtc);
+            var flightHash = owner._telemetry.DiagnosticsHealth.Enabled
+                ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(flightKey)))[..20].ToLowerInvariant() : null;
+            void TraceFlight(string outcome)
+            {
+                if (flightHash is null) return;
+                owner._telemetry.RecordDiagnostic("item_cache.flight", details: new()
+                {
+                    ItemId = identity.TmdbId, MediaType = identity.MediaType.ToString(),
+                    CacheKey = flightHash, Stage = metadataOnly ? "core" : "complete", Outcome = outcome,
+                    Sequence = current.Record.MetadataRevision, Count = (int)Math.Clamp(current.Record.Generation, 0, int.MaxValue)
+                });
+            }
+            TraceFlight("requested");
             if (!ratingsOnly && identity.MediaType == PremiereMediaType.Series && current.Record.TvmazeShowId is null
                 && (metadataDue || TvmazeRefreshNeeded(identity)))
             {
@@ -651,12 +768,26 @@ public sealed class ItemEnrichmentCacheCoordinator
                     throw new ProviderRetryAfterException("item_cache", _storageRetryAtUtc ?? Now.AddSeconds(5));
                 }
             }
-            var outcome = await owner._flights.RunAsync(flightKey, async token =>
+            var retainedProposal = !metadataOnly ? proposalCohort?.Find(flightKey) : null;
+            if (retainedProposal is not null) TraceFlight("proposal_reused");
+            var outcome = retainedProposal ?? await owner._flights.RunAsync(flightKey, async token =>
             {
+                // A caller may have missed a proposal just before its producer
+                // stored it. Check again under the ordinary shared flight before
+                // spending provider work; running-task cancellation stays there.
+                if (!metadataOnly && proposalCohort?.Find(flightKey) is { } completedProposal)
+                {
+                    TraceFlight("proposal_reused");
+                    return completedProposal;
+                }
+                TraceFlight("produced");
                 if (_completed.TryGetValue(identity, out var existing) && CanReuseCompleted(existing)) return existing;
                 // Reservation precedes every provider branch, including debut-date
                 // validation. An older overlapping request cannot win by finishing last.
-                var started = current.Record.LastSeenUtc;
+                // A core flush may read its accepted row and advance LastSeenUtc
+                // before optional work starts. Both phases still belong to the
+                // original provider observation for this reserved generation.
+                var started = observationStarted;
                 var refreshStarted = Stopwatch.GetTimestamp();
                 var result = await refresh(current, metadataDue, ratingsDue, token);
                 if (result.MetadataFailed)
@@ -705,7 +836,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                         : result.RefreshRatingsClock ? started : current.Record.RatingsFetchedUtc ?? DateTimeOffset.MinValue,
                     TmdbObservedUtc = metadata?.TmdbVotes?.TmdbObservedUtc
                 };
-                return new ItemEnrichmentSnapshot(record, metadata, ratings)
+                var proposal = new ItemEnrichmentSnapshot(record, metadata, ratings)
                 {
                     RatingsReadOrigin = current.RatingsReadOrigin, PreserveRatings = current.PreserveRatings,
                     FreshMovieCore = metadataDue && result.RefreshMetadataClock && !result.MetadataFailed
@@ -714,6 +845,11 @@ public sealed class ItemEnrichmentCacheCoordinator
                         ? new(current.Record.Generation, current.Record.MetadataRevision, rawCore, started,
                             current.Record.MetadataInvalidatedUtc, current.RatingsReadBaseline.Json, current.RatingsReadBaseline.FetchedUtc) : null
                 };
+                if (!metadataOnly && coreContinuation is not null
+                    && !result.MetadataFailed && !result.RatingsFailed && !result.AvailabilityFailed && !result.OptionalMetadataFailed
+                    && proposal.Metadata is { CoreMetadataOnly: false })
+                    proposalCohort?.Remember(flightKey, proposal);
+                return proposal;
             }, cancellationToken);
             if (current.Metadata?.TmdbVotes?.TmdbObservedUtc is { } ownObserved
                 && (outcome.Metadata?.TmdbVotes?.TmdbObservedUtc is null || ownObserved > outcome.Metadata.TmdbVotes.TmdbObservedUtc)
@@ -1149,8 +1285,16 @@ public sealed class ItemEnrichmentCacheCoordinator
         }
 
         public async Task<ItemEnrichmentReconciliation> ReconcileAsync(IReadOnlyList<PremiereItem> items,
-            bool includeConsumed, CancellationToken cancellationToken, DateOnly? windowStart = null, DateOnly? windowEnd = null)
+            bool includeConsumed, CancellationToken cancellationToken, DateOnly? windowStart = null, DateOnly? windowEnd = null,
+            bool readOnly = false)
         {
+            // readOnly never Accepts store rows into this session. A newer foreign
+            // row is only projected locally for this call, so a mid-load readiness
+            // probe can neither roll back concurrent enrichment nor consume the
+            // evidence the final reconcile uses to classify the load as dirty.
+            Dictionary<ItemEnrichmentIdentity, ItemEnrichmentSnapshot>? foreignView = readOnly ? new() : null;
+            ItemEnrichmentSnapshot? ViewOf(ItemEnrichmentIdentity identity) =>
+                foreignView is not null && foreignView.TryGetValue(identity, out var foreign) ? foreign : Find(identity);
             var started = Stopwatch.GetTimestamp();
             if (_storageUnavailable)
                 return new(items, items.Select(item => item.MediaType).Concat(_discoveryChanged.Keys).ToHashSet());
@@ -1205,7 +1349,11 @@ public sealed class ItemEnrichmentCacheCoordinator
                     var previous = Find(record.Identity);
                     if (previous is not null && previous.Record.MetadataInvalidatedUtc != record.MetadataInvalidatedUtc)
                         MarkDirty(record.Identity, "invalidation_changed");
-                    Accept(record);
+                    if (foreignView is null) Accept(record);
+                    else if (previous is null || previous.Record.MetadataInvalidatedUtc != record.MetadataInvalidatedUtc
+                        || (previous.Record.Generation, previous.Record.MetadataRevision).CompareTo((record.Generation, record.MetadataRevision)) < 0)
+                        foreignView[record.Identity] = new ItemEnrichmentSnapshot(record,
+                            Deserialize<ItemEnrichmentMetadata>(record.MetadataJson), Deserialize<ItemEnrichmentRatings>(record.RatingsJson));
                 }
                 var result = new List<PremiereItem>(items.Count);
                 foreach (var item in items)
@@ -1213,7 +1361,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                     var identity = new ItemEnrichmentIdentity(item.MediaType, item.TmdbId);
                     if (item.TmdbId <= 0 || item.VerificationState != PremiereVerificationState.Verified) { result.Add(item); continue; }
                     if (!latest.TryGetValue(identity, out var record)) { MarkDirty(identity, "missing_record"); result.Add(item); continue; }
-                    var current = Find(identity)!;
+                    var current = ViewOf(identity)!;
                     // This removes only a disproven premiere occurrence. Earlier
                     // invalidation observations and session failures remain dirty.
                     if (CanonicalDateOutsideWindow(item, current))

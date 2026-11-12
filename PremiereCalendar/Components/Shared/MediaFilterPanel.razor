@@ -590,7 +590,9 @@
 
     private bool IsLanguageSelected(string language)
     {
-        return Filters.OriginalLanguages.Contains(language, StringComparer.OrdinalIgnoreCase);
+        var normalized = LanguageCodes.Normalize(language);
+        return Filters.OriginalLanguages.Any(selected =>
+            string.Equals(LanguageCodes.Normalize(selected), normalized, StringComparison.Ordinal));
     }
 
     private bool IsCountrySelected(string country)
@@ -605,6 +607,15 @@
 
     private Task SetLanguageSelected(string language, ChangeEventArgs args)
     {
+        if (!IsChecked(args))
+        {
+            // A regional variant such as nl-BE counts as the same selection, so unchecking removes it too.
+            var normalized = LanguageCodes.Normalize(language);
+            Filters.OriginalLanguages.RemoveAll(selected =>
+                string.Equals(LanguageCodes.Normalize(selected), normalized, StringComparison.Ordinal));
+            return NotifyChanged();
+        }
+
         return SetStringSelected(Filters.OriginalLanguages, language.Trim().ToLowerInvariant(), args);
     }
 

@@ -45,6 +45,7 @@
             }
             <span class="command-week-range" data-testid="week-range">@CompactWeekRangeText()</span>
             <span class="calendar-result-count">@VisibleResultCountText()</span>
+            <span class="visually-hidden" role="status" aria-live="polite" data-testid="loading-announcement">@(_isLoading && !hasVisibleItemsForCurrentWeek ? "Loading premieres for the selected week…" : "")</span>
             @if (_isLoading && hasVisibleItemsForCurrentWeek)
             {
                 <span class="calendar-refresh-status" data-testid="refreshing" aria-live="polite">
@@ -285,10 +286,6 @@
     @if (!string.IsNullOrWhiteSpace(_error))
     {
         <div class="status-panel error" role="alert" data-testid="error">@_error</div>
-    }
-    else if (_isLoading && !hasVisibleItemsForCurrentWeek)
-    {
-        <div class="status-panel" data-testid="loading" role="status" aria-live="polite">Loading premieres for the selected week… Empty days will appear after loading completes.</div>
     }
     else
     {

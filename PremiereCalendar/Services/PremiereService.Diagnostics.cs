@@ -211,7 +211,7 @@ public sealed partial class PremiereService
         var count = 0;
         _telemetry.RecordDiagnostic("source.started", context, new()
         {
-            Provider = provider, WeekStart = source.Start, WeekEnd = source.End
+            Provider = provider, Stage = source.TraceStage, WeekStart = source.Start, WeekEnd = source.End
         });
         await using var enumerator = _telemetry.WithDiagnosticContext(source.Open(), context, cancellationToken)
             .GetAsyncEnumerator(cancellationToken);
@@ -226,11 +226,12 @@ public sealed partial class PremiereService
                 var batch = enumerator.Current;
                 count = batch.Items.Count;
                 var unavailable = batch.Error is null ? null : OptionalAccessDenial(batch.Name, batch.Error);
-                outcome = unavailable is not null ? "unavailable" : batch.Error is null ? "success" : "failed";
+                outcome = batch.IsCoreComplete ? "core_complete"
+                    : unavailable is not null ? "unavailable" : batch.Error is null ? "success" : "failed";
                 reason = unavailable?.Reason ?? batch.Error?.GetType().Name;
                 _telemetry.RecordDiagnostic("source.progress", context, new()
                 {
-                    Provider = provider, Count = count, Outcome = outcome, Reason = reason, IsFinal = batch.IsComplete,
+                    Provider = provider, Stage = source.TraceStage, Count = count, Outcome = outcome, Reason = reason, IsFinal = batch.IsComplete,
                     StatusCode = unavailable?.StatusCode, RetryAtUtc = unavailable?.RetryAtUtc,
                     DurationMilliseconds = Stopwatch.GetElapsedTime(timer).TotalMilliseconds
                 });
@@ -241,7 +242,7 @@ public sealed partial class PremiereService
         {
             _telemetry.RecordDiagnostic("source.finished", context, new()
             {
-                Provider = provider, Count = count, Outcome = cancellationToken.IsCancellationRequested ? "canceled" : outcome,
+                Provider = provider, Stage = source.TraceStage, Count = count, Outcome = cancellationToken.IsCancellationRequested ? "canceled" : outcome,
                 Reason = reason, DurationMilliseconds = Stopwatch.GetElapsedTime(timer).TotalMilliseconds
             });
         }

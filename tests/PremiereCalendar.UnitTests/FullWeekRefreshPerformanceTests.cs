@@ -190,6 +190,8 @@ public sealed partial class PremiereServiceTests
             filters: filters, resumeState: resume, cancellationToken: budget.Token))
         {
             updates.Add(update);
+            if (!update.FromCache && typeof(PremiereLoadProgress).GetProperty("IsCalendarReady")?.GetValue(update) is true)
+                Assert.DoesNotContain(update.Items, item => !currentIds.Contains(item.TmdbId));
             var currentRows = update.Items.Where(item => currentIds.Contains(item.TmdbId)).ToArray();
             if (currentRows.Length > 0) firstRowMs ??= timer.Elapsed.TotalMilliseconds;
             if (currentRows.Select(item => item.PremiereDate).Distinct().Count() == 7)
@@ -584,7 +586,7 @@ public sealed partial class PremiereServiceTests
                 start.AddDays(day), language)).Concat(includeSeries
                     ? [new FullWeekRow(20_000 + day * 100 + languageIndex * 10, true, start.AddDays(day), language)] : []))).ToArray();
 
-    private sealed class FullWeekHttpHandler(FullWeekRow[] rows) : HttpMessageHandler
+    private sealed class FullWeekHttpHandler(FullWeekRow[] rows, bool paginate = false) : HttpMessageHandler
     {
         public ConcurrentBag<string> Paths { get; } = [];
         private int _active, _maxActive;
@@ -604,14 +606,17 @@ public sealed partial class PremiereServiceTests
                 {
                     var query = QueryHelpers.ParseQuery(uri.Query);
                     var series = uri.AbsolutePath.EndsWith("/tv", StringComparison.Ordinal);
-                    Assert.Equal("1", query["page"].ToString());
+                    var page = int.Parse(query["page"].ToString(), CultureInfo.InvariantCulture);
+                    Assert.InRange(page, 1, paginate ? 2 : 1);
                     var dateKey = series ? "first_air_date" : "primary_release_date";
                     var from = DateOnly.ParseExact(query[dateKey + ".gte"].ToString(), "yyyy-MM-dd", CultureInfo.InvariantCulture);
                     var to = DateOnly.ParseExact(query[dateKey + ".lte"].ToString(), "yyyy-MM-dd", CultureInfo.InvariantCulture);
                     var selected = rows.Where(row => row.Discoverable && row.Series == series && row.Date >= from && row.Date <= to
                         && row.Language == query["with_original_language"].ToString()).ToArray();
-                    payload = new { page = 1, total_pages = 1, total_results = selected.Length,
-                        results = selected.Select(row => new { id = row.Id, title = row.Title, name = row.Title,
+                    var pageSize = Math.Max(1, (selected.Length + 1) / 2);
+                    var pageRows = paginate ? selected.Skip((page - 1) * pageSize).Take(pageSize) : selected;
+                    payload = new { page, total_pages = paginate ? 2 : 1, total_results = selected.Length,
+                        results = pageRows.Select(row => new { id = row.Id, title = row.Title, name = row.Title,
                             original_title = row.Title + " original", original_name = row.Title + " original",
                             release_date = row.Date.ToString("yyyy-MM-dd"), first_air_date = row.Date.ToString("yyyy-MM-dd"),
                             original_language = row.Language, overview = "Fixture overview", origin_country = new[] { "US" },
@@ -712,11 +717,13 @@ public sealed partial class PremiereServiceTests
     {
         private readonly SemaphoreSlim _pool = new(2);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Calls, Completed, Active;
         public async Task<RottenTomatoesScores> GetScoresAsync(PremiereMediaType type, string title, int? year,
             string? wikidataId, CancellationToken token, bool forceRefresh = false)
         {
             Interlocked.Increment(ref Calls);
+            Started.TrySetResult();
             await _pool.WaitAsync(token);
             Interlocked.Increment(ref Active);
             try

@@ -2,6 +2,7 @@ using System.Data;
 using System.Data.Common;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -13,6 +14,7 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
     private const string RateLimitedUntilUtcKey = "RateLimitedUntilUtc";
     private const string LastErrorKey = "LastError";
     private const string LastFailureUtcKey = "LastFailureUtc";
+    private const string SuccessObservationIdProperty = "_cacheSuccessObservationId";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly AppDatabaseOptions _options;
@@ -58,7 +60,8 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
                 return null;
             }
 
-            var item = JsonSerializer.Deserialize<OmdbItem>(reader.GetString(1), JsonOptions);
+            using var document = JsonDocument.Parse(reader.GetString(1));
+            var item = document.RootElement.Deserialize<OmdbItem>(JsonOptions);
             if (item is null)
             {
                 return null;
@@ -67,7 +70,10 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
             return new OmdbCacheEntry(
                 reader.GetString(0),
                 item,
-                DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+                DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                document.RootElement.TryGetProperty(SuccessObservationIdProperty, out var observation)
+                    && observation.ValueKind == JsonValueKind.String
+                    && IsSuccessObservationId(observation.GetString()) ? observation.GetString() : null);
         }
         finally
         {
@@ -75,7 +81,15 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
         }
     }
 
-    public async Task SetAsync(string imdbId, OmdbItem item, DateTimeOffset cachedAtUtc, CancellationToken cancellationToken)
+    public Task SetAsync(string imdbId, OmdbItem item, DateTimeOffset cachedAtUtc, CancellationToken cancellationToken)
+        => SaveItemAsync(imdbId, item, cachedAtUtc, Guid.NewGuid().ToString("N"), cancellationToken);
+
+    public Task SetWithObservationAsync(string imdbId, OmdbItem item, DateTimeOffset cachedAtUtc,
+        string successObservationId, CancellationToken cancellationToken)
+        => SaveItemAsync(imdbId, item, cachedAtUtc, successObservationId, cancellationToken);
+
+    private async Task SaveItemAsync(string imdbId, OmdbItem item, DateTimeOffset cachedAtUtc,
+        string successObservationId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(imdbId))
         {
@@ -97,7 +111,11 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
                     CachedAtUtc = excluded.CachedAtUtc
                 """;
             DatabaseParameters.Add(command, "@imdbId", NormalizeImdbId(imdbId));
-            DatabaseParameters.Add(command, "@json", JsonSerializer.Serialize(item, JsonOptions));
+            // An opaque observation distinguishes successful writes even when their
+            // clocks tie. Older readers ignore this optional JSON property.
+            var payload = JsonSerializer.SerializeToNode(item, JsonOptions)!.AsObject();
+            payload[SuccessObservationIdProperty] = successObservationId;
+            DatabaseParameters.Add(command, "@json", payload.ToJsonString(JsonOptions));
             DatabaseParameters.Add(command, "@cachedAtUtc", cachedAtUtc.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -237,6 +255,11 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
     {
         return imdbId.Trim().ToLowerInvariant();
     }
+
+    private static bool IsSuccessObservationId(string? value)
+        => Guid.TryParseExact(value, "N", out _)
+            || value is { Length: 97 } && value[64] == ':'
+                && value.Take(64).All(Uri.IsHexDigit) && Guid.TryParseExact(value[65..], "N", out _);
 
     private static string? GetString(IReadOnlyDictionary<string, string> values, string key)
     {

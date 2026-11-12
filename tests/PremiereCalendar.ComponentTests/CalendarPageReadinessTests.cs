@@ -28,7 +28,8 @@ public sealed partial class CalendarPageTests
                 Assert.Empty(component.FindAll("[data-testid='refreshing']"));
                 Assert.False(Services.GetRequiredService<CalendarPageCoordinator>().HasActiveForegroundLoad);
                 Assert.Equal(initiallyEmpty ? 0 : 2, component.FindAll("[data-testid='premiere-card']").Count);
-                Assert.Empty(_prefetcher.WeekStarts);
+                // Adjacent weeks start as soon as the calendar is ready, not when the stream ends.
+                Assert.Single(_prefetcher.WeekStarts);
             }, TimeSpan.FromSeconds(3));
             await service.ForegroundReleased.Task.WaitAsync(TimeSpan.FromSeconds(3));
             Assert.False(service.Finished.Task.IsCompleted);
@@ -41,7 +42,7 @@ public sealed partial class CalendarPageTests
                 Assert.Single(card.QuerySelectorAll("img[data-lazy-image]"));
                 Assert.Single(component.FindAll("[data-testid='calendar-enrichment']"));
                 Assert.Single(service.Calls);
-                Assert.Empty(_prefetcher.WeekStarts);
+                Assert.Single(_prefetcher.WeekStarts);
             });
             Assert.False(service.Finished.Task.IsCompleted);
 

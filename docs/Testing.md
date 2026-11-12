@@ -158,3 +158,29 @@ Current automated validation on 2026-05-31 after data-trust diagnostics:
 - New tests cover date semantics, source merge attribution, anomaly detection, score backfill, missing external-ID repair, source health, update evidence, rollback script behavior, provenance rendering, Settings diagnostics, and mobile filter review.
 - Deployed Playwright validation covered desktop `1440x1000` All, Series, Movies, card provenance, Settings diagnostics, command palette, and filter drawer, plus iPhone `390x844` Series, Movies, card provenance, Settings diagnostics, source health, and filter drawer.
 - Browser validation reported no console warnings or errors, no horizontal overflow, no visible command clipping, filter panes within the viewport, and two-column desktop card grids.
+
+
+## Cold discovery and OMDb retry validation â€” 7 November 2026
+
+1,905 tests pass: 1,118 unit, 195 component and 592 integration, with one expected
+Linux file-lock skip. PostgreSQL coverage executes in isolated databases.
+An earlier integration-container bootstrap directory required a writable tmpfs;
+its 581-case replay used unchanged compiled DLLs. The final 592-case suite includes
+post-review regressions and passes with that container correction. Earlier runs
+and hashes remain separate; only final accepted cases contribute to this total.
+
+Held-provider checks cover complete pagination before optional work finishes,
+source checkpoint ownership, cancellation, canonical invalidation, accepted
+projection preservation and queued admission deadlines. A gated concurrent-week
+case reproduces and protects the calculation-to-persistence sharing interval.
+OMDb cases cover persisted per-ID deadlines, exact expiry, stale-value retention,
+credential/endpoint isolation and forced-success races.
+
+Matched results and their limits are recorded in
+[Cold discovery and OMDb recovery](ColdDiscoveryAndOmdb-20261107.md).
+
+## v1.2.18 final validation - 12 November 2026
+
+2,002 tests pass on the exact release source: 1,185 unit, 225 component and 592
+integration, with one expected Linux file-lock skip. The suites ran once, in
+order, in isolated containers with an internal tmpfs-only PostgreSQL server.

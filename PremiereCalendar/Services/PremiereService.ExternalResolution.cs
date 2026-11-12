@@ -396,6 +396,7 @@ public sealed partial class PremiereService
         }
 
         var premiereDate = candidate.PremiereDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        using var candidatePolicy = UseColdExternalCandidate(candidate);
         var mappedItem = candidate.MediaType == PremiereMediaType.Movie
             ? await MapMovieAsync(
                 new TmdbMovieDiscoverItem
@@ -802,6 +803,10 @@ public sealed partial class PremiereService
         CancellationToken cancellationToken,
         bool forceRefresh)
     {
+        // The complete external mapping (including candidate-specific fallback
+        // ratings and provenance) is retained for the owned continuation phase.
+        if (_coldDiscoverySource.Value is { } coreSource
+            && !coreSource.CompleteExternalFallbacks.ContainsKey(ExternalCandidateKey(candidate))) return item;
         var candidateImdbId = NormalizeExternalId(candidate.ImdbId);
         if (_itemCacheSession.Value?.Find(new ItemEnrichmentIdentity(item.MediaType, item.TmdbId)) is { Metadata.ImdbId: { } cachedImdbId }
             && string.Equals(candidateImdbId, cachedImdbId, StringComparison.OrdinalIgnoreCase)) return item;
@@ -1206,9 +1211,10 @@ public sealed partial class PremiereService
             ? criteria.Series.OriginalLanguages
             : criteria.Movies.OriginalLanguages;
 
+        var candidateLanguage = LanguageCodes.Normalize(candidate.OriginalLanguage);
         if (languageFilters.Length > 0
-            && !string.IsNullOrWhiteSpace(candidate.OriginalLanguage)
-            && !languageFilters.Contains(candidate.OriginalLanguage, StringComparer.OrdinalIgnoreCase))
+            && candidateLanguage is not null
+            && !languageFilters.Any(language => string.Equals(LanguageCodes.Normalize(language), candidateLanguage, StringComparison.Ordinal)))
         {
             return false;
         }

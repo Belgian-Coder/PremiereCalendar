@@ -299,7 +299,7 @@
     public bool IsArrActionBusy { get; set; }
 
     private const string TransparentPosterPlaceholder = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
-    private const int PosterCacheWidth = 185;
+    private const int PosterCacheWidth = CachedImageUrl.PosterWidth;
     private const int MaxVisibleSourceNames = 6;
     private string _renderFingerprint = "";
     private PremiereItem? _fingerprintedItem;

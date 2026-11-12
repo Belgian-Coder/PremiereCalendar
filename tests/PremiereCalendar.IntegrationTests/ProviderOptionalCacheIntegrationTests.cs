@@ -63,9 +63,9 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     }
 
     [Theory]
-    [InlineData("{\"Response\":\"False\",\"Error\":\"Incorrect IMDb ID.\"}")]
-    [InlineData("{")]
-    public async Task OmdbItemPayloadFailureDoesNotBlockAnotherTitleOrPersistProviderQuota(string invalid)
+    [InlineData("{\"Response\":\"False\",\"Error\":\"Incorrect IMDb ID.\"}", "invalid_imdb_id")]
+    [InlineData("{", "invalid_response")]
+    public async Task OmdbItemPayloadFailureDoesNotBlockAnotherTitleOrPersistProviderQuota(string invalid, string reason)
     {
         using var memory = Memory();
         var store = new SqliteOmdbCacheStore(
@@ -76,7 +76,7 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "private-key" }), cacheStore: store, timeProvider: _clock);
         var bad = await client.GetByImdbIdWithStatusAsync("ttbad", default);
         Assert.False(bad.Successful);
-        Assert.Equal("invalid_response", bad.Failure?.Reason);
+        Assert.Equal(reason, bad.Failure?.Reason);
         Assert.Null((await store.GetProviderStateAsync(default)).RateLimitedUntilUtc);
         var good = await client.GetByImdbIdWithStatusAsync("ttgood", default);
         Assert.True(good.Successful);

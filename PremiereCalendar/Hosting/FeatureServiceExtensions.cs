@@ -97,6 +97,9 @@ public static class FeatureServiceExtensions
         services.AddSingleton<ImageDecodeLimiter>();
         services.AddSingleton<ImageRefreshQueue>();
         services.AddHostedService(provider => provider.GetRequiredService<ImageRefreshQueue>());
+        services.AddSingleton<PosterWarmupQueue>();
+        services.AddSingleton<IPosterWarmupQueue>(provider => provider.GetRequiredService<PosterWarmupQueue>());
+        services.AddHostedService(provider => provider.GetRequiredService<PosterWarmupQueue>());
         services.AddSingleton<CalendarPageCoordinator>();
         services.AddSingleton<CalendarLoadCoordinator>(provider => provider.GetRequiredService<CalendarPageCoordinator>());
         services.AddSingleton<IFilterCatalogService, TmdbFilterCatalogService>();

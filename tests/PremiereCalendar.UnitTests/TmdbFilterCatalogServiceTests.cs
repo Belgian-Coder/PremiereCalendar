@@ -100,8 +100,50 @@ public sealed class TmdbFilterCatalogServiceTests
         };
     }
 
+    [Fact]
+    public async Task GetCatalogAsync_LabelsDutchAsDutchOrFlemishFromTheLiveLanguageList()
+    {
+        var tmdb = new FakeTmdbClient
+        {
+            Languages =
+            [
+                new TmdbConfigurationLanguage { Iso6391 = "en", EnglishName = "English" },
+                new TmdbConfigurationLanguage { Iso6391 = "nl", EnglishName = "Dutch", Name = "Nederlands" }
+            ]
+        };
+
+        var catalog = await CreateService(tmdb).GetCatalogAsync(CancellationToken.None, forceRefresh: true);
+
+        Assert.Equal("Dutch / Flemish (NL)", Assert.Single(catalog.Languages, option => option.Value == "nl").Label);
+        Assert.Equal("English (EN)", Assert.Single(catalog.Languages, option => option.Value == "en").Label);
+        Assert.Contains(catalog.Languages, option => option.Label.Contains("Flemish", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task GetCatalogAsync_FallbackCatalogUsesTheSameDutchOrFlemishLabel()
+    {
+        var tmdb = new FakeTmdbClient { FailGenres = true };
+
+        var catalog = await CreateService(tmdb).GetCatalogAsync(CancellationToken.None, forceRefresh: true);
+
+        Assert.Equal("Dutch / Flemish (NL)", Assert.Single(catalog.Languages, option => option.Value == "nl").Label);
+    }
+
+    private static TmdbFilterCatalogService CreateService(ITmdbClient tmdb)
+    {
+        return new TmdbFilterCatalogService(
+            tmdb,
+            new MemoryCache(new MemoryCacheOptions()),
+            Microsoft.Extensions.Options.Options.Create(new TmdbOptions()),
+            NullLogger<TmdbFilterCatalogService>.Instance);
+    }
+
     private sealed class FakeTmdbClient : ITmdbClient
     {
+        public IReadOnlyList<TmdbConfigurationLanguage> Languages { get; init; } = [];
+
+        public bool FailGenres { get; init; }
+
         public Dictionary<(PremiereMediaType MediaType, string Region), IReadOnlyList<TmdbWatchProvider>> Providers { get; } = [];
 
         public Task<IReadOnlyList<TmdbGenre>> GetGenresAsync(
@@ -109,6 +151,11 @@ public sealed class TmdbFilterCatalogServiceTests
             CancellationToken cancellationToken,
             bool forceRefresh = false)
         {
+            if (FailGenres)
+            {
+                throw new InvalidOperationException("Simulated TMDb outage.");
+            }
+
             return Task.FromResult<IReadOnlyList<TmdbGenre>>([]);
         }
 
@@ -116,7 +163,7 @@ public sealed class TmdbFilterCatalogServiceTests
             CancellationToken cancellationToken,
             bool forceRefresh = false)
         {
-            return Task.FromResult<IReadOnlyList<TmdbConfigurationLanguage>>([]);
+            return Task.FromResult(Languages);
         }
 
         public Task<IReadOnlyList<TmdbConfigurationCountry>> GetCountriesAsync(

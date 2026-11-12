@@ -205,7 +205,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             command.Transaction = transaction;
             command.CommandText = """
                 DELETE FROM ProviderCacheState
-                WHERE Provider IN (@tmdb, @rottenTomatoes, @fanart, @watchmode, @tvmaze)
+                WHERE Provider IN (@tmdb, @rottenTomatoes, @fanart, @watchmode, @tvmaze, @omdb)
                   AND Scope = @scope
                   AND LastCheckedUtc < @cutoffUtc
                 """;
@@ -214,6 +214,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
             DatabaseParameters.Add(command, "@fanart", "responsecache-fanart");
             DatabaseParameters.Add(command, "@watchmode", "responsecache-watchmode");
             DatabaseParameters.Add(command, "@tvmaze", "responsecache-tvmaze");
+            DatabaseParameters.Add(command, "@omdb", "responsecache-omdb");
             DatabaseParameters.Add(command, "@scope", ProviderCacheScope.Item.ToString());
             DatabaseParameters.Add(command, "@cutoffUtc", cutoffUtc.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
             var removed = await command.ExecuteNonQueryAsync(cancellationToken);
@@ -308,7 +309,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         => DatabaseConnectionFactory.IsPostgreSql(_options) && IsResponseCacheProvider(provider) ? _responseGate : _gate;
 
     private static bool IsResponseCacheProvider(string provider)
-        => Normalize(provider) is "responsecache-tmdb" or "responsecache-rottentomatoes" or "responsecache-fanart" or "responsecache-watchmode" or "responsecache-tvmaze";
+        => Normalize(provider) is "responsecache-tmdb" or "responsecache-rottentomatoes" or "responsecache-fanart" or "responsecache-watchmode" or "responsecache-tvmaze" or "responsecache-omdb";
 
     private static void ConfigureResponseCacheConnection(DbConnection connection, bool responseCacheOperation)
     {

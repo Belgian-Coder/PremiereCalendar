@@ -57,6 +57,10 @@ public partial class Calendar
     private string _presetName = "";
     private string? _selectedPresetId;
     private bool _forceLoadOnNextLocationChange;
+    private Task? _filterCatalogLoad;
+    // Set when a handler reset the displayed week before navigating; the next location change must load
+    // even if a view-sync state resets _forceLoadOnNextLocationChange in between.
+    private bool _pendingScopeLoad;
     private bool _isDisposed;
     private bool _viewSyncInitialized;
     private bool _applyingViewSyncNavigation;
@@ -212,11 +216,14 @@ public partial class Calendar
         await InitializeViewSyncAsync();
         if (await ApplyLatestSyncedUrlIfNeededAsync(Navigation.Uri))
         {
+            // The load follows from the location handler, which never loads the filter catalog.
+            StartFilterCatalogLoadInBackground();
             return;
         }
 
         if (await RestoreSavedFiltersIfNeededAsync(Navigation.Uri))
         {
+            StartFilterCatalogLoadInBackground();
             return;
         }
 
@@ -233,8 +240,61 @@ public partial class Calendar
             return;
         }
 
-        await PublishCurrentViewSyncUrlAsync(Navigation.Uri, requireQuery: true);
-        await Task.WhenAll(LoadFilterCatalogAsync(), LoadAsync(forceRefresh: false, diagnostic));
+        // A URL that carries filter parameters is rewritten once to the explicit form so it
+        // can be shared; a plain URL keeps its view-sync and saved-filter semantics.
+        var canonicalUrl = CanonicalFilterUrlIfNeeded();
+        await PublishCurrentViewSyncUrlAsync(canonicalUrl ?? Navigation.Uri, requireQuery: true);
+        if (canonicalUrl is not null)
+        {
+            // Mark the scope as displayed first so the location handler sees no change and does not reload.
+            ResetDisplayedStateForScopeChange();
+            UpdateUrl(replace: true, forceLoadOnChange: false);
+        }
+
+        await Task.WhenAll(EnsureFilterCatalogLoadStarted(), LoadAsync(forceRefresh: false, diagnostic));
+    }
+
+    private Task EnsureFilterCatalogLoadStarted()
+    {
+        return _filterCatalogLoad ??= LoadFilterCatalogAsync();
+    }
+
+    private void StartFilterCatalogLoadInBackground()
+    {
+        _ = RenderAfterFilterCatalogLoadAsync(EnsureFilterCatalogLoadStarted());
+    }
+
+    private async Task RenderAfterFilterCatalogLoadAsync(Task load)
+    {
+        try
+        {
+            await load;
+            await InvokeAsync(() =>
+            {
+                if (!_isDisposed)
+                {
+                    StateHasChanged();
+                }
+            });
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or JSDisconnectedException or OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Rendering after the filter catalog load failed.");
+        }
+    }
+
+    private string? CanonicalFilterUrlIfNeeded()
+    {
+        if (!HasAnyQuery(Navigation.Uri))
+        {
+            return null;
+        }
+
+        var url = BuildFilterUrl();
+        return string.Equals(Navigation.Uri, url, StringComparison.Ordinal) ? null : url;
     }
 
     private async Task ToggleDensityAsync()
@@ -246,7 +306,7 @@ public partial class Calendar
     {
         try
         {
-            await JS.InvokeVoidAsync("premiereCalendarActions.copyText", Navigation.Uri);
+            await JS.InvokeVoidAsync("premiereCalendarActions.copyText", BuildFilterUrl());
             ShowToast(ToastKind.Success, "View link copied", "The current route, week, and filters are ready to paste.");
         }
         catch (JSException ex)
@@ -403,9 +463,29 @@ public partial class Calendar
         if (!_viewSyncInitialized
             || _viewSyncOverview?.Device.SyncEnabled != true
             || string.IsNullOrWhiteSpace(_viewSyncDeviceId)
-            || routeKey is null
-            || HasMeaningfulFilterQuery(location)
-            || await ViewSyncService.GetLatestStateForDeviceAsync(
+            || routeKey is null)
+        {
+            return false;
+        }
+
+        var meaningful = HasMeaningfulFilterQuery(location);
+        ViewSyncLastSeen? lastSeen = null;
+        var currentUrl = ToRelativeCalendarUrl(location);
+        if (meaningful)
+        {
+            // An explicit URL normally wins. It only follows the group when it is the URL this device
+            // itself last published or applied for the route and the group has moved on since (a reload).
+            lastSeen = await GetLastSeenViewSyncAsync(routeKey);
+            // A record from another sync group (or from before groups were recorded) counts as unseen.
+            if (lastSeen is null
+                || !string.Equals(lastSeen.Url, currentUrl, StringComparison.Ordinal)
+                || !string.Equals(lastSeen.GroupId, _viewSyncOverview.Device.GroupId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        if (await ViewSyncService.GetLatestStateForDeviceAsync(
                 _viewSyncDeviceId,
                 routeKey,
                 _disposeCancellation.Token) is not { } state)
@@ -413,7 +493,50 @@ public partial class Calendar
             return false;
         }
 
-        return await ApplyViewSyncStateAsync(state, force: true, blockLocalRestoreWhenAlreadyCurrent: true);
+        if (lastSeen is not null && state.Revision <= lastSeen.Revision)
+        {
+            if (string.Equals(state.RelativeUrl, currentUrl, StringComparison.Ordinal))
+            {
+                _lastPublishedViewSyncUrl = currentUrl;
+            }
+
+            return false;
+        }
+
+        return await ApplyViewSyncStateAsync(state, force: true, blockLocalRestoreWhenAlreadyCurrent: !meaningful);
+    }
+
+    private async Task<ViewSyncLastSeen?> GetLastSeenViewSyncAsync(string routeKey)
+    {
+        try
+        {
+            return await JS.InvokeAsync<ViewSyncLastSeen?>("premiereViewSync.getLastSeen", routeKey);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JSException or JSDisconnectedException or OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    // Fire-and-forget: it never delays navigation and observes its own failures.
+    private async Task RememberViewSyncUrlAsync(string relativeUrl, long revision, string groupId)
+    {
+        if (ViewSyncUrlPolicy.RouteKeyFor(relativeUrl) is not { } routeKey)
+        {
+            return;
+        }
+
+        try
+        {
+            await JS.InvokeVoidAsync("premiereViewSync.setLastSeen", routeKey, relativeUrl, revision, groupId);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JSException or JSDisconnectedException or OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Remembering the view-sync URL failed.");
+        }
     }
 
     private void OnViewSyncStateChanged(object? sender, ViewSyncStateChangedEventArgs args)
@@ -445,7 +568,7 @@ public partial class Calendar
         }
     }
 
-    private async Task<bool> ApplyViewSyncStateAsync(
+    private Task<bool> ApplyViewSyncStateAsync(
         ViewSyncGroupState state,
         bool force = false,
         bool blockLocalRestoreWhenAlreadyCurrent = false)
@@ -453,36 +576,38 @@ public partial class Calendar
         _lastAppliedViewSyncRevisions.TryGetValue(state.RouteKey, out var lastAppliedRevision);
         if (!force && state.Revision <= lastAppliedRevision)
         {
-            return false;
+            return Task.FromResult(false);
         }
 
         if (!ViewSyncUrlPolicy.TryNormalize(state.RelativeUrl, out var relativeUrl)
             || string.IsNullOrWhiteSpace(relativeUrl))
         {
-            return false;
+            return Task.FromResult(false);
         }
 
         if (!force && _isFilterPaneOpen)
         {
             _queuedViewSyncState = state;
             StateHasChanged();
-            return true;
+            return Task.FromResult(true);
         }
 
         _queuedViewSyncState = null;
         _lastAppliedViewSyncRevisions[state.RouteKey] = Math.Max(lastAppliedRevision, state.Revision);
+        // This device now shows the group's URL; navigating back to its earlier own URL must publish again.
+        _lastPublishedViewSyncUrl = relativeUrl;
+        _ = RememberViewSyncUrlAsync(relativeUrl, state.Revision, state.GroupId);
         if (string.Equals(ToRelativeCalendarUrl(Navigation.Uri), relativeUrl, StringComparison.Ordinal))
         {
             _suppressLocalFilterRestoreOnce = blockLocalRestoreWhenAlreadyCurrent;
-            return false;
+            return Task.FromResult(false);
         }
 
         _applyingViewSyncNavigation = true;
         _suppressLocalFilterRestoreOnce = true;
         _forceLoadOnNextLocationChange = !_hasLoadedAtLeastOnce;
         Navigation.NavigateTo(relativeUrl, replace: true);
-        await Task.CompletedTask;
-        return true;
+        return Task.FromResult(true);
     }
 
     private async Task PublishCurrentViewSyncUrlAsync(string location, bool requireQuery = false)
@@ -516,6 +641,12 @@ public partial class Calendar
             if (result.Published || result.State is not null)
             {
                 _lastPublishedViewSyncUrl = relativeUrl;
+            }
+
+            if (result.State is { } publishedState
+                && (result.Published || string.Equals(publishedState.RelativeUrl, relativeUrl, StringComparison.Ordinal)))
+            {
+                _ = RememberViewSyncUrlAsync(relativeUrl, publishedState.Revision, publishedState.GroupId);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -649,6 +780,7 @@ public partial class Calendar
 
                 if (scopeChanged
                     || forceLoad
+                    || _pendingScopeLoad
                     || _filters.WeekStart != previousWeekStart
                     || !string.Equals(previousCriteriaKey, nextCriteriaKey, StringComparison.Ordinal))
                 {
@@ -760,6 +892,7 @@ public partial class Calendar
         var isForeground = true;
         var staleDeadlineStarted = false;
         _loadCancellation = loadCancellation;
+        _pendingScopeLoad = false;
         var shouldPrefetchAdjacentWeeks = false;
         var prefetchWeekStart = default(DateOnly);
         CalendarFilters? prefetchFilters = null;
@@ -874,9 +1007,12 @@ public partial class Calendar
                         ? PremiereService.StreamSourceRefreshAsync(start, end, loadFilters, token)
                         : PremiereService.StreamPremieresAsync(start, end, false, loadFilters, token);
                 }
+                var readyPrefetchRequested = false;
                 await foreach (var update in stream.WithCancellation(token))
                 {
                     var refreshFirstCachedFreshness = false;
+                    var requestReadyPrefetch = false;
+                    IReadOnlyList<string>? posterWarmupUrls = null;
                     await InvokeAsync(() =>
                     {
                         if (_isDisposed || token.IsCancellationRequested || !ReferenceEquals(_loadCancellation, loadCancellation))
@@ -988,14 +1124,47 @@ public partial class Calendar
                             // A calendar load can stream many differently ordered provider batches.
                             // Keep existing cards in place, update matching cards, and append discoveries so
                             // the page fills progressively without rebuilding or reshuffling the whole grid.
-                            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: !update.IsCalendarReady);
+                            // A final that failed item-cache validation is the service's last word: it already excluded cards.
+                            var dirtyFinal = update.IsFinal && update.FailedSourceNames.Contains("Item cache validation", StringComparer.OrdinalIgnoreCase);
+                            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: !update.IsCalendarReady && !dirtyFinal);
                             CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: isForeground && !hasCalendarReadyResult && !update.IsFinal, _visibleItems.Count);
                             RequestPageRender(diagnostic, renderReason);
+                        }
+
+                        // Adjacent weeks can start as soon as this week is usable; the stream may keep
+                        // enriching details for a long time afterwards.
+                        if (update.IsCalendarReady
+                            && !update.IsStaleCache
+                            && !update.HasSourceErrors
+                            && !readyPrefetchRequested)
+                        {
+                            readyPrefetchRequested = true;
+                            requestReadyPrefetch = true;
+                        }
+
+                        if (requestReadyPrefetch || update.IsFinal)
+                        {
+                            posterWarmupUrls = BuildPosterWarmupUrls(start);
                         }
                     });
                     if (refreshFirstCachedFreshness)
                     {
                         _ = RefreshFirstCachedFreshnessAsync(token, loadCancellation, diagnostic);
+                    }
+
+                    if ((requestReadyPrefetch || posterWarmupUrls is { Count: > 0 })
+                        && !token.IsCancellationRequested
+                        && ReferenceEquals(_loadCancellation, loadCancellation))
+                    {
+                        if (posterWarmupUrls is { Count: > 0 })
+                        {
+                            PageServices.GetService<IPosterWarmupQueue>()?.Enqueue(posterWarmupUrls);
+                        }
+
+                        if (requestReadyPrefetch)
+                        {
+                            AdjacentWeekPrefetcher.PrefetchAdjacentWeeks(start, CalendarFilterState.Clone(loadFilters));
+                        }
                     }
                 }
 
@@ -1005,7 +1174,7 @@ public partial class Calendar
                     await RecordFilterUsageAsync(pageMode, loadFilters, _items.Count, token);
                     if (!token.IsCancellationRequested && ReferenceEquals(_loadCancellation, loadCancellation))
                     {
-                        shouldPrefetchAdjacentWeeks = hasAuthoritativeResult;
+                        shouldPrefetchAdjacentWeeks = hasAuthoritativeResult && !readyPrefetchRequested;
                         prefetchWeekStart = start;
                         prefetchFilters = CalendarFilterState.Clone(loadFilters);
                     }
@@ -1479,6 +1648,14 @@ public partial class Calendar
         }
     }
 
+    private void MarkScopeChangePending()
+    {
+        if (ResetDisplayedStateForScopeChange())
+        {
+            _pendingScopeLoad = true;
+        }
+    }
+
     private bool ResetDisplayedStateForScopeChange()
     {
         var scopeKey = $"{_pageMode}|{_filters.WeekStart:yyyyMMdd}|{PremiereDiscoveryCriteria.FromFilters(_filters).CacheKey()}";
@@ -1562,6 +1739,28 @@ public partial class Calendar
         var start = _filters.WeekStart;
         var end = start.AddDays(6);
         return items.Any(item => item.PremiereDate >= start && item.PremiereDate <= end);
+    }
+
+    private IReadOnlyList<string> BuildPosterWarmupUrls(DateOnly weekStart)
+    {
+        const int MaxPosters = 400;
+        var weekEnd = weekStart.AddDays(6);
+        var priorityDay = PriorityDateForCurrentWeek(weekStart, weekEnd);
+        IEnumerable<PremiereItem> ordered = _preserveStreamedItemOrder
+            ? _visibleItems
+            : PremiereFilter.SortItems(_visibleItems, _filters.SortMode, _filters.SortDirection, _filters.ScoreSource);
+
+        return ordered
+            .Where(item => item.PremiereDate >= weekStart
+                && item.PremiereDate <= weekEnd
+                && !string.IsNullOrWhiteSpace(item.PosterUrl))
+            .OrderBy(item => item.PremiereDate == priorityDay ? 0 : 1)
+            .ThenBy(item => item.PremiereDate)
+            .ThenBy(item => item.VerificationState == PremiereVerificationState.Unverified ? 1 : 0)
+            .Select(item => item.PosterUrl!)
+            .Distinct(StringComparer.Ordinal)
+            .Take(MaxPosters)
+            .ToArray();
     }
 
     private IReadOnlyList<PremiereItem> SourceProgressFilteredItems()
@@ -2035,6 +2234,7 @@ public partial class Calendar
         }
 
         _filters.WeekStart = targetWeekStart;
+        MarkScopeChangePending();
         RecalculateVisibleItems();
         var navigationChanged = UpdateUrl(replace: true);
         await PersistCurrentFiltersAsync();
@@ -2424,8 +2624,11 @@ public partial class Calendar
     private async Task PreviousWeek()
     {
         _filters.WeekStart = _filters.WeekStart.AddDays(-7);
-        _selectedDay = _selectedDay?.AddDays(-7) ?? _filters.WeekStart;
+        _selectedDay = _filters.WeekStart;
+        // Show the loading state for the new week on the very next render.
+        MarkScopeChangePending();
         var navigationChanged = UpdateUrl(replace: true);
+        await ResetCalendarScrollAsync();
         await PersistCurrentFiltersAsync();
         if (!navigationChanged)
         {
@@ -2437,7 +2640,9 @@ public partial class Calendar
     {
         _filters.WeekStart = CalendarFilters.StartOfWeek(DateOnly.FromDateTime(DateTime.Today));
         _selectedDay = DateOnly.FromDateTime(DateTime.Today);
+        MarkScopeChangePending();
         var navigationChanged = UpdateUrl(replace: true);
+        await ResetCalendarScrollAsync();
         await PersistCurrentFiltersAsync();
         if (!navigationChanged)
         {
@@ -2448,8 +2653,10 @@ public partial class Calendar
     private async Task NextWeek()
     {
         _filters.WeekStart = _filters.WeekStart.AddDays(7);
-        _selectedDay = _selectedDay?.AddDays(7) ?? _filters.WeekStart;
+        _selectedDay = _filters.WeekStart;
+        MarkScopeChangePending();
         var navigationChanged = UpdateUrl(replace: true);
+        await ResetCalendarScrollAsync();
         await PersistCurrentFiltersAsync();
         if (!navigationChanged)
         {
@@ -2724,6 +2931,9 @@ public partial class Calendar
         catch (JSException)
         {
         }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private async Task ResetCalendarScrollAsync()
@@ -2739,6 +2949,9 @@ public partial class Calendar
         {
         }
         catch (JSException)
+        {
+        }
+        catch (OperationCanceledException)
         {
         }
     }
@@ -2769,18 +2982,18 @@ public partial class Calendar
         catch (JSDisconnectedException)
         {
         }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private async Task<bool> RestoreSavedFiltersIfNeededAsync(string location)
     {
-        if (!_hasRendered || HasMeaningfulFilterQuery(location))
+        // Always consume the one-shot flag, even when this location is returned early below.
+        var suppressRestore = _suppressLocalFilterRestoreOnce;
+        _suppressLocalFilterRestoreOnce = false;
+        if (suppressRestore || !_hasRendered || HasMeaningfulFilterQuery(location))
         {
-            return false;
-        }
-
-        if (_suppressLocalFilterRestoreOnce)
-        {
-            _suppressLocalFilterRestoreOnce = false;
             return false;
         }
 
@@ -2824,6 +3037,10 @@ public partial class Calendar
         {
             return false;
         }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
     }
 
     private async Task<string?> GetSavedFilterQueryAsync(CalendarPageMode mode)
@@ -2837,6 +3054,10 @@ public partial class Calendar
             return null;
         }
         catch (InvalidOperationException)
+        {
+            return null;
+        }
+        catch (OperationCanceledException)
         {
             return null;
         }
@@ -2967,19 +3188,12 @@ public partial class Calendar
 
         if (mode is CalendarPageMode.All or CalendarPageMode.Series)
         {
-            AddMediaFilterParameters(parameters, PremiereMediaType.Series, "series", filters.SeriesFilters, filters);
+            AddMediaFilterParameters(parameters, PremiereMediaType.Series, "series", filters.SeriesFilters);
         }
 
         if (mode is CalendarPageMode.All or CalendarPageMode.Movies)
         {
-            AddMediaFilterParameters(parameters, PremiereMediaType.Movie, "movie", filters.MovieFilters, filters);
-        }
-
-        if (mode == CalendarPageMode.All
-            && !filters.SeriesFilters.OriginalLanguages.SequenceEqual(filters.MovieFilters.OriginalLanguages, StringComparer.OrdinalIgnoreCase))
-        {
-            parameters["seriesLang"] = filters.SeriesFilters.OriginalLanguages.Count == 0 ? "all" : string.Join(',', filters.SeriesFilters.OriginalLanguages);
-            parameters["movieLang"] = filters.MovieFilters.OriginalLanguages.Count == 0 ? "all" : string.Join(',', filters.MovieFilters.OriginalLanguages);
+            AddMediaFilterParameters(parameters, PremiereMediaType.Movie, "movie", filters.MovieFilters);
         }
 
         return parameters;
@@ -2989,16 +3203,11 @@ public partial class Calendar
         IDictionary<string, string?> parameters,
         PremiereMediaType mediaType,
         string prefix,
-        MediaFilterSet filters,
-        CalendarFilters globalFilters)
+        MediaFilterSet filters)
     {
-        var defaults = CalendarFilters.CreateDefault();
-        var mediaDefaults = mediaType == PremiereMediaType.Series ? defaults.SeriesFilters : defaults.MovieFilters;
-        if (globalFilters.Language != LanguageFilter.Both
-            || !filters.OriginalLanguages.SequenceEqual(mediaDefaults.OriginalLanguages, StringComparer.OrdinalIgnoreCase))
-        {
-            parameters[$"{prefix}Lang"] = filters.OriginalLanguages.Count == 0 ? "all" : string.Join(',', filters.OriginalLanguages);
-        }
+        // The language and runtime profile is always explicit so a shared or bookmarked URL does not
+        // depend on the receiving device's saved filters or built-in defaults.
+        parameters[$"{prefix}Lang"] = filters.OriginalLanguages.Count == 0 ? "all" : string.Join(',', filters.OriginalLanguages);
         AddIfNotEmpty(parameters, $"{prefix}Origins", filters.OriginCountries, ',');
         AddIfNotEmpty(parameters, $"{prefix}Genres", filters.GenreIds, ',');
         AddIfNotEmpty(parameters, $"{prefix}Sources", filters.SelectedSources, '|');
@@ -3018,17 +3227,8 @@ public partial class Calendar
             AddIfNotEmpty(parameters, $"{prefix}Types", filters.TvTypes, '|');
         }
 
-        if (filters.RuntimeMinMinutes != mediaDefaults.RuntimeMinMinutes
-            || (globalFilters.RuntimeMinMinutes > 0 && filters.RuntimeMinMinutes != globalFilters.RuntimeMinMinutes))
-        {
-            parameters[$"{prefix}RuntimeMin"] = filters.RuntimeMinMinutes.ToString(CultureInfo.InvariantCulture);
-        }
-
-        if (filters.RuntimeMaxMinutes < 360
-            || (globalFilters.RuntimeMaxMinutes < 360 && filters.RuntimeMaxMinutes != globalFilters.RuntimeMaxMinutes))
-        {
-            parameters[$"{prefix}RuntimeMax"] = filters.RuntimeMaxMinutes.ToString(CultureInfo.InvariantCulture);
-        }
+        parameters[$"{prefix}RuntimeMin"] = filters.RuntimeMinMinutes.ToString(CultureInfo.InvariantCulture);
+        parameters[$"{prefix}RuntimeMax"] = filters.RuntimeMaxMinutes.ToString(CultureInfo.InvariantCulture);
 
         AddIfNotBlank(parameters, $"{prefix}Keywords", filters.KeywordText);
         AddIfNotBlank(parameters, $"{prefix}Q", filters.SearchText);

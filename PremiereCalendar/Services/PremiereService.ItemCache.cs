@@ -10,6 +10,8 @@ public sealed partial class PremiereService
         bool allowWatchmodeAvailabilityFallback = true, MediaDiscoveryCriteria? requestedMovieCriteria = null,
         Action<PremiereItem>? coreMetadataAvailable = null)
     {
+        if (_coldDiscoverySource.Value is not null && !forceRefresh)
+            return await MapMovieDiscoveryCoreAsync(item, requestedMovieCriteria, cancellationToken);
         if (_itemCacheSession.Value is not { } session)
             return await MapMovieUncachedCoreAsync(item, cancellationToken, forceRefresh, cachedEnrichment,
                 allowWatchmodeAvailabilityFallback, requestedMovieCriteria, coreMetadataAvailable: coreMetadataAvailable);
@@ -109,6 +111,10 @@ public sealed partial class PremiereService
         string? episodeSource = null, bool allowWatchmodeAvailabilityFallback = true,
         DateOnly? requestedStart = null, DateOnly? requestedEnd = null, bool canonicalizeSeriesPremiereDate = false)
     {
+        if (_coldDiscoverySource.Value is not null && !forceRefresh)
+            return await MapSeriesDiscoveryCoreAsync(item, premiereDateOverride, itemTypeOverride, episodeTitle,
+                seasonNumber, episodeNumber, episodeSource, requestedStart, requestedEnd,
+                canonicalizeSeriesPremiereDate, cancellationToken);
         if (_itemCacheSession.Value is not { } session)
             return await MapSeriesUncachedCoreAsync(item, cancellationToken, forceRefresh, cachedEnrichment,
                 premiereDateOverride, itemTypeOverride, episodeTitle, seasonNumber, episodeNumber, episodeSource,
@@ -213,6 +219,7 @@ public sealed partial class PremiereService
         if ((!refreshAvailability && !refreshOptionalMetadata && previous.Metadata?.CoreMetadataOnly != true)
             || previous.Metadata is not { } metadata || _itemEnrichmentAttempt.Value is not { } attempt) return null;
         string? fetchedTvmazePoster = null;
+        string? fetchedTvmazeSummary = null;
         var updated = metadata.OptionalFreshnessTracked ? metadata : metadata with
         {
             OptionalFreshnessTracked = true, AvailabilityFetchedUtc = previous.Record.MetadataFetchedUtc,
@@ -255,6 +262,7 @@ public sealed partial class PremiereService
             if (!attempt.TvmazeFailed)
             {
                 if (!attempt.TvmazeSkipped) fetchedTvmazePoster = tvmaze.ImageUrl;
+                fetchedTvmazeSummary = tvmaze.Summary;
                 var sources = updated.Sources.Where(source => !(source.Id is null && source.Kind.Equals("network", StringComparison.OrdinalIgnoreCase)
                         && string.Equals(source.Name, metadata.NetworkName, StringComparison.OrdinalIgnoreCase))
                     && !(source.Id is null && source.Kind.Equals("web", StringComparison.OrdinalIgnoreCase)
@@ -286,6 +294,10 @@ public sealed partial class PremiereService
         if (attempt.ExternalSucceeded || attempt.ExternalReused)
             updated = updated with { OmdbPosterUrl = attempt.ExternalResult?.PosterUrl, OmdbPlot = attempt.ExternalResult?.Plot,
                 Overview = CoalesceText(updated.Overview, attempt.ExternalResult?.Plot) };
+        // The full series mapper gives OMDb plot priority over TVmaze summary.
+        // Keep that order when the two providers complete a persisted core row.
+        if (discovered.MediaType == PremiereMediaType.Series && fetchedTvmazeSummary is not null)
+            updated = updated with { Overview = CoalesceText(updated.Overview, fetchedTvmazeSummary) };
         if (refreshOptionalMetadata && !updated.ArtworkComplete
             && (_itemCacheSession.Value?.ArtworkRefreshNeeded(new(discovered.MediaType, discovered.TmdbId)) ?? true))
         {
