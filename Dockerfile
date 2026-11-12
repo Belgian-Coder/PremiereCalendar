@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM mcr.microsoft.com/dotnet/sdk:11.0.100-rc.3-alpine3.24@sha256:f2542b156e7c9eda7783e4a5745efa6c133a162a1940fd4175849aa80fccfd23 AS build
+FROM mcr.microsoft.com/dotnet/sdk:11.0.100-alpine3.24@sha256:52556c0fb9d0f609ae9aeab9efeeba96f4acc2f7038f7696f2235ccbdbb8e290 AS build
 WORKDIR /src
 COPY global.json Directory.Build.props PremiereCalendar.slnx ./
 COPY PremiereCalendar/PremiereCalendar.csproj PremiereCalendar/
@@ -20,13 +20,13 @@ RUN dotnet publish PremiereCalendar/PremiereCalendar.csproj -c Release --no-rest
     /p:UseAppHost=false \
     && test -s /out/wwwroot/_framework/blazor.web.js
 
-FROM mcr.microsoft.com/dotnet/sdk:11.0.100-rc.3-alpine3.24@sha256:f2542b156e7c9eda7783e4a5745efa6c133a162a1940fd4175849aa80fccfd23 AS development
+FROM mcr.microsoft.com/dotnet/sdk:11.0.100-alpine3.24@sha256:52556c0fb9d0f609ae9aeab9efeeba96f4acc2f7038f7696f2235ccbdbb8e290 AS development
 WORKDIR /src
 ENV Urls=http://0.0.0.0:8080 DOTNET_USE_POLLING_FILE_WATCHER=1
 EXPOSE 8080
 CMD ["dotnet", "watch", "--project", "PremiereCalendar/PremiereCalendar.csproj", "run", "--no-launch-profile"]
 
-FROM mcr.microsoft.com/dotnet/aspnet:11.0.0-rc.3-alpine3.24@sha256:77256017a4f675e1cf66a4e910e115608a73a044b50ee07c3d042c8a71132da5 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:11.0.0-alpine3.24@sha256:d39b72ad1534fa0faf52b488bffb0762df7ba269d120f0338713d4dda2a41bf5 AS runtime
 ARG VERSION=0.0.0-container
 ARG SOURCE_REVISION=unknown
 ARG BUILD_TIME_UTC=unknown
@@ -35,8 +35,6 @@ LABEL org.opencontainers.image.title="PremiereCalendar" \
       org.opencontainers.image.version="$VERSION" \
       org.opencontainers.image.revision="$SOURCE_REVISION" \
       org.opencontainers.image.created="$BUILD_TIME_UTC"
-# The pinned runtime predates Alpine's CVE-2026-4738 fix.
-RUN apk add --no-cache --upgrade zlib=1.4-r0
 WORKDIR /app
 ENV Urls=http://0.0.0.0:8080 \
     HOME=/tmp \

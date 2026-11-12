@@ -34,11 +34,12 @@ Deploy by digest. The runtime:
 - exposes `/health`, `/health/ready`, and `/health/version`.
 
 The project explicitly pins `Microsoft.AspNetCore.App.Internal.Assets` to the
-same exact .NET 11 RC version as the SDK/runtime (`11.0.0-rc.3.26522.148`). An
+same exact .NET 11 version as the SDK/runtime (`11.0.0`). An
 earlier preview omitted `_framework/blazor.web.js` even though health remained
 green, so the Docker build assertion and release-image smoke must both pass
-before publication. The pinned Alpine 3.24.3 runtime contains `libcrypto3` and
-`libssl3` version `3.5.9-r0`, above the fixed `3.5.8-r0` security threshold.
+before publication. The pinned Alpine 3.24.4 runtime contains `libcrypto3` and
+`libssl3` version `3.5.9-r0`, above the fixed `3.5.8-r0` security threshold,
+and `zlib` `1.4-r0`, so the image no longer upgrades zlib itself.
 
 ## SQLite migration
 
