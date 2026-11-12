@@ -1,16 +1,42 @@
-<div class="toast-host" aria-live="polite" aria-atomic="true">
-    @foreach (var toast in Messages)
-    {
-        <div class="@ToastClass(toast)" role="@ToastRole(toast)" @key="toast.Id">
-            <strong>@toast.Title</strong>
-            <span>@toast.Message</span>
-        </div>
-    }
+@* Two persistent containers so screen readers see content being added to an existing live region:
+   a polite one for info/success and an alert one for errors. Toasts themselves carry no role. *@
+<div class="toast-host">
+    <div class="toast-polite" aria-live="polite">
+        @foreach (var toast in Messages.Where(toast => toast.Kind != ToastKind.Error))
+        {
+            <div class="@ToastClass(toast)" @key="toast.Id">
+                <strong>@toast.Title</strong>
+                <span>@toast.Message</span>
+            </div>
+        }
+    </div>
+    <div class="toast-alerts" role="alert">
+        @foreach (var toast in Messages.Where(toast => toast.Kind == ToastKind.Error))
+        {
+            <div class="@ToastClass(toast)" @key="toast.Id">
+                <strong>@toast.Title</strong>
+                <span>@toast.Message</span>
+                @if (OnDismiss.HasDelegate)
+                {
+                    <button type="button"
+                            class="toast-dismiss"
+                            aria-label="@($"Dismiss {toast.Title}")"
+                            @onclick="() => OnDismiss.InvokeAsync(toast.Id)">
+                        Dismiss
+                    </button>
+                }
+            </div>
+        }
+    </div>
 </div>
 
 @code {
     [Parameter]
     public IReadOnlyList<ToastMessage> Messages { get; set; } = [];
+
+    // Error toasts stay until dismissed; the owner supplies the removal.
+    [Parameter]
+    public EventCallback<Guid> OnDismiss { get; set; }
 
     private static string ToastClass(ToastMessage toast)
     {
@@ -20,10 +46,5 @@
             ToastKind.Error => "toast-message error",
             _ => "toast-message info"
         };
-    }
-
-    private static string ToastRole(ToastMessage toast)
-    {
-        return toast.Kind == ToastKind.Error ? "alert" : "status";
     }
 }

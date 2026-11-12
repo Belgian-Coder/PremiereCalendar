@@ -109,12 +109,13 @@ public sealed partial class PremiereService
         DateOnly? premiereDateOverride = null, PremiereItemType? itemTypeOverride = null,
         string? episodeTitle = null, int? seasonNumber = null, int? episodeNumber = null,
         string? episodeSource = null, bool allowWatchmodeAvailabilityFallback = true,
-        DateOnly? requestedStart = null, DateOnly? requestedEnd = null, bool canonicalizeSeriesPremiereDate = false)
+        DateOnly? requestedStart = null, DateOnly? requestedEnd = null, bool canonicalizeSeriesPremiereDate = false,
+        MediaDiscoveryCriteria? requestedSeriesCriteria = null)
     {
         if (_coldDiscoverySource.Value is not null && !forceRefresh)
             return await MapSeriesDiscoveryCoreAsync(item, premiereDateOverride, itemTypeOverride, episodeTitle,
                 seasonNumber, episodeNumber, episodeSource, requestedStart, requestedEnd,
-                canonicalizeSeriesPremiereDate, cancellationToken);
+                canonicalizeSeriesPremiereDate, cancellationToken, requestedSeriesCriteria);
         if (_itemCacheSession.Value is not { } session)
             return await MapSeriesUncachedCoreAsync(item, cancellationToken, forceRefresh, cachedEnrichment,
                 premiereDateOverride, itemTypeOverride, episodeTitle, seasonNumber, episodeNumber, episodeSource,
@@ -133,6 +134,9 @@ public sealed partial class PremiereService
                 canonicalizeSeriesPremiereDate, episodeSource)
         };
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, item.Id);
+        // Core metadata is shared across filter profiles; a known mismatching language skips the enrichment.
+        if (!forceRefresh && requestedSeriesCriteria is not null && session.Find(identity)?.Metadata is { } knownSeries
+            && !OriginalLanguageMatchesFilter(knownSeries.Apply(discovered).OriginalLanguage, requestedSeriesCriteria.OriginalLanguages)) return null;
         var outcome = await session.GetAsync(identity, forceRefresh, async (previous, metadataDue, ratingsDue, token) =>
         {
             var attempt = new ItemEnrichmentAttempt(metadataDue, ratingsDue, previous.Ratings, previous.Metadata,
@@ -339,11 +343,19 @@ public sealed partial class PremiereService
         catch { await ObserveStartedEnrichmentTasksAsync([availabilityTask]); throw; }
     }
 
+    /// <summary>An unknown language never excludes a row; a known one must match a requested language after normalisation.</summary>
+    private static bool OriginalLanguageMatchesFilter(string? language, string[] requested)
+    {
+        if (requested.Length == 0) return true;
+        var normalized = LanguageCodes.Normalize(language);
+        return normalized is null
+            || requested.Any(value => string.Equals(LanguageCodes.Normalize(value), normalized, StringComparison.Ordinal));
+    }
+
     private static bool MovieMatchesKnownCriteria(PremiereItem item, MediaDiscoveryCriteria? criteria)
     {
         if (criteria is null) return true;
-        if (criteria.OriginalLanguages.Length > 0 && !string.IsNullOrWhiteSpace(item.OriginalLanguage)
-            && !criteria.OriginalLanguages.Contains(item.OriginalLanguage, StringComparer.OrdinalIgnoreCase)) return false;
+        if (!OriginalLanguageMatchesFilter(item.OriginalLanguage, criteria.OriginalLanguages)) return false;
         return item.RuntimeMinutes is not > 0 || (item.RuntimeMinutes >= criteria.RuntimeMinMinutes
             && (criteria.RuntimeMaxMinutes >= 360 || item.RuntimeMinutes <= criteria.RuntimeMaxMinutes));
     }

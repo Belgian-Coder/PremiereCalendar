@@ -31,6 +31,24 @@ public sealed class PosterWarmupQueueTests
     }
 
     [Fact]
+    public async Task DefaultQueueRunsTwoWorkersSoOneSlowPosterDoesNotStallTheBatch()
+    {
+        Assert.Equal(2, PosterWarmupQueue.DefaultWorkerCount);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cache = new RecordingImageCache { GateFirstCall = release };
+        await using var provider = CreateProvider(cache);
+        using var queue = CreateQueue(provider, enabled: true, workerCount: PosterWarmupQueue.DefaultWorkerCount);
+
+        queue.Enqueue(["https://image.tmdb.org/a.jpg", "https://image.tmdb.org/b.jpg", "https://image.tmdb.org/c.jpg"]);
+
+        // The first poster is still in flight, yet the others are already being warmed by the second worker.
+        await cache.WaitForCallsAsync(3);
+        release.SetResult();
+        await Task.Delay(50);
+        Assert.Equal(3, cache.Calls.Select(call => call.Url).Distinct().Count());
+    }
+
+    [Fact]
     public async Task Enqueue_DoesNothingWhenTheImageCacheIsDisabled()
     {
         var cache = new RecordingImageCache();
@@ -247,7 +265,8 @@ public sealed class PosterWarmupQueueTests
         int capacity = PosterWarmupQueue.DefaultCapacity,
         TimeSpan? startDelay = null,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        int workerCount = 1)
     {
         return new PosterWarmupQueue(
             provider.GetRequiredService<IServiceScopeFactory>(),
@@ -256,7 +275,8 @@ public sealed class PosterWarmupQueueTests
             capacity,
             startDelay ?? TimeSpan.Zero,
             delay ?? ((_, _) => Task.CompletedTask),
-            time ?? TimeProvider.System);
+            time ?? TimeProvider.System,
+            workerCount);
     }
 
     private static ServiceProvider CreateProvider(RecordingImageCache cache)

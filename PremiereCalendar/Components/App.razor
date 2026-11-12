@@ -35,6 +35,18 @@
             saveCookie(theme);
         })();
     </script>
+    <script>
+        (() => {
+            // Apply the stored card density before first paint so skeleton posters keep their size.
+            let compact = true;
+            try {
+                compact = window.localStorage?.getItem("premiere-calendar:density") !== "comfortable";
+            } catch {
+                compact = true;
+            }
+            document.documentElement.dataset.density = compact ? "compact" : "comfortable";
+        })();
+    </script>
     <ResourcePreloader />
     <link rel="stylesheet" href="@Assets["lib/bootstrap/dist/css/bootstrap.min.css"]" />
     <link rel="stylesheet" href="@Assets["app.css"]" />

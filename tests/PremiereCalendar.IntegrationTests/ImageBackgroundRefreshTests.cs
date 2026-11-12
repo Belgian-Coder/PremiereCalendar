@@ -51,8 +51,8 @@ public sealed class ImageBackgroundRefreshTests : IDisposable
             Assert.Equal(3, requests);
             Assert.False(final.IsStale);
             Assert.Equal(forcedResult.FilePath, final.FilePath);
-            Assert.Equal(new byte[] { 1 }, await File.ReadAllBytesAsync(original.FilePath));
-            Assert.Equal(new byte[] { 3 }, await File.ReadAllBytesAsync(final.FilePath));
+            Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 1 }, await File.ReadAllBytesAsync(original.FilePath));
+            Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 3 }, await File.ReadAllBytesAsync(final.FilePath));
         }
         finally { release.TrySetResult(); }
     }
@@ -128,7 +128,7 @@ public sealed class ImageBackgroundRefreshTests : IDisposable
 
     private static HttpResponseMessage Image(byte[] bytes)
     {
-        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([0xFF, 0xD8, 0xFF, .. bytes]) };
         response.Content.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
         return response;
     }

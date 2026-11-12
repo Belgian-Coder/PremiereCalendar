@@ -22,6 +22,13 @@
 <PageTitle>Settings</PageTitle>
 
 <ToastStack Messages="_toasts" />
+@foreach (var notice in _keyNotices.ToArray())
+{
+    <div class="settings-help update-result failed" role="alert" data-testid="api-key-notice">
+        <span>@notice</span>
+        <button type="button" class="tool-button compact-command" aria-label="Dismiss notice" @onclick="() => DismissKeyNotice(notice)">Dismiss</button>
+    </div>
+}
 
 <div class="settings-shell">
     <header class="calendar-header">
@@ -374,7 +381,7 @@
 
                         <label>
                             <span>API key</span>
-                            <InputText type="password" class="settings-input" aria-label="Sonarr API key" @bind-Value="_settings.Sonarr.ApiKey" />
+                            @SecretInput(SecretField.SonarrApiKey, "Sonarr API key")
                         </label>
 
                         <label>
@@ -495,7 +502,7 @@
 
                         <label>
                             <span>API key</span>
-                            <InputText type="password" class="settings-input" aria-label="Radarr API key" @bind-Value="_settings.Radarr.ApiKey" />
+                            @SecretInput(SecretField.RadarrApiKey, "Radarr API key")
                         </label>
 
                         <label>
@@ -608,7 +615,7 @@
 
                             <label>
                                 <span>TMDb API read access token</span>
-                                <InputText id="tmdb-token" type="password" class="settings-input" aria-label="TMDb API read access token" @bind-Value="_settings.Sources.Tmdb.BearerToken" />
+                                @SecretInput(SecretField.TmdbBearerToken, "TMDb API read access token", "tmdb-token")
                                 <small class="settings-help">Required for live calendar data.</small>
                             </label>
 
@@ -635,7 +642,7 @@
 
                             <label>
                                 <span>Trakt client ID</span>
-                                <InputText type="password" class="settings-input" aria-label="Trakt client ID" @bind-Value="_settings.Sources.Trakt.ClientId" />
+                                @SecretInput(SecretField.TraktClientId, "Trakt client ID")
                                 <small class="settings-help">Only the client ID is needed for the public calendar endpoints.</small>
                             </label>
 
@@ -659,7 +666,7 @@
 
                             <label>
                                 <span>Watchmode API key</span>
-                                <InputText type="password" class="settings-input" aria-label="Watchmode API key" @bind-Value="_settings.Sources.Watchmode.ApiKey" />
+                                @SecretInput(SecretField.WatchmodeApiKey, "Watchmode API key")
                                 <small class="settings-help">Used only as a fallback for streaming availability when TMDb has no provider data.</small>
                             </label>
 
@@ -693,12 +700,12 @@
 
                             <label>
                                 <span>SIMKL client ID</span>
-                                <InputText type="password" class="settings-input" aria-label="SIMKL client ID" @bind-Value="_settings.Sources.Simkl.ClientId" />
+                                @SecretInput(SecretField.SimklClientId, "SIMKL client ID")
                             </label>
 
                             <label>
                                 <span>SIMKL client secret</span>
-                                <InputText type="password" class="settings-input" aria-label="SIMKL client secret" @bind-Value="_settings.Sources.Simkl.ClientSecret" />
+                                @SecretInput(SecretField.SimklClientSecret, "SIMKL client secret")
                             </label>
 
                             <div class="simkl-connect" aria-label="SIMKL connection">
@@ -740,7 +747,7 @@
 
                             <label>
                                 <span>SIMKL access token</span>
-                                <InputText type="password" class="settings-input" aria-label="SIMKL access token" @bind-Value="_settings.Sources.Simkl.AccessToken" />
+                                @SecretInput(SecretField.SimklAccessToken, "SIMKL access token")
                                 <small class="settings-help">Continuous sync remains idle until an OAuth access token is saved.</small>
                             </label>
 
@@ -769,7 +776,7 @@
 
                             <label>
                                 <span>OMDb API key</span>
-                                <InputText type="password" class="settings-input" aria-label="OMDb API key" @bind-Value="_settings.Sources.Omdb.ApiKey" />
+                                @SecretInput(SecretField.OmdbApiKey, "OMDb API key")
                             </label>
                         </section>
 
@@ -793,7 +800,7 @@
 
                             <label>
                                 <span>Fanart.tv API key</span>
-                                <InputText type="password" class="settings-input" aria-label="Fanart.tv API key" @bind-Value="_settings.Sources.Fanart.ApiKey" />
+                                @SecretInput(SecretField.FanartApiKey, "Fanart.tv API key")
                             </label>
 
                             <label class="switch-row">
@@ -803,7 +810,7 @@
 
                             <label>
                                 <span>TheTVDB API key</span>
-                                <InputText type="password" class="settings-input" aria-label="TheTVDB API key" @bind-Value="_settings.Sources.TheTvdb.ApiKey" />
+                                @SecretInput(SecretField.TheTvdbApiKey, "TheTVDB API key")
                             </label>
 
                             <label class="switch-row">

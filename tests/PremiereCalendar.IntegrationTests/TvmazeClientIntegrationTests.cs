@@ -130,19 +130,30 @@ public sealed class TvmazeClientIntegrationTests
     }
 
     [Fact]
-    public async Task GetScheduleAsync_ReturnsEmptyWhenHttpClientTimesOutWithoutCallerCancellation()
+    public async Task GetScheduleAsync_ThrowsWhenHttpClientTimesOutWithoutCallerCancellation()
     {
         var handler = new StubHttpMessageHandler(_ => throw new TaskCanceledException("Simulated HTTP timeout."));
         var client = CreateClient(handler, enabled: true, enableScheduleDiscovery: true);
 
-        var episodes = await client.GetScheduleAsync(
+        await Assert.ThrowsAsync<ExternalApiException>(() => client.GetScheduleAsync(
             new DateOnly(2026, 5, 4),
             "US",
             webSchedule: true,
-            CancellationToken.None);
+            CancellationToken.None));
 
-        Assert.Empty(episodes);
         Assert.Single(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(System.Net.HttpStatusCode.TooManyRequests)]
+    [InlineData(System.Net.HttpStatusCode.ServiceUnavailable)]
+    public async Task GetScheduleAsync_ThrowsOnHttpErrorInsteadOfReturningAnEmptyDay(System.Net.HttpStatusCode status)
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(status));
+        var client = CreateClient(handler, enabled: true, enableScheduleDiscovery: true);
+
+        await Assert.ThrowsAsync<ExternalApiException>(() => client.GetScheduleAsync(
+            new DateOnly(2026, 5, 4), "US", webSchedule: false, CancellationToken.None));
     }
 
     [Fact]

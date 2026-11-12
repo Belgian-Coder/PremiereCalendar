@@ -142,11 +142,11 @@ app.MapGet(
     "/cached-image",
     async Task<IResult> (
         string url,
-        bool? refresh,
         int? w,
         IImageCache imageCache,
         IOptions<ImageCacheOptions> options,
         HttpContext httpContext,
+        ILogger<Program> logger,
         CancellationToken cancellationToken) =>
     {
         if (!options.Value.Enabled)
@@ -156,14 +156,25 @@ app.MapGet(
                 : Results.BadRequest();
         }
 
+        // Image bodies must never be interpreted as anything but an inert image, even if a provider served markup.
+        httpContext.Response.Headers.ContentSecurityPolicy = "default-src 'none'; sandbox";
+        httpContext.Response.Headers.XContentTypeOptions = "nosniff";
+
         try
         {
-            var format = w is > 0
+            var width = CachedImageUrl.SnapWidth(w);
+            var format = width is > 0
                 && httpContext.Request.GetTypedHeaders().Accept?.Any(mediaType =>
                     string.Equals(mediaType.MediaType.Value, "image/webp", StringComparison.OrdinalIgnoreCase)) == true
                     ? ImageCacheFormat.Webp
                     : ImageCacheFormat.Original;
-            var image = await imageCache.GetOrAddAsync(url, refresh == true, cancellationToken, w, format);
+            // Forced refresh is internal-only (background refresh queue); it is not reachable from the public query string.
+            var image = await imageCache.GetOrAddAsync(url, false, cancellationToken, width, format);
+            if (!CachedImageUrl.TryGetRasterContentType(image.ContentType, out var contentType))
+            {
+                return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
+            }
+
             var maxAgeSeconds = Math.Max(60, Convert.ToInt32(image.BrowserMaxAge.TotalSeconds));
             var entityTag = $"\"{image.ContentHash ?? image.CacheKey}\"";
 
@@ -185,7 +196,7 @@ app.MapGet(
                     FileShare.Read | FileShare.Delete,
                     81920,
                     FileOptions.Asynchronous | FileOptions.SequentialScan),
-                image.ContentType,
+                contentType,
                 lastModified: image.LastModifiedUtc,
                 entityTag: new Microsoft.Net.Http.Headers.EntityTagHeaderValue(entityTag),
                 enableRangeProcessing: true);
@@ -204,7 +215,16 @@ app.MapGet(
             httpContext.Response.Headers.CacheControl = "no-store";
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
-    });
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Keep unexpected failures empty-bodied and header-protected instead of falling into the HTML error page.
+            logger.LogError(ex, "Unexpected failure while serving a cached image.");
+            httpContext.Response.Headers.CacheControl = "no-store";
+            return Results.StatusCode(StatusCodes.Status500InternalServerError);
+        }
+    })
+    // Failed image requests must stay empty-bodied instead of re-executing the HTML not-found page.
+    .WithMetadata(new SkipStatusCodePagesMetadata());
 
 try
 {
@@ -229,3 +249,7 @@ static bool RequestHasMatchingEntityTag(HttpContext httpContext, string entityTa
 }
 
 public partial class Program;
+
+/// <summary>Marks an endpoint whose error responses must not be re-executed as HTML status pages.</summary>
+internal sealed class SkipStatusCodePagesMetadata : Microsoft.AspNetCore.Http.Metadata.ISkipStatusCodePagesMetadata;
+

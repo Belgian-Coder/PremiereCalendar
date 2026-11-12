@@ -31,19 +31,57 @@
     return false;
   }
 
+  let cancelPendingFocus = null;
+
+  // A next-frame attempt, then retries for up to ~500 ms (the panel is server-rendered, so on a slow
+  // link it can appear late). Any user focus, pointer or keyboard activity cancels the rest.
   function focusPaletteItem() {
-    const focus = () => {
+    cancelPendingFocus?.();
+
+    const userEvents = ["focusin", "pointerdown", "keydown"];
+    let frame = 0;
+    const timers = [];
+    const cancel = () => {
+      cancelAnimationFrame(frame);
+      timers.forEach((timer) => window.clearTimeout(timer));
+      for (const name of userEvents) {
+        document.removeEventListener(name, cancel, true);
+      }
+
+      if (cancelPendingFocus === cancel) {
+        cancelPendingFocus = null;
+      }
+    };
+    const attempt = () => {
       const panel = document.querySelector(panelSelector);
       const item = panel?.querySelector(paletteItemSelector);
       if (item instanceof HTMLElement) {
         item.focus({ preventScroll: true });
+        return true;
       }
+
+      return false;
     };
 
-    requestAnimationFrame(() => requestAnimationFrame(focus));
-    window.setTimeout(focus, 80);
-    window.setTimeout(focus, 200);
-    window.setTimeout(focus, 500);
+    cancelPendingFocus = cancel;
+    for (const name of userEvents) {
+      document.addEventListener(name, cancel, true);
+    }
+
+    frame = requestAnimationFrame(() => {
+      if (attempt()) {
+        cancel();
+        return;
+      }
+
+      for (const delay of [80, 200, 500]) {
+        timers.push(window.setTimeout(() => {
+          if (attempt() || delay === 500) {
+            cancel();
+          }
+        }, delay));
+      }
+    });
   }
 
   function closePalette() {

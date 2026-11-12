@@ -24,7 +24,7 @@
 
 <PageTitle>@PageTitleText()</PageTitle>
 
-<ToastStack Messages="_toasts" />
+<ToastStack Messages="_toasts" OnDismiss="DismissToast" />
 
 <div class="calendar-shell">
     @{
@@ -45,31 +45,9 @@
             }
             <span class="command-week-range" data-testid="week-range">@CompactWeekRangeText()</span>
             <span class="calendar-result-count">@VisibleResultCountText()</span>
-            <span class="visually-hidden" role="status" aria-live="polite" data-testid="loading-announcement">@(_isLoading && !hasVisibleItemsForCurrentWeek ? "Loading premieres for the selected week…" : "")</span>
-            @if (_isLoading && hasVisibleItemsForCurrentWeek)
-            {
-                <span class="calendar-refresh-status" data-testid="refreshing" aria-live="polite">
-                    @(_isRefreshingStaleCache
-                        ? "Cached results shown · checking for updates…"
-                        : "Updating visible premieres…")
-                </span>
-            }
-            @if (_isEnriching)
-            {
-                <span class="calendar-refresh-status" data-testid="calendar-enrichment" role="status" aria-live="polite">
-                    Calendar ready · Updating details
-                </span>
-            }
-
+            @* The one concise live region: it only changes on stage changes, never on progress ticks. *@
+            <span class="visually-hidden" role="status" aria-live="polite" data-testid="loading-announcement">@LoadingAnnouncementText(hasVisibleItemsForCurrentWeek)</span>
         </div>
-
-        @if (_unavailableSources.Count > 0)
-        {
-            <div class="alert alert-warning" role="status" data-testid="source-coverage-warning">
-                @string.Join(", ", _unavailableSources.Select(source => source.DisplayName).Distinct()) temporarily unavailable.
-                Results may be incomplete. Next check after @_unavailableSources.Min(source => source.RetryAtUtc).ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture).
-            </div>
-        }
 
         <div class="calendar-command-actions" aria-label="Calendar controls">
             <div class="button-group command-week-nav" role="group" aria-label="Week navigation">
@@ -163,7 +141,7 @@
 
         @if (ShouldShowQueryProgress())
         {
-            <section class="@QueryProgressPanelClass()" data-testid="query-progress" aria-live="polite">
+            <section class="@QueryProgressPanelClass()" data-testid="query-progress">
                 <div class="query-progress-heading">
                     <div class="query-progress-summary">
                         <span>Sources</span>
@@ -244,23 +222,57 @@
             </section>
         }
 
-        @if (visibleCacheFreshness.Count > 0 || ShouldShowVisitChangeSummary())
+        @* Always rendered with a reserved height so late status items never move the board. *@
+        <div class="calendar-status-row" data-testid="calendar-status-row">
+            @if (_isLoading && hasVisibleItemsForCurrentWeek)
+            {
+                <span class="calendar-refresh-status" data-testid="refreshing">
+                    @(_isRefreshingStaleCache
+                        ? "Cached results shown · checking for updates…"
+                        : "Updating visible premieres…")
+                </span>
+            }
+            @if (_isEnriching)
+            {
+                <span class="calendar-refresh-status" data-testid="calendar-enrichment">
+                    Calendar ready · Updating details
+                </span>
+            }
+            @if (visibleCacheFreshness.Count > 0 || ShouldShowVisitChangeSummary())
+            {
+                <section class="@DataFreshnessCardClass(visibleCacheFreshness)" data-testid="data-freshness-card" aria-label="Visible week data freshness">
+                    @foreach (var entry in visibleCacheFreshness)
+                    {
+                        <span class="@CacheFreshnessClass(entry)">
+                            <strong>@entry.Label cache</strong>
+                            <span>@CacheFreshnessText(entry)</span>
+                        </span>
+                    }
+                    @if (ShouldShowVisitChangeSummary())
+                    {
+                        <span class="visit-change-pill" data-testid="visit-change-summary">
+                            @VisitChangeText()
+                        </span>
+                    }
+                </section>
+            }
+            @if (_unavailableSources.Count > 0)
+            {
+                <button type="button"
+                        class="calendar-status-warning"
+                        data-testid="source-coverage-warning"
+                        title="@SourceWarningText()"
+                        aria-expanded="@AriaExpanded(_isSourceWarningExpanded)"
+                        aria-controls="source-coverage-detail"
+                        @onclick="ToggleSourceWarning">
+                    @SourceWarningText()
+                </button>
+            }
+        </div>
+        @if (_unavailableSources.Count > 0 && _isSourceWarningExpanded)
         {
-            <section class="@DataFreshnessCardClass(visibleCacheFreshness)" data-testid="data-freshness-card" aria-label="Visible week data freshness">
-                @foreach (var entry in visibleCacheFreshness)
-                {
-                    <span class="@CacheFreshnessClass(entry)">
-                        <strong>@entry.Label cache</strong>
-                        <span>@CacheFreshnessText(entry)</span>
-                    </span>
-                }
-                @if (ShouldShowVisitChangeSummary())
-                {
-                    <span class="visit-change-pill" data-testid="visit-change-summary">
-                        @VisitChangeText()
-                    </span>
-                }
-            </section>
+            @* Opened by the user only, so it never moves the board on its own. *@
+            <p class="calendar-status-warning-detail" id="source-coverage-detail" data-testid="source-coverage-detail">@SourceWarningText()</p>
         }
     </header>
 
@@ -297,7 +309,6 @@
                       SortDirection="_filters.SortDirection"
                       PreserveItemOrder="_preserveStreamedItemOrder"
                       ImageCacheVersion="@_imageCacheVersion"
-                      RefreshImageCache="_refreshImageCache"
                       OnOpenFilters="OpenFilters"
                       ActiveFilterCount="@activeFilterCount"
                       SelectedDay="_selectedDay"
@@ -306,6 +317,7 @@
                       IntegrationSettings="_integrationSettings"
                       OnAddToArr="AddToArrAsync"
                       IsArrActionBusy="_arrAddInProgress.Count > 0"
-                      IsUpdating="_isLoading" />
+                      IsUpdating="_isLoading"
+                      IsEnriching="_isEnriching" />
     }
 </div>

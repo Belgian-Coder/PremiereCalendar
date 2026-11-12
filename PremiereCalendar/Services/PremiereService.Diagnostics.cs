@@ -22,10 +22,12 @@ public sealed partial class PremiereService
         DateOnly? premiereDateOverride = null, PremiereItemType? itemTypeOverride = null,
         string? episodeTitle = null, int? seasonNumber = null, int? episodeNumber = null,
         string? episodeSource = null, bool allowWatchmodeAvailabilityFallback = true,
-        DateOnly? requestedStart = null, DateOnly? requestedEnd = null, bool canonicalizeSeriesPremiereDate = false)
+        DateOnly? requestedStart = null, DateOnly? requestedEnd = null, bool canonicalizeSeriesPremiereDate = false,
+        MediaDiscoveryCriteria? requestedSeriesCriteria = null)
         => TraceItemEnrichmentAsync("series", item.Id, () => MapSeriesCoreAsync(item, cancellationToken,
             forceRefresh, cachedEnrichment, premiereDateOverride, itemTypeOverride, episodeTitle, seasonNumber,
-            episodeNumber, episodeSource, allowWatchmodeAvailabilityFallback, requestedStart, requestedEnd, canonicalizeSeriesPremiereDate));
+            episodeNumber, episodeSource, allowWatchmodeAvailabilityFallback, requestedStart, requestedEnd, canonicalizeSeriesPremiereDate,
+            requestedSeriesCriteria));
 
     private async Task<PremiereItem?> TraceItemEnrichmentAsync(string media, int id, Func<Task<PremiereItem?>> operation)
     {
@@ -147,7 +149,7 @@ public sealed partial class PremiereService
                     if (update.IsFinal)
                     {
                         outcome = update.HasSourceErrors ? "partial" : "complete";
-                        if (update.HasSourceErrors) reason = update.FailedSourceNames.Contains("Item cache validation", StringComparer.OrdinalIgnoreCase)
+                        if (update.HasSourceErrors) reason = update.FailedSourceNames.Contains(PremiereLoadProgress.ItemCacheValidationSourceName, StringComparer.OrdinalIgnoreCase)
                             ? "item_cache_validation" : "source_failure";
                     }
                     yield return update;

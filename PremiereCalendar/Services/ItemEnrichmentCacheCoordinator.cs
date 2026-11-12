@@ -676,6 +676,61 @@ public sealed class ItemEnrichmentCacheCoordinator
             owner._logger.LogWarning(exception, "Item enrichment storage unavailable; preserving cached rows and deferring provider enrichment.");
         }
 
+        // A storage failure is a timed backoff, not a permanent verdict. Once the retry time has passed, the reads that
+        // failed are repeated into a side dictionary; the session state is only swapped on success. Until then (and on
+        // failure or cancellation) the unavailable flag and the existing rows stay exactly as they were, and callers
+        // keep failing fast.
+        private readonly SemaphoreSlim _recoveryGate = new(1, 1);
+
+        private async Task TryRecoverStorageAsync(CancellationToken cancellationToken)
+        {
+            // One recovery at a time; concurrent callers simply keep failing fast.
+            if (!await _recoveryGate.WaitAsync(0, CancellationToken.None)) return;
+            try
+            {
+                if (!_storageUnavailable || Now < (_storageRetryAtUtc ?? Now.AddSeconds(5))) return;
+                var unreserved = _records.Where(pair => pair.Value.Record.Generation < 0).Select(pair => pair.Key).ToArray();
+                var recovered = new Dictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>();
+                if (unreserved.Length > 0)
+                {
+                    try
+                    {
+                        if (Now.UtcTicks < Volatile.Read(ref owner._storeRetryAfterTicks)) return;
+                        foreach (var batch in unreserved.Chunk(250))
+                            foreach (var pair in await owner._store.ReadManyAsync(partition, batch, true, cancellationToken))
+                                recovered[pair.Key] = pair.Value;
+                    }
+                    catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        DeferStorage(ex);
+                        return;
+                    }
+                }
+
+                await _prepareGate.WaitAsync(cancellationToken);
+                try
+                {
+                    var complete = true;
+                    foreach (var identity in unreserved)
+                    {
+                        if (!recovered.TryGetValue(identity, out var record) || record.Generation < 0
+                            || !_records.TryGetValue(identity, out var current) || current.Record.Generation >= 0)
+                        {
+                            complete &= _records.TryGetValue(identity, out var existing) && existing.Record.Generation >= 0;
+                            continue;
+                        }
+                        RememberAcceptedTomatoes(record);
+                        _records[identity] = new ItemEnrichmentSnapshot(record, Deserialize<ItemEnrichmentMetadata>(record.MetadataJson),
+                            Deserialize<ItemEnrichmentRatings>(record.RatingsJson));
+                    }
+                    if (complete) _storageUnavailable = false;
+                    else _storageRetryAtUtc = Now.AddSeconds(5);
+                }
+                finally { _prepareGate.Release(); }
+            }
+            finally { _recoveryGate.Release(); }
+        }
+
         public async Task<ItemEnrichmentSnapshot> GetAsync(ItemEnrichmentIdentity identity, bool forceRefresh,
             Func<ItemEnrichmentSnapshot, bool, bool, CancellationToken, Task<ItemEnrichmentRefresh>> refresh,
             CancellationToken cancellationToken, bool ratingsOnly = false, PremiereItem? ratingsInputs = null, bool requireDataset = false, bool metadataOnly = false,
@@ -683,7 +738,13 @@ public sealed class ItemEnrichmentCacheCoordinator
         {
             var decisionStarted = Stopwatch.GetTimestamp();
             if (_storageUnavailable)
-                throw new ProviderRetryAfterException("item_cache", _storageRetryAtUtc ?? Now.AddSeconds(5));
+                await TryRecoverStorageAsync(cancellationToken);
+            if (_storageUnavailable)
+            {
+                // A retry time that has already passed means a recovery is in flight: ask callers to come back shortly.
+                var retryAt = _storageRetryAtUtc is { } known && known > Now ? known : Now.AddSeconds(2);
+                throw new ProviderRetryAfterException("item_cache", retryAt);
+            }
             if (!ratingsOnly && ratingsInputs is not null) ObserveTmdbVotes(identity, ratingsInputs);
             bool CanReuseCompleted(ItemEnrichmentSnapshot snapshot) => metadataOnly ? owner.MetadataFresh(snapshot)
                 : (ratingsOnly || snapshot.Metadata?.CoreMetadataOnly != true && !MetadataRefreshNeeded(identity))
@@ -1297,7 +1358,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                 foreignView is not null && foreignView.TryGetValue(identity, out var foreign) ? foreign : Find(identity);
             var started = Stopwatch.GetTimestamp();
             if (_storageUnavailable)
-                return new(items, items.Select(item => item.MediaType).Concat(_discoveryChanged.Keys).ToHashSet());
+                return new(items, items.Select(item => item.MediaType).Concat(_discoveryChanged.Keys).ToHashSet(), Validated: false);
             var itemIdentities = items.Where(item => item.TmdbId > 0 && item.VerificationState == PremiereVerificationState.Verified)
                 .Select(item => new ItemEnrichmentIdentity(item.MediaType, item.TmdbId));
             var identities = (includeConsumed ? itemIdentities.Concat(_records.Keys) : itemIdentities).Distinct().ToArray();
@@ -1394,7 +1455,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                 owner._logger.LogWarning(ex, "Could not validate item enrichment revisions; calendar results remain provisional.");
                 owner._telemetry.RecordDiagnostic("item_cache.reconcile", details: new() { Count = items.Count, Total = identities.Length,
                     Outcome = "failed", DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds });
-                return new(items, identities.Select(identity => identity.MediaType).ToHashSet());
+                return new(items, identities.Select(identity => identity.MediaType).ToHashSet(), Validated: false);
             }
         }
 
@@ -1531,4 +1592,5 @@ internal sealed record FirstEpisodeValidation(DateOnly? Date, bool Successful)
 }
 internal sealed class ItemEnrichmentInvalidatedException() : Exception(
     "Item metadata changed while enrichment was running. The source remains partial and will be retried.");
-internal sealed record ItemEnrichmentReconciliation(IReadOnlyList<PremiereItem> Items, IReadOnlySet<PremiereMediaType> DirtyMedia);
+/// <param name="Validated">False when the validation read could not run; DirtyMedia is then a conservative placeholder, not evidence.</param>
+internal sealed record ItemEnrichmentReconciliation(IReadOnlyList<PremiereItem> Items, IReadOnlySet<PremiereMediaType> DirtyMedia, bool Validated = true);

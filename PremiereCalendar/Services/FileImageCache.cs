@@ -334,7 +334,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             var value = JsonSerializer.Deserialize<ImageCacheMetadata>(stream, JsonOptions);
             if (value is null
                 || string.IsNullOrWhiteSpace(value.ContentType)
-                || !value.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                || !IsCacheableRasterContentType(value.ContentType)
                 || value.FetchedUtc == default)
             {
                 return false;
@@ -380,18 +380,8 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
                     _options.MaxConcurrentDownloads,
                     cancellationToken);
                 using (lease)
-                using (var request = new HttpRequestMessage(HttpMethod.Get, sourceUri))
                 {
-                    if (format == ImageCacheFormat.Webp)
-                    {
-                        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/webp"));
-                    }
-                    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
-
-                    using var response = await _httpClient.SendAsync(
-                        request,
-                        HttpCompletionOption.ResponseHeadersRead,
-                        cancellationToken);
+                    using var response = await SendImageRequestAsync(sourceUri, format, cancellationToken);
 
                     if (!response.IsSuccessStatusCode)
                     {
@@ -433,8 +423,12 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
                     }
                     else
                     {
-                        cachedContentType = await WriteLimitedContentAsync(response.Content, response, stagedBodyPath, cancellationToken) ?? contentType;
+                        await WriteLimitedContentAsync(response.Content, response, stagedBodyPath, cancellationToken);
                         lease.Dispose();
+                        // Verbatim bytes are only ever stored (and later served from this origin) when they are
+                        // a real raster image; the upstream header alone is not trusted.
+                        cachedContentType = await SniffRasterContentTypeAsync(stagedBodyPath, cancellationToken)
+                            ?? throw new ExternalApiException("Image response is not a supported raster image (jpeg, png, gif, webp or avif).");
                     }
 
                     var fetchedUtc = DateTimeOffset.UtcNow;
@@ -451,6 +445,107 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             throw;
         }
     }
+
+    private const int MaxImageRedirects = 3;
+
+    private async Task<HttpResponseMessage> SendImageRequestAsync(
+        Uri sourceUri, ImageCacheFormat format, CancellationToken cancellationToken)
+    {
+        var current = sourceUri;
+        for (var hop = 0; ; hop++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, current);
+            if (format == ImageCacheFormat.Webp)
+            {
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/webp"));
+            }
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
+
+            var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+            try
+            {
+                // Covers a handler that already followed redirects: where the request ended must still be allowed.
+                var finalUri = response.RequestMessage?.RequestUri ?? current;
+                if (!ImageSourceUrlPolicy.TryCreateAllowedUri(finalUri.AbsoluteUri, _options.AllowedHosts, out _))
+                {
+                    throw new ExternalApiException("Image fetch was redirected outside the allowed image hosts.");
+                }
+
+                if (response.StatusCode is System.Net.HttpStatusCode.MovedPermanently
+                    or System.Net.HttpStatusCode.Found
+                    or System.Net.HttpStatusCode.SeeOther
+                    or System.Net.HttpStatusCode.TemporaryRedirect
+                    or System.Net.HttpStatusCode.PermanentRedirect
+                    && response.Headers.Location is { } location)
+                {
+                    if (hop >= MaxImageRedirects)
+                    {
+                        throw new ExternalApiException("Image fetch followed too many redirects.");
+                    }
+
+                    var next = location.IsAbsoluteUri ? location : new Uri(finalUri, location);
+                    if (!ImageSourceUrlPolicy.TryCreateAllowedUri(next.AbsoluteUri, _options.AllowedHosts, out var allowed))
+                    {
+                        throw new ExternalApiException("Image fetch was redirected outside the allowed image hosts.");
+                    }
+
+                    current = allowed;
+                    response.Dispose();
+                    continue;
+                }
+
+                return response;
+            }
+            catch
+            {
+                response.Dispose();
+                throw;
+            }
+        }
+    }
+
+    private static async Task<string?> SniffRasterContentTypeAsync(string path, CancellationToken cancellationToken)
+    {
+        var header = new byte[64];
+        int read;
+        await using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+            StreamBufferSize, FileOptions.Asynchronous))
+        {
+            read = await stream.ReadAtLeastAsync(header, header.Length, throwOnEndOfStream: false, cancellationToken);
+        }
+
+        return SniffRasterContentType(header.AsSpan(0, read));
+    }
+
+    internal static string? SniffRasterContentType(ReadOnlySpan<byte> header)
+    {
+        if (header.Length >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF) return "image/jpeg";
+        if (header.Length >= 8 && header[..8].SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A })) return "image/png";
+        if (header.Length >= 6 && (header[..6].SequenceEqual("GIF87a"u8) || header[..6].SequenceEqual("GIF89a"u8))) return "image/gif";
+        if (header.Length >= 12 && header[..4].SequenceEqual("RIFF"u8) && header[8..12].SequenceEqual("WEBP"u8)) return "image/webp";
+        if (header.Length >= 12 && header[4..8].SequenceEqual("ftyp"u8) && IsAvifBrandSet(header)) return "image/avif";
+        return null;
+    }
+
+    // The major brand (or a compatible brand) must be avif/avis. A bare mif1 is also what HEIC files declare.
+    private static bool IsAvifBrandSet(ReadOnlySpan<byte> header)
+    {
+        if (header[8..12].SequenceEqual("avif"u8) || header[8..12].SequenceEqual("avis"u8)) return true;
+        if (!header[8..12].SequenceEqual("mif1"u8)) return false;
+        // Skip the minor version (4 bytes); the rest of the box lists compatible brands, 4 bytes each.
+        var boxEnd = Math.Min(header.Length, (int)Math.Min(int.MaxValue, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(header[..4])));
+        for (var offset = 16; offset + 4 <= boxEnd; offset += 4)
+        {
+            if (header[offset..(offset + 4)].SequenceEqual("avif"u8) || header[offset..(offset + 4)].SequenceEqual("avis"u8)) return true;
+        }
+        return false;
+    }
+
+    private static bool IsCacheableRasterContentType(string contentType) =>
+        contentType.Trim().ToLowerInvariant() is "image/jpeg" or "image/png" or "image/gif" or "image/webp" or "image/avif";
 
     private async Task<string?> WriteLimitedContentAsync(
         HttpContent content,
@@ -507,6 +602,10 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             await WriteLimitedResponseContentToFileAsync(content, tempSourcePath, maxBytes, cancellationToken);
             response.Dispose();
             downloadLease.Dispose();
+            // The allow-list is decided on the bytes before any decoder (or the upstream header) is trusted. AVIF passes it
+            // but ImageMagick's policy has no AVIF coder, so an AVIF can only be stored verbatim (no width), never resized.
+            var sniffedContentType = await SniffRasterContentTypeAsync(tempSourcePath, cancellationToken)
+                ?? throw new ExternalApiException("Image response is not a supported raster image (jpeg, png, gif, webp or avif).");
 
             using (await _decodeLimiter.AcquireDecodeAsync(cancellationToken))
             {
@@ -517,7 +616,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 
                     var maxDecodedPixels = Math.Max(1, _options.MaxDecodedPixels);
                     var isApng = ApngValidator.ValidateIfAnimated(tempSourcePath, maxDecodedPixels, cancellationToken);
-                    var sourceFormatHint = GetSourceFormatHint(sourceContentType, sourcePath, tempSourcePath);
+                    var sourceFormatHint = GetSourceFormatHint(sniffedContentType);
                     var (metadataFrames, usedFormatHint) = PingImageMetadata(tempSourcePath, sourceFormatHint);
                     using (metadataFrames)
                     {
@@ -542,6 +641,17 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 
                         ValidateDecodedPixelBudget(metadataFrames, maxDecodedPixels);
                         var frameCount = metadataFrames.Count;
+
+                        // Already at or below the requested width: keep the verified original bytes and their real
+                        // type instead of a lossy decode and re-encode.
+                        if (sourceFormat is MagickFormat.Jpeg or MagickFormat.Png or MagickFormat.Gif or MagickFormat.WebP
+                            && metadataFrames.All(frame => frame.Width <= (uint)targetWidth)
+                            && await SniffRasterContentTypeAsync(tempSourcePath, cancellationToken) is { } passThroughType)
+                        {
+                            File.Copy(tempSourcePath, tempImagePath, overwrite: true);
+                            ReplaceAtomically(tempImagePath, filePath);
+                            return passThroughType;
+                        }
 
                         using var images = new MagickImageCollection();
                         await using (var sourceStream = OpenImageReader(tempSourcePath))
@@ -668,47 +778,21 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
 
     private static bool IsAllowedRasterFormat(MagickFormat format)
     {
-        return format is MagickFormat.Bmp
-            or MagickFormat.Gif
-            or MagickFormat.Ico
+        return format is MagickFormat.Gif
             or MagickFormat.Jpeg
-            or MagickFormat.Pbm
-            or MagickFormat.Pgm
-            or MagickFormat.Pnm
             or MagickFormat.Png
-            or MagickFormat.Ppm
-            or MagickFormat.Qoi
-            or MagickFormat.Tga
-            or MagickFormat.Tif
-            or MagickFormat.Tiff
             or MagickFormat.WebP;
     }
 
-    private static MagickFormat? GetSourceFormatHint(string? contentType, string sourcePath, string stagedSourcePath)
+    // The decoder is chosen from the verified magic bytes only, never from the upstream content type or the URL extension.
+    private static MagickFormat? GetSourceFormatHint(string sniffedContentType) => sniffedContentType switch
     {
-        var mediaType = contentType?.Trim().ToLowerInvariant();
-        var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
-        if (mediaType is "image/x-tga" or "image/tga" || extension == ".tga")
-        {
-            return MagickFormat.Tga;
-        }
-
-        if (mediaType is "image/x-icon" or "image/vnd.microsoft.icon" or "image/ico" || extension is ".ico" or ".cur")
-        {
-            Span<byte> header = stackalloc byte[4];
-            using var stream = new FileStream(stagedSourcePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            if (stream.Read(header) == header.Length
-                && header[0] == 0
-                && header[1] == 0
-                && header[2] is 1 or 2
-                && header[3] == 0)
-            {
-                return MagickFormat.Ico;
-            }
-        }
-
-        return null;
-    }
+        "image/jpeg" => MagickFormat.Jpeg,
+        "image/png" => MagickFormat.Png,
+        "image/gif" => MagickFormat.Gif,
+        "image/webp" => MagickFormat.WebP,
+        _ => null
+    };
 
     private static (MagickImageCollection Frames, bool UsedFormatHint) PingImageMetadata(
         string path,

@@ -108,8 +108,149 @@ public sealed class CachedImageEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal($"\"{firstGeneration.ContentHash}\"", response.Headers.ETag?.Tag);
         Assert.Equal(firstGeneration.ContentHash, contentHash);
-        Assert.Equal(new byte[] { 1, 2, 3 }, body);
+        Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 1 }, body);
         Assert.True(File.Exists(firstGeneration.FilePath));
+    }
+
+    private const string ImageRequest = "/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg";
+
+    private async Task<CachedImage> WriteImageAsync(string contentType, string name = "image.bin")
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, name);
+        await File.WriteAllBytesAsync(path, [1, 2, 3, 4]);
+        return new CachedImage(path, contentType, DateTimeOffset.UtcNow, "key", TimeSpan.FromMinutes(5), new string('b', 64));
+    }
+
+    [Fact]
+    public async Task CachedImageEndpoint_SendsLockdownHeadersAndRasterContentType()
+    {
+        var image = await WriteImageAsync("IMAGE/JPEG; charset=binary");
+        using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync(ImageRequest);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("image/jpeg", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("default-src 'none'; sandbox", Assert.Single(response.Headers.GetValues("Content-Security-Policy")));
+        Assert.Equal("nosniff", Assert.Single(response.Headers.GetValues("X-Content-Type-Options")));
+    }
+
+    [Theory]
+    [InlineData("text/html")]
+    [InlineData("image/svg+xml")]
+    [InlineData("application/octet-stream")]
+    [InlineData("")]
+    public async Task CachedImageEndpoint_RejectsNonRasterContentTypeWithoutBody(string contentType)
+    {
+        var image = await WriteImageAsync(contentType);
+        using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync(ImageRequest);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Theory]
+    [InlineData("image/jpeg")]
+    [InlineData("image/png")]
+    [InlineData("image/gif")]
+    [InlineData("image/webp")]
+    [InlineData("image/avif")]
+    public async Task CachedImageEndpoint_ServesEveryAllowedRasterType(string contentType)
+    {
+        var image = await WriteImageAsync(contentType);
+        using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync(ImageRequest);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(contentType, response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.BadRequest)]
+    [InlineData(HttpStatusCode.NotFound)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task CachedImageEndpoint_FailuresAreEmptyBodiedInsteadOfHtmlStatusPages(HttpStatusCode expected)
+    {
+        Exception failure = expected switch
+        {
+            HttpStatusCode.BadRequest => new ArgumentException("bad url"),
+            HttpStatusCode.NotFound => new ExternalApiException("invalid image response"),
+            _ => new HttpRequestException("upstream unavailable")
+        };
+        using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromException<CachedImage>(failure)));
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync(ImageRequest);
+
+        Assert.Equal(expected, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task CachedImageEndpoint_UnexpectedFailureIsEmptyBodied500WithLockdownHeaders()
+    {
+        using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) =>
+            Task.FromException<CachedImage>(new InvalidOperationException("boom"))));
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync(ImageRequest);
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("default-src 'none'; sandbox", Assert.Single(response.Headers.GetValues("Content-Security-Policy")));
+        Assert.Equal("nosniff", Assert.Single(response.Headers.GetValues("X-Content-Type-Options")));
+        Assert.True(response.Headers.CacheControl?.NoStore);
+    }
+
+    [Fact]
+    public async Task CachedImageEndpoint_IgnoresPublicRefreshParameter()
+    {
+        var image = await WriteImageAsync("image/jpeg");
+        var forceRefreshValues = new List<bool>();
+        using var factory = CreateFactory(new StubImageCache((_, forceRefresh, _, _, _) =>
+        {
+            forceRefreshValues.Add(forceRefresh);
+            return Task.FromResult(image);
+        }));
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync($"{ImageRequest}&refresh=true");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal([false], forceRefreshValues);
+    }
+
+    [Theory]
+    [InlineData("&w=185", 185)]
+    [InlineData("&w=64", 185)]
+    [InlineData("&w=640", 185)]
+    [InlineData("&w=300", 185)]
+    [InlineData("&w=100000", 185)]
+    [InlineData("&w=0", null)]
+    [InlineData("&w=-7", null)]
+    [InlineData("", null)]
+    public async Task CachedImageEndpoint_SnapsWidthToAllowedVariants(string query, int? expectedWidth)
+    {
+        var image = await WriteImageAsync("image/jpeg");
+        int? seenWidth = -1;
+        using var factory = CreateFactory(new StubImageCache((_, _, _, width, _) =>
+        {
+            seenWidth = width;
+            return Task.FromResult(image);
+        }));
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync(ImageRequest + query);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(expectedWidth, seenWidth);
     }
 
     private WebApplicationFactory<Program> CreateFactory(IImageCache imageCache)
@@ -181,7 +322,7 @@ public sealed class CachedImageEndpointTests : IDisposable
             var version = Interlocked.Increment(ref _version);
             var response = new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new ByteArrayContent([(byte)version, 2, 3])
+                Content = new ByteArrayContent([0xFF, 0xD8, 0xFF, (byte)version])
             };
             response.Content.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
             return Task.FromResult(response);

@@ -80,7 +80,8 @@ public sealed class TvmazeScheduleDiscoveryProvider :
 
         var concurrency = Math.Clamp(_options.ScheduleFetchConcurrency, 1, Math.Max(1, requests.Count));
         var nextRequestIndex = 0;
-        var active = new List<Task<IReadOnlyList<ExternalPremiereCandidate>>>();
+        var active = new List<Task<ScheduleCandidateResult>>();
+        var failures = new List<Exception>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var emitted = false;
 
@@ -101,7 +102,15 @@ public sealed class TvmazeScheduleDiscoveryProvider :
             active.Remove(completed);
             StartPending();
 
-            var candidates = (await completed)
+            var scheduleResult = await completed;
+            if (scheduleResult.Error is { } scheduleError)
+            {
+                // Keep the days that succeeded, but never let a failed day look like a day without premieres.
+                failures.Add(scheduleError);
+                continue;
+            }
+
+            var candidates = scheduleResult.Candidates
                 .Where(candidate => seen.Add(CandidateKey(candidate)))
                 .ToArray();
 
@@ -114,13 +123,41 @@ public sealed class TvmazeScheduleDiscoveryProvider :
             yield return candidates;
         }
 
+        if (failures.Count > 0) throw CombineFailures(failures);
+
         if (!emitted)
         {
             yield return [];
         }
     }
 
-    private async Task<IReadOnlyList<ExternalPremiereCandidate>> GetScheduleCandidatesAsync(
+    // One failure carrying the latest retry deadline: the source is deferred until every throttled request may be retried.
+    private static Exception CombineFailures(IReadOnlyList<Exception> failures)
+    {
+        var deadlines = failures.Select(RetryDeadlineOf).Where(deadline => deadline is not null).Select(deadline => deadline!.Value).ToArray();
+        if (deadlines.Length > 0)
+        {
+            return new ExternalApiException(
+                $"{failures.Count} TVmaze schedule request(s) failed.",
+                new ProviderRetryAfterException("tvmaze", deadlines.Max()));
+        }
+
+        return failures.Count == 1 ? failures[0] : new AggregateException("One or more TVmaze schedule requests failed.", failures);
+    }
+
+    private static DateTimeOffset? RetryDeadlineOf(Exception? error)
+    {
+        if (error is ProviderRetryAfterException throttled) return throttled.RetryAtUtc;
+        if (error is ProviderCircuitOpenException circuit) return circuit.RetryAtUtc;
+        if (error is ProviderRequestException request && request.Failure.RetryAtUtc is { } retryAt) return retryAt;
+        if (error is AggregateException aggregate)
+            return aggregate.InnerExceptions.Select(RetryDeadlineOf).Where(value => value is not null).Max();
+        return error?.InnerException is { } inner ? RetryDeadlineOf(inner) : null;
+    }
+
+    private sealed record ScheduleCandidateResult(IReadOnlyList<ExternalPremiereCandidate> Candidates, Exception? Error);
+
+    private async Task<ScheduleCandidateResult> GetScheduleCandidatesAsync(
         TvmazeScheduleRequest request,
         CancellationToken cancellationToken,
         bool forceRefresh)
@@ -137,18 +174,19 @@ public sealed class TvmazeScheduleDiscoveryProvider :
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return [];
+            return new([], new ExternalApiException("TVmaze schedule request timed out.",
+                new ProviderRetryAfterException("tvmaze", DateTimeOffset.UtcNow.AddSeconds(60))));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return [];
+            return new([], ex);
         }
 
-        return schedule
+        return new(schedule
             .Select(ToCandidate)
             .Where(candidate => candidate is not null)
             .Select(candidate => candidate!)
-            .ToArray();
+            .ToArray(), null);
     }
 
     private static ExternalPremiereCandidate? ToCandidate(TvmazeScheduleEpisode episode)

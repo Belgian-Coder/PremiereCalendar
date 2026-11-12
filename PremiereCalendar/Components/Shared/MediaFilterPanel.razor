@@ -39,7 +39,7 @@
             <span>Where to watch</span>
             <strong>@SelectedSourceSummary()</strong>
         </summary>
-        <div class="filter-dropdown-menu">
+        <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} sources")">
             <label>
                 Country
                 <select @bind="Filters.WatchRegion" @bind:after="NotifyChanged">
@@ -69,7 +69,6 @@
                 <label @key="source.Value" class="dropdown-check-option">
                     <input type="checkbox"
                            checked="@IsSourceSelected(source.Value)"
-                           aria-label="@($"Toggle {Title} source {source.Label}")"
                            @onchange="args => SetSourceSelected(source.Value, args)" />
                     <span>@source.Label</span>
                 </label>
@@ -92,13 +91,12 @@
             <span>Availabilities</span>
             <strong>@SelectedAvailabilitySummary()</strong>
         </summary>
-        <div class="filter-dropdown-menu">
+        <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} availabilities")">
             @foreach (var option in MonetizationOptions)
             {
                 <label @key="option.Value" class="dropdown-check-option">
                     <input type="checkbox"
                            checked="@Filters.MonetizationTypes.Contains(option.Value, StringComparer.OrdinalIgnoreCase)"
-                           aria-label="@($"Toggle {Title} availability {option.Label}")"
                            @onchange="args => SetStringSelected(Filters.MonetizationTypes, option.Value, args)" />
                     <span>@option.Label</span>
                 </label>
@@ -113,13 +111,12 @@
                 <span>Release dates</span>
                 <strong>@SelectedMovieReleaseTypeSummary()</strong>
             </summary>
-            <div class="filter-dropdown-menu">
+            <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} release dates")">
                 @foreach (var option in MovieReleaseTypeOptions)
                 {
                     <label @key="option.Value" class="dropdown-check-option">
                         <input type="checkbox"
                                checked="@Filters.MovieReleaseTypes.Contains(option.Value)"
-                               aria-label="@($"Toggle movie release type {option.Label}")"
                                @onchange="args => SetIntSelected(Filters.MovieReleaseTypes, option.Value, args)" />
                         <span>@option.Label</span>
                     </label>
@@ -141,13 +138,12 @@
                 <span>Status</span>
                 <strong>@SelectedTvStatusSummary()</strong>
             </summary>
-            <div class="filter-dropdown-menu">
+            <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} series status")">
                 @foreach (var option in TvStatusOptions)
                 {
                     <label @key="option.Value" class="dropdown-check-option">
                         <input type="checkbox"
                                checked="@Filters.TvStatuses.Contains(option.Value, StringComparer.OrdinalIgnoreCase)"
-                               aria-label="@($"Toggle series status {option.Label}")"
                                @onchange="args => SetStringSelected(Filters.TvStatuses, option.Value, args)" />
                         <span>@option.Label</span>
                     </label>
@@ -160,13 +156,12 @@
                 <span>Type</span>
                 <strong>@SelectedTvTypeSummary()</strong>
             </summary>
-            <div class="filter-dropdown-menu">
+            <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} series type")">
                 @foreach (var option in TvTypeOptions)
                 {
                     <label @key="option.Value" class="dropdown-check-option">
                         <input type="checkbox"
                                checked="@Filters.TvTypes.Contains(option.Value, StringComparer.OrdinalIgnoreCase)"
-                               aria-label="@($"Toggle series type {option.Label}")"
                                @onchange="args => SetStringSelected(Filters.TvTypes, option.Value, args)" />
                         <span>@option.Label</span>
                     </label>
@@ -180,13 +175,12 @@
             <span>Genres</span>
             <strong>@SelectedGenreSummary()</strong>
         </summary>
-        <div class="filter-dropdown-menu">
+        <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} genres")">
             @foreach (var genre in GenreOptions())
             {
                 <label @key="genre.Value" class="dropdown-check-option">
                     <input type="checkbox"
                            checked="@Filters.GenreIds.Contains(ParseInt(genre.Value))"
-                           aria-label="@($"Toggle {Title} genre {genre.Label}")"
                            @onchange="args => SetIntSelected(Filters.GenreIds, ParseInt(genre.Value), args)" />
                     <span>@genre.Label</span>
                 </label>
@@ -206,13 +200,12 @@
                 <span>Certification</span>
                 <strong>@SelectedCertificationSummary()</strong>
             </summary>
-            <div class="filter-dropdown-menu">
+            <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} certifications")">
                 @foreach (var certification in CertificationOptions())
                 {
                     <label @key="certification.Value" class="dropdown-check-option">
                         <input type="checkbox"
                                checked="@Filters.Certifications.Contains(certification.Value, StringComparer.OrdinalIgnoreCase)"
-                               aria-label="@($"Toggle {Title} certification {certification.Label}")"
                                @onchange="args => SetStringSelected(Filters.Certifications, certification.Value, args)" />
                         <span>@certification.Label</span>
                     </label>
@@ -226,7 +219,7 @@
             <span>Language</span>
             <strong>@SelectedLanguageSummary()</strong>
         </summary>
-        <div class="filter-dropdown-menu">
+        <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} languages")">
             <label class="filter-option-search-label">
                 Search languages
                 <input class="filter-option-search"
@@ -245,7 +238,6 @@
                 <label @key="language.Value" class="dropdown-check-option">
                     <input type="checkbox"
                            checked="@IsLanguageSelected(language.Value)"
-                           aria-label="@($"Toggle {Title} language {language.Label}")"
                            @onchange="args => SetLanguageSelected(language.Value, args)" />
                     <span>@language.Label</span>
                 </label>
@@ -268,7 +260,7 @@
             <span>Origin country</span>
             <strong>@SelectedOriginCountrySummary()</strong>
         </summary>
-        <div class="filter-dropdown-menu">
+        <div class="filter-dropdown-menu" role="group" aria-label="@($"{Title} origin countries")">
             <label class="filter-option-search-label">
                 Search countries
                 <input class="filter-option-search"
@@ -287,7 +279,6 @@
                 <label @key="country.Value" class="dropdown-check-option">
                     <input type="checkbox"
                            checked="@IsCountrySelected(country.Value)"
-                           aria-label="@($"Toggle {Title} origin country {country.Label}")"
                            @onchange="args => SetCountrySelected(country.Value, args)" />
                     <span>@country.Label</span>
                 </label>
@@ -402,8 +393,8 @@
         _languageOptions = MergeOptions(
             Catalog.Languages,
             mediaItems
-                .Select(item => item.OriginalLanguage)
-                .Where(language => !string.IsNullOrWhiteSpace(language))
+                .Select(item => LanguageCodes.Normalize(item.OriginalLanguage))
+                .OfType<string>()
                 .Select(language => new FilterOption(language, language.ToUpperInvariant())));
         _countryOptions = MergeOptions(
             Catalog.Countries,

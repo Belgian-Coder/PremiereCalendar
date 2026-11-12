@@ -4,6 +4,11 @@ services:
   database:
     image: postgres:18.6-alpine3.24@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       POSTGRES_DB: premierecalendar
       POSTGRES_USER: premierecalendar
@@ -23,6 +28,12 @@ services:
   app:
     image: ${PREMIERECALENDAR_IMAGE:?Set PREMIERECALENDAR_IMAGE to an immutable tag or digest}
     restart: unless-stopped
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
@@ -32,6 +43,7 @@ services:
       AppDatabase__PasswordFile: /run/secrets/postgres_password
       ApplicationUpdate__Enabled: "false"
       Urls: http://0.0.0.0:8080
+      TZ: Europe/Brussels
     secrets: [postgres_password]
     volumes:
       - app-data:/app/App_Data

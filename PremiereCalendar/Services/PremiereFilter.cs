@@ -300,7 +300,8 @@ public static class PremiereFilter
         SortDirection sortDirection,
         ScoreSource scoreSource)
     {
-        return sortMode switch
+        // The final ordinal tie-break keeps card order identical between visits for equal sort keys.
+        return (sortMode switch
         {
             PremiereSortMode.Title => SortBy(
                 items,
@@ -329,7 +330,7 @@ public static class PremiereFilter
                 .ThenBy(VerificationSortRank)
                 .ThenBy(item => item.MediaType)
                 .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
-        };
+        }).ThenBy(item => item.CanonicalId, StringComparer.Ordinal);
     }
 
     private static int VerificationSortRank(PremiereItem item)

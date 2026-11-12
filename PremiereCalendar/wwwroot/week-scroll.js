@@ -1,5 +1,6 @@
 const filterPaneSelector = "[data-filter-pane]";
 const filterCloseSelector = "[data-filter-close]";
+const filterSaveSelector = "[data-filter-save]";
 const dayButtonSelector = "[data-day-button]";
 const autoDayNavigationDebounceMs = 550;
 const autoDayNavigationWheelThreshold = 24;
@@ -77,21 +78,54 @@ function focusDayButton(dayElementId) {
     }
 }
 
+let cancelPendingFocus = null;
+
+// One focus attempt on the next frame and at most one retry. Any user focus, pointer or
+// keyboard activity cancels a pending attempt so focus is never taken from the user.
 function focusSelector(selector) {
     const targetSelector = String(selector ?? "");
-    const focus = () => {
+    cancelPendingFocus?.();
+
+    const userEvents = ["focusin", "pointerdown", "keydown"];
+    let frame = 0;
+    let timer = 0;
+    const cancel = () => {
+        cancelAnimationFrame(frame);
+        window.clearTimeout(timer);
+        for (const name of userEvents) {
+            document.removeEventListener(name, cancel, true);
+        }
+
+        if (cancelPendingFocus === cancel) {
+            cancelPendingFocus = null;
+        }
+    };
+    const attempt = () => {
         const element = document.querySelector(targetSelector);
         if (element instanceof HTMLElement) {
             element.focus({ preventScroll: true });
+            return true;
         }
+
+        return false;
     };
 
-    requestAnimationFrame(() => requestAnimationFrame(focus));
-    window.setTimeout(focus, 50);
-    window.setTimeout(focus, 250);
-    window.setTimeout(focus, 750);
-    window.setTimeout(focus, 1500);
-    window.setTimeout(focus, 2500);
+    cancelPendingFocus = cancel;
+    for (const name of userEvents) {
+        document.addEventListener(name, cancel, true);
+    }
+
+    frame = requestAnimationFrame(() => {
+        if (attempt()) {
+            cancel();
+            return;
+        }
+
+        timer = window.setTimeout(() => {
+            attempt();
+            cancel();
+        }, 250);
+    });
 }
 
 function scrollCalendarToTop() {
@@ -442,7 +476,8 @@ function initializeFilterPane(pane) {
         }
     });
 
-    pane.querySelectorAll(filterCloseSelector).forEach(button => {
+    // Close, Cancel and Save all hand focus back to the control that opened the pane.
+    pane.querySelectorAll(`${filterCloseSelector}, ${filterSaveSelector}`).forEach(button => {
         button.addEventListener("click", () => {
             if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
                 requestAnimationFrame(() => previouslyFocused.focus({ preventScroll: true }));

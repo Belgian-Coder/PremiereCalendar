@@ -528,12 +528,12 @@ public sealed partial class CalendarPageTests
         component.WaitForAssertion(() => Assert.Single(service.Calls));
 
         component.Find("button[title='Open filters']").Click();
-        var checkbox = component.Find("input[aria-label='Toggle Series filters language Dutch (NL)']");
+        var checkbox = FilterCheckbox(component, "series-language-filter", "Dutch (NL)");
         Assert.True(checkbox.HasAttribute("checked"));
         checkbox.Change(false);
 
         component.WaitForAssertion(() =>
-            Assert.False(component.Find("input[aria-label='Toggle Series filters language Dutch (NL)']").HasAttribute("checked")));
+            Assert.False(FilterCheckbox(component, "series-language-filter", "Dutch (NL)").HasAttribute("checked")));
     }
 
     [Fact]
@@ -601,7 +601,7 @@ public sealed partial class CalendarPageTests
         component.WaitForAssertion(() => Assert.Equal(1, catalog.Calls));
         component.Find("button[title='Open filters']").Click();
         component.WaitForAssertion(() =>
-            Assert.NotEmpty(component.FindAll("input[aria-label='Toggle Series filters language German (DE)']")));
+            Assert.NotEmpty(FilterCheckboxes(component, "series-language-filter", "German (DE)")));
         Assert.Equal(1, catalog.Calls);
     }
 

@@ -16,7 +16,7 @@ public sealed class OptionalProviderStorageOutageTests
     [InlineData("fanart")]
     [InlineData("tvmaze")]
     [InlineData("watchmode")]
-    public async Task DistinctKeysAcrossClientsDeferWithoutHttpUntilTheStorageDeadlineRecovers(string provider)
+    public async Task StorageOutageStillCallsTheProviderAndOnlyRepeatedFailuresBackOffTheStorage(string provider)
     {
         var clock = new Clock();
         var store = new StateStore();
@@ -27,34 +27,57 @@ public sealed class OptionalProviderStorageOutageTests
         using var handler = new ProviderHandler();
         var readsBefore = store.Reads;
         store.Unavailable = true;
-        var first = await CallAsync(provider, 701, memory, handler, durable, clock);
-        Assert.False(first.Successful);
-        if (first.Value is IReadOnlyList<PremiereSource> sources) Assert.Empty(sources);
-        else Assert.Null(first.Value);
-        Assert.Equal("storage_unavailable", first.Failure?.Reason);
-        Assert.True(first.Failure?.IsLocal);
-        Assert.Equal(clock.GetUtcNow().AddSeconds(5), first.Failure?.RetryAtUtc);
-        Assert.Equal(readsBefore + 1, store.Reads);
-        clock.Advance(TimeSpan.FromSeconds(2));
-        for (var id = 702; id < 707; id++)
+        var requestsBefore = handler.Requests;
+        for (var id = 701; id < 705; id++)
         {
-            // Each call creates another transient typed client with a distinct key.
-            var deferred = await CallAsync(provider, id, memory, handler, durable, clock);
-            Assert.False(deferred.Successful);
-            Assert.Equal(first.Failure?.RetryAtUtc, deferred.Failure?.RetryAtUtc);
+            // Each call creates another transient typed client with a distinct key: storage is a miss, never a failure.
+            var outcome = await CallAsync(provider, id, memory, handler, durable, clock);
+            Assert.True(outcome.Successful, $"{provider} call {id} must reach the provider while storage is down.");
+            Assert.Null(outcome.Failure);
+            Assert.True(handler.Requests > requestsBefore);
+            requestsBefore = handler.Requests;
         }
-        Assert.Equal(0, handler.Requests);
-        Assert.Equal(readsBefore + 1, store.Reads);
+        // The first failures are tolerated; once the threshold is crossed storage is no longer touched.
+        var readsDuringBackoff = store.Reads;
+        Assert.True(readsDuringBackoff > readsBefore);
+        for (var id = 705; id < 709; id++)
+        {
+            Assert.True((await CallAsync(provider, id, memory, handler, durable, clock)).Successful);
+        }
+        Assert.Equal(readsDuringBackoff, store.Reads);
         store.Unavailable = false;
-        clock.Advance(TimeSpan.FromSeconds(4));
-        var recovered = await CallAsync(provider, 708, memory, handler, durable, clock);
+        clock.Advance(TimeSpan.FromSeconds(6));
+        var recovered = await CallAsync(provider, 710, memory, handler, durable, clock);
         Assert.True(recovered.Successful);
-        Assert.Null(recovered.Failure);
-        Assert.True(handler.Requests > 0);
+        Assert.True(store.Reads > readsDuringBackoff);
     }
 
     [Fact]
-    public async Task FailedStorageRetainsForcedMemoryValueAndPreservesEmptyListVersusNullableContracts()
+    public void DefaultIoBudgetIsGenerousEnoughForOneSlowOperation()
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(1500), ProviderResponseCache.DefaultIoBudget);
+    }
+
+    [Fact]
+    public async Task OneSlowReadBeyondTheOldHalfSecondBudgetStillHitsAndDoesNotBackOff()
+    {
+        var clock = new Clock();
+        var store = new StateStore { ReadDelay = TimeSpan.FromMilliseconds(700) };
+        // A generous explicit budget keeps this independent of host load; the point is that a read
+        // slower than the old 500 ms budget is a hit and does not start a backoff.
+        var durable = Durable(store, clock, TimeSpan.FromSeconds(20));
+        await durable.SaveAsync("tmdb", "slow", "value", default);
+
+        var read = await durable.ReadAsync<string>("tmdb", "slow", TimeSpan.FromDays(1), default);
+
+        Assert.Equal(ProviderResponseCacheReadStatus.Hit, read.Status);
+        Assert.Null(read.RetryAtUtc);
+        Assert.Equal(ProviderResponseCacheReadStatus.Hit, (await durable.ReadAsync<string>("tmdb", "slow", TimeSpan.FromDays(1), default)).Status);
+        Assert.Equal(2, store.Reads);
+    }
+
+    [Fact]
+    public async Task StorageOutageDoesNotStopForcedOrColdProviderCalls()
     {
         var clock = new Clock();
         var store = new StateStore();
@@ -62,48 +85,27 @@ public sealed class OptionalProviderStorageOutageTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         using var handler = new ProviderHandler();
         var fanart = Fanart(memory, handler, durable, clock);
-        var goodArt = await fanart.GetMovieArtworkWithStatusAsync(42, default);
-        Assert.NotNull(goodArt.Value);
+        Assert.NotNull((await fanart.GetMovieArtworkWithStatusAsync(42, default)).Value);
         var tvmaze = Tvmaze(memory, handler, durable, clock);
-        var goodImages = await tvmaze.GetShowImagesWithStatusAsync(42, default);
-        Assert.Single(goodImages.Value);
+        Assert.Single((await tvmaze.GetShowImagesWithStatusAsync(42, default)).Value);
         var watchmode = Watchmode(memory, handler, durable, clock);
-        var goodSources = await watchmode.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], default);
-        Assert.Single(goodSources.Value);
+        Assert.Single((await watchmode.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], default)).Value);
         var before = handler.Requests;
         store.Unavailable = true;
-        var retainedArt = await fanart.GetMovieArtworkWithStatusAsync(42, default, true);
-        Assert.False(retainedArt.Successful);
-        Assert.Same(goodArt.Value, retainedArt.Value);
-        var retainedImages = await tvmaze.GetShowImagesWithStatusAsync(42, default, true);
-        Assert.False(retainedImages.Successful);
-        Assert.Same(goodImages.Value, retainedImages.Value);
+        var forced = await fanart.GetMovieArtworkWithStatusAsync(42, default, true);
+        Assert.True(forced.Successful);
+        Assert.NotNull(forced.Value);
         var coldImages = await tvmaze.GetShowImagesWithStatusAsync(99, default);
-        Assert.False(coldImages.Successful);
-        Assert.NotNull(coldImages.Value);
-        Assert.Empty(coldImages.Value);
-        var coldLookup = await tvmaze.LookupShowWithStatusAsync(99, null, default);
-        var coldSearch = await tvmaze.SearchShowByNameWithStatusAsync("Unseen title", default);
-        Assert.False(coldLookup.Successful);
-        Assert.False(coldSearch.Successful);
-        Assert.Null(coldLookup.Value);
-        Assert.Null(coldSearch.Value);
-        // The identity is retained, but this new region has no availability value.
+        Assert.True(coldImages.Successful);
+        Assert.Single(coldImages.Value);
         var coldSources = await watchmode.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["NL"], default);
-        Assert.False(coldSources.Successful);
-        Assert.NotNull(coldSources.Value);
-        Assert.Empty(coldSources.Value);
-        var retainedSources = await watchmode.GetTitleSourcesWithRefreshPolicyAsync(PremiereMediaType.Movie, 42, null, ["BE"], default,
-            forceRefresh: true, forceIdentityRefresh: false);
-        Assert.False(retainedSources.Successful);
-        Assert.Same(goodSources.Value, retainedSources.Value);
-        Assert.Equal(before, handler.Requests);
-        Assert.True((await fanart.GetMovieArtworkWithStatusAsync(42, default)).Successful);
-        Assert.Equal(before, handler.Requests);
+        Assert.True(coldSources.Successful);
+        Assert.NotEmpty(coldSources.Value);
+        Assert.True(handler.Requests > before);
     }
 
     [Fact]
-    public async Task RetainedStaleMemoryIsNotDiscardedWhenStorageIsUnavailable()
+    public async Task RetainedStaleMemoryIsRefetchedWhenStorageIsUnavailable()
     {
         var clock = new Clock();
         var store = new StateStore();
@@ -118,29 +120,35 @@ public sealed class OptionalProviderStorageOutageTests
         clock.Advance(TimeSpan.FromDays(2));
         store.Unavailable = true;
         var result = await responses.GetAsync("fanart", "stale", false, TimeSpan.FromDays(1), Fetch, default);
-        Assert.False(result.Successful);
+        // An unavailable durable cache is only a cache miss: the provider is called again.
+        Assert.True(result.Successful);
         Assert.Equal("retained", result.Value);
-        Assert.Equal("storage_unavailable", result.Failure?.Reason);
-        Assert.Equal(1, calls);
+        Assert.Null(result.Failure);
+        Assert.Equal(2, calls);
     }
 
     [Fact]
-    public async Task ReadBudgetExhaustionIsUnavailableAndDoesNotStartAProviderFetch()
+    public async Task ReadBudgetExhaustionStillCallsTheProviderAndBacksOffAfterRepeatedBudgetFailures()
     {
         var clock = new Clock();
         var store = new StateStore { BlockReads = true };
-        var durable = Durable(store, clock);
+        var durable = Durable(store, clock, TimeSpan.FromMilliseconds(100));
         using var memory = new MemoryCache(new MemoryCacheOptions());
         using var handler = new ProviderHandler();
         var response = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, default).WaitAsync(TimeSpan.FromSeconds(3));
-        Assert.False(response.Successful);
-        Assert.Equal("storage_unavailable", response.Failure?.Reason);
-        Assert.Equal(clock.GetUtcNow().AddSeconds(5), response.Failure?.RetryAtUtc);
-        Assert.Equal(0, handler.Requests);
-        var read = await durable.ReadAsync<string>("fanart", "another-key", TimeSpan.FromDays(1), default);
-        Assert.Equal(ProviderResponseCacheReadStatus.StorageUnavailable, read.Status);
-        Assert.Equal(response.Failure?.RetryAtUtc, read.RetryAtUtc);
-        Assert.Equal(1, store.Reads);
+        Assert.True(response.Successful);
+        Assert.Equal(1, handler.Requests);
+        var second = await durable.ReadAsync<string>("fanart", "another-key", TimeSpan.FromDays(1), default);
+        Assert.Equal(ProviderResponseCacheReadStatus.StorageUnavailable, second.Status);
+        // Below the threshold there is no retry time at all (never a deadline in the past).
+        Assert.Null(second.RetryAtUtc);
+        // Third failure inside the 10 s window opens the 5 s backoff.
+        var third = await durable.ReadAsync<string>("fanart", "third-key", TimeSpan.FromDays(1), default);
+        Assert.Equal(clock.GetUtcNow().AddSeconds(5), third.RetryAtUtc);
+        var reads = store.Reads;
+        var skipped = await durable.ReadAsync<string>("fanart", "skipped-key", TimeSpan.FromDays(1), default);
+        Assert.Equal(ProviderResponseCacheReadStatus.StorageUnavailable, skipped.Status);
+        Assert.Equal(reads, store.Reads);
     }
 
     [Fact]
@@ -203,7 +211,7 @@ public sealed class OptionalProviderStorageOutageTests
     }
 
     [Fact]
-    public async Task SuccessfulFetchSurvivesSaveFailureWhileDistinctMissesDefer()
+    public async Task SuccessfulFetchSurvivesSaveFailureAndDistinctMissesStillReachTheProvider()
     {
         var clock = new Clock();
         var store = new StateStore { FailSaves = true };
@@ -217,14 +225,13 @@ public sealed class OptionalProviderStorageOutageTests
         var cached = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, default);
         Assert.True(cached.Successful);
         Assert.Same(first.Value, cached.Value);
-        var deferred = await firstClient.GetMovieArtworkWithStatusAsync(43, default);
-        Assert.False(deferred.Successful);
-        Assert.Equal("storage_unavailable", deferred.Failure?.Reason);
-        Assert.Equal(1, handler.Requests);
-        Assert.Equal(1, store.Reads);
+        var second = await firstClient.GetMovieArtworkWithStatusAsync(43, default);
+        Assert.True(second.Successful);
+        Assert.Equal(2, handler.Requests);
+        Assert.Equal(2, store.Reads);
     }
 
-    private static ProviderResponseCache Durable(StateStore store, Clock clock) => new(store, NullLogger<ProviderResponseCache>.Instance, clock);
+    private static ProviderResponseCache Durable(StateStore store, Clock clock, TimeSpan? ioBudget = null) => new(store, NullLogger<ProviderResponseCache>.Instance, clock, ioBudget: ioBudget);
     private static FanartClient Fanart(IMemoryCache memory, HttpMessageHandler handler, ProviderResponseCache durable, Clock clock) => new(
         new HttpClient(handler, disposeHandler: false) { BaseAddress = new("https://webservice.fanart.tv/v3/") }, memory,
         Microsoft.Extensions.Options.Options.Create(new FanartOptions { Enabled = true, ApiKey = "fixture" }), responseCache: durable, timeProvider: clock);
@@ -272,6 +279,7 @@ public sealed class OptionalProviderStorageOutageTests
         public bool Unavailable;
         public bool FailSaves;
         public bool BlockReads;
+        public TimeSpan ReadDelay;
         private int _reads;
         public int Reads => Volatile.Read(ref _reads);
         public TaskCompletionSource ReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -280,6 +288,7 @@ public sealed class OptionalProviderStorageOutageTests
             Interlocked.Increment(ref _reads);
             ReadStarted.TrySetResult();
             if (BlockReads) await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            if (ReadDelay > TimeSpan.Zero) await Task.Delay(ReadDelay, cancellationToken);
             if (Unavailable) throw new IOException("Simulated unavailable response storage.");
             return Values.GetValueOrDefault((provider, scope, key));
         }

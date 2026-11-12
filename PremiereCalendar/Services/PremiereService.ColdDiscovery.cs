@@ -229,7 +229,8 @@ public sealed partial class PremiereService
     private async Task<PremiereItem?> MapSeriesDiscoveryCoreAsync(TmdbTvDiscoverItem item,
         DateOnly? premiereDateOverride, PremiereItemType? itemTypeOverride, string? episodeTitle,
         int? seasonNumber, int? episodeNumber, string? episodeSource, DateOnly? requestedStart,
-        DateOnly? requestedEnd, bool canonicalizeSeriesDate, CancellationToken cancellationToken)
+        DateOnly? requestedEnd, bool canonicalizeSeriesDate, CancellationToken cancellationToken,
+        MediaDiscoveryCriteria? requestedSeriesCriteria = null)
     {
         var session = _itemCacheSession.Value!;
         var source = _coldDiscoverySource.Value!;
@@ -332,6 +333,10 @@ public sealed partial class PremiereService
             if (_coldExternalCandidate.Value is { } failedExternal) source.CompleteExternalFallbacks[ExternalCandidateKey(failedExternal)] = 0;
             return fallback;
         }
+        var coreResult = outcome.Apply(discovered);
+        // Same gate as movies: once the core says the language cannot match, no optional enrichment is queued.
+        if (requestedSeriesCriteria is not null
+            && !OriginalLanguageMatchesFilter(coreResult.OriginalLanguage, requestedSeriesCriteria.OriginalLanguages)) return null;
         if (discovered.Type == PremiereItemType.SeriesPremiere
             && outcome.Metadata is not { FirstEpisodeDateChecked: true })
             Interlocked.Exchange(ref source.UnverifiedCore, 1);
@@ -339,7 +344,7 @@ public sealed partial class PremiereService
             : new(identity, outcome.Record.Generation, Series: item, PremiereDate: premiereDateOverride, ItemType: itemTypeOverride,
                 EpisodeTitle: episodeTitle, SeasonNumber: seasonNumber, EpisodeNumber: episodeNumber, EpisodeSource: episodeSource,
                 RequestedStart: requestedStart, RequestedEnd: requestedEnd, CanonicalizeSeriesDate: canonicalizeSeriesDate));
-        return outcome.Apply(discovered);
+        return coreResult;
     }
 
     private async IAsyncEnumerable<PremiereItemBatch> CompleteColdDiscoverySourceAsync(ColdDiscoverySource source,
@@ -347,10 +352,19 @@ public sealed partial class PremiereService
         DateOnly start, DateOnly end, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         using var policy = UseColdDiscoverySource(null);
+        // Throttled or timed-out optional enrichment for one candidate must not cancel the rest of the completion
+        // batch: record it, keep going (the core row stays) and report one combined failure at the end.
+        var deferred = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
         await foreach (var batch in MapInProgressBatchesAsync(source.Mappings, CompleteAsync, cancellationToken))
         {
             if (_itemCacheSession.Value is { } session) await session.FlushAsync(cancellationToken);
             yield return batch;
+        }
+        if (!deferred.IsEmpty)
+        {
+            throw deferred.Count == 1 && deferred.TryPeek(out var only)
+                ? only
+                : new AggregateException("Optional enrichment was deferred for one or more candidates.", deferred);
         }
 
         async Task<PremiereItem?> CompleteAsync(ColdDiscoveryMapping mapping, CancellationToken token)
@@ -369,7 +383,15 @@ public sealed partial class PremiereService
                     throw new ItemEnrichmentInvalidatedException();
                 }
                 if (mapping.External is { } external)
-                    return await MapExternalCandidateAsync(external, token, false, criteria, cachedEnrichment, start, end);
+                {
+                    try { return await MapExternalCandidateAsync(external, token, false, criteria, cachedEnrichment, start, end); }
+                    catch (ExternalApiException ex) when (!token.IsCancellationRequested && RetryDeadline(ex) is not null)
+                    {
+                        _logger.LogWarning(ex, "Deferring optional enrichment for external candidate {Title}.", external.Title);
+                        deferred.Enqueue(ex);
+                        return null;
+                    }
+                }
                 if (mapping.Movie is { } movie)
                     return await MapMovieAsync(movie, token, false, cachedEnrichment, requestedMovieCriteria: mapping.MovieCriteria);
                 return await MapSeriesAsync(mapping.Series!, token, false, cachedEnrichment,

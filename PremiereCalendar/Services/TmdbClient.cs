@@ -984,7 +984,14 @@ public sealed class TmdbClient : ITmdbClient
 
             if (!response.IsSuccessStatusCode)
             {
-                throw new ExternalApiException($"{operation} failed with HTTP {(int)response.StatusCode} {response.ReasonPhrase}.");
+                var failure = $"{operation} failed with HTTP {(int)response.StatusCode} {response.ReasonPhrase}.";
+                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                {
+                    // Keep the retry time so callers can defer (RetryDeadline) instead of treating this as a permanent miss.
+                    var retryAt = ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow).RetryAtUtc ?? DateTimeOffset.UtcNow.AddMinutes(1);
+                    throw new ExternalApiException(failure, new ProviderRetryAfterException("tmdb", retryAt, response.StatusCode));
+                }
+                throw new ExternalApiException(failure);
             }
 
             var value = await ReadJsonContentAsync<T>(response.Content, cancellationToken);
@@ -1109,7 +1116,8 @@ public sealed class TmdbClient : ITmdbClient
         using var lease = await _requestLimiter.AcquireAsync(cancellationToken);
         if (!lease.IsAcquired)
         {
-            throw new ExternalApiException($"{operation} was rate limited locally before the request was sent.");
+            throw new ExternalApiException($"{operation} was rate limited locally before the request was sent.",
+                new ProviderRetryAfterException("tmdb", DateTimeOffset.UtcNow.AddSeconds(15)));
         }
 
         using var request = new HttpRequestMessage(HttpMethod.Get, path);

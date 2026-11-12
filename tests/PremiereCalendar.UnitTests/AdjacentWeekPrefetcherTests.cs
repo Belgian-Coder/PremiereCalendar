@@ -130,6 +130,33 @@ public sealed class AdjacentWeekPrefetcherTests
     }
 
     [Fact]
+    public async Task PrefetchAdjacentWeeks_PreservesPriorityDateInClonedFilters()
+    {
+        using var lifetime = new FakeHostApplicationLifetime();
+        var service = new RecordingPremiereService();
+        await using var provider = new ServiceCollection()
+            .AddSingleton<IPremiereService>(service)
+            .BuildServiceProvider();
+        using var prefetcher = new AdjacentWeekPrefetcher(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            lifetime,
+            Microsoft.Extensions.Options.Options.Create(new CalendarCacheOptions
+            {
+                Enabled = true,
+                AdjacentWeekPrefetchEnabled = true,
+                FuturePrefetchWeeks = 1,
+                PastPrefetchWeeks = 0
+            }),
+            NullLogger<AdjacentWeekPrefetcher>.Instance);
+
+        prefetcher.PrefetchAdjacentWeeks(new DateOnly(2026, 5, 4), new CalendarFilters { PriorityDate = new DateOnly(2026, 5, 6) });
+
+        await WaitForAsync(() => service.Calls.Count >= 1);
+
+        Assert.Equal(new DateOnly(2026, 5, 6), Assert.Single(service.Calls).Filters!.PriorityDate);
+    }
+
+    [Fact]
     public async Task PrefetchAdjacentWeeks_CancelsSlowPrefetchAfterConfiguredTimeout()
     {
         using var lifetime = new FakeHostApplicationLifetime();

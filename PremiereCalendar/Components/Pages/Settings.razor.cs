@@ -60,6 +60,236 @@ public partial class Settings
     private string _backupJson = "";
     private bool _includeBackupSecrets;
 
+    // Stored secrets are never rendered. Values typed into the write-only secret inputs live here
+    // until Save replaces the stored value; a blank input keeps whatever is already stored.
+    private readonly Dictionary<SecretField, string> _secretDrafts = [];
+
+    private enum SecretField
+    {
+        SonarrApiKey,
+        RadarrApiKey,
+        TmdbBearerToken,
+        TraktClientId,
+        WatchmodeApiKey,
+        SimklClientId,
+        SimklClientSecret,
+        SimklAccessToken,
+        OmdbApiKey,
+        FanartApiKey,
+        TheTvdbApiKey
+    }
+
+    private string StoredSecret(SecretField field) => field switch
+    {
+        SecretField.SonarrApiKey => _settings.Sonarr.ApiKey,
+        SecretField.RadarrApiKey => _settings.Radarr.ApiKey,
+        SecretField.TmdbBearerToken => _settings.Sources.Tmdb.BearerToken,
+        SecretField.TraktClientId => _settings.Sources.Trakt.ClientId,
+        SecretField.WatchmodeApiKey => _settings.Sources.Watchmode.ApiKey,
+        SecretField.SimklClientId => _settings.Sources.Simkl.ClientId,
+        SecretField.SimklClientSecret => _settings.Sources.Simkl.ClientSecret,
+        SecretField.SimklAccessToken => _settings.Sources.Simkl.AccessToken,
+        SecretField.OmdbApiKey => _settings.Sources.Omdb.ApiKey,
+        SecretField.FanartApiKey => _settings.Sources.Fanart.ApiKey,
+        SecretField.TheTvdbApiKey => _settings.Sources.TheTvdb.ApiKey,
+        _ => ""
+    };
+
+    private void StoreSecret(SecretField field, string value)
+    {
+        switch (field)
+        {
+            case SecretField.SonarrApiKey: _settings.Sonarr.ApiKey = value; break;
+            case SecretField.RadarrApiKey: _settings.Radarr.ApiKey = value; break;
+            case SecretField.TmdbBearerToken: _settings.Sources.Tmdb.BearerToken = value; break;
+            case SecretField.TraktClientId: _settings.Sources.Trakt.ClientId = value; break;
+            case SecretField.WatchmodeApiKey: _settings.Sources.Watchmode.ApiKey = value; break;
+            case SecretField.SimklClientId: _settings.Sources.Simkl.ClientId = value; break;
+            case SecretField.SimklClientSecret: _settings.Sources.Simkl.ClientSecret = value; break;
+            case SecretField.SimklAccessToken: _settings.Sources.Simkl.AccessToken = value; break;
+            case SecretField.OmdbApiKey: _settings.Sources.Omdb.ApiKey = value; break;
+            case SecretField.FanartApiKey: _settings.Sources.Fanart.ApiKey = value; break;
+            case SecretField.TheTvdbApiKey: _settings.Sources.TheTvdb.ApiKey = value; break;
+        }
+    }
+
+    private string _persistedSonarrBaseUrl = "";
+    private string _persistedRadarrBaseUrl = "";
+
+    // Persistent (until dismissed) notices: a removed Arr key must not vanish with the 3 second toast.
+    private readonly List<string> _keyNotices = [];
+
+    private void AddKeyNotice(string notice)
+    {
+        if (!_keyNotices.Contains(notice))
+        {
+            _keyNotices.Add(notice);
+        }
+    }
+
+    private void DismissKeyNotice(string notice) => _keyNotices.Remove(notice);
+
+    private bool HasSecretDraft(SecretField field)
+    {
+        return _secretDrafts.TryGetValue(field, out var draft) && !string.IsNullOrWhiteSpace(draft);
+    }
+
+    /// <summary>True when an Arr base URL was edited away from the saved one, so the saved key must not follow it.</summary>
+    private bool ArrUrlChanged(SecretField field) => field switch
+    {
+        SecretField.SonarrApiKey => !SecretHostBinding.SameBaseUrl(_settings.Sonarr.BaseUrl, _persistedSonarrBaseUrl),
+        SecretField.RadarrApiKey => !SecretHostBinding.SameBaseUrl(_settings.Radarr.BaseUrl, _persistedRadarrBaseUrl),
+        _ => false
+    };
+
+    private void RememberPersistedArrUrls()
+    {
+        _persistedSonarrBaseUrl = _settings.Sonarr.BaseUrl ?? "";
+        _persistedRadarrBaseUrl = _settings.Radarr.BaseUrl ?? "";
+    }
+
+    /// <summary>The value a connection test should use: a newly typed secret, otherwise the stored one (never for a changed Arr URL).</summary>
+    private string EffectiveSecret(SecretField field)
+    {
+        if (HasSecretDraft(field))
+        {
+            return _secretDrafts[field].Trim();
+        }
+
+        return ArrUrlChanged(field) ? "" : StoredSecret(field);
+    }
+
+    private Dictionary<SecretField, string> SnapshotSecrets()
+    {
+        return Enum.GetValues<SecretField>().ToDictionary(field => field, StoredSecret);
+    }
+
+    private void RestoreSecrets(Dictionary<SecretField, string> snapshot)
+    {
+        foreach (var (field, value) in snapshot)
+        {
+            StoreSecret(field, value);
+        }
+    }
+
+    /// <summary>Writes typed secrets into the settings and drops a saved Arr key whose URL changed without a new key.</summary>
+    private List<string> ApplyPendingSecrets()
+    {
+        var notices = new List<string>();
+        foreach (var (field, name) in new[] { (SecretField.SonarrApiKey, "Sonarr"), (SecretField.RadarrApiKey, "Radarr") })
+        {
+            if (ArrUrlChanged(field) && !HasSecretDraft(field) && !string.IsNullOrWhiteSpace(StoredSecret(field)))
+            {
+                StoreSecret(field, "");
+                notices.Add($"The {name} URL changed, so its saved API key was removed. Enter the API key again.");
+            }
+        }
+
+        foreach (var (field, draft) in _secretDrafts)
+        {
+            if (!string.IsNullOrWhiteSpace(draft))
+            {
+                StoreSecret(field, draft.Trim());
+            }
+        }
+
+        return notices;
+    }
+
+    /// <summary>Saves the settings with pending secrets; drafts only leave the pending state once the save succeeded.</summary>
+    private async Task<List<string>> PersistSettingsAsync(CancellationToken cancellationToken = default)
+    {
+        var snapshot = SnapshotSecrets();
+        var notices = ApplyPendingSecrets();
+        try
+        {
+            NormalizeSettings();
+            await SettingsStore.SaveAsync(_settings, cancellationToken);
+        }
+        catch
+        {
+            RestoreSecrets(snapshot);
+            throw;
+        }
+
+        _secretDrafts.Clear();
+        RememberPersistedArrUrls();
+        return notices;
+    }
+
+    private void OnSecretChanged(SecretField field, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            _secretDrafts.Remove(field);
+            return;
+        }
+
+        _secretDrafts[field] = value;
+        _isDirty = true;
+    }
+
+    private void ClearSecret(SecretField field)
+    {
+        _secretDrafts.Remove(field);
+        StoreSecret(field, "");
+        _isDirty = true;
+    }
+
+    private RenderFragment SecretInput(SecretField field, string label, string? id = null) => builder =>
+    {
+        var hasStored = !string.IsNullOrWhiteSpace(StoredSecret(field));
+        var hasDraft = _secretDrafts.ContainsKey(field);
+
+        builder.OpenElement(0, "input");
+        if (id is not null)
+        {
+            builder.AddAttribute(1, "id", id);
+        }
+
+        builder.AddAttribute(2, "type", "password");
+        builder.AddAttribute(3, "class", "settings-input");
+        builder.AddAttribute(4, "aria-label", label);
+        builder.AddAttribute(5, "autocomplete", "new-password");
+        builder.AddAttribute(6, "placeholder", hasStored ? "Saved - type to replace" : "Not set");
+        builder.AddAttribute(7, "value", _secretDrafts.GetValueOrDefault(field, ""));
+        builder.AddAttribute(8, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(
+            this,
+            args => OnSecretChanged(field, args.Value?.ToString())));
+        builder.CloseElement();
+
+        if (hasStored && !hasDraft && ArrUrlChanged(field))
+        {
+            builder.OpenElement(19, "small");
+            builder.AddAttribute(20, "class", "settings-help");
+            builder.AddAttribute(21, "role", "status");
+            builder.AddAttribute(22, "data-testid", $"secret-url-hint-{field}");
+            builder.AddContent(23, "URL changed \u2013 enter the API key again.");
+            builder.CloseElement();
+        }
+
+        builder.OpenElement(9, "small");
+        builder.AddAttribute(10, "class", "settings-help");
+        builder.AddAttribute(11, "data-testid", $"secret-status-{field}");
+        builder.AddContent(12, hasDraft
+            ? "New value will replace the saved one when you save."
+            : hasStored
+                ? "Saved. Leave blank to keep it."
+                : "Not set.");
+        builder.CloseElement();
+
+        if (hasStored || hasDraft)
+        {
+            builder.OpenElement(13, "button");
+            builder.AddAttribute(14, "type", "button");
+            builder.AddAttribute(15, "class", "tool-button compact-command");
+            builder.AddAttribute(16, "aria-label", $"Clear {label}");
+            builder.AddAttribute(17, "onclick", EventCallback.Factory.Create(this, () => ClearSecret(field)));
+            builder.AddContent(18, "Clear");
+            builder.CloseElement();
+        }
+    };
+
     private bool HasSimklAccessToken => !string.IsNullOrWhiteSpace(_settings.Sources.Simkl.AccessToken);
 
     private string SimklConnectButtonText => HasSimklAccessToken ? "Reconnect SIMKL" : "Connect SIMKL";
@@ -421,8 +651,10 @@ public partial class Settings
     {
         try
         {
-            await SettingsBackupService.ImportAsync(_backupJson, _disposeCancellation.Token);
+            var importNotices = await SettingsBackupService.ImportAsync(_backupJson, _disposeCancellation.Token);
+            _secretDrafts.Clear();
             _settings = await SettingsStore.GetAsync(_disposeCancellation.Token);
+            RememberPersistedArrUrls();
             HydrateDerivedSettingsFields();
             NormalizeSettings();
             HydrateDerivedSettingsFields();
@@ -430,6 +662,10 @@ public partial class Settings
             _isDirty = false;
             await RefreshLocalStatusAsync();
             ShowToast(ToastKind.Success, "Backup imported", "Settings were restored from the backup JSON.");
+            foreach (var notice in importNotices)
+            {
+                AddKeyNotice(notice);
+            }
         }
         catch (Exception ex)
         {
@@ -505,6 +741,7 @@ public partial class Settings
         try
         {
             _settings = await SettingsStore.GetAsync();
+            RememberPersistedArrUrls();
             _showTmdbRequiredNotice = showTmdbRequiredNotice && HasMissingTmdbToken();
             CreateEditContext();
             EnsureSimklActivityCheckInterval();
@@ -788,8 +1025,10 @@ public partial class Settings
         try
         {
             StopSimklAuthorizationPolling();
-            NormalizeSettings();
-            await SettingsStore.SaveAsync(_settings);
+            foreach (var notice in await PersistSettingsAsync())
+            {
+                AddKeyNotice(notice);
+            }
 
             var result = await SimklClient.RequestPinCodeAsync(_disposeCancellation.Token);
             if (!result.Success)
@@ -908,10 +1147,20 @@ public partial class Settings
         switch (result.Status)
         {
             case SimklPinStatus.Authorized when !string.IsNullOrWhiteSpace(result.AccessToken):
-                _settings.Sources.Simkl.AccessToken = result.AccessToken;
-                NormalizeSettings();
-                await SettingsStore.SaveAsync(_settings, cancellationToken);
-                _isDirty = false;
+                // Persist only the token SIMKL just returned; other typed secrets, pending Clears and edits stay unsaved.
+                var token = result.AccessToken.Trim();
+                _secretDrafts.Remove(SecretField.SimklAccessToken);
+                _settings.Sources.Simkl.AccessToken = token;
+                var persisted = await SettingsStore.GetAsync(cancellationToken);
+                await SettingsStore.SaveAsync(
+                    persisted with
+                    {
+                        Sources = persisted.Sources with
+                        {
+                            Simkl = persisted.Sources.Simkl with { AccessToken = token }
+                        }
+                    },
+                    cancellationToken);
                 _simklPinCode = null;
                 _simklAuthorizationStatus = null;
                 StopSimklAuthorizationPolling();
@@ -968,9 +1217,13 @@ public partial class Settings
         _isSaving = true;
         try
         {
-            NormalizeSettings();
-            await SettingsStore.SaveAsync(_settings);
+            var notices = await PersistSettingsAsync();
             _isDirty = false;
+            foreach (var notice in notices)
+            {
+                AddKeyNotice(notice);
+            }
+
             if (!HasMissingTmdbToken())
             {
                 _showTmdbRequiredNotice = false;
@@ -999,11 +1252,23 @@ public partial class Settings
 
     private async Task LoadSonarrOptionsCoreAsync(bool showToast, TimeSpan? timeout = null)
     {
+        if (ArrUrlChanged(SecretField.SonarrApiKey) && !HasSecretDraft(SecretField.SonarrApiKey))
+        {
+            if (showToast)
+            {
+                ShowToast(ToastKind.Error, "Sonarr API key required", "The Sonarr URL changed, so the saved API key is not sent to it. Type the API key to test the connection.");
+            }
+
+            return;
+        }
+
         _isLoadingSonarr = true;
         using var timeoutCts = timeout is null ? null : new CancellationTokenSource(timeout.Value);
         try
         {
-            _sonarrOptions = await ArrService.GetSonarrOptionsAsync(_settings.Sonarr, timeoutCts?.Token ?? default);
+            _sonarrOptions = await ArrService.GetSonarrOptionsAsync(
+                _settings.Sonarr with { ApiKey = EffectiveSecret(SecretField.SonarrApiKey) },
+                timeoutCts?.Token ?? default);
             _settings.Sonarr.RootFolderPath = FirstRootIfEmpty(_settings.Sonarr.RootFolderPath, _sonarrOptions);
             _settings.Sonarr.QualityProfileId ??= _sonarrOptions.QualityProfiles.FirstOrDefault()?.Id;
             if (showToast)
@@ -1031,11 +1296,23 @@ public partial class Settings
 
     private async Task LoadRadarrOptionsCoreAsync(bool showToast, TimeSpan? timeout = null)
     {
+        if (ArrUrlChanged(SecretField.RadarrApiKey) && !HasSecretDraft(SecretField.RadarrApiKey))
+        {
+            if (showToast)
+            {
+                ShowToast(ToastKind.Error, "Radarr API key required", "The Radarr URL changed, so the saved API key is not sent to it. Type the API key to test the connection.");
+            }
+
+            return;
+        }
+
         _isLoadingRadarr = true;
         using var timeoutCts = timeout is null ? null : new CancellationTokenSource(timeout.Value);
         try
         {
-            _radarrOptions = await ArrService.GetRadarrOptionsAsync(_settings.Radarr, timeoutCts?.Token ?? default);
+            _radarrOptions = await ArrService.GetRadarrOptionsAsync(
+                _settings.Radarr with { ApiKey = EffectiveSecret(SecretField.RadarrApiKey) },
+                timeoutCts?.Token ?? default);
             _settings.Radarr.RootFolderPath = FirstRootIfEmpty(_settings.Radarr.RootFolderPath, _radarrOptions);
             _settings.Radarr.QualityProfileId ??= _radarrOptions.QualityProfiles.FirstOrDefault()?.Id;
             if (showToast)
@@ -1060,14 +1337,14 @@ public partial class Settings
     {
         return _settings.Sonarr.Enabled
             && !string.IsNullOrWhiteSpace(_settings.Sonarr.BaseUrl)
-            && !string.IsNullOrWhiteSpace(_settings.Sonarr.ApiKey);
+            && !string.IsNullOrWhiteSpace(EffectiveSecret(SecretField.SonarrApiKey));
     }
 
     private bool CanLoadRadarrOptions()
     {
         return _settings.Radarr.Enabled
             && !string.IsNullOrWhiteSpace(_settings.Radarr.BaseUrl)
-            && !string.IsNullOrWhiteSpace(_settings.Radarr.ApiKey);
+            && !string.IsNullOrWhiteSpace(EffectiveSecret(SecretField.RadarrApiKey));
     }
 
     private void NormalizeSettings()

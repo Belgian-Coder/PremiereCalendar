@@ -142,6 +142,32 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     private readonly PremiereTelemetry _telemetry;
     private readonly ConcurrentDictionary<string, JobBroadcast> _broadcasts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ExecutionCheckpoint> _executions = new(StringComparer.Ordinal);
+    // Consecutive provider-recovery deferrals per job (in memory, bounded; a restart resets it). Retry times that the
+    // client invented (timeouts, local limiter) have no cooldown state behind them, so deferral must be capped.
+    internal const int MaximumConsecutiveDeferrals = 3;
+    private const int MaximumTrackedDeferralJobs = 1024;
+    private static readonly TimeSpan MaximumGrownDeferral = TimeSpan.FromMinutes(10);
+    private readonly ConcurrentDictionary<string, int> _deferrals = new(StringComparer.Ordinal);
+    private readonly ILogger<ProviderWorkScheduler> _logger;
+
+    // Returns the deadline to use (grown for repeated deferrals) or null when the cap is reached.
+    private DateTimeOffset? RegisterDeferral(ProviderWorkSnapshot job, DateTimeOffset now, DateTimeOffset requested)
+    {
+        if (_deferrals.Count >= MaximumTrackedDeferralJobs && !_deferrals.ContainsKey(job.JobId)) _deferrals.Clear();
+        var count = _deferrals.AddOrUpdate(job.JobId, 1, (_, current) => current + 1);
+        if (count > MaximumConsecutiveDeferrals)
+        {
+            _deferrals.TryRemove(job.JobId, out _);
+            _logger.LogWarning("Provider work {JobId} was deferred {Count} times in a row; ending it as a terminal partial result.",
+                job.JobId, count - 1);
+            return null;
+        }
+        if (count == 1) return requested;
+        var grown = TimeSpan.FromTicks(Math.Min((requested - now).Ticks * (1L << (count - 1)),
+            Math.Max(MaximumGrownDeferral.Ticks, (requested - now).Ticks)));
+        return requested > now ? now + grown : requested;
+    }
+
     private readonly object _broadcastGate = new();
     private readonly HashSet<string> _detachedJobs = new(StringComparer.Ordinal);
     private readonly object _signalGate = new();
@@ -160,8 +186,10 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         IOptions<ProviderSchedulerOptions> options,
         PremiereTelemetry? telemetry = null,
         IOptions<CalendarCacheOptions>? cacheOptions = null,
-        IHostApplicationLifetime? applicationLifetime = null)
+        IHostApplicationLifetime? applicationLifetime = null,
+        ILogger<ProviderWorkScheduler>? logger = null)
     {
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ProviderWorkScheduler>.Instance;
         _store = store;
         _timeProvider = timeProvider;
         _options = options.Value;
@@ -502,7 +530,10 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         var degraded = finalCalendar is { IsDegradedResult: true, HasSourceErrors: true }
             && finalCalendar.UnavailableSources.Count > 0
             && finalCalendar.UnavailableSources.All(source => source.IsOptionalAccessDenial && source.RetryAtUtc > now);
-        if (!degraded && finalCalendar?.RetryAfterUtc is { } retryAfter && retryAfter > now)
+        DateTimeOffset? deferralDeadline = null;
+        if (!degraded && finalCalendar?.RetryAfterUtc is { } requestedRetry && requestedRetry > now)
+            deferralDeadline = RegisterDeferral(job, now, requestedRetry);
+        if (deferralDeadline is { } retryAfter)
         {
             if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), now, retryAfter, false,
                     "Provider work is waiting for provider recovery.", cancellationToken, retryWaiting: true))
@@ -519,6 +550,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
                 "Provider work will resume after provider recovery."));
             return;
         }
+        _deferrals.TryRemove(job.JobId, out _);
         if (!await _store.CompleteAsync(job.JobId, RequireOwner(job), now, cancellationToken))
         { RecordLeaseLost(job, "complete"); return; }
         var completionOutcome = degraded ? "degraded" : finalCalendar?.HasSourceErrors == true ? "partial" : "completed";
@@ -563,7 +595,9 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         var transitionStarted = _timeProvider.GetTimestamp();
         if (!await FlushAsync(job, cancellationToken)) return;
         var currentTime = _timeProvider.GetUtcNow();
-        if (RetryDeadline(error, currentTime) is { } retryDeadline)
+        DateTimeOffset? errorDeadline = RetryDeadline(error, currentTime) is { } requestedDeadline
+            ? RegisterDeferral(job, currentTime, requestedDeadline) : null;
+        if (errorDeadline is { } retryDeadline)
         {
             if (!await _store.RequeueAsync(job.JobId, RequireOwner(job), currentTime, retryDeadline, false,
                     sanitized, cancellationToken, retryWaiting: true))
@@ -602,6 +636,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
             return;
         }
 
+        _deferrals.TryRemove(job.JobId, out _);
         if (!await _store.FailAsync(job.JobId, RequireOwner(job), sanitized, _timeProvider.GetUtcNow(), cancellationToken))
         { RecordLeaseLost(job, "fail"); return; }
         RecordDiagnostic(job, "scheduler.job.failed", new()

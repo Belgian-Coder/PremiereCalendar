@@ -353,6 +353,74 @@ html[data-density="comfortable"] .premiere-card {
     padding: 0.2rem 0;
 }
 
+/* Always present; the reserved height keeps the board still while status items arrive. */
+.calendar-status-row {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0.35rem;
+    align-items: center;
+    /* Fixed height, single-line content: the row never changes size, whatever arrives. */
+    height: 2.15rem;
+    overflow: hidden;
+}
+
+.calendar-status-row > * {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.calendar-status-row .data-freshness-card {
+    flex: 0 1 auto;
+    flex-wrap: nowrap;
+    min-width: 0;
+    padding: 0;
+    overflow: hidden;
+}
+
+.calendar-status-warning {
+    padding: 0.16rem 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--amber-soft) 75%, var(--surface-strong));
+    color: #75501c;
+    font-size: 0.8rem;
+    font-weight: 750;
+    line-height: 1.3;
+    /* The warning has priority: it keeps a readable minimum while the freshness pills shrink first. */
+    flex: 1 1 auto;
+    min-width: 9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.calendar-status-warning-detail {
+    grid-column: 1 / -1;
+    margin: 0;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--amber-soft) 75%, var(--surface-strong));
+    color: #75501c;
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+
+html[data-theme="dark"] .calendar-status-warning-detail {
+    color: #f2c766;
+}
+
+html[data-theme="dark"] .calendar-status-warning {
+    color: #f2c766;
+}
+
+.cache-freshness-pill.checking {
+    opacity: 0.78;
+}
+
 .visit-change-pill {
     display: inline-flex;
     align-items: center;
@@ -2231,7 +2299,47 @@ html[data-density="comfortable"] .premiere-card {
     color: #8a5620;
 }
 
+/* The primary scores row is one fixed line (ellipsis, full text in its title), so the card
+   height is identical before and after ratings arrive. */
+.primary-score {
+    flex-wrap: nowrap;
+    align-items: center;
+    height: 1.6rem;
+    overflow: hidden;
+}
+
+/* The user's selected score comes first and is never cut off. */
+.primary-score .selected-score {
+    order: -1;
+    flex-shrink: 0;
+}
+
+.primary-score span {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.scores-placeholder {
+    min-height: 1.6rem;
+    align-items: center;
+}
+
+.scores-placeholder .scores-placeholder-text {
+    background: transparent;
+    padding-left: 0;
+    color: var(--muted);
+    font-style: italic;
+}
+
 .card-description {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
     margin: 0.72rem 0 0;
     padding: 0.58rem 0.68rem;
     border: 1px solid rgba(23, 33, 43, 0.08);
@@ -2391,6 +2499,12 @@ html[data-theme="dark"] .card-content p {
     color: var(--ink);
 }
 
+html[data-theme="dark"] .card-description {
+    border-color: rgba(237, 244, 242, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    color: #dbe5ea;
+}
+
 html[data-theme="dark"] .scores span,
 html[data-theme="dark"] .genre-tags span,
 html[data-theme="dark"] .item-facts span,
@@ -2473,8 +2587,7 @@ html[data-theme="dark"] .links span {
     top: 4.25rem;
     right: 1rem;
     z-index: 90;
-    display: grid;
-    gap: 0.65rem;
+    display: block;
     width: min(24rem, calc(100vw - 2rem));
     pointer-events: none;
 }
@@ -2497,6 +2610,28 @@ html[data-theme="dark"] .links span {
 .toast-message span {
     color: var(--muted);
     line-height: 1.35;
+}
+
+.toast-polite,
+.toast-alerts {
+    display: grid;
+    gap: 0.65rem;
+}
+
+.toast-polite:has(.toast-message) + .toast-alerts {
+    margin-top: 0.65rem;
+}
+
+.toast-message .toast-dismiss {
+    justify-self: end;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
+    pointer-events: auto;
 }
 
 .toast-message.success {
@@ -3498,6 +3633,11 @@ html[data-theme="dark"] .unverified-day-separator small {
 
     .calendar-command-bar .command-palette-presets {
         grid-column: 1 / -1;
+    }
+
+    .calendar-status-row {
+        height: 1.5rem;
+        gap: 0.25rem;
     }
 
     .data-freshness-card {

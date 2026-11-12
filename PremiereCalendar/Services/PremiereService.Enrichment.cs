@@ -417,12 +417,7 @@ public sealed partial class PremiereService
         if (requestedMovieCriteria is not null)
         {
             var originalLanguage = CoalesceText(item.OriginalLanguage, details?.OriginalLanguage);
-            var hasLanguageMismatch = requestedMovieCriteria.OriginalLanguages.Length > 0
-                && !string.IsNullOrWhiteSpace(originalLanguage)
-                && !requestedMovieCriteria.OriginalLanguages.Any(language => string.Equals(
-                    originalLanguage,
-                    language.Trim(),
-                    StringComparison.OrdinalIgnoreCase));
+            var hasLanguageMismatch = !OriginalLanguageMatchesFilter(originalLanguage, requestedMovieCriteria.OriginalLanguages);
             var runtimeMinutes = details?.Runtime;
             var hasRuntimeFilter = requestedMovieCriteria.RuntimeMinMinutes > 0
                 || requestedMovieCriteria.RuntimeMaxMinutes < 360;

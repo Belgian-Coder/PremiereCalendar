@@ -444,57 +444,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
         _queueSignal.Release();
     }
 
-    private static CalendarFilters CloneFilters(CalendarFilters source)
-    {
-        return new CalendarFilters
-        {
-            WeekStart = source.WeekStart,
-            ShowSeries = source.ShowSeries,
-            ShowMovies = source.ShowMovies,
-            SortMode = source.SortMode,
-            SortDirection = source.SortDirection,
-            ScoreSource = source.ScoreSource,
-            MinScore = source.MinScore,
-            MaxScore = source.MaxScore,
-            IncludeUnknownScores = source.IncludeUnknownScores,
-            MinVoteCount = source.MinVoteCount,
-            Language = source.Language,
-            OriginGroup = source.OriginGroup,
-            GenreIds = [.. source.GenreIds],
-            SelectedSources = [.. source.SelectedSources],
-            NetworkText = source.NetworkText,
-            RuntimeMinMinutes = source.RuntimeMinMinutes,
-            RuntimeMaxMinutes = source.RuntimeMaxMinutes,
-            KeywordText = source.KeywordText,
-            SearchText = source.SearchText,
-            SeriesFilters = CloneMediaFilterSet(source.SeriesFilters),
-            MovieFilters = CloneMediaFilterSet(source.MovieFilters)
-        };
-    }
-
-    private static MediaFilterSet CloneMediaFilterSet(MediaFilterSet source)
-    {
-        return new MediaFilterSet
-        {
-            SeriesDateMode = source.SeriesDateMode,
-            OriginalLanguages = [.. source.OriginalLanguages],
-            OriginCountries = [.. source.OriginCountries],
-            GenreIds = [.. source.GenreIds],
-            SelectedSources = [.. source.SelectedSources],
-            WatchRegion = source.WatchRegion,
-            SourceText = source.SourceText,
-            MonetizationTypes = [.. source.MonetizationTypes],
-            MovieReleaseTypes = [.. source.MovieReleaseTypes],
-            Certifications = [.. source.Certifications],
-            CertificationCountry = source.CertificationCountry,
-            TvStatuses = [.. source.TvStatuses],
-            TvTypes = [.. source.TvTypes],
-            RuntimeMinMinutes = source.RuntimeMinMinutes,
-            RuntimeMaxMinutes = source.RuntimeMaxMinutes,
-            KeywordText = source.KeywordText,
-            SearchText = source.SearchText
-        };
-    }
+    private static CalendarFilters CloneFilters(CalendarFilters source) => CalendarFilterState.Clone(source);
 
     private sealed record PrefetchRequest(
         DateOnly WeekStart,

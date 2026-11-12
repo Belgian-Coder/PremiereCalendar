@@ -184,3 +184,11 @@ Matched results and their limits are recorded in
 2,002 tests pass on the exact release source: 1,185 unit, 225 component and 592
 integration, with one expected Linux file-lock skip. The suites ran once, in
 order, in isolated containers with an internal tmpfs-only PostgreSQL server.
+
+## v1.2.19 final validation - 12 November 2026
+
+2,183 tests pass on the exact release source: 1,283 unit, 271 component and 629
+integration, with one expected Linux file-lock skip, run once in isolated
+containers with an internal tmpfs-only PostgreSQL server. Wall-clock-sensitive
+tests must not assume an idle host: start timers before the first measured
+event and give storage budgets an explicit generous value.

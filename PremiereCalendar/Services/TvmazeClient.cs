@@ -23,6 +23,7 @@ public sealed class TvmazeClient : ITvmazeClient
     private readonly object _lookupPublicationGate;
     private readonly PremiereTelemetry? _telemetry;
     private readonly OptionalProviderResponseCache _responses;
+    private readonly TimeProvider _timeProvider;
 
     public TvmazeClient(
         HttpClient httpClient,
@@ -43,6 +44,7 @@ public sealed class TvmazeClient : ITvmazeClient
         _requestThrottler = requestThrottler ?? new ProviderRequestThrottler();
         _lookupPublicationGate = LookupPublicationGates.GetValue(cache, static _ => new object());
         _telemetry = telemetry;
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _responses = new(cache, responseCache, timeProvider);
     }
 
@@ -78,7 +80,7 @@ public sealed class TvmazeClient : ITvmazeClient
                 {
                     using var response = await GetAsync(path, token);
                     if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return new(null, true);
-                    if (!response.IsSuccessStatusCode) return new(null, false, ProviderFailure.FromResponse(response, DateTimeOffset.UtcNow));
+                    if (!response.IsSuccessStatusCode) return new(null, false, ProviderFailure.FromResponse(response, _timeProvider.GetUtcNow()));
                     var show = await response.Content.ReadFromJsonAsync<TvmazeShow>(JsonOptions, token);
                     return show is { Id: > 0 } ? new(show, true) : new(null, false, new("invalid_response", 200));
                 }
@@ -194,6 +196,15 @@ public sealed class TvmazeClient : ITvmazeClient
             outcome = result.Outcome;
             cache = result.Cache;
             count = result.Episodes.Count;
+            if (result.Outcome is "failed" or "timeout")
+            {
+                // An empty list would be indistinguishable from "no premieres that day" and let the week be published as complete.
+                // Keep the underlying failure (and its retry deadline) so the source can defer instead of retrying blindly.
+                throw new ExternalApiException(
+                    $"TVmaze schedule request for {date:yyyy-MM-dd} {(webSchedule ? "web" : "broadcast")} {country} {result.Outcome}.",
+                    result.Error!);
+            }
+
             return result.Episodes;
         }
         catch (OperationCanceledException)
@@ -241,9 +252,15 @@ public sealed class TvmazeClient : ITvmazeClient
                 {
                     var path = BuildSchedulePath(date, country, webSchedule);
                     using var response = await GetWithRetryAsync(path, token);
+                    if (response.StatusCode is System.Net.HttpStatusCode.BadRequest or System.Net.HttpStatusCode.NotFound)
+                    {
+                        // A deterministic rejection of this country/day (for example an unsupported country) is an empty day.
+                        return new ScheduleResult([], "absent", "miss");
+                    }
                     if (!response.IsSuccessStatusCode)
                     {
-                        return new ScheduleResult([], "failed", "miss");
+                        return new ScheduleResult([], "failed", "miss",
+                            new ProviderRequestException("tvmaze", ProviderFailure.FromResponse(response, _timeProvider.GetUtcNow())));
                     }
 
                     var episodes = await response.Content.ReadFromJsonAsync<IReadOnlyList<TvmazeScheduleEpisode>>(
@@ -258,25 +275,27 @@ public sealed class TvmazeClient : ITvmazeClient
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    return new ScheduleResult([], "timeout", "miss");
+                    return new ScheduleResult([], "timeout", "miss",
+                        new ProviderRetryAfterException("tvmaze", _timeProvider.GetUtcNow().AddSeconds(60)));
                 }
                 catch (OperationCanceledException)
                 {
                     throw;
                 }
-                catch (HttpRequestException)
+                catch (HttpRequestException ex)
                 {
-                    return new ScheduleResult([], "failed", "miss");
+                    // Throttling and open circuits arrive as HttpRequestException subclasses that carry their retry time.
+                    return new ScheduleResult([], "failed", "miss", ex);
                 }
-                catch (JsonException)
+                catch (JsonException ex)
                 {
-                    return new ScheduleResult([], "failed", "miss");
+                    return new ScheduleResult([], "failed", "miss", ex);
                 }
             },
             cancellationToken);
     }
 
-    private sealed record ScheduleResult(IReadOnlyList<TvmazeScheduleEpisode> Episodes, string Outcome, string Cache);
+    private sealed record ScheduleResult(IReadOnlyList<TvmazeScheduleEpisode> Episodes, string Outcome, string Cache, Exception? Error = null);
 
     private void PrimeScheduleLookups(IReadOnlyList<TvmazeScheduleEpisode> episodes, DateTimeOffset expiresAtUtc,
         CancellationToken cancellationToken)

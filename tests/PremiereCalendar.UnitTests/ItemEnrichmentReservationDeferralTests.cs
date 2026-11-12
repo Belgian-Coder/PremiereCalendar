@@ -82,6 +82,93 @@ public sealed partial class PremiereServiceTests
     }
 
     [Fact]
+    public async Task ItemCacheReadFailureIsATimedBackoffThatTheSameSessionRecoversFrom()
+    {
+        var clock = new ItemCacheClock();
+        var store = new ReservationFailureStore(new MemoryItemEnrichmentStore(clock)) { ReadFailure = new IOException("Unavailable store") };
+        var coordinator = ItemCacheCoordinatorForReservation(store, clock);
+        var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, 901);
+        var providers = 0;
+        Task<ItemEnrichmentRefresh> Refresh(ItemEnrichmentSnapshot previous, bool _, bool __, CancellationToken token)
+        { providers++; return Task.FromResult(new ItemEnrichmentRefresh(null, null, RefreshMetadataClock: false, RefreshRatingsClock: false)); }
+        await using var session = await coordinator.CreateSessionAsync(default);
+        await session.PrepareAsync([identity], null, default);
+        var failed = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, Refresh, default));
+        Assert.Equal(clock.GetUtcNow().AddSeconds(30), failed.RetryAtUtc);
+        var readsAfterFailure = store.Reads;
+
+        // Inside the backoff window the session keeps failing fast without touching the store.
+        clock.Advance(TimeSpan.FromSeconds(10));
+        await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, Refresh, default));
+        Assert.Equal(readsAfterFailure, store.Reads);
+        Assert.Equal(0, providers);
+
+        // Once the retry time has passed, the missing read is repeated and the item is usable again.
+        clock.Advance(TimeSpan.FromSeconds(21));
+        store.ReadFailure = null;
+        await session.GetAsync(identity, true, Refresh, default);
+        Assert.True(store.Reads > readsAfterFailure);
+        Assert.Equal(1, providers);
+    }
+
+    private static async Task<(ItemEnrichmentCacheCoordinator.ItemEnrichmentSession Session, ReservationFailureStore Store, ItemCacheClock Clock)> FailedReadSessionAsync(
+        ItemEnrichmentIdentity identity)
+    {
+        var clock = new ItemCacheClock();
+        var store = new ReservationFailureStore(new MemoryItemEnrichmentStore(clock)) { ReadFailure = new IOException("Unavailable store") };
+        var session = await ItemCacheCoordinatorForReservation(store, clock).CreateSessionAsync(default);
+        await session.PrepareAsync([identity], null, default);
+        await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, NoopRefresh, default));
+        store.ReadFailure = null;
+        clock.Advance(TimeSpan.FromSeconds(31));
+        return (session, store, clock);
+    }
+
+    private static Task<ItemEnrichmentRefresh> NoopRefresh(ItemEnrichmentSnapshot previous, bool _, bool __, CancellationToken token)
+        => Task.FromResult(new ItemEnrichmentRefresh(null, null, RefreshMetadataClock: false, RefreshRatingsClock: false));
+
+    [Fact]
+    public async Task CancelledStorageRecoveryLeavesTheFailedStateUntouchedAndRecoversLater()
+    {
+        var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, 901);
+        var (session, store, _) = await FailedReadSessionAsync(identity);
+        await using var owned = session;
+        store.BeforeRead = token => Task.Delay(Timeout.InfiniteTimeSpan, token);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.GetAsync(identity, true, NoopRefresh, cancellation.Token));
+
+        // Nothing was removed or cleared: the placeholder row is still there and the session still fails fast.
+        Assert.Equal(-1, session.Find(identity)!.Record.Generation);
+        store.BeforeRead = null;
+        var reads = store.Reads;
+        await session.GetAsync(identity, true, NoopRefresh, default);
+        Assert.True(store.Reads > reads);
+        Assert.True(session.Find(identity)!.Record.Generation >= 0);
+    }
+
+    [Fact]
+    public async Task ConcurrentGetDuringStorageRecoveryFailsFastInsteadOfSeeingMissingRows()
+    {
+        var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, 901);
+        var (session, store, _) = await FailedReadSessionAsync(identity);
+        await using var owned = session;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.BeforeRead = async token => { started.TrySetResult(); await release.Task.WaitAsync(token); };
+
+        var recovering = session.GetAsync(identity, true, NoopRefresh, default);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var concurrent = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, NoopRefresh, default));
+        Assert.True(concurrent.RetryAtUtc > DateTimeOffset.MinValue);
+        Assert.Equal(-1, session.Find(identity)!.Record.Generation);
+
+        release.SetResult();
+        await recovering.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(session.Find(identity)!.Record.Generation >= 0);
+    }
+
+    [Fact]
     public async Task TvmazeReservationCallerCancellationKeepsSharedReservationAndDoesNotTripStorageBackoff()
     {
         var clock = new ItemCacheClock();
@@ -156,13 +243,20 @@ public sealed partial class PremiereServiceTests
     private sealed class ReservationFailureStore(IItemEnrichmentStore inner) : IItemEnrichmentStore
     {
         public Exception? Failure;
+        public Exception? ReadFailure;
         public Func<CancellationToken, Task<IAsyncDisposable>>? Reserve;
         public int Reads;
         public int Reservations;
         public int Writes;
-        public Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>> ReadManyAsync(string partition,
+        public Func<CancellationToken, Task>? BeforeRead;
+        public async Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>> ReadManyAsync(string partition,
             IReadOnlyCollection<ItemEnrichmentIdentity> identities, bool reserveMissing, CancellationToken token)
-        { Reads++; return inner.ReadManyAsync(partition, identities, reserveMissing, token); }
+        {
+            Reads++;
+            if (BeforeRead is { } before) await before(token);
+            if (ReadFailure is { } readFailure) throw readFailure;
+            return await inner.ReadManyAsync(partition, identities, reserveMissing, token);
+        }
         public Task<IAsyncDisposable> ReserveTvmazeLookupAsync(string partition, ItemEnrichmentIdentity identity, CancellationToken token)
         {
             Reservations++;

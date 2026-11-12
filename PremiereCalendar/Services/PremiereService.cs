@@ -387,6 +387,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var sourceAndItemCacheValidationFailed = false;
         var progressHistory = new Dictionary<string, PremiereLoadProgress>(StringComparer.Ordinal);
         Exception? refreshError = null;
+        // Once a clean ready update used the fresh seed, expired rows must never be merged back by a later
+        // non-final update (for example an enrichment batch that reports a source error).
+        var freshSeedLatched = false;
         // The seed is immutable for this execution; avoid rebuilding it for every provider update.
         var provisionalSeed = seededItems.Count == 0 ? staleSeededItems
             : staleSeededItems.Count == 0 ? seededItems
@@ -413,7 +416,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                     break;
                 }
 
-                var progressSeed = (update.IsFinal || update.IsCalendarReady) && !update.HasSourceErrors
+                var cleanFreshUpdate = (update.IsFinal || update.IsCalendarReady) && !update.HasSourceErrors;
+                if (cleanFreshUpdate && update.IsCalendarReady) freshSeedLatched = true;
+                var progressSeed = cleanFreshUpdate || (freshSeedLatched && !update.IsFinal)
                     ? seededItems
                     : provisionalSeed;
                 if (progressSeed.Count > 0)
@@ -537,7 +542,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                 IsCalendarReady = finalUpdate.IsCalendarReady && validation.DirtyMedia.Count == 0,
                 IsEnriching = false,
                 FailedSourceNames = validation.DirtyMedia.Count == 0 ? finalUpdate.FailedSourceNames
-                    : finalUpdate.FailedSourceNames.Append("Item cache validation").Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+                    : finalUpdate.FailedSourceNames.Append(PremiereLoadProgress.ItemCacheValidationSourceName).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
             };
         }
 
@@ -1139,7 +1144,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                             discoveryReady = false;
                             errors.Add(error);
                             readinessValidationErrors.Add(error);
-                            failedSourceNames.Add("Item cache validation");
+                            failedSourceNames.Add(PremiereLoadProgress.ItemCacheValidationSourceName);
                         }
                         if (flushed)
                         {
@@ -1147,7 +1152,9 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
                                 includeConsumed: true, sourceToken, windowStart: start, windowEnd: end, readOnly: true);
                             // The probe does not accept store rows, so keep its evidence
                             // durably in the session for the final classification.
-                            foreach (var dirtyMedia in validation.DirtyMedia) coreSession.MarkDiscoveryUnverified(dirtyMedia);
+                            // A probe whose validation read failed only withholds readiness; it is not evidence of dirt.
+                            if (validation.Validated)
+                                foreach (var dirtyMedia in validation.DirtyMedia) coreSession.MarkDiscoveryUnverified(dirtyMedia);
                             if (validation.DirtyMedia.Count == 0)
                             {
                                 discoveryReady = true;
@@ -1252,7 +1259,7 @@ public sealed partial class PremiereService : IPremiereService, IPremiereLoadPip
         var failures = failedBatches.SelectMany(batch => Unwrap(batch.Error!).Select(error =>
             (Error: error, Notice: OptionalAccessDenial(batch.Name, error))))
             .Concat(readinessValidationErrors.SelectMany(validation => Unwrap(validation).Select(error =>
-                (Error: error, Notice: OptionalAccessDenial("Item cache validation", error))))).ToArray();
+                (Error: error, Notice: OptionalAccessDenial(PremiereLoadProgress.ItemCacheValidationSourceName, error))))).ToArray();
         var retryDeadline = errors.Select(RetryDeadline).Where(deadline => deadline is not null).Min();
         var deadlineFailures = failures.Where(failure => RetryDeadline(failure.Error) is not null).ToArray();
         // Optional access-denial deadlines must not keep an unrelated, non-deferred

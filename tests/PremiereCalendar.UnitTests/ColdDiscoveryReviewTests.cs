@@ -200,8 +200,11 @@ public sealed partial class PremiereServiceTests
             Microsoft.Extensions.Options.Options.Create(new TmdbOptions { BearerToken = "fixture" }),
             NullLogger<PremiereService>.Instance, itemEnrichmentCache: ItemCacheCoordinator(store, clock));
         var injected = 0;
+        var validationReads = 0;
         store.BeforeCurrentRead = identities =>
         {
+            if (InReconcileRead() && identities.Contains(new ItemEnrichmentIdentity(PremiereMediaType.Movie, 2)))
+                Interlocked.Increment(ref validationReads);
             if (!InReconcileRead() || !identities.Contains(new ItemEnrichmentIdentity(PremiereMediaType.Movie, 2))
                 || Interlocked.Exchange(ref injected, 1) == 1) return;
             clock.Advance(TimeSpan.FromMinutes(1));
@@ -213,10 +216,12 @@ public sealed partial class PremiereServiceTests
             { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"], RuntimeMinMinutes = 45 } }, cancellationToken: budget.Token))
             updates.Add(update);
         Assert.Equal(1, injected);
+        // The readiness probe and the final reconcile must both have validated the rejected row.
+        Assert.True(validationReads >= 2, $"Expected the readiness probe and the final reconcile to read the row, saw {validationReads}.");
         var final = Assert.Single(updates, update => update.IsFinal);
         Assert.DoesNotContain(updates, update => update.IsCalendarReady);
         Assert.True(final.HasSourceErrors);
-        Assert.Contains("Item cache validation", final.FailedSourceNames);
+        Assert.Contains(PremiereLoadProgress.ItemCacheValidationSourceName, final.FailedSourceNames);
         Assert.Equal([1], final.Items.Select(item => item.TmdbId));
         Assert.Empty(cache.SetCalls);
     }
@@ -230,8 +235,11 @@ public sealed partial class PremiereServiceTests
         using var fixture = CreateColdFixture(rows, held: true);
         fixture.Held!.Release.TrySetResult();
         var injected = 0;
+        var validationReads = 0;
         fixture.Store.BeforeCurrentRead = identities =>
         {
+            if (InReconcileRead() && identities.Contains(new ItemEnrichmentIdentity(PremiereMediaType.Series, 20_000)))
+                Interlocked.Increment(ref validationReads);
             if (!InReconcileRead() || !identities.Contains(new ItemEnrichmentIdentity(PremiereMediaType.Series, 20_000))
                 || Interlocked.Exchange(ref injected, 1) == 1) return;
             var key = Assert.Single(fixture.Store.Records.Keys, key => key.Identity.TmdbId == 20_000);
@@ -251,10 +259,11 @@ public sealed partial class PremiereServiceTests
         await foreach (var update in fixture.Service.StreamCoreAsync(start, start.AddDays(6), filters: ColdFilters(true),
             cancellationToken: budget.Token)) updates.Add(update);
         Assert.Equal(1, injected);
+        Assert.True(validationReads >= 2, $"Expected the readiness probe and the final reconcile to read the row, saw {validationReads}.");
         var final = Assert.Single(updates, update => update.IsFinal);
         Assert.DoesNotContain(updates, update => update.IsCalendarReady);
         Assert.True(final.HasSourceErrors);
-        Assert.Contains("Item cache validation", final.FailedSourceNames);
+        Assert.Contains(PremiereLoadProgress.ItemCacheValidationSourceName, final.FailedSourceNames);
         Assert.DoesNotContain(final.Items, item => item.TmdbId == 20_000);
         Assert.Empty(fixture.Cache.SetCalls);
     }
@@ -331,6 +340,61 @@ public sealed partial class PremiereServiceTests
                 if (!update.HasSourceErrors) continue;
                 laterErrorUpdates++;
                 Assert.True(update.IsCalendarReady);
+            }
+        }
+        finally { tomatoes.Release.TrySetResult(); }
+        Assert.True(sawReady);
+        Assert.True(laterErrorUpdates > 0);
+    }
+
+    [Fact]
+    public async Task ColdDiscovery_ExpiredRowsDoNotComeBackInALaterUpdateThatCarriesASourceErrorAfterReadiness()
+    {
+        var date = new DateOnly(2026, 11, 2);
+        var tmdb = new FakeTmdbClient
+        {
+            MovieItems = [new() { Id = 1, Title = "Known", ReleaseDate = "2026-11-02", OriginalLanguage = "en" }]
+        };
+        tmdb.MovieDetailsById[1] = new() { Id = 1, Runtime = 110, OriginalLanguage = "en" };
+        var clock = new ItemCacheClock();
+        var store = new MemoryItemEnrichmentStore(clock);
+        using var tomatoes = new ColdReleasedTomatoes();
+        var stale = new PremiereItem
+        {
+            CanonicalId = PremiereIdentity.CanonicalId(PremiereMediaType.Movie, 777), Title = "Expired card",
+            MediaType = PremiereMediaType.Movie, Type = PremiereItemType.MovieFirstRelease, TmdbId = 777,
+            PremiereDate = date, OriginalLanguage = "en", RuntimeMinutes = 100
+        };
+        var service = new PremiereService(tmdb, new FakeOmdbClient(), new FakeTvmazeClient(), new FakeWatchmodeClient(),
+            new FakeCalendarCache { ExpiredItems = [stale] }, new TrailerSelector(), new RatingMapper(), [], [],
+            Microsoft.Extensions.Options.Options.Create(new TmdbOptions { BearerToken = "fixture" }),
+            NullLogger<PremiereService>.Instance, rottenTomatoesClient: tomatoes,
+            itemEnrichmentCache: ItemCacheCoordinator(store, clock));
+        var sawReady = false;
+        var laterErrorUpdates = 0;
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            await foreach (var update in service.StreamCoreAsync(date, date, filters: new CalendarFilters
+                { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"] } }, cancellationToken: budget.Token))
+            {
+                if (update.IsFinal) continue;
+                if (!sawReady)
+                {
+                    if (!update.IsCalendarReady) continue;
+                    sawReady = true;
+                    Assert.DoesNotContain(update.Items, item => item.TmdbId == 777);
+                    store.BeforeWriteBatch = (_, token) =>
+                    {
+                        store.InvalidateTmdbAsync(PremiereMediaType.Movie, [1], clock.GetUtcNow(), token).GetAwaiter().GetResult();
+                        return Task.CompletedTask;
+                    };
+                    tomatoes.Release.TrySetResult();
+                    continue;
+                }
+                // Once the calendar was ready with fresh rows, no later (error-carrying) update may resurrect expired ones.
+                Assert.DoesNotContain(update.Items, item => item.TmdbId == 777);
+                if (update.HasSourceErrors) laterErrorUpdates++;
             }
         }
         finally { tomatoes.Release.TrySetResult(); }

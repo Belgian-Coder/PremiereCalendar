@@ -398,7 +398,7 @@ public sealed partial class CalendarPageTests : BunitContext
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
         component.WaitForAssertion(() => Assert.Single(service.Calls));
         string? originalPoster = null;
-        component.WaitForAssertion(() => originalPoster = component.Find("img[data-lazy-src]").GetAttribute("data-lazy-src"));
+        component.WaitForAssertion(() => originalPoster = component.Find(".poster-frame img").GetAttribute("src"));
         Assert.StartsWith("/cached-image?url=", originalPoster);
 
         component.Find("button[title='Refresh release lists and reuse fresh ratings and artwork']").Click();
@@ -408,7 +408,7 @@ public sealed partial class CalendarPageTests : BunitContext
         Assert.False(service.Calls[1].ForceRefresh);
         component.WaitForAssertion(() =>
         {
-            var refreshedPoster = component.Find("img[data-lazy-src]").GetAttribute("data-lazy-src");
+            var refreshedPoster = component.Find(".poster-frame img").GetAttribute("src");
             Assert.Equal(originalPoster, refreshedPoster);
             Assert.DoesNotContain("refresh=true", refreshedPoster);
             Assert.DoesNotContain("&v=", refreshedPoster);
@@ -839,6 +839,8 @@ public sealed partial class CalendarPageTests : BunitContext
         Services.AddSingleton<IPremiereService>(service);
 
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        // A bare URL selects today, so pin a week whose first day holds the cards.
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/?week=2026-05-04");
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
         component.WaitForAssertion(() =>
         {
@@ -1147,7 +1149,10 @@ public sealed partial class CalendarPageTests : BunitContext
         {
             Assert.Empty(component.FindAll("[data-testid='premiere-card']"));
             Assert.Equal("Loading", component.Find(".calendar-result-count").TextContent.Trim());
-            Assert.Empty(component.FindAll("[data-testid='data-freshness-card']"));
+            // The previous week's freshness stays (marked as checking) so the status row does not collapse.
+            var freshness = component.Find("[data-testid='data-freshness-card']");
+            Assert.Contains("Movies cache", freshness.TextContent);
+            Assert.Contains("Checking cache", freshness.TextContent);
         });
         service.ReleaseNextWeekFinal();
         component.WaitForAssertion(() =>
@@ -1337,7 +1342,7 @@ public sealed partial class CalendarPageTests : BunitContext
         component.WaitForAssertion(() => Assert.Single(component.FindAll("[data-testid='premiere-card']")));
 
         component.Find("button[title='Open filters']").Click();
-        component.Find("input[aria-label='Toggle Series filters source HBO Max']").Change(true);
+        FilterCheckbox(component, "series-where-to-watch-filter", "HBO Max").Change(true);
         component.Find("button[title='Save filters']").Click();
 
         component.WaitForAssertion(() =>
@@ -1379,7 +1384,7 @@ public sealed partial class CalendarPageTests : BunitContext
         component.WaitForAssertion(() => Assert.Single(component.FindAll("[data-testid='premiere-card']")));
 
         component.Find("button[title='Open filters']").Click();
-        component.Find("input[aria-label='Toggle Series filters source Legacy Network']").Change(true);
+        FilterCheckbox(component, "series-where-to-watch-filter", "Legacy Network").Change(true);
         component.Find("button[title='Save filters']").Click();
 
         component.WaitForAssertion(() =>
@@ -1483,8 +1488,8 @@ public sealed partial class CalendarPageTests : BunitContext
         component.WaitForAssertion(() => Assert.Equal(3, component.FindAll("[data-testid='premiere-card']").Count));
 
         component.Find("button[title='Open filters']").Click();
-        component.Find("input[aria-label='Toggle Series filters language English (EN)']").Change(true);
-        component.Find("input[aria-label='Toggle Series filters language Dutch (NL)']").Change(true);
+        FilterCheckbox(component, "series-language-filter", "English (EN)").Change(true);
+        FilterCheckbox(component, "series-language-filter", "Dutch (NL)").Change(true);
         component.Find("button[title='Save filters']").Click();
 
         component.WaitForAssertion(() =>
@@ -1580,7 +1585,7 @@ public sealed partial class CalendarPageTests : BunitContext
         });
 
         component.Find("button[title='Open filters']").Click();
-        component.Find("input[aria-label='Toggle Series filters language English (EN)']").Change(false);
+        FilterCheckbox(component, "series-language-filter", "English (EN)").Change(false);
         component.Find("button[title='Save filters']").Click();
 
         component.WaitForAssertion(() =>
@@ -1700,7 +1705,7 @@ public sealed partial class CalendarPageTests : BunitContext
         component.WaitForAssertion(() => Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count));
 
         component.Find("button[title='Open filters']").Click();
-        component.Find("input[aria-label='Toggle Series filters origin country Belgium (BE)']").Change(true);
+        FilterCheckbox(component, "series-origin-country-filter", "Belgium (BE)").Change(true);
         component.Find("button[title='Save filters']").Click();
 
         component.WaitForAssertion(() =>
@@ -2037,8 +2042,9 @@ public sealed partial class CalendarPageTests : BunitContext
         {
             var pane = component.Find("[data-testid='filter-pane']");
             Assert.Equal("filter-pane-summary", pane.GetAttribute("aria-describedby"));
-            Assert.Equal("status", component.Find("#filter-pane-summary").GetAttribute("role"));
-            Assert.Equal("polite", component.Find("#filter-pane-summary").GetAttribute("aria-live"));
+            // The summary changes with every draft edit; it is described-by text, not a live region.
+            Assert.Null(component.Find("#filter-pane-summary").GetAttribute("role"));
+            Assert.Null(component.Find("#filter-pane-summary").GetAttribute("aria-live"));
             Assert.DoesNotContain("Calendar controls", pane.TextContent);
             Assert.Contains("Selected score", pane.TextContent);
             Assert.Contains("Selected-source votes", pane.TextContent);
@@ -2218,6 +2224,8 @@ public sealed partial class CalendarPageTests : BunitContext
         };
         Services.AddSingleton<IPremiereService>(service);
 
+        // A bare URL selects today, so pin a week whose first day holds the cards.
+        Services.GetRequiredService<NavigationManager>().NavigateTo("/?week=2026-05-04");
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() =>

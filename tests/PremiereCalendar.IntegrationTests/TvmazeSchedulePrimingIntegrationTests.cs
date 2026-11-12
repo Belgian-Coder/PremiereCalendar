@@ -118,7 +118,7 @@ public sealed class TvmazeSchedulePrimingIntegrationTests
         var handler = new StubHttpMessageHandler(_ => malformed
             ? StubHttpMessageHandler.Json("[{\"show\":" + JsonSerializer.Serialize(Show(82)) + "},invalid]")
             : new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
-        Assert.Empty(await Client(handler, cache).GetScheduleAsync(ScheduleDate, "US", false, CancellationToken.None));
+        await Assert.ThrowsAsync<ExternalApiException>(() => Client(handler, cache).GetScheduleAsync(ScheduleDate, "US", false, CancellationToken.None));
         Assert.False(cache.TryGetValue("tvmaze:lookup:lookup/shows?thetvdb=81189", out _));
         Assert.False(cache.TryGetValue("tvmaze:lookup:lookup/shows?imdb=tt0944947", out _));
     }

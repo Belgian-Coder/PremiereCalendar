@@ -26,8 +26,10 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     private string DatabasePath => Path.Combine(_root, "test.db");
     private IProviderCacheStateStore CreateStore() => new SqliteProviderCacheStateStore(
         Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = DatabasePath }), new TestEnvironment(_root));
-    private static ProviderResponseCache Cache(IProviderCacheStateStore store, TimeProvider? time = null) =>
-        new(store, NullLogger<ProviderResponseCache>.Instance, time);
+    // Generous by default so a loaded host never turns a held read into a fallback; budget tests pass a small one explicitly.
+    private static readonly TimeSpan GenerousIoBudget = TimeSpan.FromSeconds(30);
+    private static ProviderResponseCache Cache(IProviderCacheStateStore store, TimeProvider? time = null, TimeSpan? ioBudget = null) =>
+        new(store, NullLogger<ProviderResponseCache>.Instance, time, ioBudget: ioBudget ?? GenerousIoBudget);
 
     [Theory]
     [InlineData(false)]
@@ -261,7 +263,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     public async Task CacheIoBudget_CancelsAndObservesStoreWork_FallsBackToHttp_AndPreservesCallerCancellation()
     {
         var blockedWrite = new InterceptingStore(CreateStore()) { BlockWrites = true };
-        var save = Cache(blockedWrite).SaveAsync("tmdb", "request", RottenTomatoesScores.Empty, CancellationToken.None);
+        var save = Cache(blockedWrite, ioBudget: TimeSpan.FromMilliseconds(500)).SaveAsync("tmdb", "request", RottenTomatoesScores.Empty, CancellationToken.None);
         await blockedWrite.WriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await save.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(blockedWrite.WriteCanceled);
@@ -270,7 +272,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         var blockedRead = new InterceptingStore(CreateStore()) { BlockReads = true };
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{\"id\":42}"));
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var fetch = Details(Tmdb(handler, memory, Cache(blockedRead)), false);
+        var fetch = Details(Tmdb(handler, memory, Cache(blockedRead, ioBudget: TimeSpan.FromMilliseconds(500))), false);
         await blockedRead.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(42, (await fetch.WaitAsync(TimeSpan.FromSeconds(5)))!.Id);
         Assert.True(blockedRead.ReadCanceled);
@@ -360,7 +362,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         await inner.SaveAsync(new("responsecache-omdb", ProviderCacheScope.Item, "expired-outcome",
             now.AddMonths(-3).AddTicks(-1), null, null, null, "{}"), default);
         var blocked = new InterceptingStore(inner) { BlockReads = true, BlockProvider = "responsecache-omdb" };
-        var cache = Cache(blocked, new TestTimeProvider(now));
+        var cache = Cache(blocked, new TestTimeProvider(now), TimeSpan.FromMilliseconds(500));
         Assert.Null(await cache.GetAsync<RottenTomatoesScores>("omdb", "blocked", TimeSpan.FromHours(1), default));
         Assert.True(blocked.ReadCanceled);
         Assert.Equal(1, await cache.CleanupAsync(default));
@@ -464,14 +466,16 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         await writer.OpenAsync();
         await using var transaction = writer.BeginTransaction(deferred: false);
         var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
-        var responseCache = Cache(CreateStore(), clock);
+        var responseCache = Cache(CreateStore(), clock, TimeSpan.FromMilliseconds(500));
         var started = Stopwatch.GetTimestamp();
-        await responseCache.SaveAsync("tmdb", "locked", RottenTomatoesScores.Empty, CancellationToken.None);
-        Assert.InRange(Stopwatch.GetElapsedTime(started).TotalSeconds, 0, 3);
+        // A single failed write is not an outage: only repeated consecutive failures open the backoff.
+        for (var attempt = 0; attempt < ProviderResponseCache.FailuresBeforeBackoff; attempt++)
+            await responseCache.SaveAsync("tmdb", $"locked-{attempt}", RottenTomatoesScores.Empty, CancellationToken.None);
+        Assert.InRange(Stopwatch.GetElapsedTime(started).TotalSeconds, 0, 9);
 
         started = Stopwatch.GetTimestamp();
         await responseCache.SaveAsync("tmdb", "backoff", RottenTomatoesScores.Empty, CancellationToken.None);
-        Assert.InRange(Stopwatch.GetElapsedTime(started).TotalSeconds, 0, 1);
+        Assert.InRange(Stopwatch.GetElapsedTime(started).TotalSeconds, 0, 0.4);
         Assert.Empty(await CreateStore().GetByProviderAsync("responsecache-tmdb", 100, CancellationToken.None));
 
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
@@ -636,14 +640,16 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     public async Task ProviderIoBackoff_DoesNotSuppressOtherProvidersPersistence(string failedProvider, string healthyProvider)
     {
         var store = new InterceptingStore(CreateStore()) { BlockReads = true, BlockProvider = $"responsecache-{failedProvider}" };
-        var cache = Cache(store, new TestTimeProvider(DateTimeOffset.UtcNow));
-        Assert.Null(await cache.GetAsync<RottenTomatoesScores>(failedProvider, "blocked", TimeSpan.FromHours(12), CancellationToken.None));
+        var cache = Cache(store, new TestTimeProvider(DateTimeOffset.UtcNow), TimeSpan.FromMilliseconds(300));
+        // Only repeated consecutive failures open the provider's backoff.
+        for (var attempt = 0; attempt < ProviderResponseCache.FailuresBeforeBackoff; attempt++)
+            Assert.Null(await cache.GetAsync<RottenTomatoesScores>(failedProvider, $"blocked-{attempt}", TimeSpan.FromHours(12), CancellationToken.None));
         Assert.True(store.ReadCanceled);
         var scores = new RottenTomatoesScores(88, 91);
         await cache.SaveAsync(healthyProvider, "healthy", scores, CancellationToken.None);
         Assert.Equal(scores, (await cache.GetAsync<RottenTomatoesScores>(healthyProvider, "healthy", TimeSpan.FromHours(12), CancellationToken.None))!.Value);
         await cache.SaveAsync(failedProvider, "backoff", scores, CancellationToken.None);
-        Assert.Equal(2, store.ReadCount);
+        Assert.Equal(ProviderResponseCache.FailuresBeforeBackoff + 1, store.ReadCount);
         Assert.Equal(1, store.WriteCount);
         Assert.Single(await CreateStore().GetByProviderAsync($"responsecache-{healthyProvider}", 100, CancellationToken.None));
         Assert.Empty(await CreateStore().GetByProviderAsync($"responsecache-{failedProvider}", 100, CancellationToken.None));

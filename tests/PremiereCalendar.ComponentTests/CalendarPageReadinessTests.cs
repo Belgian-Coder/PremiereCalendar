@@ -39,7 +39,10 @@ public sealed partial class CalendarPageTests
             {
                 var card = Assert.Single(component.FindAll("[data-testid='premiere-card']"));
                 Assert.Contains("Enriched movie", card.TextContent);
-                Assert.Single(card.QuerySelectorAll("img[data-lazy-image]"));
+                // First-viewport posters render the real src directly instead of the lazy placeholder.
+                var poster = Assert.Single(card.QuerySelectorAll(".poster-frame img"));
+                Assert.Equal("high", poster.GetAttribute("fetchpriority"));
+                Assert.False(poster.HasAttribute("data-lazy-image"));
                 Assert.Single(component.FindAll("[data-testid='calendar-enrichment']"));
                 Assert.Single(service.Calls);
                 Assert.Single(_prefetcher.WeekStarts);

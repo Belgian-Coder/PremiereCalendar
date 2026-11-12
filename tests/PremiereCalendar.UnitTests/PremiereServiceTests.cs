@@ -2677,7 +2677,7 @@ public sealed partial class PremiereServiceTests
     }
 
     [Fact]
-    public async Task GetPremieresAsync_SkipsTimedOutExternalIdResolutionWithoutDroppingOtherCandidates()
+    public async Task GetPremieresAsync_ReportsTimedOutExternalIdResolutionAsAFailedSourceButKeepsTheResolvedCandidates()
     {
         var tmdb = new FakeTmdbClient();
         tmdb.FindResults[(PremiereMediaType.Series, "tvdb_id", "9002")] = 102;
@@ -2706,27 +2706,23 @@ public sealed partial class PremiereServiceTests
                     "External IDs")
             ]
         };
-        var reports = new List<PremiereLoadProgress>();
+        var cache = new FakeCalendarCache();
         var service = CreateService(
             tmdb,
             discoveryProviders: [discovery],
+            calendarCache: cache,
             enrichmentProgressBatchSize: 1);
 
-        var items = await service.GetPremieresAsync(
-            new DateOnly(2026, 5, 4),
-            new DateOnly(2026, 5, 10),
-            CancellationToken.None,
-            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
-            filters: NewSeriesOnlyFilters());
+        var updates = await CollectStreamAsync(service, new DateOnly(2026, 5, 4), new DateOnly(2026, 5, 10), NewSeriesOnlyFilters());
 
-        Assert.Equal(2, items.Count);
-        Assert.Contains(items, item =>
-            item.Title == "Resolved Show"
-            && item.VerificationState == PremiereVerificationState.Verified);
-        Assert.Contains(items, item =>
-            item.Title == "Timed Out Show"
-            && item.VerificationState == PremiereVerificationState.Unverified);
-        Assert.DoesNotContain(reports, report => report.HasSourceErrors);
+        // The candidate whose lookup timed out gets no card and the source is reported failed with a retry time,
+        // but the other candidate still resolves and stays on screen.
+        var final = Assert.Single(updates, update => update.IsFinal);
+        Assert.True(final.HasSourceErrors);
+        Assert.NotNull(final.RetryAfterUtc);
+        Assert.Contains(final.Items, item => item.Title == "Resolved Show" && item.VerificationState == PremiereVerificationState.Verified);
+        Assert.DoesNotContain(final.Items, item => item.Title == "Timed Out Show");
+        Assert.Empty(cache.SetCalls);
         Assert.Contains(tmdb.FindCalls, call => call.ExternalId == "9001");
         Assert.Contains(tmdb.FindCalls, call => call.ExternalId == "9002");
     }

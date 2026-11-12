@@ -16,11 +16,12 @@ public interface IPosterWarmupQueue
 /// Generates the WebP poster variant requested by calendar cards before the browser asks for it.
 /// Latest batch wins: a new batch replaces every pending poster, the item in flight may finish, and the
 /// worker waits briefly after a new batch so the browser's own requests for visible cards go first.
-/// One worker; never blocks or throws into the caller.
+/// Two workers by default; never blocks or throws into the caller.
 /// </summary>
 public sealed class PosterWarmupQueue : IPosterWarmupQueue, IHostedService, IDisposable
 {
     internal const int DefaultCapacity = 512;
+    internal const int DefaultWorkerCount = 2;
     internal const int RecentlyWarmedCapacity = 2000;
     internal static readonly TimeSpan DefaultStartDelay = TimeSpan.FromMilliseconds(750);
     internal static readonly TimeSpan RecentlyWarmedLifetime = TimeSpan.FromMinutes(30);
@@ -39,6 +40,7 @@ public sealed class PosterWarmupQueue : IPosterWarmupQueue, IHostedService, IDis
     private readonly int _capacity;
     private readonly bool _enabled;
     private readonly Task _worker;
+    private readonly int _workerCount;
     private CancellationTokenSource _batchCancellation = new();
     private long _generation;
     private int _pendingIndex;
@@ -60,7 +62,8 @@ public sealed class PosterWarmupQueue : IPosterWarmupQueue, IHostedService, IDis
         int capacity,
         TimeSpan startDelay,
         Func<TimeSpan, CancellationToken, Task> delay,
-        TimeProvider time)
+        TimeProvider time,
+        int workerCount = DefaultWorkerCount)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
@@ -69,7 +72,10 @@ public sealed class PosterWarmupQueue : IPosterWarmupQueue, IHostedService, IDis
         _delay = delay;
         _time = time;
         _enabled = options.Value.Enabled;
-        _worker = _enabled ? Task.Run(RunAsync) : Task.CompletedTask;
+        _workerCount = Math.Clamp(workerCount, 1, 8);
+        _worker = _enabled
+            ? Task.WhenAll(Enumerable.Range(0, _workerCount).Select(_ => Task.Run(RunAsync)))
+            : Task.CompletedTask;
     }
 
     public void Enqueue(IEnumerable<string> posterUrls)
@@ -116,7 +122,8 @@ public sealed class PosterWarmupQueue : IPosterWarmupQueue, IHostedService, IDis
                 previous.Dispose();
                 if (batch.Count > 0)
                 {
-                    _signal.Release();
+                    // Every worker may join the batch; surplus wake-ups find nothing pending and go back to sleep.
+                    _signal.Release(_workerCount);
                 }
             }
         }

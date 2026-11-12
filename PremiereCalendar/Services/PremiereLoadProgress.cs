@@ -14,6 +14,9 @@ public sealed record PremiereLoadProgress(
     string? ProgressText = null,
     long? ElapsedMilliseconds = null)
 {
+    /// <summary>Source name reported in <see cref="FailedSourceNames"/> when item-cache validation fails.</summary>
+    public const string ItemCacheValidationSourceName = "Item cache validation";
+
     public string ProviderKey { get; init; } = SourceName;
     public string Phase { get; init; } = IsFinal ? "complete" : FromCache ? "cache" : "loading";
     public int? AcceptedCount { get; init; } = SourceItemCount;

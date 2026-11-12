@@ -36,10 +36,9 @@ internal sealed class OptionalProviderResponseCache(IMemoryCache memory, Provide
 
             var read = persistent is null ? null
                 : await persistent.ReadAsync<OptionalProviderValue<T>>(provider, partition, lifetime, token);
-            if (read?.Status == ProviderResponseCacheReadStatus.StorageUnavailable)
-                return new(previous is null ? unavailableFallback : previous.Value.Value, false,
-                    new ProviderFailure("storage_unavailable", RetryAtUtc: read.RetryAtUtc, IsLocal: true));
-            var stored = read?.Response;
+            // An unavailable persistent cache is a cache miss: the provider is still called, only the
+            // durable copy is skipped. Failing here would hide fresh provider data behind a storage hiccup.
+            var stored = read?.Status == ProviderResponseCacheReadStatus.StorageUnavailable ? null : read?.Response;
             previous ??= stored;
             if (!force && stored is not null)
             {

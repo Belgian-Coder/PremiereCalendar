@@ -147,7 +147,7 @@ public sealed class TvmazeScheduleDiscoveryProviderTests
     }
 
     [Fact]
-    public async Task GetCandidatesAsync_SkipsFailedScheduleRequestAndKeepsOtherCandidates()
+    public async Task GetCandidatesAsync_KeepsOtherCandidatesButReportsFailedScheduleRequest()
     {
         var client = new FakeTvmazeClient
         {
@@ -176,11 +176,10 @@ public sealed class TvmazeScheduleDiscoveryProviderTests
         };
         var provider = CreateProvider(client);
 
-        var candidates = await provider.GetCandidatesAsync(
-            new DateOnly(2026, 5, 4),
-            new DateOnly(2026, 5, 4),
-            CancellationToken.None);
+        // The days that succeeded are kept, but the failed request surfaces so the week is never published as complete.
+        var (candidates, failure) = await StreamUntilFailureAsync(provider);
 
+        Assert.IsType<ExternalApiException>(failure);
         var candidate = Assert.Single(candidates);
         Assert.Equal("Surviving Schedule", candidate.Title);
         Assert.Equal(67890, candidate.TvdbId);
@@ -189,7 +188,7 @@ public sealed class TvmazeScheduleDiscoveryProviderTests
     }
 
     [Fact]
-    public async Task GetCandidatesAsync_SkipsTimedOutScheduleRequestAndKeepsOtherCandidates()
+    public async Task GetCandidatesAsync_KeepsOtherCandidatesButReportsTimedOutScheduleRequest()
     {
         var client = new FakeTvmazeClient
         {
@@ -219,16 +218,39 @@ public sealed class TvmazeScheduleDiscoveryProviderTests
         };
         var provider = CreateProvider(client);
 
-        var candidates = await provider.GetCandidatesAsync(
-            new DateOnly(2026, 5, 4),
-            new DateOnly(2026, 5, 4),
-            CancellationToken.None);
+        var (candidates, failure) = await StreamUntilFailureAsync(provider);
 
+        Assert.IsType<ExternalApiException>(failure);
         var candidate = Assert.Single(candidates);
         Assert.Equal("Timeout Survivor", candidate.Title);
         Assert.Equal(11111, candidate.TvdbId);
         Assert.Contains(client.ScheduleCalls, call => call.Country == "BE" && !call.WebSchedule);
         Assert.Contains(client.ScheduleCalls, call => call.Country == "BE" && call.WebSchedule);
+    }
+
+    [Fact]
+    public async Task GetCandidatesAsync_ThrowsWhenAnyScheduleRequestFailsSoTheWeekIsNotComplete()
+    {
+        var client = new FakeTvmazeClient
+        {
+            ThrowForCalls = [new ScheduleCall(new DateOnly(2026, 5, 4), "US", true)]
+        };
+
+        await Assert.ThrowsAsync<ExternalApiException>(() => CreateProvider(client).GetCandidatesAsync(
+            new DateOnly(2026, 5, 4), new DateOnly(2026, 5, 4), CancellationToken.None));
+    }
+
+    private static async Task<(List<ExternalPremiereCandidate> Candidates, Exception? Failure)> StreamUntilFailureAsync(
+        TvmazeScheduleDiscoveryProvider provider)
+    {
+        var candidates = new List<ExternalPremiereCandidate>();
+        try
+        {
+            await foreach (var batch in provider.StreamCandidatesAsync(new DateOnly(2026, 5, 4), new DateOnly(2026, 5, 4)))
+                candidates.AddRange(batch);
+            return (candidates, null);
+        }
+        catch (Exception exception) { return (candidates, exception); }
     }
 
     private static TvmazeScheduleDiscoveryProvider CreateProvider(FakeTvmazeClient client)

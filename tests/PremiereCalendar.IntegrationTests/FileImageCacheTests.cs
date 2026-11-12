@@ -126,7 +126,7 @@ public sealed class FileImageCacheTests : IDisposable
     [Fact]
     public async Task GetOrAddAsync_FetchesAndReusesCachedImage()
     {
-        var handler = new StubHttpMessageHandler(_ => Image([1, 2, 3]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(1, 2, 3)));
         var cache = CreateCache(handler);
 
         var first = await cache.GetOrAddAsync(
@@ -148,7 +148,7 @@ public sealed class FileImageCacheTests : IDisposable
     [Fact]
     public async Task GetOrAddAsync_CoalescesConcurrentFetchesForSameImage()
     {
-        var handler = new BlockingImageHandler([4, 5, 6]);
+        var handler = new BlockingImageHandler(Marker(4, 5, 6));
         var firstCache = CreateCache(handler);
         var secondCache = CreateCache(handler);
         const string imageUrl = "https://image.tmdb.org/t/p/w342/concurrent.jpg";
@@ -179,7 +179,7 @@ public sealed class FileImageCacheTests : IDisposable
     public async Task GetOrAddAsync_ForceRefreshFetchesRemoteImageAgain()
     {
         byte imageVersion = 0;
-        var handler = new StubHttpMessageHandler(_ => Image([++imageVersion]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(++imageVersion)));
         var cache = CreateCache(handler);
 
         var first = await cache.GetOrAddAsync(
@@ -194,8 +194,8 @@ public sealed class FileImageCacheTests : IDisposable
         var secondBytes = await File.ReadAllBytesAsync(second.FilePath);
 
         Assert.Equal(2, handler.Requests.Count);
-        Assert.Equal(1, firstBytes[0]);
-        Assert.Equal(2, secondBytes[0]);
+        Assert.Equal(1, firstBytes[3]);
+        Assert.Equal(2, secondBytes[3]);
         Assert.NotEqual(first.ContentHash, second.ContentHash);
     }
 
@@ -203,7 +203,7 @@ public sealed class FileImageCacheTests : IDisposable
     public async Task GetOrAddAsync_RefreshPublishesAnImmutableGenerationForExistingReaders()
     {
         byte imageVersion = 0;
-        var handler = new StubHttpMessageHandler(_ => Image([++imageVersion, 2, 3]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(++imageVersion, 2, 3)));
         var cache = CreateCache(handler);
         var first = await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/atomic.jpg",
@@ -218,8 +218,8 @@ public sealed class FileImageCacheTests : IDisposable
 
         using var oldSnapshot = new MemoryStream();
         await oldReader.CopyToAsync(oldSnapshot);
-        Assert.Equal(new byte[] { 1, 2, 3 }, oldSnapshot.ToArray());
-        Assert.Equal(new byte[] { 1, 2, 3 }, await File.ReadAllBytesAsync(first.FilePath));
+        Assert.Equal(Marker(1, 2, 3), oldSnapshot.ToArray());
+        Assert.Equal(Marker(1, 2, 3), await File.ReadAllBytesAsync(first.FilePath));
         Assert.NotEqual(first.FilePath, (await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/atomic.jpg",
             forceRefresh: false,
@@ -230,7 +230,7 @@ public sealed class FileImageCacheTests : IDisposable
     public async Task GetOrAddAsync_ReadOnlyMetadataKeepsThePlatformCommitAndBodyPairConsistent()
     {
         byte imageVersion = 0;
-        var handler = new StubHttpMessageHandler(_ => Image([++imageVersion, 4, 5]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(++imageVersion, 4, 5)));
         var cache = CreateCache(handler);
         const string imageUrl = "https://image.tmdb.org/t/p/w342/metadata-failure.jpg";
         var first = await cache.GetOrAddAsync(imageUrl, false, CancellationToken.None);
@@ -264,7 +264,7 @@ public sealed class FileImageCacheTests : IDisposable
             Assert.NotEqual(oldMetadata, await File.ReadAllBytesAsync(metadataPath));
             Assert.NotEqual(first.ContentHash, current.ContentHash);
             Assert.Equal(refreshed.ContentHash, current.ContentHash);
-            Assert.Equal(new byte[] { 2, 4, 5 }, await File.ReadAllBytesAsync(current.FilePath));
+            Assert.Equal(Marker(2, 4, 5), await File.ReadAllBytesAsync(current.FilePath));
         }
 
         Assert.Equal(2, handler.Requests.Count);
@@ -283,7 +283,7 @@ public sealed class FileImageCacheTests : IDisposable
                 throw new TaskCanceledException("Simulated HTTP timeout.");
             }
 
-            return Image([7, 7, 7]);
+            return Image(Marker(7, 7, 7));
         });
         var cache = CreateCache(handler);
         var cached = await cache.GetOrAddAsync(
@@ -307,7 +307,7 @@ public sealed class FileImageCacheTests : IDisposable
         Assert.Equal(cached.FilePath, stale.FilePath);
         Assert.True(stale.IsStale);
         Assert.Equal(TimeSpan.FromMinutes(1), stale.BrowserMaxAge);
-        Assert.Equal([7, 7, 7], await File.ReadAllBytesAsync(stale.FilePath));
+        Assert.Equal(Marker(7, 7, 7), await File.ReadAllBytesAsync(stale.FilePath));
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -316,7 +316,7 @@ public sealed class FileImageCacheTests : IDisposable
     {
         var requestCount = 0;
         var handler = new StubHttpMessageHandler(_ => Interlocked.Increment(ref requestCount) == 1
-            ? Image([6, 5, 4])
+            ? Image(Marker(6, 5, 4))
             : StalledImage());
         var cache = CreateCache(handler, new ImageCacheOptions
         {
@@ -335,13 +335,13 @@ public sealed class FileImageCacheTests : IDisposable
 
         Assert.True(stale.IsStale);
         Assert.Equal(cached.ContentHash, stale.ContentHash);
-        Assert.Equal(new byte[] { 6, 5, 4 }, await File.ReadAllBytesAsync(stale.FilePath));
+        Assert.Equal(Marker(6, 5, 4), await File.ReadAllBytesAsync(stale.FilePath));
     }
 
     [Fact]
     public async Task GetOrAddAsync_LazilyAddsContentHashToLegacyMetadata()
     {
-        var handler = new StubHttpMessageHandler(_ => Image([2, 4, 6]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(2, 4, 6)));
         var cache = CreateCache(handler);
         var first = await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/legacy-hash.jpg",
@@ -373,7 +373,7 @@ public sealed class FileImageCacheTests : IDisposable
     [Fact]
     public async Task GetOrAddAsync_RepairsCorruptMetadataByFetchingImageAgain()
     {
-        var handler = new StubHttpMessageHandler(_ => Image([8, 9, 10]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(8, 9, 10)));
         var cache = CreateCache(handler);
         var first = await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/corrupt-metadata.jpg",
@@ -713,7 +713,7 @@ public sealed class FileImageCacheTests : IDisposable
     [Fact]
     public async Task GetOrAddAsync_WithTmdbRequestedWidthStoresRemoteVariantWithoutDecoding()
     {
-        var originalBytes = new byte[] { 9, 8, 7, 6 };
+        var originalBytes = Marker(9, 8, 7, 6);
         var handler = new StubHttpMessageHandler(_ => Image(originalBytes));
         var cache = CreateCache(handler);
 
@@ -730,7 +730,7 @@ public sealed class FileImageCacheTests : IDisposable
     }
 
     [Fact]
-    public async Task GetOrAddAsync_WithLargerTmdbVariantStillResizesForCardWidth()
+    public async Task GetOrAddAsync_WithLargerTmdbVariantButSmallDeliveredImagePassesTheOriginalThrough()
     {
         var handler = new StubHttpMessageHandler(_ => Image(SamplePngBytes(), "image/png"));
         var cache = CreateCache(handler);
@@ -742,54 +742,17 @@ public sealed class FileImageCacheTests : IDisposable
             width: 185);
         var bytes = await File.ReadAllBytesAsync(resized.FilePath);
 
+        // The w342 variant is wider than the card, but the delivered image is only 100px: nothing to shrink,
+        // so the original is served as-is with its real type instead of being re-encoded.
         Assert.Single(handler.Requests);
-        Assert.Equal("image/jpeg", resized.ContentType);
-        Assert.Equal(0xFF, bytes[0]);
-        Assert.Equal(0xD8, bytes[1]);
-        using var image = new MagickImage(resized.FilePath);
-        Assert.Equal(100u, image.Width);
-        Assert.Equal(100u, image.Height);
-    }
-
-    [Fact]
-    public async Task GetOrAddAsync_ConvertsMultipageTiffFromCommonsToResizedJpeg()
-    {
-        var tiffBytes = MultipageTiffBytes();
-        var handler = new StubHttpMessageHandler(_ => Image(tiffBytes, "image/tiff"));
-        var cache = CreateCache(handler, new ImageCacheOptions
-        {
-            Enabled = true,
-            Directory = "cache/images",
-            CacheDays = 30,
-            MaxBytes = 1024 * 1024,
-            AllowedHosts = ["static.tvmaze.com"]
-        });
-
-        var cached = await cache.GetOrAddAsync(
-            "https://static.tvmaze.com/uploads/images/original_untouched/multipage.tiff",
-            false,
-            CancellationToken.None,
-            width: 80);
-
-        using var output = new MagickImage(cached.FilePath);
-        Assert.Equal("image/jpeg", cached.ContentType);
-        Assert.Equal(80u, output.Width);
-        Assert.Equal(80u, output.Height);
+        Assert.Equal("image/png", resized.ContentType);
+        Assert.Equal(SamplePngBytes(), bytes);
     }
 
     [Theory]
-    [InlineData(MagickFormat.Bmp)]
     [InlineData(MagickFormat.Gif)]
-    [InlineData(MagickFormat.Ico)]
     [InlineData(MagickFormat.Jpeg)]
-    [InlineData(MagickFormat.Pbm)]
-    [InlineData(MagickFormat.Pgm)]
-    [InlineData(MagickFormat.Pnm)]
     [InlineData(MagickFormat.Png)]
-    [InlineData(MagickFormat.Ppm)]
-    [InlineData(MagickFormat.Qoi)]
-    [InlineData(MagickFormat.Tga)]
-    [InlineData(MagickFormat.Tiff)]
     [InlineData(MagickFormat.WebP)]
     public async Task GetOrAddAsync_ConvertsExistingRasterFormats(MagickFormat sourceFormat)
     {
@@ -814,6 +777,88 @@ public sealed class FileImageCacheTests : IDisposable
         Assert.Equal("image/jpeg", cached.ContentType);
         Assert.Equal(80u, output.Width);
         Assert.Equal(80u, output.Height);
+    }
+
+    [Theory]
+    [InlineData(MagickFormat.Bmp)]
+    [InlineData(MagickFormat.Ico)]
+    [InlineData(MagickFormat.Pbm)]
+    [InlineData(MagickFormat.Pgm)]
+    [InlineData(MagickFormat.Pnm)]
+    [InlineData(MagickFormat.Ppm)]
+    [InlineData(MagickFormat.Qoi)]
+    [InlineData(MagickFormat.Tga)]
+    [InlineData(MagickFormat.Tiff)]
+    public async Task GetOrAddAsync_RejectsRasterFormatsOutsideTheAllowListBeforeDecoding(MagickFormat sourceFormat)
+    {
+        var bytes = RasterFixtureBytes(sourceFormat);
+        var handler = new StubHttpMessageHandler(_ => Image(bytes, "image/octet-stream"));
+        var cache = CreateCache(handler, new ImageCacheOptions
+        {
+            Enabled = true,
+            Directory = "cache/images",
+            CacheDays = 30,
+            MaxBytes = 1024 * 1024,
+            AllowedHosts = ["static.tvmaze.com"]
+        });
+
+        var error = await Assert.ThrowsAsync<ExternalApiException>(() => cache.GetOrAddAsync(
+            $"https://static.tvmaze.com/uploads/images/original_untouched/image.{sourceFormat.ToString().ToLowerInvariant()}",
+            false,
+            CancellationToken.None,
+            width: 80));
+
+        Assert.Contains("not a supported raster image", error.Message, StringComparison.Ordinal);
+    }
+
+    private static byte[] Ftyp(string major, params string[] compatible)
+    {
+        var box = new List<byte> { 0, 0, 0, (byte)(16 + (compatible.Length * 4)), (byte)'f', (byte)'t', (byte)'y', (byte)'p' };
+        box.AddRange(System.Text.Encoding.ASCII.GetBytes(major));
+        box.AddRange(new byte[] { 0, 0, 0, 0 });
+        foreach (var brand in compatible) box.AddRange(System.Text.Encoding.ASCII.GetBytes(brand));
+        return [.. box];
+    }
+
+    [Theory]
+    [InlineData("avif")]
+    [InlineData("avis")]
+    public async Task GetOrAddAsync_StoresAvifVerbatimWhenTheMajorBrandIsAvifOrAvis(string brand)
+    {
+        var avif = Ftyp(brand, "mif1", "miaf");
+        var cache = CreateCache(new StubHttpMessageHandler(_ => Image(avif, "image/avif")));
+
+        var cached = await cache.GetOrAddAsync("https://static.tvmaze.com/uploads/images/original_untouched/a.avif", false, CancellationToken.None);
+
+        Assert.Equal("image/avif", cached.ContentType);
+        Assert.Equal(avif, await File.ReadAllBytesAsync(cached.FilePath));
+    }
+
+    [Fact]
+    public async Task GetOrAddAsync_AcceptsAMif1MajorBrandOnlyWhenAvifIsAmongTheCompatibleBrands()
+    {
+        var avif = Ftyp("mif1", "miaf", "avif");
+        var accepted = await CreateCache(new StubHttpMessageHandler(_ => Image(avif, "image/avif")))
+            .GetOrAddAsync("https://static.tvmaze.com/uploads/images/original_untouched/b.avif", false, CancellationToken.None);
+        Assert.Equal("image/avif", accepted.ContentType);
+
+        // HEIC files also declare mif1 as their major brand; without an AVIF compatible brand they must not be stored.
+        foreach (var heic in new[] { Ftyp("mif1"), Ftyp("mif1", "heic", "mif1") })
+        {
+            await Assert.ThrowsAsync<ExternalApiException>(() => CreateCache(new StubHttpMessageHandler(_ => Image(heic, "image/avif")))
+                .GetOrAddAsync("https://static.tvmaze.com/uploads/images/original_untouched/c.heic", false, CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public void DecoderHintComesOnlyFromVerifiedMagicBytes()
+    {
+        var method = typeof(FileImageCache).GetMethod("GetSourceFormatHint", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        // The hint has a single input, the sniffed type: the upstream content type and URL extension cannot select a decoder.
+        Assert.Single(method.GetParameters());
+        Assert.Equal(MagickFormat.Jpeg, method.Invoke(null, ["image/jpeg"]));
+        Assert.Null(method.Invoke(null, ["image/x-tga"]));
+        Assert.Null(method.Invoke(null, ["image/avif"]));
     }
 
     [Fact]
@@ -870,11 +915,133 @@ public sealed class FileImageCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task GetOrAddAsync_WithoutWidthRejectsSvgAndStoresNothing()
+    {
+        var svg = System.Text.Encoding.UTF8.GetBytes("<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>");
+        var handler = new StubHttpMessageHandler(_ => Image(svg, "image/svg+xml"));
+        var cache = CreateCache(handler);
+
+        await Assert.ThrowsAsync<ExternalApiException>(() => cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/vector.svg", false, CancellationToken.None));
+
+        Assert.False(Directory.Exists(Path.Combine(_root, "cache", "images"))
+            && Directory.EnumerateFiles(Path.Combine(_root, "cache", "images"), "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Fact]
+    public async Task GetOrAddAsync_WithoutWidthStoresARasterBodyUnderItsRealTypeNotTheUpstreamHeader()
+    {
+        var handler = new StubHttpMessageHandler(_ => Image(SamplePngBytes(), "image/jpeg"));
+        var cache = CreateCache(handler);
+
+        var cached = await cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/liar.jpg", false, CancellationToken.None);
+
+        Assert.Equal("image/png", cached.ContentType);
+        Assert.Equal(SamplePngBytes(), await File.ReadAllBytesAsync(cached.FilePath));
+    }
+
+    [Fact]
+    public async Task GetOrAddAsync_WithoutWidthRejectsRasterFormatsOutsideTheServedAllowList()
+    {
+        var bmp = new byte[] { 0x42, 0x4D, 0x1E, 0, 0, 0, 0, 0, 0, 0, 0x1A, 0, 0, 0 };
+        var handler = new StubHttpMessageHandler(_ => Image(bmp, "image/bmp"));
+        var cache = CreateCache(handler);
+
+        await Assert.ThrowsAsync<ExternalApiException>(() => cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/small.bmp", false, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetOrAddAsync_RefusesARedirectToAHostOutsideTheAllowList()
+    {
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.Host == "static.tvmaze.com"
+            ? new HttpResponseMessage(HttpStatusCode.Found) { Headers = { Location = new Uri("https://evil.example.com/a.png") } }
+            : Image(SamplePngBytes(), "image/png"));
+        var cache = CreateCache(handler);
+
+        await Assert.ThrowsAsync<ExternalApiException>(() => cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/redirect.png", false, CancellationToken.None));
+
+        Assert.DoesNotContain(handler.Requests, request => request.Uri.Host == "evil.example.com");
+    }
+
+    [Fact]
+    public async Task GetOrAddAsync_RefusesAnHttpRedirectAndFollowsOnlyBoundedHops()
+    {
+        var handler = new StubHttpMessageHandler(request => new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = request.RequestUri!.AbsolutePath.EndsWith("/plain.png", StringComparison.Ordinal)
+                ? new Uri("http://static.tvmaze.com/downgrade.png")
+                : new Uri($"https://static.tvmaze.com/loop/{Guid.NewGuid():N}.png") }
+        });
+        var cache = CreateCache(handler);
+
+        await Assert.ThrowsAsync<ExternalApiException>(() => cache.GetOrAddAsync(
+            "https://static.tvmaze.com/plain.png", false, CancellationToken.None));
+        await Assert.ThrowsAsync<ExternalApiException>(() => cache.GetOrAddAsync(
+            "https://static.tvmaze.com/loop/start.png", false, CancellationToken.None));
+        // One request for the downgrade attempt, then the first request plus at most three followed hops.
+        Assert.Equal(1 + 4, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task GetOrAddAsync_FollowsARedirectInsideTheAllowList()
+    {
+        var handler = new StubHttpMessageHandler(request => request.RequestUri!.Host == "static.tvmaze.com"
+            ? new HttpResponseMessage(HttpStatusCode.MovedPermanently) { Headers = { Location = new Uri("https://image.tmdb.org/t/p/a.png") } }
+            : Image(SamplePngBytes(), "image/png"));
+        var cache = CreateCache(handler);
+
+        var cached = await cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/moved.png", false, CancellationToken.None);
+
+        Assert.Equal("image/png", cached.ContentType);
+        Assert.Equal(["static.tvmaze.com", "image.tmdb.org"], handler.Requests.Select(request => request.Uri.Host));
+    }
+
+    [Fact]
+    public async Task GetOrAddAsync_PassesThroughAnOriginalAtOrBelowTheRequestedWidthWithItsRealType()
+    {
+        var png = SamplePngBytes();
+        var handler = new StubHttpMessageHandler(_ => Image(png, "image/png"));
+        var cache = CreateCache(handler);
+
+        var cached = await cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/small-enough.png",
+            false, CancellationToken.None, width: 200, format: ImageCacheFormat.Webp);
+
+        Assert.Equal("image/png", cached.ContentType);
+        Assert.Equal(png, await File.ReadAllBytesAsync(cached.FilePath));
+        // A second request is served from the cache with the same type and bytes.
+        var again = await cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/small-enough.png",
+            false, CancellationToken.None, width: 200, format: ImageCacheFormat.Webp);
+        Assert.Equal("image/png", again.ContentType);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task GetOrAddAsync_StillReencodesAnOriginalWiderThanTheRequestedWidthToTheNegotiatedFormat()
+    {
+        var handler = new StubHttpMessageHandler(_ => Image(SamplePngBytes(), "image/png"));
+        var cache = CreateCache(handler);
+
+        var cached = await cache.GetOrAddAsync(
+            "https://static.tvmaze.com/uploads/images/original_untouched/too-wide.png",
+            false, CancellationToken.None, width: 80, format: ImageCacheFormat.Webp);
+
+        Assert.Equal("image/webp", cached.ContentType);
+        using var output = new MagickImage(cached.FilePath);
+        Assert.Equal(80u, output.Width);
+    }
+
+    [Fact]
     public async Task GetOrAddAsync_RejectsDeclaredOversizedResponseBeforeWriting()
     {
         var handler = new StubHttpMessageHandler(_ =>
         {
-            var response = Image([1, 2, 3]);
+            var response = Image(Marker(1, 2, 3));
             response.Content.Headers.ContentLength = 4096;
             return response;
         });
@@ -904,7 +1071,7 @@ public sealed class FileImageCacheTests : IDisposable
     [Fact]
     public async Task CleanupAsync_RemovesImageFilesOlderThanRetention()
     {
-        var handler = new StubHttpMessageHandler(_ => Image([1, 2, 3]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(1, 2, 3)));
         var cache = CreateCache(handler);
         var oldImage = await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/old.jpg",
@@ -940,7 +1107,7 @@ public sealed class FileImageCacheTests : IDisposable
     public async Task CleanupAsync_KeepsARecentlyRetiredGenerationForLookupsThatHaveNotOpenedIt()
     {
         byte version = 0;
-        var cache = CreateCache(new StubHttpMessageHandler(_ => Image([++version])));
+        var cache = CreateCache(new StubHttpMessageHandler(_ => Image(Marker(++version))));
         const string url = "https://image.tmdb.org/t/p/w342/retired.jpg";
         var old = await cache.GetOrAddAsync(url, false, CancellationToken.None);
         File.SetLastWriteTimeUtc(old.FilePath, DateTime.UtcNow.AddDays(-100));
@@ -949,15 +1116,15 @@ public sealed class FileImageCacheTests : IDisposable
         await cache.CleanupAsync(DateTimeOffset.UtcNow, TimeSpan.FromDays(60), CancellationToken.None);
 
         Assert.True(File.Exists(old.FilePath));
-        Assert.Equal(new byte[] { 1 }, await File.ReadAllBytesAsync(old.FilePath));
-        Assert.Equal(new byte[] { 2 }, await File.ReadAllBytesAsync(current.FilePath));
+        Assert.Equal(Marker(1), await File.ReadAllBytesAsync(old.FilePath));
+        Assert.Equal(Marker(2), await File.ReadAllBytesAsync(current.FilePath));
     }
 
     [Fact]
     public async Task CleanupAsync_PreservesCurrentGenerationAndRemovesExpiredOrphanGeneration()
     {
         byte imageVersion = 0;
-        var handler = new StubHttpMessageHandler(_ => Image([++imageVersion, 3, 8]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(++imageVersion, 3, 8)));
         var cache = CreateCache(handler);
         const string imageUrl = "https://image.tmdb.org/t/p/w342/generations.jpg";
         var oldGeneration = await cache.GetOrAddAsync(imageUrl, false, CancellationToken.None);
@@ -978,7 +1145,7 @@ public sealed class FileImageCacheTests : IDisposable
     [Fact]
     public async Task CleanupAsync_RemovesOldCorruptMetadataAndMatchingImageFile()
     {
-        var handler = new StubHttpMessageHandler(_ => Image([1, 2, 3]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(1, 2, 3)));
         var cache = CreateCache(handler);
         var oldImage = await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/corrupt.jpg",
@@ -1003,7 +1170,7 @@ public sealed class FileImageCacheTests : IDisposable
     [Fact]
     public async Task CleanupAsync_RemovesOldTemporaryImageCacheFiles()
     {
-        var handler = new StubHttpMessageHandler(_ => Image([1, 2, 3]));
+        var handler = new StubHttpMessageHandler(_ => Image(Marker(1, 2, 3)));
         var cache = CreateCache(handler);
         var cacheDirectory = Path.Combine(_root, "cache", "images");
         Directory.CreateDirectory(cacheDirectory);
@@ -1071,6 +1238,9 @@ public sealed class FileImageCacheTests : IDisposable
 
         Assert.Fail($"Expected {count} staged image sources in {directory}.");
     }
+
+    // Minimal verbatim-served payload: the cache only stores bytes that start with a real raster signature.
+    private static byte[] Marker(params int[] payload) => [0xFF, 0xD8, 0xFF, .. payload.Select(value => (byte)value)];
 
     private static HttpResponseMessage Image(byte[] bytes, string contentType = "image/jpeg")
     {

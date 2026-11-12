@@ -1,6 +1,7 @@
 using Bunit;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.DependencyInjection;
@@ -333,6 +334,411 @@ public sealed class SettingsPageTests : BunitContext
             Assert.DoesNotContain("simkl-secret", backupJson, StringComparison.Ordinal);
             Assert.DoesNotContain("simkl-token", backupJson, StringComparison.Ordinal);
         });
+    }
+
+    private static IntegrationSettings SettingsWithStoredSecrets() => new()
+    {
+        Sonarr = new SonarrIntegrationSettings { ApiKey = "stored-sonarr-key" },
+        Radarr = new RadarrIntegrationSettings { ApiKey = "stored-radarr-key" },
+        Sources = new SourceIntegrationSettings
+        {
+            Tmdb = new TmdbSourceSettings { BearerToken = "stored-tmdb-token" },
+            Trakt = new TraktSourceSettings { ClientId = "stored-trakt-id" },
+            Watchmode = new WatchmodeSourceSettings { ApiKey = "stored-watchmode-key" },
+            Omdb = new OmdbSourceSettings { ApiKey = "stored-omdb-key" },
+            Fanart = new FanartSourceSettings { ApiKey = "stored-fanart-key" },
+            TheTvdb = new TheTvdbSourceSettings { ApiKey = "stored-tvdb-key" },
+            Simkl = new SimklSourceSettings
+            {
+                ClientId = "stored-simkl-id",
+                ClientSecret = "stored-simkl-secret",
+                AccessToken = "stored-simkl-token"
+            }
+        }
+    };
+
+    private static readonly string[] StoredSecretValues =
+    [
+        "stored-sonarr-key", "stored-radarr-key", "stored-tmdb-token", "stored-trakt-id", "stored-watchmode-key",
+        "stored-omdb-key", "stored-fanart-key", "stored-tvdb-key", "stored-simkl-id", "stored-simkl-secret",
+        "stored-simkl-token"
+    ];
+
+    private FakeIntegrationSettingsStore RegisterStoreWithStoredSecrets(FakeArrIntegrationService? arr = null)
+    {
+        var store = new FakeIntegrationSettingsStore { Settings = SettingsWithStoredSecrets() };
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(arr ?? new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+        return store;
+    }
+
+    [Fact]
+    public void SettingsPage_NeverRendersStoredSecretsAndShowsSavedIndicator()
+    {
+        RegisterStoreWithStoredSecrets();
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='OMDb API key']");
+        component.WaitForAssertion(() =>
+        {
+            foreach (var secret in StoredSecretValues)
+            {
+                Assert.DoesNotContain(secret, component.Markup, StringComparison.Ordinal);
+            }
+
+            var passwordInputs = component.FindAll("input[type='password']");
+            Assert.Equal(StoredSecretValues.Length, passwordInputs.Count);
+            Assert.All(passwordInputs, input => Assert.True(string.IsNullOrEmpty(input.GetAttribute("value"))));
+            Assert.Contains("Saved", component.Find("[data-testid='secret-status-OmdbApiKey']").TextContent);
+            Assert.NotEmpty(component.FindAll("button[aria-label='Clear OMDb API key']"));
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_ShowsNotSetAndNoClearButtonWhenNoSecretIsStored()
+    {
+        Services.AddSingleton<IIntegrationSettingsStore>(new FakeIntegrationSettingsStore());
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("Not set", component.Find("[data-testid='secret-status-OmdbApiKey']").TextContent);
+            Assert.Empty(component.FindAll("button[aria-label='Clear OMDb API key']"));
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_SavingANonSecretEditKeepsEveryStoredSecret()
+    {
+        var store = RegisterStoreWithStoredSecrets();
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='TVmaze schedule countries']");
+        component.Find("input[aria-label='TVmaze schedule countries']").Change("be");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(["BE"], store.Settings.Sources.Tvmaze.ScheduleCountries);
+            Assert.Equal("stored-sonarr-key", store.Settings.Sonarr.ApiKey);
+            Assert.Equal("stored-radarr-key", store.Settings.Radarr.ApiKey);
+            Assert.Equal("stored-tmdb-token", store.Settings.Sources.Tmdb.BearerToken);
+            Assert.Equal("stored-trakt-id", store.Settings.Sources.Trakt.ClientId);
+            Assert.Equal("stored-watchmode-key", store.Settings.Sources.Watchmode.ApiKey);
+            Assert.Equal("stored-omdb-key", store.Settings.Sources.Omdb.ApiKey);
+            Assert.Equal("stored-fanart-key", store.Settings.Sources.Fanart.ApiKey);
+            Assert.Equal("stored-tvdb-key", store.Settings.Sources.TheTvdb.ApiKey);
+            Assert.Equal("stored-simkl-id", store.Settings.Sources.Simkl.ClientId);
+            Assert.Equal("stored-simkl-secret", store.Settings.Sources.Simkl.ClientSecret);
+            Assert.Equal("stored-simkl-token", store.Settings.Sources.Simkl.AccessToken);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_TmdbRequiredRedirectFlowWorksAfterTypingATokenAndSaving()
+    {
+        var store = new FakeIntegrationSettingsStore();
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
+        var navigation = Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        navigation.NavigateTo("/settings?reason=tmdb&returnUrl=%2Fmovies%3Fweek%3D2026-05-04");
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() => Assert.NotEmpty(component.FindAll("[data-testid='tmdb-required-notice']")));
+        Assert.Contains("Not set", component.Find("[data-testid='secret-status-TmdbBearerToken']").TextContent);
+        component.Find("input[aria-label='TMDb API read access token']").Change("typed-tmdb-token");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("typed-tmdb-token", store.Settings.Sources.Tmdb.BearerToken);
+            Assert.EndsWith("/movies?week=2026-05-04", new Uri(navigation.Uri).PathAndQuery);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_ChangedArrUrlNeverSendsTheStoredKeyToTheNewHost()
+    {
+        var arr = new FakeArrIntegrationService();
+        var store = RegisterStoreWithStoredSecrets(arr);
+        store.Settings.Sonarr.Enabled = true;
+        store.Settings.Sonarr.BaseUrl = "http://sonarr.test/";
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() => Assert.Equal(1, arr.SonarrCallCount));
+        component.Find("input[aria-label='Sonarr URL']").Change("http://evil.example/");
+        component.Find("button[aria-label='Load Sonarr quality profiles and root folders']").Click();
+
+        component.WaitForAssertion(() => Assert.Contains("Sonarr API key required", component.Markup));
+        Assert.Equal(1, arr.SonarrCallCount);
+
+        component.Find("input[aria-label='Sonarr API key']").Change("typed-sonarr-key");
+        component.Find("button[aria-label='Load Sonarr quality profiles and root folders']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, arr.SonarrCallCount);
+            Assert.Equal("typed-sonarr-key", arr.LastSonarrApiKey);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_ChangedArrUrlWithBlankKeyClearsTheStoredKeyOnSave()
+    {
+        var store = RegisterStoreWithStoredSecrets();
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='Radarr URL']");
+        component.Find("input[aria-label='Radarr URL']").Change("http://evil.example/");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("http://evil.example/", store.Settings.Radarr.BaseUrl);
+            Assert.Equal("", store.Settings.Radarr.ApiKey);
+            Assert.Equal("stored-sonarr-key", store.Settings.Sonarr.ApiKey);
+            Assert.Contains("saved API key was removed", component.Markup);
+            Assert.Contains("Not set", component.Find("[data-testid='secret-status-RadarrApiKey']").TextContent);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_ShowsInlineHintAsSoonAsAnArrUrlDiffersFromTheSavedOne()
+    {
+        RegisterStoreWithStoredSecrets();
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='Radarr URL']");
+        Assert.Empty(component.FindAll("[data-testid='secret-url-hint-RadarrApiKey']"));
+
+        component.Find("input[aria-label='Radarr URL']").Change("http://radarr.new/");
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("URL changed", component.Find("[data-testid='secret-url-hint-RadarrApiKey']").TextContent);
+            Assert.Contains("enter the API key again", component.Find("[data-testid='secret-url-hint-RadarrApiKey']").TextContent);
+            Assert.Empty(component.FindAll("[data-testid='secret-url-hint-SonarrApiKey']"));
+        });
+
+        component.Find("input[aria-label='Radarr API key']").Change("typed-radarr-key");
+        component.WaitForAssertion(() =>
+            Assert.Empty(component.FindAll("[data-testid='secret-url-hint-RadarrApiKey']")));
+
+        component.Find("input[aria-label='Radarr API key']").Change("");
+        component.Find("input[aria-label='Radarr URL']").Change("http://radarr.test");
+        component.Find("input[aria-label='Radarr URL']").Change("");
+        component.Find("input[aria-label='Radarr URL']").Change("http://other/");
+        component.WaitForAssertion(() =>
+            Assert.NotEmpty(component.FindAll("[data-testid='secret-url-hint-RadarrApiKey']")));
+    }
+
+    [Fact]
+    public void SettingsPage_RemovedKeyNoticeStaysUntilDismissed()
+    {
+        var store = RegisterStoreWithStoredSecrets();
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='Radarr URL']");
+        component.Find("input[aria-label='Radarr URL']").Change("http://evil.example/");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("", store.Settings.Radarr.ApiKey);
+            Assert.Contains("saved API key was removed", component.Find("[data-testid='api-key-notice']").TextContent);
+        });
+
+        System.Threading.Thread.Sleep(3500);
+        Assert.Single(component.FindAll("[data-testid='api-key-notice']"));
+
+        component.Find("[data-testid='api-key-notice'] button").Click();
+        Assert.Empty(component.FindAll("[data-testid='api-key-notice']"));
+    }
+
+    [Fact]
+    public void SettingsPage_ChangedArrUrlWithATypedKeySavesTheTypedKey()
+    {
+        var store = RegisterStoreWithStoredSecrets();
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='Radarr URL']");
+        component.Find("input[aria-label='Radarr URL']").Change("http://radarr.new/");
+        component.Find("input[aria-label='Radarr API key']").Change("typed-radarr-key");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("http://radarr.new/", store.Settings.Radarr.BaseUrl);
+            Assert.Equal("typed-radarr-key", store.Settings.Radarr.ApiKey);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_SimklAuthorizationPersistsOnlyTheReturnedTokenAndLeavesOtherDraftsPending()
+    {
+        var store = RegisterStoreWithStoredSecretsAndSimkl(out _);
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("button[aria-label='Connect SIMKL']");
+        component.Find("button[aria-label='Connect SIMKL']").Click();
+        component.WaitForElement("button[aria-label='Save SIMKL token after authorization']");
+
+        component.Find("input[aria-label='SIMKL access token']").Change("typed-token-draft");
+        component.Find("input[aria-label='OMDb API key']").Change("typed-omdb-key");
+        component.Find("button[aria-label='Clear Fanart.tv API key']").Click();
+        component.Find("button[aria-label='Save SIMKL token after authorization']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("returned-token", store.Settings.Sources.Simkl.AccessToken);
+            Assert.Equal("stored-omdb-key", store.Settings.Sources.Omdb.ApiKey);
+            Assert.Equal("stored-fanart-key", store.Settings.Sources.Fanart.ApiKey);
+            Assert.Contains("New value will replace", component.Find("[data-testid='secret-status-OmdbApiKey']").TextContent);
+            Assert.Contains("Not set", component.Find("[data-testid='secret-status-FanartApiKey']").TextContent);
+        });
+
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("typed-omdb-key", store.Settings.Sources.Omdb.ApiKey);
+            Assert.Equal("", store.Settings.Sources.Fanart.ApiKey);
+            Assert.Equal("returned-token", store.Settings.Sources.Simkl.AccessToken);
+        });
+    }
+
+    private FakeIntegrationSettingsStore RegisterStoreWithStoredSecretsAndSimkl(out FakeSimklClient simkl)
+    {
+        var store = new FakeIntegrationSettingsStore { Settings = SettingsWithStoredSecrets() };
+        store.Settings.Sources.Simkl.Enabled = true;
+        simkl = new FakeSimklClient
+        {
+            PinCodeResult = new SimklPinCodeResult(
+                Success: true,
+                UserCode: "ABCD-EFGH",
+                VerificationUrl: "https://simkl.com/pin/",
+                ExpiresInSeconds: 600,
+                IntervalSeconds: 30),
+            PinStatusResult = new SimklPinStatusResult(SimklPinStatus.Authorized, AccessToken: "returned-token")
+        };
+        Services.AddSingleton<IIntegrationSettingsStore>(store);
+        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
+        Services.AddSingleton<ISimklClient>(simkl);
+        return store;
+    }
+
+    [Fact]
+    public void SettingsPage_FailedSaveKeepsTypedSecretsPendingInsteadOfShowingThemSaved()
+    {
+        var store = RegisterStoreWithStoredSecrets();
+        store.Settings.Sources.Omdb.ApiKey = "";
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='OMDb API key']");
+        store.FailSave = true;
+        component.Find("input[aria-label='OMDb API key']").Change("typed-omdb-key");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("Settings not saved", component.Markup);
+            Assert.Contains("New value will replace", component.Find("[data-testid='secret-status-OmdbApiKey']").TextContent);
+            Assert.Equal("", store.Settings.Sources.Omdb.ApiKey);
+        });
+
+        store.FailSave = false;
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("typed-omdb-key", store.Settings.Sources.Omdb.ApiKey);
+            Assert.Contains("Saved", component.Find("[data-testid='secret-status-OmdbApiKey']").TextContent);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_TypingASecretReplacesOnlyThatStoredValueAndNeverEchoesIt()
+    {
+        var store = RegisterStoreWithStoredSecrets();
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("input[aria-label='OMDb API key']");
+        component.Find("input[aria-label='OMDb API key']").Change("  replaced-omdb-key ");
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("replaced-omdb-key", store.Settings.Sources.Omdb.ApiKey);
+            Assert.Equal("stored-fanart-key", store.Settings.Sources.Fanart.ApiKey);
+            Assert.Equal("stored-sonarr-key", store.Settings.Sonarr.ApiKey);
+            Assert.DoesNotContain("stored-omdb-key", component.Markup, StringComparison.Ordinal);
+            Assert.True(string.IsNullOrEmpty(component.Find("input[aria-label='OMDb API key']").GetAttribute("value")));
+            Assert.Contains("Saved", component.Find("[data-testid='secret-status-OmdbApiKey']").TextContent);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_ClearRemovesOnlyThatStoredSecretOnSave()
+    {
+        var store = RegisterStoreWithStoredSecrets();
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForElement("button[aria-label='Clear OMDb API key']");
+        component.Find("button[aria-label='Clear OMDb API key']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Contains("Not set", component.Find("[data-testid='secret-status-OmdbApiKey']").TextContent);
+            Assert.Empty(component.FindAll("button[aria-label='Clear OMDb API key']"));
+        });
+
+        component.Find("button[title='Save integration settings']").Click();
+
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("", store.Settings.Sources.Omdb.ApiKey);
+            Assert.Equal("stored-fanart-key", store.Settings.Sources.Fanart.ApiKey);
+            Assert.Equal("stored-tmdb-token", store.Settings.Sources.Tmdb.BearerToken);
+        });
+    }
+
+    [Fact]
+    public void SettingsPage_ConnectionTestUsesStoredSecretWhenBlankAndTypedSecretOtherwise()
+    {
+        var arr = new FakeArrIntegrationService();
+        var store = RegisterStoreWithStoredSecrets(arr);
+        store.Settings.Sonarr.Enabled = true;
+        store.Settings.Sonarr.BaseUrl = "http://sonarr.test/";
+
+        var component = Render<PremiereCalendar.Components.Pages.Settings>();
+
+        component.WaitForAssertion(() => Assert.Equal("stored-sonarr-key", arr.LastSonarrApiKey));
+
+        component.Find("button[aria-label='Load Sonarr quality profiles and root folders']").Click();
+        component.WaitForAssertion(() => Assert.Equal("stored-sonarr-key", arr.LastSonarrApiKey));
+
+        component.Find("input[aria-label='Sonarr API key']").Change("typed-sonarr-key");
+        component.Find("button[aria-label='Load Sonarr quality profiles and root folders']").Click();
+
+        component.WaitForAssertion(() => Assert.Equal("typed-sonarr-key", arr.LastSonarrApiKey));
+        Assert.Equal("stored-sonarr-key", store.Settings.Sonarr.ApiKey);
     }
 
     [Fact]
@@ -1106,16 +1512,28 @@ public sealed class SettingsPageTests : BunitContext
     private sealed class FakeIntegrationSettingsStore : IIntegrationSettingsStore
     {
         public IntegrationSettings Settings { get; set; } = new();
+        public bool FailSave { get; set; }
 
+        // Like the database-backed store, hand out independent copies so unsaved page edits are not "persisted".
         public Task<IntegrationSettings> GetAsync(CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(Settings);
+            return Task.FromResult(Clone(Settings));
         }
 
         public Task SaveAsync(IntegrationSettings settings, CancellationToken cancellationToken = default)
         {
-            Settings = settings;
+            if (FailSave)
+            {
+                throw new IOException("Settings database is unavailable.");
+            }
+
+            Settings = Clone(settings);
             return Task.CompletedTask;
+        }
+
+        private static IntegrationSettings Clone(IntegrationSettings settings)
+        {
+            return JsonSerializer.Deserialize<IntegrationSettings>(JsonSerializer.Serialize(settings))!;
         }
     }
 
@@ -1139,10 +1557,15 @@ public sealed class SettingsPageTests : BunitContext
             return Task.FromResult(new ArrAddResult(true, false, ArrIntegrationTarget.Radarr, item.Title, "Added."));
         }
 
+        public string? LastSonarrApiKey { get; private set; }
+        public int SonarrCallCount { get; private set; }
+
         public Task<ArrConnectionOptions> GetSonarrOptionsAsync(
             SonarrIntegrationSettings settings,
             CancellationToken cancellationToken = default)
         {
+            LastSonarrApiKey = settings.ApiKey;
+            SonarrCallCount++;
             return Task.FromResult(new ArrConnectionOptions(
                 [new ArrRootFolder(1, "/series", 1000)],
                 [new ArrOption(4, "HD-1080p"), new ArrOption(7, "HD-720p")]));

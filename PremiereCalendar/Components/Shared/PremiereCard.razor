@@ -3,11 +3,21 @@
 
 <article class="premiere-card @MediaClass()" data-testid="premiere-card" data-canonical-id="@Item.CanonicalId">
     <div class="poster-frame">
-        @if (!string.IsNullOrWhiteSpace(Item.PosterUrl))
+        @if (!string.IsNullOrWhiteSpace(Item.PosterUrl) && _posterEagerAtFirstRender == true)
+        {
+            @* First-viewport posters skip the lazy-image mechanism: real src, high priority, fixed size. *@
+            <img src="@CachedImageUrl.Build(Item.PosterUrl, ImageCacheVersion, PosterCacheWidth)"
+                 alt="@($"{Item.Title} poster")"
+                 fetchpriority="high"
+                 decoding="async"
+                 width="104"
+                 height="156" />
+        }
+        else if (!string.IsNullOrWhiteSpace(Item.PosterUrl))
         {
             <img src="@TransparentPosterPlaceholder"
                  data-lazy-image
-                 data-lazy-src="@CachedImageUrl.Build(Item.PosterUrl, ImageCacheVersion, RefreshImageCache, PosterCacheWidth)"
+                 data-lazy-src="@CachedImageUrl.Build(Item.PosterUrl, ImageCacheVersion, PosterCacheWidth)"
                  alt="@($"{Item.Title} poster")"
                  loading="lazy"
                  decoding="async"
@@ -70,16 +80,23 @@
             }
         </div>
 
-        @if (HasVisibleScores)
+        @if (!HasVisibleScores)
         {
-            <div class="scores primary-score" aria-label="Scores">
+            @* One line is always reserved so ratings arriving later never grow the card. *@
+            <div class="scores primary-score scores-placeholder" data-testid="scores-placeholder">
+                <span class="scores-placeholder-text">@(DetailsPending ? "Ratings pending" : "No ratings")</span>
+            </div>
+        }
+        else
+        {
+            <div class="scores primary-score" aria-label="Scores" title="@ScoresSummary">
                 @if (Item.ImdbScore is > 0)
                 {
                     <span class="@(ScoreSource == ScoreSource.Imdb ? "selected-score" : null)">IMDb @FormatScore(Item.ImdbScore) / 10 (@FormatVoteCount(Item.ImdbVoteCount))</span>
                 }
                 @if (Item.TmdbScore is > 0)
                 {
-                    <span class="@(ScoreSource == ScoreSource.Tmdb ? "selected-score" : null)">TMDb @FormatScore(Item.TmdbScore) / 10 (@(Item.TmdbVoteCount ?? 0))</span>
+                    <span class="@(ScoreSource == ScoreSource.Tmdb ? "selected-score" : null)">TMDb @FormatScore(Item.TmdbScore) / 10 (@FormatVoteCount(Item.TmdbVoteCount ?? 0))</span>
                 }
                 @if (Item.RottenTomatoesAudienceScore is > 0)
                 {
@@ -94,7 +111,7 @@
 
         @if (!string.IsNullOrWhiteSpace(Item.Overview))
         {
-            <p class="card-description">@Item.Overview</p>
+            <p class="card-description" data-testid="card-overview">@Item.Overview</p>
         }
 
         <div class="links primary-actions" aria-label="Primary actions">
@@ -122,6 +139,11 @@
             @if (_isDetailsLoaded)
             {
                 <div class="card-details-content">
+                    @if (!string.IsNullOrWhiteSpace(Item.Overview))
+                    {
+                        <p class="card-overview-full" data-testid="card-overview-full">@Item.Overview</p>
+                    }
+
                     @if (IsUnverified && !string.IsNullOrWhiteSpace(Item.VerificationNote))
                     {
                         <p class="verification-note">@Item.VerificationNote</p>
@@ -287,9 +309,6 @@
     public string? ImageCacheVersion { get; set; }
 
     [Parameter]
-    public bool RefreshImageCache { get; set; }
-
-    [Parameter]
     public IntegrationSettings IntegrationSettings { get; set; } = new();
 
     [Parameter]
@@ -297,6 +316,14 @@
 
     [Parameter]
     public bool IsArrActionBusy { get; set; }
+
+    // True while the load is still enriching details such as ratings.
+    [Parameter]
+    public bool DetailsPending { get; set; }
+
+    // Renders the real poster src with high fetch priority instead of the lazy placeholder.
+    [Parameter]
+    public bool PosterEager { get; set; }
 
     private const string TransparentPosterPlaceholder = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
     private const int PosterCacheWidth = CachedImageUrl.PosterWidth;
@@ -306,16 +333,21 @@
     private IntegrationSettings? _fingerprintedIntegrationSettings;
     private ScoreSource _fingerprintedScoreSource;
     private string? _fingerprintedImageCacheVersion;
-    private bool _fingerprintedRefreshImageCache;
     private bool _fingerprintedArrActionBusy;
     private bool _fingerprintedSonarrEnabled;
     private bool _fingerprintedRadarrEnabled;
+    private bool _fingerprintedDetailsPending;
+    // Decided once when the card first renders and kept for its lifetime, so a card crossing the
+    // top-4 boundary never swaps its <img> element (no blank flash).
+    private bool? _posterEagerAtFirstRender;
     private bool _shouldRender = true;
     private bool _isDetailsLoaded;
     private bool _isProvenanceLoaded;
 
     protected override void OnParametersSet()
     {
+        _posterEagerAtFirstRender ??= PosterEager;
+
         // Parent calendar renders are frequent while provider batches arrive. Most cards
         // retain the same immutable record and parameters; avoid rebuilding a large
         // fingerprint (and enumerating all metadata arrays) in that common case.
@@ -323,10 +355,10 @@
             && ReferenceEquals(IntegrationSettings, _fingerprintedIntegrationSettings)
             && ScoreSource == _fingerprintedScoreSource
             && string.Equals(ImageCacheVersion, _fingerprintedImageCacheVersion, StringComparison.Ordinal)
-            && RefreshImageCache == _fingerprintedRefreshImageCache
             && IsArrActionBusy == _fingerprintedArrActionBusy
             && IntegrationSettings.Sonarr.Enabled == _fingerprintedSonarrEnabled
-            && IntegrationSettings.Radarr.Enabled == _fingerprintedRadarrEnabled)
+            && IntegrationSettings.Radarr.Enabled == _fingerprintedRadarrEnabled
+            && DetailsPending == _fingerprintedDetailsPending)
         {
             _shouldRender = false;
             return;
@@ -339,10 +371,10 @@
         _fingerprintedIntegrationSettings = IntegrationSettings;
         _fingerprintedScoreSource = ScoreSource;
         _fingerprintedImageCacheVersion = ImageCacheVersion;
-        _fingerprintedRefreshImageCache = RefreshImageCache;
         _fingerprintedArrActionBusy = IsArrActionBusy;
         _fingerprintedSonarrEnabled = IntegrationSettings.Sonarr.Enabled;
         _fingerprintedRadarrEnabled = IntegrationSettings.Radarr.Enabled;
+        _fingerprintedDetailsPending = DetailsPending;
     }
 
     protected override bool ShouldRender()
@@ -381,6 +413,15 @@
         || Item.TmdbScore is > 0
         || Item.RottenTomatoesAudienceScore is > 0
         || Item.RottenTomatoesScore is > 0;
+
+    // Full text for the single-line scores row, so nothing is lost when a chip is clipped.
+    private string ScoresSummary => string.Join(" · ", new[]
+    {
+        Item.ImdbScore is > 0 ? $"IMDb {FormatScore(Item.ImdbScore)} / 10 ({FormatVoteCount(Item.ImdbVoteCount)})" : null,
+        Item.TmdbScore is > 0 ? $"TMDb {FormatScore(Item.TmdbScore)} / 10 ({FormatVoteCount(Item.TmdbVoteCount ?? 0)})" : null,
+        Item.RottenTomatoesAudienceScore is > 0 ? $"RT audience {FormatRottenTomatoes(Item.RottenTomatoesAudienceScore)}" : null,
+        Item.RottenTomatoesScore is > 0 ? $"RT critics {FormatRottenTomatoes(Item.RottenTomatoesScore)}" : null
+    }.Where(part => part is not null));
 
     private bool HasSecondaryScores =>
         Item.MetacriticScore is > 0
@@ -563,16 +604,16 @@
     {
         if (Item is null)
         {
-            return $"{ScoreSource}|{ImageCacheVersion}|{RefreshImageCache}";
+            return $"{ScoreSource}|{ImageCacheVersion}";
         }
 
         var builder = new StringBuilder();
         Append(builder, ScoreSource);
         Append(builder, ImageCacheVersion);
-        Append(builder, RefreshImageCache);
         Append(builder, IntegrationSettings.Sonarr.Enabled);
         Append(builder, IntegrationSettings.Radarr.Enabled);
         Append(builder, IsArrActionBusy);
+        Append(builder, DetailsPending);
         Append(builder, Item.CanonicalId);
         Append(builder, Item.Type);
         Append(builder, Item.MediaType);

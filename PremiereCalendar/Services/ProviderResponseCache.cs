@@ -13,11 +13,20 @@ public sealed class ProviderResponseCache(
     ILogger<ProviderResponseCache> logger,
     TimeProvider? timeProvider = null,
     PremiereTelemetry? telemetry = null,
-    IOptions<ItemEnrichmentCacheOptions>? itemCacheOptions = null)
+    IOptions<ItemEnrichmentCacheOptions>? itemCacheOptions = null,
+    TimeSpan? ioBudget = null)
 {
+    /// <summary>Default per-operation storage budget; one slow read or write is not an outage.</summary>
+    public static readonly TimeSpan DefaultIoBudget = TimeSpan.FromMilliseconds(1500);
+    /// <summary>Failed operations within <see cref="FailureWindow"/> before a provider's persistent cache is bypassed for <see cref="FailureBackoff"/>.</summary>
+    internal const int FailuresBeforeBackoff = 3;
+    internal static readonly TimeSpan FailureWindow = TimeSpan.FromSeconds(10);
+
     private const int EnvelopeVersion = 1;
     private const int MaximumPayloadBytes = 256 * 1024;
-    private static readonly TimeSpan IoBudget = TimeSpan.FromMilliseconds(500);
+    private readonly TimeSpan IoBudget = ioBudget is { } configured && configured > TimeSpan.Zero ? configured : DefaultIoBudget;
+    private readonly object _failureGate = new();
+    private readonly Dictionary<string, Queue<long>> _failureTimes = new(StringComparer.Ordinal);
     private static readonly TimeSpan FailureBackoff = TimeSpan.FromSeconds(5);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
@@ -325,11 +334,22 @@ public sealed class ProviderResponseCache(
         var ticks = Volatile.Read(ref BackoffSlot(provider));
         return ticks > _timeProvider.GetUtcNow().UtcTicks ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
     }
-    private DateTimeOffset BackOff(string provider)
+    // A sliding window rather than a streak: storage that fails intermittently still backs off, and a single slow or
+    // failed operation does not. Below the threshold there is no retry time (null).
+    private DateTimeOffset? BackOff(string provider)
     {
-        var until = _timeProvider.GetUtcNow().Add(FailureBackoff);
-        Interlocked.Exchange(ref BackoffSlot(provider), until.UtcTicks);
-        return until;
+        var now = _timeProvider.GetUtcNow();
+        lock (_failureGate)
+        {
+            if (!_failureTimes.TryGetValue(provider, out var failures)) _failureTimes[provider] = failures = new Queue<long>();
+            failures.Enqueue(now.UtcTicks);
+            while (failures.Count > 0 && failures.Peek() < now.UtcTicks - FailureWindow.Ticks) failures.Dequeue();
+            if (failures.Count < FailuresBeforeBackoff) return null;
+            failures.Clear();
+            var until = now.Add(FailureBackoff);
+            Interlocked.Exchange(ref BackoffSlot(provider), until.UtcTicks);
+            return until;
+        }
     }
     private ref long BackoffSlot(string provider)
     {

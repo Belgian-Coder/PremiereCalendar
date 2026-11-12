@@ -105,7 +105,9 @@ public static class ProviderClientServiceExtensions
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
             client.Timeout = Timeout.InfiniteTimeSpan;
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false })
+        // Redirects are followed by FileImageCache itself, validating every hop against the image host allow-list.
+        .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
             .Create("images", 4, TimeSpan.FromSeconds(20)));
         services.AddHttpClient<IArrIntegrationService, ArrIntegrationService>(client =>
         {

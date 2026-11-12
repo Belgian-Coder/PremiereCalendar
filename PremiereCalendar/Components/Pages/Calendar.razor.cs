@@ -27,6 +27,8 @@ public partial class Calendar
     private readonly HashSet<string> _arrAddInProgress = [];
     private readonly List<ToastMessage> _toasts = [];
     private IReadOnlyList<CacheFreshnessEntry> _cacheFreshness = [];
+    // True while the retained freshness entries still describe the previous scope.
+    private bool _cacheFreshnessChecking;
     private IReadOnlyList<CalendarFilterPreset> _filterPresets = [];
     private CalendarVisitChangeSummary? _visitChangeSummary;
     private readonly CancellationTokenSource _disposeCancellation = new();
@@ -36,7 +38,6 @@ public partial class Calendar
     private long _cacheFreshnessRevision;
     private string? _displayScopeKey;
     private bool _isFilterPaneOpen;
-    private bool _refreshImageCache;
     private string? _imageCacheVersion;
     private string? _error;
     private IReadOnlyList<SourceUnavailableNotice> _unavailableSources = [];
@@ -58,6 +59,7 @@ public partial class Calendar
     private string? _selectedPresetId;
     private bool _forceLoadOnNextLocationChange;
     private Task? _filterCatalogLoad;
+    private bool _filterCatalogFailed;
     // Set when a handler reset the displayed week before navigating; the next location change must load
     // even if a view-sync state resets _forceLoadOnNextLocationChange in between.
     private bool _pendingScopeLoad;
@@ -105,17 +107,36 @@ public partial class Calendar
         var start = _filters.WeekStart;
         var end = start.AddDays(6);
 
-        if (start.Year == end.Year && start.Month == end.Month)
-        {
-            return $"{start.ToString("dd MMM", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
-        }
-
         if (start.Year == end.Year)
         {
             return $"{start.ToString("dd MMM", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
         }
 
         return $"{start.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}-{end.ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}";
+    }
+
+    private bool _isSourceWarningExpanded;
+
+    private void ToggleSourceWarning()
+    {
+        _isSourceWarningExpanded = !_isSourceWarningExpanded;
+    }
+
+    private string SourceWarningText()
+    {
+        var names = string.Join(", ", _unavailableSources.Select(source => source.DisplayName).Distinct());
+        var retry = _unavailableSources.Min(source => source.RetryAtUtc).ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture);
+        return $"{names} temporarily unavailable. Results may be incomplete. Next check after {retry}.";
+    }
+
+    private string LoadingAnnouncementText(bool hasVisibleItemsForCurrentWeek)
+    {
+        if (_isLoading && !hasVisibleItemsForCurrentWeek)
+        {
+            return "Loading premieres for the selected week…";
+        }
+
+        return _isEnriching ? "Calendar ready. Updating details." : "";
     }
 
     private string VisibleResultCountText()
@@ -200,11 +221,9 @@ public partial class Calendar
         }
         if (_focusCalendarHeadingAfterRender)
         {
+            // One attempt per request; progress renders must never refocus the heading.
+            _focusCalendarHeadingAfterRender = false;
             await FocusCalendarHeadingAsync();
-            if (!_isLoading)
-            {
-                _focusCalendarHeadingAfterRender = false;
-            }
         }
 
         if (!firstRender)
@@ -251,12 +270,20 @@ public partial class Calendar
             UpdateUrl(replace: true, forceLoadOnChange: false);
         }
 
-        await Task.WhenAll(EnsureFilterCatalogLoadStarted(), LoadAsync(forceRefresh: false, diagnostic));
+        // The catalog renders again when it arrives so an already-open filter dialog gets its options.
+        StartFilterCatalogLoadInBackground();
+        await LoadAsync(forceRefresh: false, diagnostic);
     }
 
     private Task EnsureFilterCatalogLoadStarted()
     {
-        return _filterCatalogLoad ??= LoadFilterCatalogAsync();
+        if (_filterCatalogLoad is null || (_filterCatalogFailed && _filterCatalogLoad.IsCompleted))
+        {
+            _filterCatalogFailed = false;
+            _filterCatalogLoad = LoadFilterCatalogAsync();
+        }
+
+        return _filterCatalogLoad;
     }
 
     private void StartFilterCatalogLoadInBackground()
@@ -834,6 +861,8 @@ public partial class Calendar
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             Logger.LogWarning(ex, "Filter catalog load failed.");
+            // Let the next dialog open retry instead of caching the failure.
+            _filterCatalogFailed = true;
         }
     }
 
@@ -928,7 +957,6 @@ public partial class Calendar
         RecalculateVisibleItems(
             preserveCurrentOrder: _visibleItems.Count > 0,
             retainMissingItems: true);
-        _refreshImageCache = false;
         _imageCacheVersion = null;
 
         var observation = new CalendarObservationScope();
@@ -988,6 +1016,10 @@ public partial class Calendar
         async Task ConsumeLoadAsync()
         {
             using var observationContext = observation.Enter();
+            // Declared outside the try so the cleanup can flush a batch the throttle was still holding.
+            var trailingRenderScheduled = false;
+            PremiereLoadProgress? latestUpdate = null;
+            PremiereLoadProgress? lastRenderedUpdate = null;
             try
             {
                 var start = _filters.WeekStart;
@@ -998,6 +1030,7 @@ public partial class Calendar
                 loadFilters.PriorityDate = PriorityDateForCurrentWeek(start, end);
                 var lastUiUpdateUtc = DateTimeOffset.MinValue;
                 var renderedFirstUpdate = false;
+                var renderedReadyUpdate = false;
                 IAsyncEnumerable<PremiereLoadProgress> stream;
                 using (diagnostic?.Telemetry.UseDiagnosticContext(diagnostic.Context))
                 {
@@ -1008,6 +1041,55 @@ public partial class Calendar
                         : PremiereService.StreamPremieresAsync(start, end, false, loadFilters, token);
                 }
                 var readyPrefetchRequested = false;
+
+                // Recalculates the visible cards from the newest items and renders. Used by every
+                // update that passes the throttle and by the single trailing flush.
+                void RenderUpdate(PremiereLoadProgress renderedUpdate, string renderReason)
+                {
+                    lastRenderedUpdate = renderedUpdate;
+                    ApplyVisibleRecalculation(renderedUpdate);
+                    CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: isForeground && !hasCalendarReadyResult && !renderedUpdate.IsFinal, _visibleItems.Count);
+                    RequestPageRender(diagnostic, renderReason);
+                }
+
+                // A throttled update would otherwise stay invisible until the next one arrives.
+                // Schedule exactly one delayed render of the newest update.
+                void ScheduleTrailingRender(TimeSpan delay)
+                {
+                    if (trailingRenderScheduled)
+                    {
+                        return;
+                    }
+
+                    trailingRenderScheduled = true;
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(delay, token);
+                            await InvokeAsync(() =>
+                            {
+                                trailingRenderScheduled = false;
+                                var pendingUpdate = latestUpdate;
+                                if (_isDisposed
+                                    || token.IsCancellationRequested
+                                    || !ReferenceEquals(_loadCancellation, loadCancellation)
+                                    || pendingUpdate is null
+                                    || ReferenceEquals(pendingUpdate, lastRenderedUpdate))
+                                {
+                                    return;
+                                }
+
+                                lastUiUpdateUtc = DateTimeOffset.UtcNow;
+                                RenderUpdate(pendingUpdate, "progress");
+                            });
+                        }
+                        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or InvalidOperationException or JSDisconnectedException)
+                        {
+                        }
+                    });
+                }
+
                 await foreach (var update in stream.WithCancellation(token))
                 {
                     var refreshFirstCachedFreshness = false;
@@ -1021,6 +1103,7 @@ public partial class Calendar
                         }
 
                         _items = update.Items;
+                        latestUpdate = update;
                         if (update.IsCalendarReady)
                         {
                             hasCalendarReadyResult = true;
@@ -1113,22 +1196,22 @@ public partial class Calendar
                         var minimumUiUpdateInterval = update.Items.Count >= 200
                             ? TimeSpan.FromMilliseconds(750)
                             : TimeSpan.FromMilliseconds(250);
+                        // Only the first transition to ready and the final result bypass the throttle.
+                        var firstReady = update.IsCalendarReady && !renderedReadyUpdate;
                         if (!renderedFirstUpdate
-                            || update.IsCalendarReady
+                            || firstReady
                             || update.IsFinal
                             || now - lastUiUpdateUtc >= minimumUiUpdateInterval)
                         {
                             var renderReason = update.IsFinal ? "final_result" : renderedFirstUpdate ? "progress" : "first_result";
                             renderedFirstUpdate = true;
+                            renderedReadyUpdate |= update.IsCalendarReady;
                             lastUiUpdateUtc = now;
-                            // A calendar load can stream many differently ordered provider batches.
-                            // Keep existing cards in place, update matching cards, and append discoveries so
-                            // the page fills progressively without rebuilding or reshuffling the whole grid.
-                            // A final that failed item-cache validation is the service's last word: it already excluded cards.
-                            var dirtyFinal = update.IsFinal && update.FailedSourceNames.Contains("Item cache validation", StringComparer.OrdinalIgnoreCase);
-                            RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: !update.IsCalendarReady && !dirtyFinal);
-                            CalendarLoadCoordinator.UpdatePageState(start, pageMode.ToString(), loading: isForeground && !hasCalendarReadyResult && !update.IsFinal, _visibleItems.Count);
-                            RequestPageRender(diagnostic, renderReason);
+                            RenderUpdate(update, renderReason);
+                        }
+                        else
+                        {
+                            ScheduleTrailingRender(minimumUiUpdateInterval - (now - lastUiUpdateUtc));
                         }
 
                         // Adjacent weeks can start as soon as this week is usable; the stream may keep
@@ -1248,6 +1331,8 @@ public partial class Calendar
                 {
                     try
                     {
+                        // Runs on every path, including a deadline that cancelled the refresh above.
+                        await ResolveCacheFreshnessCheckingAsync(loadCancellation, diagnostic);
                         if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation))
                         {
                             _isLoading = false;
@@ -1259,6 +1344,17 @@ public partial class Calendar
                             {
                                 if (!_isDisposed)
                                 {
+                                    // The stream ended (or hit its deadline) while a throttled batch was still
+                                    // waiting for its trailing render: show it now.
+                                    // Without a final update (deadline, hand-off) the chosen sort has not been applied yet.
+                                    if (latestUpdate is not null
+                                        && (!ReferenceEquals(latestUpdate, lastRenderedUpdate)
+                                            || (!hasFinalResult && !IsDefaultSort())))
+                                    {
+                                        lastRenderedUpdate = latestUpdate;
+                                        ApplyVisibleRecalculation(latestUpdate, endOfLoad: true);
+                                        CalendarLoadCoordinator.UpdatePageState(_filters.WeekStart, _pageMode.ToString(), loading: false, _visibleItems.Count);
+                                    }
                                     RequestPageRender(diagnostic, "load_cleanup");
                                 }
                             });
@@ -1362,6 +1458,7 @@ public partial class Calendar
                 return false;
             }
             _cacheFreshness = entries;
+            _cacheFreshnessChecking = false;
             outcome = "applied";
             return true;
         }
@@ -1373,7 +1470,11 @@ public partial class Calendar
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             if (!_isDisposed && ReferenceEquals(_loadCancellation, loadCancellation)
-                && revision == Volatile.Read(ref _cacheFreshnessRevision)) _cacheFreshness = [];
+                && revision == Volatile.Read(ref _cacheFreshnessRevision))
+            {
+                _cacheFreshness = [];
+                _cacheFreshnessChecking = false;
+            }
             return false;
         }
         finally
@@ -1382,6 +1483,30 @@ public partial class Calendar
             {
                 Reason = reason, Outcome = outcome, DurationMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds
             });
+        }
+    }
+
+    // The load token may already be cancelled (background-budget deadline), which makes the normal refresh
+    // a no-op. Never leave the previous scope's entries marked "checking": refresh with the page token, or clear.
+    private async Task ResolveCacheFreshnessCheckingAsync(CancellationTokenSource loadCancellation, PageLoadDiagnostic? diagnostic)
+    {
+        if (!_cacheFreshnessChecking || _isDisposed || !ReferenceEquals(_loadCancellation, loadCancellation))
+        {
+            return;
+        }
+
+        try
+        {
+            await RefreshCacheFreshnessAsync(_disposeCancellation.Token, loadCancellation, diagnostic, "load_cleanup_resolve");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        if (_cacheFreshnessChecking && ReferenceEquals(_loadCancellation, loadCancellation))
+        {
+            _cacheFreshness = [];
+            _cacheFreshnessChecking = false;
         }
     }
 
@@ -1416,12 +1541,15 @@ public partial class Calendar
             return [];
         }
 
+        // Entries are kept across a scope change (marked as checking); never show a label the page does not cover.
+        var labels = CacheFreshnessModes().Select(mode => mode.Label).ToHashSet(StringComparer.Ordinal);
+        var entries = _cacheFreshness.Where(entry => labels.Contains(entry.Label)).ToArray();
         if (ShouldShowCompletedCacheFreshness())
         {
-            return _cacheFreshness;
+            return entries;
         }
 
-        return _cacheFreshness
+        return entries
             .Where(IsActionableCacheFreshnessEntry)
             .ToArray();
     }
@@ -1494,13 +1622,20 @@ public partial class Calendar
         return filters;
     }
 
-    private static string CacheFreshnessClass(CacheFreshnessEntry entry)
+    private string CacheFreshnessClass(CacheFreshnessEntry entry)
     {
-        return entry.Metadata is null
+        if (_cacheFreshnessChecking)
+        {
+            // Neutral while the entries still describe another scope.
+            return "cache-freshness-pill checking";
+        }
+
+        var baseClass = entry.Metadata is null
             ? "cache-freshness-pill missing"
             : entry.Metadata.Completeness == CalendarCacheCompleteness.Partial
                 ? "cache-freshness-pill partial"
                 : "cache-freshness-pill complete";
+        return baseClass;
     }
 
     private string DataFreshnessCardClass(IReadOnlyList<CacheFreshnessEntry> entries)
@@ -1517,7 +1652,12 @@ public partial class Calendar
             && entries.All(entry => entry.Metadata is { Completeness: CalendarCacheCompleteness.Complete });
     }
 
-    private static string CacheFreshnessText(CacheFreshnessEntry entry)
+    private string CacheFreshnessText(CacheFreshnessEntry entry)
+    {
+        return _cacheFreshnessChecking ? "Checking cache…" : CacheFreshnessBaseText(entry);
+    }
+
+    private static string CacheFreshnessBaseText(CacheFreshnessEntry entry)
     {
         if (entry.Metadata is not { } metadata)
         {
@@ -1676,7 +1816,8 @@ public partial class Calendar
         Interlocked.Increment(ref _cacheFreshnessRevision);
         _items = [];
         _visibleItems = [];
-        _cacheFreshness = [];
+        // Keep the previous freshness entries (marked as checking) so the status row does not collapse.
+        _cacheFreshnessChecking = _cacheFreshness.Count > 0;
         _visitChangeSummary = null;
         _loadProgress.Clear();
         InvalidateLoadProgressCache();
@@ -1705,13 +1846,47 @@ public partial class Calendar
         }
 
         var nextById = nextItems.ToDictionary(item => item.CanonicalId, StringComparer.Ordinal);
+        // An unverified external row that becomes verified gets a new CanonicalId but keeps its
+        // ExternalCandidateKey; match on that alias so the card is never shown twice. Same verification
+        // state: replaced in its slot. Changed state: moved to the end of its new section.
+        var nextByAlias = new Dictionary<string, PremiereItem>(StringComparer.Ordinal);
+        foreach (var nextItem in nextItems)
+        {
+            if (!string.IsNullOrWhiteSpace(nextItem.ExternalCandidateKey))
+            {
+                nextByAlias.TryAdd(nextItem.ExternalCandidateKey, nextItem);
+            }
+        }
+
         var reconciled = new List<PremiereItem>(nextItems.Count);
         var retainedIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var visibleItem in _visibleItems)
         {
-            if (nextById.TryGetValue(visibleItem.CanonicalId, out var updatedItem))
+            nextById.TryGetValue(visibleItem.CanonicalId, out var updatedItem);
+            if (updatedItem is null
+                && !string.IsNullOrWhiteSpace(visibleItem.ExternalCandidateKey)
+                && nextByAlias.TryGetValue(visibleItem.ExternalCandidateKey, out var aliasedItem)
+                && !retainedIds.Contains(aliasedItem.CanonicalId)
+                && !_visibleItems.Any(other => string.Equals(other.CanonicalId, aliasedItem.CanonicalId, StringComparison.Ordinal)))
             {
-                reconciled.Add(updatedItem);
+                if (aliasedItem.VerificationState != visibleItem.VerificationState)
+                {
+                    // The day renders verified and unverified cards in separate grids. Replacing in place would
+                    // insert the card mid-way through its new grid and push later cards down: drop the old row
+                    // and let the new item be appended at the end of its section instead.
+                    retainedIds.Add(visibleItem.CanonicalId);
+                    continue;
+                }
+
+                updatedItem = aliasedItem;
+            }
+
+            if (updatedItem is not null)
+            {
+                if (retainedIds.Add(updatedItem.CanonicalId))
+                {
+                    reconciled.Add(updatedItem);
+                }
             }
             else if (retainMissingItems)
             {
@@ -1732,6 +1907,27 @@ public partial class Calendar
         }
 
         _visibleItems = reconciled;
+    }
+
+    // A calendar load can stream many differently ordered provider batches.
+    // Keep existing cards in place, update matching cards, and append discoveries so
+    // the page fills progressively without rebuilding or reshuffling the whole grid.
+    // A final that failed item-cache validation is the service's last word: it already excluded cards.
+    private void ApplyVisibleRecalculation(PremiereLoadProgress update, bool endOfLoad = false)
+    {
+        var dirtyFinal = update.IsFinal && update.FailedSourceNames.Contains(PremiereLoadProgress.ItemCacheValidationSourceName, StringComparer.OrdinalIgnoreCase);
+        RecalculateVisibleItems(preserveCurrentOrder: true, retainMissingItems: !update.IsCalendarReady && !dirtyFinal);
+        if ((update.IsFinal || endOfLoad) && !IsDefaultSort())
+        {
+            // Streamed cards keep arrival order; the chosen sort is applied once, when the load ends.
+            RecalculateVisibleItems();
+        }
+    }
+
+    private bool IsDefaultSort()
+    {
+        return _filters.SortMode == PremiereSortMode.PremiereDate
+            && _filters.SortDirection == SortDirection.Ascending;
     }
 
     private bool HasVisibleItemsForCurrentWeek(IReadOnlyList<PremiereItem> items)
@@ -2246,9 +2442,14 @@ public partial class Calendar
 
     private DateOnly? PriorityDateForCurrentWeek(DateOnly start, DateOnly end)
     {
-        return _selectedDay is { } selectedDay && selectedDay >= start && selectedDay <= end
-            ? selectedDay
-            : start;
+        if (_selectedDay is { } selectedDay && selectedDay >= start && selectedDay <= end)
+        {
+            return selectedDay;
+        }
+
+        // A bare week URL selects today when the shown week contains it.
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        return today >= start && today <= end ? today : start;
     }
 
     private CalendarPageMode ResolvePageMode()
@@ -2275,6 +2476,10 @@ public partial class Calendar
     {
         _isCommandPaletteOpen = false;
         _isFilterPaneOpen = true;
+        if (_hasRendered && _filterCatalogFailed)
+        {
+            StartFilterCatalogLoadInBackground();
+        }
     }
 
     private async Task LoadPresetsAsync()
@@ -2382,11 +2587,31 @@ public partial class Calendar
         }
     }
 
+    private const int MaxToasts = 4;
+
     private void ShowToast(ToastKind kind, string title, string message)
     {
         var toast = new ToastMessage(Guid.NewGuid(), kind, title, message);
+        // Persistent error toasts must not pile up: a repeat replaces its twin and the stack is capped.
+        _toasts.RemoveAll(existing => existing.Title == title && existing.Message == message);
         _toasts.Add(toast);
-        _ = RemoveToastAfterDelayAsync(toast.Id, _disposeCancellation.Token);
+        while (_toasts.Count > MaxToasts)
+        {
+            // Never push out an undismissed error while a non-error toast can go instead.
+            var oldest = _toasts.FindIndex(existing => existing.Kind != ToastKind.Error);
+            _toasts.RemoveAt(oldest >= 0 ? oldest : 0);
+        }
+
+        if (kind != ToastKind.Error)
+        {
+            // Error toasts stay until the user dismisses them.
+            _ = RemoveToastAfterDelayAsync(toast.Id, _disposeCancellation.Token);
+        }
+    }
+
+    private void DismissToast(Guid id)
+    {
+        _toasts.RemoveAll(toast => toast.Id == id);
     }
 
     private async Task RemoveToastAfterDelayAsync(Guid id, CancellationToken cancellationToken)

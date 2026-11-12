@@ -53,19 +53,19 @@
     <div class="calendar-grid" data-testid="calendar-week" @ref="_selectedDayContainer">
         <CalendarDay @key="_selectedDay"
                      Day="_selectedDay"
-                     WindowScope="WindowScope"
+                     WindowScope="@WindowScope"
                      DayId="@DayElementId(_selectedDay)"
                      LabelledById="@DayButtonId(_selectedDay)"
                      Items="SelectedDayItems"
                      ScoreSource="ScoreSource"
                      ImageCacheVersion="@ImageCacheVersion"
-                     RefreshImageCache="RefreshImageCache"
                      InitialVisibleCount="InitialItemsPerDay"
                      LoadBatchSize="ItemsPerDayBatch"
                      IntegrationSettings="IntegrationSettings"
                      OnAddToArr="OnAddToArr"
                      IsArrActionBusy="IsArrActionBusy"
-                     IsUpdating="IsUpdating" />
+                     IsUpdating="IsUpdating"
+                     IsEnriching="IsEnriching" />
     </div>
 </div>
 
@@ -95,9 +95,6 @@
     public string? ImageCacheVersion { get; set; }
 
     [Parameter]
-    public bool RefreshImageCache { get; set; }
-
-    [Parameter]
     public IntegrationSettings IntegrationSettings { get; set; } = new();
 
     [Parameter]
@@ -108,6 +105,9 @@
 
     [Parameter]
     public bool IsUpdating { get; set; }
+
+    [Parameter]
+    public bool IsEnriching { get; set; }
 
     [Parameter]
     public int InitialItemsPerDay { get; set; } = 10;
@@ -164,7 +164,7 @@
         if (weekChanged)
         {
             _lastWeekStart = WeekStart;
-            _selectedDay = externallySelectedDay ?? WeekStart;
+            _selectedDay = externallySelectedDay ?? DefaultDayForWeek();
             _hasUserSelectedDay = externallySelectedDay.HasValue;
         }
         else if (externallySelectedDay is { } selectedDay)
@@ -174,7 +174,7 @@
         }
         else if (externalSelectionCleared)
         {
-            _selectedDay = WeekStart;
+            _selectedDay = DefaultDayForWeek();
             _hasUserSelectedDay = false;
         }
 
@@ -196,13 +196,14 @@
             || _selectedDay < WeekStart
             || _selectedDay > WeekStart.AddDays(6))
         {
-            _selectedDay = WeekStart;
+            _selectedDay = DefaultDayForWeek();
             _hasUserSelectedDay = false;
         }
 
-        if (!_hasUserSelectedDay && SelectedDayItems.Count == 0)
+        // Never move the selection while a load is still updating the board.
+        if (!_hasUserSelectedDay && !IsUpdating && SelectedDayItems.Count == 0 && FirstDayWithItems() is { } firstDayWithItems)
         {
-            _selectedDay = FirstDayWithItems() ?? WeekStart;
+            _selectedDay = firstDayWithItems;
         }
     }
 
@@ -420,6 +421,13 @@
         }
 
         await SelectDay(value, focusSelectedDayButton: true);
+    }
+
+    // Without an explicit day: today when the shown week contains it, otherwise the first day of the week.
+    private DateOnly DefaultDayForWeek()
+    {
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        return today >= WeekStart && today <= WeekStart.AddDays(6) ? today : WeekStart;
     }
 
     private DateOnly? FirstDayWithItems()

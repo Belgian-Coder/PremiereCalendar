@@ -20,8 +20,15 @@
         <div class="day-header-meta">
             @if (Items.Count > 0)
             {
-                <span>@FormatCount(MovieCount, "movie")</span>
-                <span>@FormatCount(SeriesCount, "series")</span>
+                @* A dedicated /series or /movies page never shows a zero count for the type it does not list. *@
+                @if (ShowMovieCount)
+                {
+                    <span>@FormatCount(MovieCount, "movie")</span>
+                }
+                @if (ShowSeriesCount)
+                {
+                    <span>@FormatCount(SeriesCount, "series")</span>
+                }
             }
         </div>
     </header>
@@ -70,11 +77,12 @@
         <div class="day-items-grid">
             @foreach (var item in VisibleVerifiedItems)
             {
-                <PremiereCard @key="item.CanonicalId"
+                <PremiereCard @key="CardKey(item)"
                               Item="item"
+                              DetailsPending="DetailsPending"
+                              PosterEager="IsEagerPoster(item)"
                               ScoreSource="ScoreSource"
                               ImageCacheVersion="@ImageCacheVersion"
-                              RefreshImageCache="RefreshImageCache"
                               IntegrationSettings="IntegrationSettings"
                               OnAddToArr="OnAddToArr"
                               IsArrActionBusy="IsArrActionBusy" />
@@ -91,11 +99,12 @@
                 <div class="day-items-grid">
                     @foreach (var item in VisibleUnverifiedItems)
                     {
-                        <PremiereCard @key="item.CanonicalId"
+                        <PremiereCard @key="CardKey(item)"
                                       Item="item"
+                                      DetailsPending="DetailsPending"
+                                      PosterEager="IsEagerPoster(item)"
                                       ScoreSource="ScoreSource"
                                       ImageCacheVersion="@ImageCacheVersion"
-                                      RefreshImageCache="RefreshImageCache"
                                       IntegrationSettings="IntegrationSettings"
                                       OnAddToArr="OnAddToArr"
                                       IsArrActionBusy="IsArrActionBusy" />
@@ -153,9 +162,6 @@
     public string? ImageCacheVersion { get; set; }
 
     [Parameter]
-    public bool RefreshImageCache { get; set; }
-
-    [Parameter]
     public IntegrationSettings IntegrationSettings { get; set; } = new();
 
     [Parameter]
@@ -166,6 +172,9 @@
 
     [Parameter]
     public bool IsUpdating { get; set; }
+
+    [Parameter]
+    public bool IsEnriching { get; set; }
 
     [Parameter]
     public int InitialVisibleCount { get; set; } = 10;
@@ -195,6 +204,39 @@
     private int _movieCount;
     private int _seriesCount;
 
+    // Cards that wait for details (for example ratings) show a reserved, muted placeholder.
+    private bool DetailsPending => IsUpdating || IsEnriching;
+
+    private bool ShowMovieCount => !string.Equals(WindowScope, nameof(CalendarPageMode.Series), StringComparison.Ordinal);
+
+    private bool ShowSeriesCount => !string.Equals(WindowScope, nameof(CalendarPageMode.Movies), StringComparison.Ordinal);
+
+    private const int EagerPosterCount = 4;
+
+    private readonly Dictionary<string, string> _cardKeys = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _cardOrder = new(StringComparer.Ordinal);
+
+    // A stable alias keeps a card mounted when an unverified external row becomes a verified item
+    // (new CanonicalId, same ExternalCandidateKey).
+    private string CardKey(PremiereItem item)
+    {
+        return _cardKeys.TryGetValue(item.CanonicalId, out var key) ? key : item.CanonicalId;
+    }
+
+    private bool IsEagerPoster(PremiereItem item)
+    {
+        return _windowStart == 0
+            && _cardOrder.TryGetValue(item.CanonicalId, out var order)
+            && order < EagerPosterCount;
+    }
+
+    private static bool IsSameCard(PremiereItem left, PremiereItem right)
+    {
+        return string.Equals(left.CanonicalId, right.CanonicalId, StringComparison.Ordinal)
+            || (!string.IsNullOrWhiteSpace(left.ExternalCandidateKey)
+                && string.Equals(left.ExternalCandidateKey, right.ExternalCandidateKey, StringComparison.Ordinal));
+    }
+
     private int MovieCount => _movieCount;
 
     private int SeriesCount => _seriesCount;
@@ -221,8 +263,7 @@
         var signature = canReuseItemsSignature ? _itemsSignature : BuildItemsSignature();
         var itemsChanged = !string.Equals(signature, _itemsSignature, StringComparison.Ordinal);
         var hasMountedItemOverlap = _visibleItems.Count == 0
-            || _visibleItems.Any(previous => Items.Any(current =>
-                string.Equals(current.CanonicalId, previous.CanonicalId, StringComparison.Ordinal)));
+            || _visibleItems.Any(previous => Items.Any(current => IsSameCard(current, previous)));
         var resetWindow = _windowDay is { } windowDay && windowDay != Day
             || !string.Equals(_lastWindowScope, WindowScope, StringComparison.Ordinal)
             || _lastItemsCount > 0 && Items.Count == 0
@@ -366,6 +407,24 @@
             .Where(item => item.VerificationState == PremiereVerificationState.Unverified)
             .ToArray();
         _partitionVisibleCount = HashCode.Combine(_windowStart, _visibleCount);
+
+        _cardKeys.Clear();
+        _cardOrder.Clear();
+        var usedKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in _visibleVerifiedItems.Concat(_visibleUnverifiedItems))
+        {
+            var key = string.IsNullOrWhiteSpace(item.ExternalCandidateKey)
+                ? item.CanonicalId
+                : $"ext:{item.ExternalCandidateKey}";
+            if (!usedKeys.Add(key))
+            {
+                key = item.CanonicalId;
+                usedKeys.Add(key);
+            }
+
+            _cardKeys[item.CanonicalId] = key;
+            _cardOrder[item.CanonicalId] = _cardOrder.Count;
+        }
     }
 
     private static string FormatCount(int count, string noun)
@@ -382,7 +441,7 @@
     {
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"{_itemsSignature}|{WindowScope}|{ScoreSource}|{ImageCacheVersion}|{RefreshImageCache}|{InitialVisibleCount}|{LoadBatchSize}|{MaxMountedItemCount}|{_windowStart}|{_visibleCount}|{_trimmedHeightPx}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}|{Items.Count == 0 && IsUpdating}");
+            $"{_itemsSignature}|{WindowScope}|{ScoreSource}|{ImageCacheVersion}|{InitialVisibleCount}|{LoadBatchSize}|{MaxMountedItemCount}|{_windowStart}|{_visibleCount}|{_trimmedHeightPx}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}|{Items.Count == 0 && IsUpdating}|{IsUpdating}|{IsEnriching}");
     }
 
     private string BuildItemsSignature()

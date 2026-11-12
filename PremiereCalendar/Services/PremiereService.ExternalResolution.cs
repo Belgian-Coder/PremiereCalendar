@@ -65,6 +65,9 @@ public sealed partial class PremiereService
     {
         var candidateBatchSize = Math.Clamp(_options.ExternalCandidateBatchSize, 1, 500);
         var seenCandidateKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Candidates whose ID resolution was deferred (throttled or timed out): they produce no card and are not
+        // memoised, the others keep mapping, and the source reports one combined failure when it is done.
+        var resolutionFailures = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
         var pendingCandidates = new List<ExternalPremiereCandidate>(candidateBatchSize);
         var rawCandidateCount = 0;
         var acceptedCandidateCount = 0;
@@ -118,7 +121,8 @@ public sealed partial class PremiereService
                     cachedEnrichment,
                     start,
                     end,
-                    cancellationToken)
+                    cancellationToken,
+                    resolutionFailures)
                 .WithCancellation(cancellationToken))
             {
                 emitted = true;
@@ -131,7 +135,7 @@ public sealed partial class PremiereService
         if (pendingCandidates.Count > 0)
         {
             await using var mapped = MapExternalCandidatesInProgressAsync(
-                pendingCandidates, forceRefresh, criteria, cachedEnrichment, start, end, cancellationToken)
+                pendingCandidates, forceRefresh, criteria, cachedEnrichment, start, end, cancellationToken, resolutionFailures)
                 .GetAsyncEnumerator(cancellationToken);
             while (true)
             {
@@ -147,6 +151,15 @@ public sealed partial class PremiereService
                 emitted = true;
                 yield return OffsetExternalCandidateProgress(mapped.Current, acceptedCandidateCount - pendingCandidates.Count);
             }
+        }
+
+        if (!resolutionFailures.IsEmpty)
+        {
+            var resolutionError = resolutionFailures.Count == 1 && resolutionFailures.TryPeek(out var onlyFailure)
+                ? onlyFailure
+                : new AggregateException("External ID resolution was deferred for one or more candidates.", resolutionFailures);
+            if (providerFailure is not null) throw new AggregateException(providerFailure, resolutionError);
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(resolutionError).Throw();
         }
 
         if (providerFailure is not null)
@@ -231,19 +244,27 @@ public sealed partial class PremiereService
         IReadOnlyDictionary<string, PremiereItem> cachedEnrichment,
         DateOnly requestStart,
         DateOnly requestEnd,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        System.Collections.Concurrent.ConcurrentQueue<Exception>? resolutionFailures = null)
     {
         await PrepareExternalItemEnrichmentAsync(candidates, forceRefresh, cachedEnrichment, cancellationToken);
         await foreach (var mappedBatch in MapInProgressBatchesAsync(
                 candidates,
-                (candidate, token) => MapExternalCandidateAsync(
-                    candidate,
-                    token,
-                    forceRefresh,
-                    criteria,
-                    cachedEnrichment,
-                    requestStart,
-                    requestEnd),
+                async (candidate, token) =>
+                {
+                    try
+                    {
+                        return await MapExternalCandidateAsync(
+                            candidate, token, forceRefresh, criteria, cachedEnrichment, requestStart, requestEnd);
+                    }
+                    catch (ExternalApiException ex) when (resolutionFailures is not null && !token.IsCancellationRequested
+                        && RetryDeadline(ex) is not null)
+                    {
+                        _logger.LogWarning(ex, "Deferring external candidate {Title}; its TMDb lookup was throttled or timed out.", candidate.Title);
+                        resolutionFailures.Enqueue(ex);
+                        return null;
+                    }
+                },
                 cancellationToken)
             .WithCancellation(cancellationToken))
         {
@@ -433,7 +454,8 @@ public sealed partial class PremiereService
                 seasonNumber: candidate.SeasonNumber,
                 episodeNumber: candidate.EpisodeNumber,
                 episodeSource: candidate.Source,
-                allowWatchmodeAvailabilityFallback: false);
+                allowWatchmodeAvailabilityFallback: false,
+                requestedSeriesCriteria: criteria.Series);
 
         if (mappedItem is null)
         {
@@ -918,8 +940,33 @@ public sealed partial class PremiereService
     {
         if (_itemCacheSession.Value is not { } session)
             return ResolveCandidateTmdbIdCoreAsync(candidate, cancellationToken, forceRefresh);
-        return session.ResolvedCandidates.GetOrAdd(ExternalCandidateKey(candidate), _ => new Lazy<Task<int?>>(
-            () => ResolveCandidateTmdbIdCoreAsync(candidate, cancellationToken, forceRefresh))).Value;
+        var key = ExternalCandidateKey(candidate);
+        var resolution = session.ResolvedCandidates.GetOrAdd(key, _ =>
+        {
+            Lazy<Task<int?>>? flight = null;
+            flight = new Lazy<Task<int?>>(async () =>
+            {
+                try
+                {
+                    // The session token (not the first caller's) owns the shared flight, so one
+                    // source timing out cannot poison the entry for later callers.
+                    return await ResolveCandidateTmdbIdCoreAsync(candidate, session.LifetimeToken, forceRefresh);
+                }
+                catch
+                {
+                    // Never memoise a failed (throttled, timed-out) resolution; a later caller retries it.
+                    ((ICollection<KeyValuePair<string, Lazy<Task<int?>>>>)session.ResolvedCandidates)
+                        .Remove(new(key, flight!));
+                    throw;
+                }
+            });
+            return flight;
+        });
+        var shared = resolution.Value;
+        // A flight whose callers all stopped waiting (cancelled) must still have its failure observed.
+        _ = shared.ContinueWith(static task => _ = task.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return shared.WaitAsync(cancellationToken);
     }
 
     private async Task<int?> ResolveCandidateTmdbIdCoreAsync(
@@ -1028,9 +1075,16 @@ public sealed partial class PremiereService
         {
             _logger.LogWarning(
                 ex,
-                "Skipping strict TMDb title lookup for {ProviderName} candidate {Title} after a request timeout.",
+                "TMDb title lookup for {ProviderName} candidate {Title} timed out; reporting the source as failed.",
                 candidate.Source,
                 candidate.Title);
+            throw new ExternalApiException("TMDb title lookup timed out.",
+                new ProviderRetryAfterException("tmdb", DateTimeOffset.UtcNow.Add(ExternalLookupTimeoutRetryDelay)));
+        }
+        catch (ExternalApiException ex) when (RetryDeadline(ex) is not null)
+        {
+            // Throttling or an open circuit is not evidence that the title is unmatched.
+            throw;
         }
         catch (ExternalApiException ex)
         {
@@ -1078,6 +1132,9 @@ public sealed partial class PremiereService
             && resultDate.Year == candidateYear;
     }
 
+    // A timed-out lookup is not evidence of a missing title; it gets a short retry time like a throttled one.
+    private static readonly TimeSpan ExternalLookupTimeoutRetryDelay = TimeSpan.FromSeconds(60);
+
     private async Task<int?> TryFindTmdbIdAsync(
         PremiereMediaType mediaType,
         string externalId,
@@ -1099,12 +1156,18 @@ public sealed partial class PremiereService
         {
             _logger.LogWarning(
                 ex,
-                "Skipping {ProviderName} candidate because TMDb lookup for {ExternalSource}:{ExternalId} timed out.",
-                providerName,
+                "TMDb lookup for {ExternalSource}:{ExternalId} timed out for {ProviderName}; reporting the source as failed.",
                 externalSource,
-                externalId);
+                externalId,
+                providerName);
 
-            return null;
+            throw new ExternalApiException("TMDb external ID lookup timed out.",
+                new ProviderRetryAfterException("tmdb", DateTimeOffset.UtcNow.Add(ExternalLookupTimeoutRetryDelay)));
+        }
+        catch (ExternalApiException ex) when (RetryDeadline(ex) is not null)
+        {
+            // Throttling or an open circuit is not evidence that the ID is unknown.
+            throw;
         }
         catch (ExternalApiException ex)
         {

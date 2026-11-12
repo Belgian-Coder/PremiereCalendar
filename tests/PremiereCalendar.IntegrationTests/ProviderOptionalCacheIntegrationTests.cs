@@ -19,7 +19,7 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     public ProviderOptionalCacheIntegrationTests() => TestSqliteDatabase.Initialize(_root, DatabasePath);
     private IProviderCacheStateStore Store() => new SqliteProviderCacheStateStore(
         Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = DatabasePath }), new Environment(_root));
-    private ProviderResponseCache Durable() => new(Store(), NullLogger<ProviderResponseCache>.Instance, _clock);
+    private ProviderResponseCache Durable() => new(Store(), NullLogger<ProviderResponseCache>.Instance, _clock, ioBudget: TimeSpan.FromSeconds(30));
     private static MemoryCache Memory() => new(new MemoryCacheOptions());
     private FanartClient Fanart(HttpMessageHandler handler, IMemoryCache memory, string key = "private-key", string version = "v3") => new(
         new HttpClient(handler) { BaseAddress = new Uri($"https://webservice.fanart.tv/{version}/") }, memory,

@@ -66,6 +66,30 @@ public sealed class PremiereFilterTests
         Assert.Equal(PremiereFilter.Apply(items, filters).Count, PremiereFilter.CountMatches(items, filters));
     }
 
+    [Theory]
+    [InlineData(PremiereSortMode.PremiereDate)]
+    [InlineData(PremiereSortMode.Title)]
+    [InlineData(PremiereSortMode.Score)]
+    [InlineData(PremiereSortMode.VoteCount)]
+    [InlineData(PremiereSortMode.Runtime)]
+    public void Apply_OrdersEqualSortKeysByCanonicalIdRegardlessOfInputOrder(PremiereSortMode mode)
+    {
+        PremiereItem Item(string id) => new()
+        {
+            CanonicalId = id, Title = "Same", MediaType = PremiereMediaType.Movie, Type = PremiereItemType.MovieFirstRelease,
+            TmdbId = 1, PremiereDate = new DateOnly(2026, 5, 4), TmdbScore = 7, TmdbVoteCount = 10, RuntimeMinutes = 100
+        };
+        var items = new[] { Item("movie:3"), Item("movie:1"), Item("movie:2") };
+        foreach (var direction in new[] { SortDirection.Ascending, SortDirection.Descending })
+        {
+            var filters = new CalendarFilters { SortMode = mode, SortDirection = direction };
+            var forward = PremiereFilter.Apply(items, filters).Select(item => item.CanonicalId).ToArray();
+            var reversed = PremiereFilter.Apply(items.Reverse().ToArray(), filters).Select(item => item.CanonicalId).ToArray();
+            Assert.Equal(["movie:1", "movie:2", "movie:3"], forward);
+            Assert.Equal(forward, reversed);
+        }
+    }
+
     [Fact]
     public void Apply_UsesSelectedScoreSourceForScoresAndVotes()
     {

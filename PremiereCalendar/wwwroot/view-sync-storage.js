@@ -1,4 +1,5 @@
-function lastSeenStorage() {
+(() => {
+const lastSeenStorage = () => {
   try {
     const session = window.sessionStorage;
     if (session) {
@@ -10,7 +11,7 @@ function lastSeenStorage() {
   }
 
   return window.localStorage;
-}
+};
 
 window.premiereViewSync = {
   getOrCreateDeviceId() {
@@ -72,3 +73,4 @@ window.premiereViewSync = {
     }
   }
 };
+})();

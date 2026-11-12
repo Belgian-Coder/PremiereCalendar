@@ -105,7 +105,7 @@ public sealed class PremiereCardTests : BunitContext
     }
 
     [Fact]
-    public void PremiereCard_AddsImageRefreshParametersWhenRequested()
+    public void PremiereCard_BuildsVersionedCachedImageUrl()
     {
         var item = new PremiereItem
         {
@@ -120,12 +120,11 @@ public sealed class PremiereCardTests : BunitContext
 
         var component = Render<PremiereCard>(parameters => parameters
             .Add(x => x.Item, item)
-            .Add(x => x.ImageCacheVersion, "123")
-            .Add(x => x.RefreshImageCache, true));
+            .Add(x => x.ImageCacheVersion, "123"));
 
         var imageUrl = component.Find("img").GetAttribute("data-lazy-src");
         Assert.Equal(
-            "/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Ffresh.jpg&w=185&v=123&refresh=true",
+            "/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Ffresh.jpg&w=185&v=123",
             imageUrl);
     }
 
@@ -177,10 +176,12 @@ public sealed class PremiereCardTests : BunitContext
 
         var component = Render<PremiereCard>(parameters => parameters.Add(x => x.Item, item));
 
-        Assert.Empty(component.FindAll(".primary-score"));
+        // The row stays (one reserved line) but carries no score chips.
+        Assert.Equal("No ratings", component.Find("[data-testid='scores-placeholder']").TextContent.Trim());
+        Assert.Empty(component.FindAll(".primary-score:not(.scores-placeholder)"));
         component.Find(".card-details summary").Click();
         Assert.Empty(component.FindAll(".secondary-scores"));
-        Assert.Empty(component.FindAll(".scores span"));
+        Assert.Empty(component.FindAll(".scores span:not(.scores-placeholder-text)"));
     }
 
     [Fact]
