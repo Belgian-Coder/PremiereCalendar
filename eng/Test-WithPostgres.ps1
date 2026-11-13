@@ -21,7 +21,11 @@ BrowserTests need Playwright browsers and are not part of the default set.
 Optional dotnet test --filter expression.
 
 .PARAMETER ExtraTestArguments
-Extra arguments appended to `dotnet test`, for example '-p:UseRuntimeAsync=false'.
+Extra arguments appended to `dotnet test`. Values that start with a dash must be bound with the colon form,
+for example -ExtraTestArguments:-p:Foo=bar (see also -NoRuntimeAsync).
+
+.PARAMETER NoRuntimeAsync
+Builds and runs the tests with -p:UseRuntimeAsync=false (the .NET 11 runtime-async compiler feature is on by default).
 
 .PARAMETER BuildVolume
 Optional named Docker volume mounted at /PremiereCalendar.Build (the Directory.Build.props artifacts path) so that
@@ -40,6 +44,7 @@ param(
     [ValidateRange(1, 64)]
     [int] $Cpus = 4,
     [string[]] $ExtraTestArguments = @(),
+    [switch] $NoRuntimeAsync,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')]
     [string] $BuildVolume,
     [string] $DevImage = 'premierecalendar-dev-app:latest',
@@ -76,6 +81,7 @@ $subnetOctet = Get-Random -Minimum 1 -Maximum 250
 
 $projectList = ($Project | ForEach-Object { "tests/PremiereCalendar.$_/PremiereCalendar.$_.csproj" }) -join ' '
 $testArguments = @('-c', $Configuration, '--nologo') + $ExtraTestArguments
+if ($NoRuntimeAsync) { $testArguments += '-p:UseRuntimeAsync=false' }
 if (-not [string]::IsNullOrWhiteSpace($Filter)) { $testArguments += @('--filter', $Filter) }
 $quotedTestArguments = ($testArguments | ForEach-Object { "'" + ($_ -replace "'", "'\''") + "'" }) -join ' '
 $buildMount = if ($BuildVolume) { "-v '$BuildVolume':/PremiereCalendar.Build" } else { '' }
