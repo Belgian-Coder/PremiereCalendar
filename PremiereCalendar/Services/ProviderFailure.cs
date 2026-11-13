@@ -79,4 +79,6 @@ internal static class ProviderOutcomeDiagnostics
 internal static class ProviderRequestOptions
 {
     internal static readonly HttpRequestOptionsKey<bool> AllowAuthenticationRefresh = new("PremiereCalendar.AllowAuthenticationRefresh");
+    /// <summary>Decoded response-size limit in bytes; absent means unlimited (images and IMDb dataset downloads).</summary>
+    internal static readonly HttpRequestOptionsKey<long> MaxResponseBytes = new("PremiereCalendar.MaxResponseBytes");
 }

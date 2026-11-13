@@ -17,7 +17,9 @@ internal sealed class DeadlineProviderContent : HttpContent
     private readonly ProviderExecutionLease? _lease;
     private readonly long? _contentLength;
     private readonly Action<ProviderExecutionResult, string>? _onCompleted;
+    private readonly long _maxDecodedBytes;
     private long _bytesRead;
+    private long _decodedBytes;
     private int _completed;
     private int _disposed;
 
@@ -29,8 +31,10 @@ internal sealed class DeadlineProviderContent : HttpContent
         CancellationTokenSource requestSource,
         CancellationToken callerToken,
         ProviderExecutionLease? lease,
-        Action<ProviderExecutionResult, string>? onCompleted = null)
+        Action<ProviderExecutionResult, string>? onCompleted = null,
+        long maxDecodedBytes = ProviderResponseLimits.Unlimited)
     {
+        _maxDecodedBytes = maxDecodedBytes;
         _inner = inner;
         _provider = provider;
         _requestTimeout = requestTimeout;
@@ -66,7 +70,9 @@ internal sealed class DeadlineProviderContent : HttpContent
         try
         {
             linked.Token.ThrowIfCancellationRequested();
-            await _inner.CopyToAsync(stream, context, linked.Token).ConfigureAwait(false);
+            // The decoded size is capped even when the caller's stream has no limit of its own.
+            await using var limited = new LimitedWriteStream(stream, this);
+            await _inner.CopyToAsync(_maxDecodedBytes == ProviderResponseLimits.Unlimited ? stream : limited, context, linked.Token).ConfigureAwait(false);
             linked.Token.ThrowIfCancellationRequested();
             Complete(ProviderExecutionResult.Success, "consumed");
         }
@@ -105,6 +111,15 @@ internal sealed class DeadlineProviderContent : HttpContent
     protected override Stream CreateContentReadStream(CancellationToken cancellationToken)
         => CreateContentReadStreamAsync(cancellationToken).GetAwaiter().GetResult();
 
+    private void CountDecoded(int count)
+    {
+        if (_maxDecodedBytes != ProviderResponseLimits.Unlimited
+            && Interlocked.Add(ref _decodedBytes, count) > _maxDecodedBytes)
+        {
+            throw new ProviderResponseTooLargeException(_provider, _maxDecodedBytes);
+        }
+    }
+
     private Exception RecordFailure(Exception exception, CancellationToken readToken)
     {
         var cancelled = _callerToken.IsCancellationRequested || readToken.IsCancellationRequested
@@ -114,7 +129,8 @@ internal sealed class DeadlineProviderContent : HttpContent
             : exception;
         Complete(cancelled ? ProviderExecutionResult.Cancelled : ProviderExecutionResult.Failed,
             Volatile.Read(ref _disposed) != 0 ? "disposed" : cancelled ? "cancelled"
-                : _timeoutSource?.IsCancellationRequested == true ? "timeout" : "failed");
+                : _timeoutSource?.IsCancellationRequested == true ? "timeout"
+                : exception is ProviderResponseTooLargeException ? "oversize" : "failed");
         return failure;
     }
 
@@ -158,6 +174,37 @@ internal sealed class DeadlineProviderContent : HttpContent
         finally { base.Dispose(true); }
     }
 
+    private sealed class LimitedWriteStream(Stream target, DeadlineProviderContent owner) : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => target.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) => target.FlushAsync(cancellationToken);
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            owner.CountDecoded(buffer.Length);
+            target.Write(buffer);
+        }
+
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            owner.CountDecoded(buffer.Length);
+            return target.WriteAsync(buffer, cancellationToken);
+        }
+    }
+
     private sealed class DeadlineReadStream(Stream inner, DeadlineProviderContent owner, CancellationToken streamToken) : Stream
     {
         public override bool CanRead => inner.CanRead;
@@ -181,6 +228,7 @@ internal sealed class DeadlineProviderContent : HttpContent
                 linked.Token.ThrowIfCancellationRequested();
                 var read = await inner.ReadAsync(buffer, linked.Token).ConfigureAwait(false);
                 linked.Token.ThrowIfCancellationRequested();
+                if (read > 0) owner.CountDecoded(read);
                 // A zero-sized caller buffer is not evidence that the body ended.
                 if ((read == 0 && buffer.Length != 0)
                     || (read > 0 && owner._contentLength is { } length

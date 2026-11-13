@@ -45,6 +45,29 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
             factory.Services.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>().Get(clientName).HandlerLifetime);
     }
 
+    [Theory]
+    [MemberData(nameof(CompressedProviderClients))]
+    public void ProviderClientsCapDecodedResponsesBeforeTheAdaptiveHandlerSeesThem(string clientName)
+    {
+        using var factory = CreateFactory();
+
+        // Buffered reads are capped by HttpClient itself.
+        using var client = factory.Services.GetRequiredService<IHttpClientFactory>().CreateClient(clientName);
+        Assert.Equal(16L * 1024 * 1024, client.MaxResponseContentBufferSize);
+
+        // Streamed reads are capped by the adaptive handler, which learns the limit from the outer limit handler.
+        var chain = new List<Type>();
+        var handler = factory.Services.GetRequiredService<IHttpMessageHandlerFactory>().CreateHandler(clientName);
+        while (handler is DelegatingHandler delegating)
+        {
+            chain.Add(delegating.GetType());
+            handler = delegating.InnerHandler!;
+        }
+        Assert.Contains(typeof(ProviderResponseLimitHandler), chain);
+        Assert.Contains(typeof(AdaptiveProviderHandler), chain);
+        Assert.True(chain.IndexOf(typeof(ProviderResponseLimitHandler)) < chain.IndexOf(typeof(AdaptiveProviderHandler)));
+    }
+
     [Fact]
     public void ImageAndDatasetClientsKeepTheirRawTransport()
     {

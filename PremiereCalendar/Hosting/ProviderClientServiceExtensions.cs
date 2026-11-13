@@ -137,7 +137,12 @@ public static class ProviderClientServiceExtensions
     /// Decompression strips Content-Length/Content-Encoding from the response seen by the adaptive handler, so body
     /// completion for those responses relies on end-of-stream rather than a declared length.
     /// </summary>
-    internal static IHttpClientBuilder ConfigureProviderTransport(this IHttpClientBuilder builder) => builder
+    internal static IHttpClientBuilder ConfigureProviderTransport(
+        this IHttpClientBuilder builder, long maxResponseBytes = ProviderResponseLimits.DefaultMaxBytes) => builder
+        // Decoded-size cap: buffered reads are limited by HttpClient itself, streamed reads and the adaptive slot
+        // accounting by the handler below, which learns the limit from the request options.
+        .ConfigureHttpClient(client => client.MaxResponseContentBufferSize = maxResponseBytes)
+        .AddHttpMessageHandler(() => new ProviderResponseLimitHandler(maxResponseBytes))
         .ConfigurePrimaryHttpMessageHandler(CreateProviderPrimaryHandler)
         // Connection rotation is owned by PooledConnectionLifetime; recycling the whole handler chain every two
         // minutes would only discard warm connections and TLS sessions.

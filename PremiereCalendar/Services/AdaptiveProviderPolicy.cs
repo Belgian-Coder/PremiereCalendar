@@ -657,7 +657,9 @@ public sealed class AdaptiveProviderHandler(
                             response.Content = new DeadlineProviderContent(
                                 response.Content, provider, requestTimeout, timeoutSource, timeoutLink,
                                 cancellationToken, result == ProviderExecutionResult.Success ? lease : null,
-                                (bodyResult, reason) => attemptDiagnostics.BodyCompleted(bodyResult, reason, result));
+                                (bodyResult, reason) => attemptDiagnostics.BodyCompleted(bodyResult, reason, result),
+                                request.Options.TryGetValue(ProviderRequestOptions.MaxResponseBytes, out var maxResponseBytes)
+                                    ? maxResponseBytes : ProviderResponseLimits.Unlimited);
                             responseOwnsDeadline = true;
                             responseOwnsLease = result == ProviderExecutionResult.Success;
                         }

@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Microsoft.Extensions.DependencyInjection;
 using PremiereCalendar.Hosting;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
@@ -100,11 +101,119 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         Assert.Contains("Cookie: session=abc123", server.AllRequestHeaders[1], StringComparison.OrdinalIgnoreCase);
     }
 
-    private HttpClient CreateClient(string provider)
+    [Fact]
+    public void ConfiguredProviderClientsCapBufferedResponsesAtTheDefaultDecodedLimit()
     {
-        var handler = new AdaptiveProviderHandlerFactory(_policy).Create(provider, 1, TimeSpan.FromSeconds(30));
-        handler.InnerHandler = ProviderClientServiceExtensions.CreateProviderPrimaryHandler();
-        return new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        var services = new ServiceCollection();
+        services.AddHttpClient("limited").ConfigureProviderTransport();
+        using var provider = services.BuildServiceProvider();
+
+        using var client = provider.GetRequiredService<IHttpClientFactory>().CreateClient("limited");
+
+        Assert.Equal(16L * 1024 * 1024, ProviderResponseLimits.DefaultMaxBytes);
+        Assert.Equal(ProviderResponseLimits.DefaultMaxBytes, client.MaxResponseContentBufferSize);
+    }
+
+    [Theory]
+    [InlineData("gzip")]
+    [InlineData("br")]
+    public async Task ConfiguredProviderClientRejectsADecompressionBombBeyondTheDefaultLimit(string encoding)
+    {
+        var bomb = CompressZeros(20 * 1024 * 1024, encoding);
+        Assert.True(bomb.Length < 100 * 1024, "the fixture must be tiny on the wire");
+        await using var server = new LoopbackServer(encoding, bomb);
+        var services = new ServiceCollection();
+        services.AddHttpClient("bomb").ConfigureProviderTransport();
+        using var provider = services.BuildServiceProvider();
+        using var client = provider.GetRequiredService<IHttpClientFactory>().CreateClient("bomb");
+
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url));
+    }
+
+    [Theory]
+    [InlineData("gzip")]
+    [InlineData("br")]
+    public async Task BufferedDecompressionBombFailsAtTheCapAndReleasesTheAdaptiveSlot(string encoding)
+    {
+        const long cap = 1024 * 1024;
+        await using var server = new LoopbackServer(encoding, CompressZeros(8 * 1024 * 1024, encoding));
+        using var client = CreateClient("bomb-buffered-" + encoding, cap);
+
+        var failure = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url));
+
+        Assert.Contains("limit", failure.Message, StringComparison.OrdinalIgnoreCase);
+        var snapshot = Assert.Single(_policy.GetSnapshots());
+        Assert.Equal(0, snapshot.ActiveRequests);
+        Assert.Equal(1, snapshot.ConsecutiveFailures);
+    }
+
+    [Theory]
+    [InlineData("gzip")]
+    [InlineData("br")]
+    public async Task StreamedDecompressionBombFailsAtTheCapAndReleasesTheAdaptiveSlot(string encoding)
+    {
+        const long cap = 1024 * 1024;
+        await using var server = new LoopbackServer(encoding, CompressZeros(8 * 1024 * 1024, encoding));
+        using var client = CreateClient("bomb-streamed-" + encoding, cap);
+        using var response = await client.GetAsync(server.Url, HttpCompletionOption.ResponseHeadersRead);
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        var buffer = new byte[64 * 1024];
+        long total = 0;
+
+        var failure = await Assert.ThrowsAsync<ProviderResponseTooLargeException>(async () =>
+        {
+            while (true)
+            {
+                var read = await stream.ReadAsync(buffer);
+                if (read == 0) return;
+                total += read;
+            }
+        });
+
+        Assert.Contains("limit", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(total <= cap, $"read {total} bytes before the cap stopped the body");
+        var snapshot = Assert.Single(_policy.GetSnapshots());
+        Assert.Equal(0, snapshot.ActiveRequests);
+        Assert.Equal(1, snapshot.ConsecutiveFailures);
+    }
+
+    [Fact]
+    public async Task ABodyWithinTheCapIsUnaffected()
+    {
+        var payload = JsonPayload();
+        await using var server = new LoopbackServer("gzip", Compress(payload, "gzip"));
+        using var client = CreateClient("within-cap", 1024 * 1024);
+
+        Assert.Equal(payload, await client.GetStringAsync(server.Url));
+        Assert.Equal(0, Assert.Single(_policy.GetSnapshots()).ActiveRequests);
+    }
+
+    private HttpClient CreateClient(string provider, long? maxResponseBytes = null)
+    {
+        var adaptive = new AdaptiveProviderHandlerFactory(_policy).Create(provider, 1, TimeSpan.FromSeconds(30));
+        adaptive.InnerHandler = ProviderClientServiceExtensions.CreateProviderPrimaryHandler();
+        if (maxResponseBytes is not { } cap) return new HttpClient(adaptive) { Timeout = Timeout.InfiniteTimeSpan };
+        // Mirror ConfigureProviderTransport: the limit handler is outermost and HttpClient caps buffered reads.
+        return new HttpClient(new ProviderResponseLimitHandler(cap) { InnerHandler = adaptive })
+        {
+            Timeout = Timeout.InfiniteTimeSpan,
+            MaxResponseContentBufferSize = cap
+        };
+    }
+
+    private static byte[] CompressZeros(int decodedBytes, string encoding)
+    {
+        using var output = new MemoryStream();
+        using (Stream compressor = encoding switch
+        {
+            "gzip" => new GZipStream(output, CompressionLevel.SmallestSize, leaveOpen: true),
+            "br" => new BrotliStream(output, CompressionLevel.SmallestSize, leaveOpen: true),
+            _ => throw new ArgumentOutOfRangeException(nameof(encoding))
+        })
+        {
+            compressor.Write(new byte[decodedBytes]);
+        }
+        return output.ToArray();
     }
 
     private static string JsonPayload()

@@ -190,6 +190,10 @@ The default host URL is configured as:
 
 This lets the app listen on all network interfaces. Containers set `Urls` to `http://0.0.0.0:8080` and publish it on the loopback port described in [Docker and PostgreSQL](DockerAndPostgres.md).
 
+## Provider Response Limits
+
+The JSON and HTML provider clients (TMDb, OMDb, TVmaze, Fanart.tv, Trakt, TheTVDB, Wikimedia, Rotten Tomatoes, Watchmode, SIMKL) negotiate gzip, deflate and Brotli. Because decompression hides the wire size, each response is limited to 16 MiB of decoded bytes: buffered reads stop at `HttpClient.MaxResponseContentBufferSize` and streamed reads stop in the provider body wrapper. An oversized body fails the request and releases the provider's adaptive concurrency slot, so a malicious or broken endpoint cannot expand a few kilobytes of compressed data into gigabytes. The largest known payloads are Wikidata claim batches (about 1.2 MB decoded) and Rotten Tomatoes pages (a few hundred KB). The IMDb dataset download and the image cache have their own size limits and are not capped by this setting. Provider clients keep the default HTTP cookie handling.
+
 ## TVmaze
 
 TVmaze enrichment and schedule discovery can be controlled from the Settings page. They are enabled by default:
