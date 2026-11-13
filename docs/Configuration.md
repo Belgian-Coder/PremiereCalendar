@@ -276,7 +276,7 @@ Week-level normalized results are stored in a local file cache by default:
 
 The UI Refresh button bypasses the fresh week cache and the in-memory source API caches for the visible week, then fetches fresh data. If a source refresh fails, the app can still read the last cached week as a fallback. The cache directory is ignored by git.
 
-Full-week JSON and image bytes remain on disk. Reusable per-title metadata, scores and provider response envelopes live in the application database, so different weeks and filters can share them. The supported deployment uses PostgreSQL; SQLite remains available for local/test use.
+Full-week JSON and image bytes remain on disk. Reusable per-title metadata, scores and provider response envelopes live in the application database, so different weeks and filters can share them. The only supported database is PostgreSQL.
 
 ```json
 "ItemEnrichmentCache": {

@@ -33,7 +33,7 @@ flowchart LR
     Cards --> ImageCache["/cached-image"]
 ```
 
-TMDb is the canonical identity source. TMDb Discover creates the primary verified rows. Trakt and optional TVmaze schedules can add candidates; mapped candidates become verified cards, while unmapped candidates are retained as unverified external cards below the verified results. In the new-series view, TVmaze later episodes are filtered out before TMDb mapping; `S01E01` candidates can still support a series-premiere card. Watchmode is streaming availability fallback only. SIMKL is account/library sync state, not calendar discovery. Draft filter changes never call external APIs; saved filters do. Runtime API and integration credentials are read from the local SQLite settings database.
+TMDb is the canonical identity source. TMDb Discover creates the primary verified rows. Trakt and optional TVmaze schedules can add candidates; mapped candidates become verified cards, while unmapped candidates are retained as unverified external cards below the verified results. In the new-series view, TVmaze later episodes are filtered out before TMDb mapping; `S01E01` candidates can still support a series-premiere card. Watchmode is streaming availability fallback only. SIMKL is account/library sync state, not calendar discovery. Draft filter changes never call external APIs; saved filters do. Runtime API and integration credentials are read from the PostgreSQL settings tables.
 
 ## Request Flow
 
