@@ -19,7 +19,7 @@ public static class OperationalLoggingDiagnostics
 
 internal sealed class OperationalLoggingDiagnosticState(Action<string>? firstFailureNotice = null)
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private long _failureCount;
     private DateTimeOffset? _lastFailureUtc;
     private string? _reason;

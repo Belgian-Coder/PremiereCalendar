@@ -39,7 +39,7 @@ public sealed partial class PerformanceDiagnosticStore : IDisposable, IHostedSer
     private readonly Action<string>? _beforeDelete;
     private readonly Action? _beforeFlush;
     private readonly Action? _beforeBarrier;
-    private readonly object _lifecycleGate = new();
+    private readonly Lock _lifecycleGate = new();
     private Task? _shutdownTask;
     private int _stopping;
     private int _writerRunning;

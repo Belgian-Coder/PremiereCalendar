@@ -21,7 +21,7 @@ internal static class ImdbRatingLookupBatcher
         private const int MaximumIds = 64;
         private const int MaximumConcurrentBatches = 2;
         private static readonly TimeSpan CoalescingWindow = TimeSpan.FromMilliseconds(10);
-        private readonly object _gate = new();
+        private readonly Lock _gate = new();
         private readonly SemaphoreSlim _capacity = new(512, 512);
         private readonly Dictionary<string, Work> _work = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<Work> _pending = [];

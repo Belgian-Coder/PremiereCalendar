@@ -7,7 +7,7 @@ namespace PremiereCalendar.Services;
 /// <summary>Owns bounded, deduplicated stale-image refresh work for the application lifetime.</summary>
 public sealed class ImageRefreshQueue : IHostedService, IDisposable
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly HashSet<string> _pending = new(StringComparer.Ordinal);
     private readonly Channel<Refresh> _queue;
     private readonly CancellationTokenSource _shutdown = new();

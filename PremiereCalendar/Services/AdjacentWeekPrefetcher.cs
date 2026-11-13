@@ -16,7 +16,7 @@ public sealed class AdjacentWeekPrefetcher : IAdjacentWeekPrefetcher, IHostedSer
     private readonly IProviderWorkScheduler? _workScheduler;
     private readonly DatabaseRecoveryState? _databaseState;
     private readonly ConcurrentDictionary<string, byte> _scheduledWeeks = [];
-    private readonly object _queueGate = new();
+    private readonly Lock _queueGate = new();
     private readonly PriorityQueue<PrefetchRequest, PrefetchPriority> _queue = new();
     private readonly Dictionary<string, PrefetchRequest> _pendingRequests = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _queueSignal = new(0);

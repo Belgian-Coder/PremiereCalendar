@@ -4,7 +4,7 @@ namespace PremiereCalendar.Services;
 public sealed class CalendarObservationScope
 {
     private static readonly AsyncLocal<CalendarObservationScope?> Ambient = new();
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly Dictionary<Guid, Func<CancellationToken, Task>> _callbacks = [];
     private bool _passive;
     public static CalendarObservationScope? Current => Ambient.Value;

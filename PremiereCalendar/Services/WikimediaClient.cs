@@ -14,7 +14,7 @@ public sealed class WikimediaClient : IWikimediaClient
     private readonly IIntegrationSettingsStore? _settingsStore;
     private readonly PremiereTelemetry? _telemetry;
     private readonly WikimediaClaimBatcher _claims;
-    private readonly object _fenceGate = new();
+    private readonly Lock _fenceGate = new();
     private readonly OptionalProviderResponseCache _commonsResponses;
 
     public WikimediaClient(

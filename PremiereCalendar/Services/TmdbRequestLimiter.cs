@@ -8,7 +8,7 @@ namespace PremiereCalendar.Services;
 public sealed class TmdbRequestLimiter : IDisposable
 {
     private readonly TokenBucketRateLimiter _limiter;
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly ProviderAdmissionQueue<TaskCompletionSource<TmdbRequestLease>> _admissions = new();
     private readonly CancellationTokenSource _stopping = new();
     private readonly int _maximumConcurrency;

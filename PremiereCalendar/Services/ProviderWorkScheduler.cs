@@ -168,9 +168,9 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         return requested > now ? now + grown : requested;
     }
 
-    private readonly object _broadcastGate = new();
+    private readonly Lock _broadcastGate = new();
     private readonly HashSet<string> _detachedJobs = new(StringComparer.Ordinal);
-    private readonly object _signalGate = new();
+    private readonly Lock _signalGate = new();
     private TaskCompletionSource _signal = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly SemaphoreSlim _countGate = new(1, 1);
     private long? _lastCountTimestamp;
@@ -1098,7 +1098,7 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
     internal sealed class JobBroadcast(TimeProvider? timeProvider = null)
     {
         private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
-        private readonly object _gate = new();
+        private readonly Lock _gate = new();
         private readonly HashSet<Subscription> _subscribers = [];
         private readonly Dictionary<string, (long Sequence, ProviderWorkProgress Progress)> _retained = new(StringComparer.Ordinal);
         private long _sequence;

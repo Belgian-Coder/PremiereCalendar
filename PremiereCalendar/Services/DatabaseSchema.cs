@@ -289,7 +289,7 @@ internal sealed record DatabaseMigration(
 
 public sealed class DatabaseRecoveryState
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private TaskCompletionSource _healthy = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DatabaseStatusSnapshot _snapshot = new(0, DatabaseSchema.CurrentVersion, false, "Database has not been initialized.", null, null);
 

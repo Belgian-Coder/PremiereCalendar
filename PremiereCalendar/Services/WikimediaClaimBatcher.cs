@@ -10,7 +10,7 @@ internal sealed class WikimediaClaimBatcher(
 {
     private const int MaximumEntities = 50;
     private const int MaximumConcurrentBatches = 2;
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly SemaphoreSlim _capacity = new(1024, 1024);
     private readonly Dictionary<(string Id, long Generation), EntityWork> _work = [];
     private readonly List<EntityWork> _pending = [];
