@@ -12,9 +12,14 @@ public sealed class FileCalendarCache : ICalendarCache, ICalendarCacheMaintenanc
     private const int CurrentSchemaVersion = 8;
     private const int MetadataHeaderReadLimit = 16 * 1024;
 
+    // Cache files are a few MB. Larger (de)serializer chunks mean fewer read/write calls; the bytes written
+    // are unaffected by the buffer size.
+    private const int FileBufferSize = 64 * 1024;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        WriteIndented = false
+        WriteIndented = false,
+        DefaultBufferSize = FileBufferSize
     };
 
     private readonly CalendarCacheOptions _options;
@@ -793,7 +798,7 @@ public sealed class FileCalendarCache : ICalendarCache, ICalendarCacheMaintenanc
 
     private static FileStream OpenCacheReader(string path)
     {
-        return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
 
     private static void ReplaceAtomically(string temporaryPath, string destinationPath)
