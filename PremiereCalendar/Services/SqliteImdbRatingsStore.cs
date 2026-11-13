@@ -231,6 +231,8 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         var voteCountParameter = DatabaseParameters.Add(insert, "@voteCount", DbType.Int64);
         var importedAtParameter = DatabaseParameters.Add(insert, "@importedAtUtc", DbType.String);
         importedAtParameter.Value = importedAtUtc.ToString("O", CultureInfo.InvariantCulture);
+        // Compile the statement once; every row below only rebinds the three changing parameters.
+        insert.Prepare();
 
         await foreach (var rating in ratings.WithCancellation(cancellationToken))
         {
@@ -239,7 +241,9 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             imdbIdParameter.Value = NormalizeImdbId(rating.ImdbId);
             ratingParameter.Value = rating.AverageRating;
             voteCountParameter.Value = rating.VoteCount;
-            await insert.ExecuteNonQueryAsync(cancellationToken);
+            // Microsoft.Data.Sqlite completes ExecuteNonQueryAsync synchronously, so the async call
+            // only added a Task and a state machine per row; the cancellation check above is kept.
+            insert.ExecuteNonQuery();
             count++;
         }
         return count;
