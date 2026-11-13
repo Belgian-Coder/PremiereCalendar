@@ -463,7 +463,7 @@ public sealed class SimklCalendarEfficiencyTests
         await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(2, handler.Paths.Count);
-        Assert.Single(handler.Paths.Where(path => path == "/calendar/2020/9/tv.json"));
+        Assert.Single(handler.Paths, path => path == "/calendar/2020/9/tv.json");
     }
 
     [Theory]

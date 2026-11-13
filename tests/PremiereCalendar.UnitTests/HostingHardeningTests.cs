@@ -101,5 +101,5 @@ public sealed class HostingHardeningTests
     }
 
     private static void AssertStartupValidationSucceeds(ServiceProvider provider) =>
-        provider.GetRequiredService<IStartupValidator>().Validate();
+        provider.GetRequiredService<IAsyncStartupValidator>().ValidateAsync(CancellationToken.None).GetAwaiter().GetResult();
 }
