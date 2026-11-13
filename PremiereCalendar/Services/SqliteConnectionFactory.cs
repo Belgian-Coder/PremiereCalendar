@@ -30,8 +30,33 @@ internal static class SqliteConnectionFactory
             if (args.CurrentState == System.Data.ConnectionState.Open)
             {
                 SQLitePCL.raw.sqlite3_busy_timeout(connection.Handle, DefaultBusyTimeoutMilliseconds);
+                RelaxWalDurability(connection);
             }
         };
         return connection;
+    }
+
+    /// <summary>
+    /// The initializer switches the database to WAL with synchronous=NORMAL, but synchronous is a per-connection
+    /// setting and the stores open unpooled connections that would otherwise run at the FULL default, fsyncing the
+    /// WAL on every commit. NORMAL is corruption-safe in WAL mode (only the last commits can be lost on power
+    /// failure, never on an application crash), so it is applied only when the database is actually in WAL mode;
+    /// rollback-journal databases such as freshly created portable backups keep FULL.
+    /// </summary>
+    private static void RelaxWalDurability(SqliteConnection connection)
+    {
+        try
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA journal_mode";
+            if (!string.Equals(command.ExecuteScalar() as string, "wal", StringComparison.OrdinalIgnoreCase)) return;
+            command.CommandText = "PRAGMA synchronous = NORMAL";
+            command.ExecuteNonQuery();
+        }
+        catch (SqliteException)
+        {
+            // Best effort: an unreadable or busy database surfaces its error on the caller's first command, exactly
+            // as before, rather than from the connection-opened hook.
+        }
     }
 }
