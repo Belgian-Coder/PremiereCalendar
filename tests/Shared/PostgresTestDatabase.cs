@@ -92,7 +92,8 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
         var server = Server.Value;
         var name = $"premierecalendar_test_{Guid.NewGuid():N}";
         var application = new NpgsqlConnectionStringBuilder(server.ConnectionString) { Database = name };
-        application.Remove("Password");
+        // A password file overrides any inline password (Npgsql rejects both together); without one the inline password stays.
+        if (server.PasswordFile is not null) application.Remove("Password");
         await using (var admin = new NpgsqlConnection(server.AdminConnectionString))
         {
             await admin.OpenAsync();
