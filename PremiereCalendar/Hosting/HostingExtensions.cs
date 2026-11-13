@@ -21,7 +21,7 @@ public static class HostingExtensions
                 if (System.Net.IPAddress.TryParse(proxy, out var address)) options.KnownProxies.Add(address);
             }
         });
-        services.AddSingleton<IValidateOptions<AppDatabaseOptions>, AppDatabaseOptionsValidator>();
+        services.AddSingleton<IValidateOptions<AppDatabaseOptions>>(new AppDatabaseOptionsValidator(configuration));
         services.AddOptions<AppDatabaseOptions>().Bind(configuration.GetSection("AppDatabase"))
             .ValidateOnStart();
         services.AddOptions<ImageCacheOptions>().Bind(configuration.GetSection("ImageCache"))
