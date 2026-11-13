@@ -84,13 +84,13 @@ internal static partial class PerformanceTraceArchive
                             compressor.Write(buffer, 0, count);
                         }
                     }
-                    hash = Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant();
+                    hash = Convert.ToHexStringLower(digest.GetHashAndReset());
                     target.Flush(flushToDisk: true);
                 }
 
                 source.Position = 0;
                 var index = BuildIndex(source, new FileInfo(temporaryArchive).Length, hash, cancellationToken);
-                var indexBytes = JsonSerializer.SerializeToUtf8Bytes(index, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                var indexBytes = JsonSerializer.SerializeToUtf8Bytes(index, JsonSerializerOptions.Web);
                 if (indexBytes.Length > MaximumIndexBytes) throw new InvalidDataException("Trace index exceeds its bound.");
                 // Incompressible traces remain raw; archival never grows retained storage.
                 if (indexBytes.Length + index.CompressedBytes >= source.Length) return false;

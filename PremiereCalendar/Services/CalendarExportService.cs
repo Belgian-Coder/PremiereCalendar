@@ -42,7 +42,7 @@ public static class CalendarExportService
     public static string ToJson(IEnumerable<PremiereItem> items, JsonSerializerOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(items);
-        return JsonSerializer.Serialize(items, options ?? new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return JsonSerializer.Serialize(items, options ?? JsonSerializerOptions.Web);
     }
 
     private static string Description(PremiereItem item) => string.Join("\n", new[] { item.Overview, item.TmdbUrl ?? item.ExternalUrl }.Where(static x => !string.IsNullOrWhiteSpace(x)));
