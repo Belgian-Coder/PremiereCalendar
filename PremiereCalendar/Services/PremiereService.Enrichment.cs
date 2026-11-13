@@ -1693,6 +1693,12 @@ public sealed partial class PremiereService
         return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
     }
 
+    [System.Text.RegularExpressions.GeneratedRegex("<.*?>")]
+    private static partial System.Text.RegularExpressions.Regex HtmlTagRegex();
+
+    [System.Text.RegularExpressions.GeneratedRegex("\\s+")]
+    private static partial System.Text.RegularExpressions.Regex WhitespaceRunRegex();
+
     private static string? StripHtml(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -1700,8 +1706,8 @@ public sealed partial class PremiereService
             return null;
         }
 
-        var withoutTags = System.Text.RegularExpressions.Regex.Replace(value, "<.*?>", " ");
-        return System.Text.RegularExpressions.Regex.Replace(withoutTags, "\\s+", " ").Trim();
+        var withoutTags = HtmlTagRegex().Replace(value, " ");
+        return WhitespaceRunRegex().Replace(withoutTags, " ").Trim();
     }
 
     private static bool TryParseTmdbDate(string? value, out DateOnly date)

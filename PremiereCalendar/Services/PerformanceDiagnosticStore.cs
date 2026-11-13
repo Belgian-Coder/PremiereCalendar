@@ -9,7 +9,7 @@ using PremiereCalendar.Options;
 namespace PremiereCalendar.Services;
 
 /// <summary>Bounded nonblocking capture with independent single-writer persistence and archival workers.</summary>
-public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
+public sealed partial class PerformanceDiagnosticStore : IDisposable, IHostedService
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -416,6 +416,9 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
             .Select(group => new TraceFile(group.Key, group.Select(entry => entry.Path).ToArray()))
             .OrderBy(file => file.Name, StringComparer.Ordinal).ToArray();
 
+    [System.Text.RegularExpressions.GeneratedRegex(@"^performance-\d{8}(?:-[a-z0-9]+)?\.ndjson$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+    private static partial System.Text.RegularExpressions.Regex LegacyTraceNameRegex();
+
     private static string? TraceBasePath(string path)
     {
         var raw = path;
@@ -423,8 +426,7 @@ public sealed class PerformanceDiagnosticStore : IDisposable, IHostedService
             if (raw.EndsWith(suffix, StringComparison.Ordinal)) { raw = raw[..^suffix.Length]; break; }
         // Retain the historical date/name convention as well as current process-qualified files.
         return PerformanceTraceArchive.IsTrace(raw)
-            || System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(raw),
-                @"^performance-\d{8}(?:-[a-z0-9]+)?\.ndjson$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            || LegacyTraceNameRegex().IsMatch(Path.GetFileName(raw))
             ? raw : null;
     }
 

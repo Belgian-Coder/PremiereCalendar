@@ -6,10 +6,13 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class ScoreBackfillService
+public sealed partial class ScoreBackfillService
 {
-    private static readonly Regex NonAlphaNumericRegex = new("[^a-z0-9]+", RegexOptions.Compiled);
-    private static readonly Regex WhitespaceRegex = new("\\s+", RegexOptions.Compiled);
+    [GeneratedRegex("[^a-z0-9]+")]
+    private static partial Regex NonAlphaNumericRegex();
+
+    [GeneratedRegex("\\s+")]
+    private static partial Regex WhitespaceRegex();
 
     private readonly IImdbRatingsStore? _imdbRatingsStore;
     private readonly IOmdbClient _omdbClient;
@@ -246,8 +249,8 @@ public sealed class ScoreBackfillService
     private static string NormalizeRottenTomatoesTitle(string value)
     {
         var normalized = WebUtility.HtmlDecode(value).ToLowerInvariant();
-        normalized = NonAlphaNumericRegex.Replace(normalized, " ");
-        return WhitespaceRegex.Replace(normalized, " ").Trim();
+        normalized = NonAlphaNumericRegex().Replace(normalized, " ");
+        return WhitespaceRegex().Replace(normalized, " ").Trim();
     }
 
     private async Task<TResult[]> RunBoundedAsync<TWork, TResult>(

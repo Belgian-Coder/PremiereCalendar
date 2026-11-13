@@ -10,23 +10,42 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class RottenTomatoesClient : IRottenTomatoesClient
+public sealed partial class RottenTomatoesClient : IRottenTomatoesClient
 {
-    private static readonly Regex SearchRowRegex = new(
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> AttributeRegexes = new(StringComparer.Ordinal);
+
+    [GeneratedRegex(
         "<search-page-media-row\\b(?<attrs>[^>]*)>(?<body>.*?)</search-page-media-row>",
-        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex SearchRowRegex();
 
-    private static readonly Regex InfoNameLinkRegex = new(
+    [GeneratedRegex(
         "<a\\b(?<attrs>[^>]*)data-qa=[\"']info-name[\"'](?<attrs2>[^>]*)>(?<title>.*?)</a>",
-        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex InfoNameLinkRegex();
 
-    private static readonly Regex ScorecardJsonRegex = new(
+    [GeneratedRegex(
         "<script\\b[^>]*id=[\"']media-scorecard-json[\"'][^>]*>(?<json>.*?)</script>",
-        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex ScorecardJsonRegex();
 
-    private static readonly Regex TagRegex = new("<.*?>", RegexOptions.Singleline | RegexOptions.Compiled);
-    private static readonly Regex NonAlphaNumericRegex = new("[^a-z0-9]+", RegexOptions.Compiled);
-    private static readonly Regex WhitespaceRegex = new("\\s+", RegexOptions.Compiled);
+    [GeneratedRegex("<.*?>", RegexOptions.Singleline)]
+    private static partial Regex TagRegex();
+
+    [GeneratedRegex("[^a-z0-9]+")]
+    private static partial Regex NonAlphaNumericRegex();
+
+    [GeneratedRegex("\\s+")]
+    private static partial Regex WhitespaceRegex();
+
+    [GeneratedRegex("class=[\"'][^\"']*\\bjs-search-no-results\\b[^\"']*[\"']", RegexOptions.IgnoreCase)]
+    private static partial Regex NoResultsContainerRegex();
+
+    [GeneratedRegex("Sorry,\\s*no results found for", RegexOptions.IgnoreCase)]
+    private static partial Regex NoResultsTextRegex();
+
+    [GeneratedRegex("cf-chl-|<title>\\s*Just a moment|verify you are human", RegexOptions.IgnoreCase)]
+    private static partial Regex ChallengePageRegex();
 
     private readonly HttpClient _httpClient;
     private readonly IMemoryCache _cache;
@@ -378,10 +397,10 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
         var results = ParseSearchResults(html);
         // A transport-successful challenge or changed document does not verify that
         // ratings disappeared. Empty results require the provider's result container.
-        var recognizedEmptySearch = Regex.IsMatch(html, "class=[\"'][^\"']*\\bjs-search-no-results\\b[^\"']*[\"']", RegexOptions.IgnoreCase)
-                && Regex.IsMatch(html, "Sorry,\\s*no results found for", RegexOptions.IgnoreCase);
-        if (Regex.IsMatch(html, "cf-chl-|<title>\\s*Just a moment|verify you are human", RegexOptions.IgnoreCase)
-            || results.Count == 0 && (!recognizedEmptySearch || SearchRowRegex.IsMatch(html)))
+        var recognizedEmptySearch = NoResultsContainerRegex().IsMatch(html)
+                && NoResultsTextRegex().IsMatch(html);
+        if (ChallengePageRegex().IsMatch(html)
+            || results.Count == 0 && (!recognizedEmptySearch || SearchRowRegex().IsMatch(html)))
         {
             RecordFailure(fetchOutcome, new("invalid_response", 200));
             return RottenTomatoesScores.Empty;
@@ -610,11 +629,11 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
     private static IReadOnlyList<RottenTomatoesSearchResult> ParseSearchResults(string html)
     {
         var results = new List<RottenTomatoesSearchResult>();
-        foreach (Match row in SearchRowRegex.Matches(html))
+        foreach (Match row in SearchRowRegex().Matches(html))
         {
             var rowAttributes = row.Groups["attrs"].Value;
             var body = row.Groups["body"].Value;
-            var link = InfoNameLinkRegex.Match(body);
+            var link = InfoNameLinkRegex().Match(body);
             if (!link.Success)
             {
                 continue;
@@ -653,7 +672,7 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
 
     private static RottenTomatoesScores ParseScorecardScores(string html)
     {
-        var match = ScorecardJsonRegex.Match(html);
+        var match = ScorecardJsonRegex().Match(html);
         if (!match.Success)
         {
             // A 200 response can be a challenge, consent or error document.
@@ -833,24 +852,25 @@ public sealed class RottenTomatoesClient : IRottenTomatoesClient
 
     private static string? AttributeValue(string attributes, string name)
     {
-        var match = Regex.Match(
-            attributes,
-            $"(?:^|\\s){Regex.Escape(name)}\\s*=\\s*[\"'](?<value>.*?)[\"']",
-            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        // Callers pass a small fixed set of attribute names, so the cache stays bounded.
+        var regex = AttributeRegexes.GetOrAdd(name, static attributeName => new Regex(
+            $"(?:^|\\s){Regex.Escape(attributeName)}\\s*=\\s*[\"'](?<value>.*?)[\"']",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline));
+        var match = regex.Match(attributes);
         return match.Success ? WebUtility.HtmlDecode(match.Groups["value"].Value) : null;
     }
 
     private static string CleanHtmlText(string value)
     {
-        var withoutTags = TagRegex.Replace(value, " ");
-        return WhitespaceRegex.Replace(WebUtility.HtmlDecode(withoutTags), " ").Trim();
+        var withoutTags = TagRegex().Replace(value, " ");
+        return WhitespaceRegex().Replace(WebUtility.HtmlDecode(withoutTags), " ").Trim();
     }
 
     private static string NormalizeTitle(string value)
     {
         var normalized = WebUtility.HtmlDecode(value).ToLowerInvariant();
-        normalized = NonAlphaNumericRegex.Replace(normalized, " ");
-        return WhitespaceRegex.Replace(normalized, " ").Trim();
+        normalized = NonAlphaNumericRegex().Replace(normalized, " ");
+        return WhitespaceRegex().Replace(normalized, " ").Trim();
     }
 
     private sealed record RottenTomatoesSearchResult(
