@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using Microsoft.Data.Sqlite;
@@ -13,21 +14,7 @@ internal static class DatabaseConnectionFactory
 
     public static DbConnection Create(AppDatabaseOptions options, string contentRootPath)
     {
-        if (IsPostgreSql(options))
-        {
-            var builder = new NpgsqlConnectionStringBuilder(options.ConnectionString.Trim())
-            {
-                Pooling = true,
-                Timeout = 15,
-                CommandTimeout = 30,
-                ApplicationName = "PremiereCalendar"
-            };
-            if (!string.IsNullOrWhiteSpace(options.PasswordFile))
-            {
-                builder.Password = File.ReadAllText(Path.GetFullPath(options.PasswordFile.Trim())).TrimEnd('\r', '\n');
-            }
-            return new NpgsqlConnection(builder.ConnectionString);
-        }
+        if (IsPostgreSql(options)) return CreatePostgreSql(options);
 
         var configuredPath = string.IsNullOrWhiteSpace(options.Path)
             ? "App_Data/data/premiere-calendar.db"
@@ -42,6 +29,69 @@ internal static class DatabaseConnectionFactory
             Cache = SqliteCacheMode.Private
         }.ToString());
     }
+
+    /// <summary>
+    /// Opens a connection through a cached <see cref="NpgsqlDataSource"/>. The connection string is parsed and
+    /// validated once per distinct configuration instead of per call, and the password file is read asynchronously
+    /// by Npgsql only when a new physical connection is established (never while a pooled one is reused), so a
+    /// rotated password is still picked up by the next physical connection exactly as before.
+    /// </summary>
+    internal static NpgsqlConnection CreatePostgreSql(AppDatabaseOptions options, int? commandTimeoutSeconds = null)
+    {
+        var connectionString = options.ConnectionString.Trim();
+        var passwordFile = string.IsNullOrWhiteSpace(options.PasswordFile)
+            ? null
+            : Path.GetFullPath(options.PasswordFile.Trim());
+        var key = new PostgreSqlDataSourceKey(connectionString, passwordFile, commandTimeoutSeconds);
+        if (!PostgreSqlDataSources.TryGetValue(key, out var dataSource))
+        {
+            dataSource = PostgreSqlDataSources.GetOrAdd(key, static candidate => BuildPostgreSqlDataSource(candidate));
+        }
+        return dataSource.CreateConnection();
+    }
+
+    /// <summary>Disposes every cached PostgreSQL data source, closing its pooled connections.</summary>
+    internal static void DisposePostgreSqlDataSources()
+    {
+        foreach (var key in PostgreSqlDataSources.Keys)
+        {
+            if (!PostgreSqlDataSources.TryRemove(key, out var dataSource)) continue;
+            try { dataSource.Dispose(); }
+            catch (Exception) { /* Shutdown must not fail because a pool could not close cleanly. */ }
+        }
+    }
+
+    private static readonly ConcurrentDictionary<PostgreSqlDataSourceKey, NpgsqlDataSource> PostgreSqlDataSources = new();
+    private static int _shutdownHookRegistered;
+
+    private readonly record struct PostgreSqlDataSourceKey(string ConnectionString, string? PasswordFile, int? CommandTimeoutSeconds);
+
+    private static NpgsqlDataSource BuildPostgreSqlDataSource(PostgreSqlDataSourceKey key)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(key.ConnectionString)
+        {
+            Pooling = true,
+            Timeout = 15,
+            CommandTimeout = key.CommandTimeoutSeconds ?? 30,
+            ApplicationName = "PremiereCalendar"
+        };
+        var dataSourceBuilder = new NpgsqlDataSourceBuilder(builder.ConnectionString);
+        if (key.PasswordFile is { } passwordFile)
+        {
+            dataSourceBuilder.UsePasswordProvider(
+                _ => ReadPassword(passwordFile),
+                async (_, cancellationToken) => (await File.ReadAllTextAsync(passwordFile, cancellationToken)).TrimEnd('\r', '\n'));
+        }
+        if (Interlocked.Exchange(ref _shutdownHookRegistered, 1) == 0)
+        {
+            // Explicit data sources are not tracked by Npgsql's own process-exit pool cleanup.
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => DisposePostgreSqlDataSources();
+        }
+        return dataSourceBuilder.Build();
+    }
+
+    private static string ReadPassword(string passwordFile)
+        => File.ReadAllText(passwordFile).TrimEnd('\r', '\n');
 
     public static bool IsPostgreSql(DbConnection connection) => connection is NpgsqlConnection;
 

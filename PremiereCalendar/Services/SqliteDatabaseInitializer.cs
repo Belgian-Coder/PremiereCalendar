@@ -177,7 +177,7 @@ public sealed class SqliteDatabaseInitializer(
         await source.OpenAsync(cancellationToken);
         await EnsureIntegrityAsync(source, cancellationToken);
 
-        await using (var target = CreateConnection(destinationPath, readOnly: false, pooling: false))
+        await using (var target = CreateConnection(destinationPath, readOnly: false, pooling: false, relaxDurability: false))
         {
             await target.OpenAsync(cancellationToken);
             source.BackupDatabase(target);
@@ -246,7 +246,7 @@ public sealed class SqliteDatabaseInitializer(
         if (File.Exists(source)) File.Move(source, destination, overwrite: false);
     }
 
-    private static SqliteConnection CreateConnection(string path, bool readOnly, bool? pooling = null)
+    private static SqliteConnection CreateConnection(string path, bool readOnly, bool? pooling = null, bool relaxDurability = true)
     {
         var builder = new SqliteConnectionStringBuilder
         {
@@ -255,7 +255,8 @@ public sealed class SqliteDatabaseInitializer(
             Cache = SqliteCacheMode.Shared,
             Pooling = pooling ?? !readOnly
         };
-        return SqliteConnectionFactory.Create(builder.ToString());
+        // Portable backups are written in rollback-journal mode and must keep full fsync durability.
+        return SqliteConnectionFactory.Create(builder.ToString(), relaxDurability);
     }
 
     private static async Task ConfigureConnectionAsync(SqliteConnection connection, CancellationToken cancellationToken)
@@ -380,7 +381,7 @@ public sealed class SqliteDatabaseInitializer(
         var directory = ResolveBackupDirectory();
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"pre-schema-{currentVersion}-to-{DatabaseSchema.CurrentVersion}-{timeProvider.GetUtcNow():yyyyMMddHHmmss}.db");
-        await using (var target = CreateConnection(path, readOnly: false, pooling: false))
+        await using (var target = CreateConnection(path, readOnly: false, pooling: false, relaxDurability: false))
         {
             await target.OpenAsync(cancellationToken);
             source.BackupDatabase(target);
