@@ -1,3 +1,5 @@
+using System.Buffers;
+
 namespace PremiereCalendar.Services;
 
 /// <summary>Opaque technical correlation identifiers; never use titles, filters, URLs or credentials.</summary>
@@ -45,17 +47,54 @@ public sealed record PerformanceDiagnosticDetails
     public bool? IsFinal { get; init; }
     public bool? FromCache { get; init; }
 
-    internal PerformanceDiagnosticDetails Sanitize() => this with
+    internal PerformanceDiagnosticDetails Sanitize()
     {
-        MediaType = DiagnosticIdentifier.Code(MediaType),
-        Stage = DiagnosticIdentifier.Code(Stage), Provider = DiagnosticIdentifier.Code(Provider),
-        Outcome = DiagnosticIdentifier.Code(Outcome), Reason = DiagnosticIdentifier.Code(Reason),
-        Cache = DiagnosticIdentifier.Code(Cache), JobKind = DiagnosticIdentifier.Code(JobKind),
-        SourceKey = DiagnosticIdentifier.Code(SourceKey), CacheKey = DiagnosticIdentifier.CacheKey(CacheKey),
-        DurationMilliseconds = Finite(DurationMilliseconds), WaitMilliseconds = Finite(WaitMilliseconds),
-        SerializeMilliseconds = Finite(SerializeMilliseconds), EncodeMilliseconds = Finite(EncodeMilliseconds),
-        StoreMilliseconds = Finite(StoreMilliseconds)
-    };
+        var mediaType = DiagnosticIdentifier.Code(MediaType);
+        var stage = DiagnosticIdentifier.Code(Stage);
+        var provider = DiagnosticIdentifier.Code(Provider);
+        var outcome = DiagnosticIdentifier.Code(Outcome);
+        var reason = DiagnosticIdentifier.Code(Reason);
+        var cache = DiagnosticIdentifier.Code(Cache);
+        var jobKind = DiagnosticIdentifier.Code(JobKind);
+        var sourceKey = DiagnosticIdentifier.Code(SourceKey);
+        var cacheKey = DiagnosticIdentifier.CacheKey(CacheKey);
+        var duration = Finite(DurationMilliseconds);
+        var wait = Finite(WaitMilliseconds);
+        var serialize = Finite(SerializeMilliseconds);
+        var encode = Finite(EncodeMilliseconds);
+        var store = Finite(StoreMilliseconds);
+
+        // Producers normally pass fixed code identifiers, so the common case needs no copy of
+        // this wide record. Strings are compared by reference because the sanitizers return
+        // either their input instance or a replacement; doubles are compared bitwise so a
+        // negative zero (normalized to positive zero) still counts as a change.
+        if (ReferenceEquals(mediaType, MediaType) && ReferenceEquals(stage, Stage)
+            && ReferenceEquals(provider, Provider) && ReferenceEquals(outcome, Outcome)
+            && ReferenceEquals(reason, Reason) && ReferenceEquals(cache, Cache)
+            && ReferenceEquals(jobKind, JobKind) && ReferenceEquals(sourceKey, SourceKey)
+            && ReferenceEquals(cacheKey, CacheKey)
+            && SameBits(duration, DurationMilliseconds) && SameBits(wait, WaitMilliseconds)
+            && SameBits(serialize, SerializeMilliseconds) && SameBits(encode, EncodeMilliseconds)
+            && SameBits(store, StoreMilliseconds))
+            return this;
+
+        return this with
+        {
+            MediaType = mediaType,
+            Stage = stage, Provider = provider,
+            Outcome = outcome, Reason = reason,
+            Cache = cache, JobKind = jobKind,
+            SourceKey = sourceKey, CacheKey = cacheKey,
+            DurationMilliseconds = duration, WaitMilliseconds = wait,
+            SerializeMilliseconds = serialize, EncodeMilliseconds = encode,
+            StoreMilliseconds = store
+        };
+    }
+
+    private static bool SameBits(double? sanitized, double? original)
+        => sanitized is { } left
+            ? original is { } right && BitConverter.DoubleToInt64Bits(left) == BitConverter.DoubleToInt64Bits(right)
+            : original is null;
 
     private static double? Finite(double? value) => value is { } number && double.IsFinite(number) ? Math.Max(0, number) : null;
 }
@@ -121,15 +160,26 @@ public sealed record PerformanceDiagnosticHealth(
 
 internal static class DiagnosticIdentifier
 {
+    private static readonly SearchValues<char> CodeCharacters =
+        SearchValues.Create("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-");
+
+    private static readonly SearchValues<char> HexCharacters = SearchValues.Create("0123456789abcdefABCDEF");
+    private static readonly SearchValues<char> LowerHexCharacters = SearchValues.Create("0123456789abcdef");
+
     // Reject whole values instead of retaining fragments of a URL, query, exception or free text.
     internal static string? Code(string? value)
-        => value is null ? null : value.Length is > 0 and <= 64 && value.All(character =>
-            char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-') ? value : "redacted";
+        => value is null ? null : value.Length is > 0 and <= 64 && !value.AsSpan().ContainsAnyExcept(CodeCharacters)
+            ? value : "redacted";
 
     internal static string? Correlation(string? value)
-        => value is null ? null : Guid.TryParse(value, out var id) ? id.ToString("N") : "redacted";
+    {
+        if (value is null) return null;
+        // 32 lowercase hex digits is already the "N" form Guid.ToString("N") would produce.
+        if (value.Length == 32 && !value.AsSpan().ContainsAnyExcept(LowerHexCharacters)) return value;
+        return Guid.TryParse(value, out var id) ? id.ToString("N") : "redacted";
+    }
 
     internal static string? CacheKey(string? value)
-        => value is null ? null : value == "default" || (value.Length is 20 or 64 && value.All(Uri.IsHexDigit))
+        => value is null ? null : value == "default" || (value.Length is 20 or 64 && !value.AsSpan().ContainsAnyExcept(HexCharacters))
             ? value : "redacted";
 }
