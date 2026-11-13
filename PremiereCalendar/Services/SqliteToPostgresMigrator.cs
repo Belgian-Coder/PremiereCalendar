@@ -47,11 +47,10 @@ public sealed class SqliteToPostgresMigrator(
         }
         await DatabaseSchema.AssertCurrentAsync(source, cancellationToken);
 
-        await using var destination = (NpgsqlConnection)DatabaseConnectionFactory.Create(options.Value, environment.ContentRootPath);
-        destination.ConnectionString = new NpgsqlConnectionStringBuilder(destination.ConnectionString)
-        {
-            CommandTimeout = 0
-        }.ConnectionString;
+        // Connection creation no longer depends on the content root; the parameter stays for the public constructor.
+        _ = environment;
+        // Bulk copy statements must not be cut off by the regular 30-second command timeout.
+        await using var destination = DatabaseConnectionFactory.CreatePostgreSql(options.Value, commandTimeoutSeconds: 0);
         await destination.OpenAsync(cancellationToken);
         await DatabaseSchema.AssertCurrentAsync(destination, cancellationToken);
 
