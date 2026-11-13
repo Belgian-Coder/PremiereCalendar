@@ -33,7 +33,6 @@ services:
       AppDatabase__PasswordFile: /run/secrets/postgres_password
       PREMIERECALENDAR_TEST_POSTGRES: Host=database;Port=5432;Database=postgres;Username=premierecalendar
       PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      ApplicationUpdate__Enabled: "false"
       CalendarWarmup__Enabled: "false"
       Urls: http://0.0.0.0:8080
     secrets:

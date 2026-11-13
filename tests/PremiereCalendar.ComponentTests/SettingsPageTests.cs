@@ -15,7 +15,6 @@ namespace PremiereCalendar.ComponentTests;
 public sealed class SettingsPageTests : BunitContext
 {
     private readonly FakeViewSyncService _viewSyncService = new();
-    private readonly FakeApplicationUpdateService _applicationUpdateService = new();
     private readonly InMemoryAppStateStore _appStateStore = new();
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-settings-tests-{Guid.NewGuid():N}");
 
@@ -26,7 +25,6 @@ public sealed class SettingsPageTests : BunitContext
         JSInterop.Setup<string>("premiereViewSync.getOrCreateDeviceId").SetResult("device-a");
         Services.AddLogging();
         Services.AddSingleton<IViewSyncService>(_viewSyncService);
-        Services.AddSingleton<IApplicationUpdateService>(_applicationUpdateService);
         Services.AddSingleton<IAppStateStore>(_appStateStore);
         Services.AddSingleton(TimeProvider.System);
         Services.AddSingleton(sp => new CacheInspectorService(
@@ -47,20 +45,6 @@ public sealed class SettingsPageTests : BunitContext
         Services.AddSingleton<SourceHealthService>();
         Services.AddSingleton<CalendarDataMaintenanceService>();
         Services.AddSingleton<SettingsBackupService>();
-        Services.AddSingleton(new ReleaseUpdateService(
-            new HttpClient(new StaticHttpMessageHandler(
-                """
-                {
-                  "tag_name": "v1.2.0",
-                  "html_url": "https://github.com/Belgian-Coder/PremiereCalendar/releases/tag/v1.2.0",
-                  "published_at": "2026-05-16T10:00:00Z",
-                  "name": "Premiere Calendar 1.2.0"
-                }
-                """))
-            {
-                BaseAddress = new Uri("https://api.github.com/")
-            },
-            "1.0.0"));
     }
 
     [Fact]
@@ -203,34 +187,6 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Contains("Backfill scores", status.TextContent);
             Assert.Contains("Repair IDs", status.TextContent);
             Assert.Contains("Backup", status.TextContent);
-            Assert.Contains("Signed GitHub release update", status.TextContent);
-        });
-
-        component.Find("button[title='Check for application updates']").Click();
-
-        component.WaitForAssertion(() =>
-            Assert.Contains("1.2.0", component.Find("[data-testid='release-update-result']").TextContent));
-    }
-
-    [Fact]
-    public void SettingsPage_StartsConfiguredSignedReleaseUpdate()
-    {
-        var store = new FakeIntegrationSettingsStore();
-        Services.AddSingleton<IIntegrationSettingsStore>(store);
-        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
-        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
-
-        var component = Render<PremiereCalendar.Components.Pages.Settings>();
-
-        component.WaitForElement("button[title='Install latest signed GitHub release']");
-        component.Find("button[title='Install latest signed GitHub release']").Click();
-
-        component.WaitForAssertion(() =>
-        {
-            Assert.Equal(1, _applicationUpdateService.StartCount);
-            var result = component.Find("[data-testid='application-update-result']");
-            Assert.Contains("release update started", result.TextContent, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("application-update.log", result.TextContent);
         });
     }
 
@@ -270,33 +226,6 @@ public sealed class SettingsPageTests : BunitContext
             var firstJob = Assert.Single(jobTimeline.QuerySelectorAll("li").Take(1));
             Assert.Contains("Provider delta sync", firstJob.TextContent);
             Assert.Contains("TMDb change tracking timed out", firstJob.TextContent);
-        });
-    }
-
-    [Fact]
-    public void SettingsPage_ShowsNoReleaseMessageWhenGitHubHasNoPublishedReleases()
-    {
-        Services.AddSingleton(new ReleaseUpdateService(
-            new HttpClient(new StaticHttpMessageHandler("{}", HttpStatusCode.NotFound))
-            {
-                BaseAddress = new Uri("https://api.github.com/")
-            },
-            "1.0.0"));
-        var store = new FakeIntegrationSettingsStore();
-        Services.AddSingleton<IIntegrationSettingsStore>(store);
-        Services.AddSingleton<IArrIntegrationService>(new FakeArrIntegrationService());
-        Services.AddSingleton<ISimklClient>(new FakeSimklClient());
-
-        var component = Render<PremiereCalendar.Components.Pages.Settings>();
-
-        component.WaitForElement("button[title='Check for application updates']");
-        component.Find("button[title='Check for application updates']").Click();
-
-        component.WaitForAssertion(() =>
-        {
-            var result = component.Find("[data-testid='release-update-result']").TextContent;
-            Assert.Contains("No published releases found.", result);
-            Assert.Contains("Current 1.0.0", result);
         });
     }
 
@@ -1731,39 +1660,6 @@ public sealed class SettingsPageTests : BunitContext
         }
     }
 
-    private sealed class FakeApplicationUpdateService : IApplicationUpdateService
-    {
-        public int StartCount { get; private set; }
-        public ApplicationUpdateStatus Status { get; set; } = new(
-            IsEnabled: true,
-            IsConfigured: true,
-            UpdaterScriptPath: "D:\\Apps\\PremiereCalendar\\updater\\install-github-release.ps1",
-            InstallRoot: "D:\\Apps\\PremiereCalendar",
-            DataRoot: "D:\\Apps\\PremiereCalendarData",
-            Repository: "Belgian-Coder/PremiereCalendar",
-            LatestLogPath: null,
-            ActiveVersion: "1.1.4",
-            LatestLogTail: null,
-            LastResult: null,
-            Message: "Ready to install signed GitHub releases.");
-
-        public ApplicationUpdateStartResult Result { get; set; } = new(
-            Started: true,
-            Message: "Signed GitHub release update started. The app may restart while the installer runs.",
-            LogPath: "D:\\Apps\\PremiereCalendarData\\logs\\application-updates\\application-update.log");
-
-        public ApplicationUpdateStatus GetStatus()
-        {
-            return Status;
-        }
-
-        public Task<ApplicationUpdateStartResult> StartUpdateAsync(CancellationToken cancellationToken)
-        {
-            StartCount++;
-            return Task.FromResult(Result);
-        }
-    }
-
     private sealed class InMemoryAppStateStore : IAppStateStore
     {
         private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
@@ -1980,16 +1876,5 @@ public sealed class SettingsPageTests : BunitContext
         public IFileProvider WebRootFileProvider { get; set; }
         public string ContentRootPath { get; set; }
         public IFileProvider ContentRootFileProvider { get; set; }
-    }
-
-    private sealed class StaticHttpMessageHandler(string content, HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            return Task.FromResult(new HttpResponseMessage(statusCode)
-            {
-                Content = new StringContent(content, Encoding.UTF8, "application/json")
-            });
-        }
     }
 }

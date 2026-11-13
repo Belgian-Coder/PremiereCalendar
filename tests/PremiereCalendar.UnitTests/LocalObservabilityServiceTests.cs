@@ -152,44 +152,6 @@ public sealed class LocalObservabilityServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ReleaseUpdateService_DetectsNewerGitHubRelease()
-    {
-        var handler = new StaticHttpMessageHandler(
-            """
-            {
-              "tag_name": "v1.4.0",
-              "html_url": "https://github.com/Belgian-Coder/PremiereCalendar/releases/tag/v1.4.0",
-              "published_at": "2026-05-16T10:00:00Z",
-              "name": "Premiere Calendar 1.4.0"
-            }
-            """);
-        var service = new ReleaseUpdateService(
-            new HttpClient(handler) { BaseAddress = new Uri("https://api.github.com/") },
-            currentVersion: "1.3.0");
-
-        var result = await service.CheckLatestAsync(CancellationToken.None);
-
-        Assert.True(result.IsUpdateAvailable);
-        Assert.Equal("1.3.0", result.CurrentVersion);
-        Assert.Equal("1.4.0", result.LatestVersion);
-        Assert.Equal("https://github.com/Belgian-Coder/PremiereCalendar/releases/tag/v1.4.0", result.ReleaseUrl);
-    }
-
-    [Fact]
-    public void ReleaseUpdateService_ActivatesAsTypedHttpClient()
-    {
-        var services = new ServiceCollection();
-        services.AddHttpClient<ReleaseUpdateService>(client =>
-        {
-            client.BaseAddress = new Uri("https://api.github.com/");
-        });
-
-        using var provider = services.BuildServiceProvider();
-
-        Assert.NotNull(provider.GetRequiredService<ReleaseUpdateService>());
-    }
-
-    [Fact]
     public async Task SettingsBackupService_ExportsAndImportsSettingsAndLocalState()
     {
         var sourceSettingsStore = new InMemoryIntegrationSettingsStore();
@@ -271,33 +233,6 @@ public sealed class LocalObservabilityServiceTests : IDisposable
             presets.Select(preset => preset.Name));
     }
 
-    [Theory]
-    [InlineData("1.4.0-preview.1", "v1.4.0", true)]
-    [InlineData("1.2", "v1.2.0", false)]
-    [InlineData("1.4.0+local", "v1.4.0", false)]
-    public async Task ReleaseUpdateService_UsesSemanticVersionComparison(
-        string currentVersion,
-        string latestTag,
-        bool expectedUpdate)
-    {
-        var handler = new StaticHttpMessageHandler(
-            $$"""
-            {
-              "tag_name": "{{latestTag}}",
-              "html_url": "https://github.com/Belgian-Coder/PremiereCalendar/releases/tag/{{latestTag}}",
-              "published_at": "2026-05-16T10:00:00Z",
-              "name": "Premiere Calendar {{latestTag}}"
-            }
-            """);
-        var service = new ReleaseUpdateService(
-            new HttpClient(handler) { BaseAddress = new Uri("https://api.github.com/") },
-            currentVersion);
-
-        var result = await service.CheckLatestAsync(CancellationToken.None);
-
-        Assert.Equal(expectedUpdate, result.IsUpdateAvailable);
-    }
-
     public void Dispose()
     {
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
@@ -331,18 +266,6 @@ public sealed class LocalObservabilityServiceTests : IDisposable
         public IFileProvider WebRootFileProvider { get; set; }
         public string ContentRootPath { get; set; }
         public IFileProvider ContentRootFileProvider { get; set; }
-    }
-
-    private sealed class StaticHttpMessageHandler(string content) : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            var response = new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(content, Encoding.UTF8, "application/json")
-            };
-            return Task.FromResult(response);
-        }
     }
 
     private sealed class InMemoryIntegrationSettingsStore : IIntegrationSettingsStore

@@ -2744,48 +2744,12 @@ html[data-theme="dark"] .links span {
     justify-content: center;
 }
 
-.application-update-block {
-    display: grid;
-    gap: 0.45rem;
-    padding-top: 0.65rem;
-    border-top: 1px solid var(--line);
-}
-
 .update-result.started {
     color: var(--teal-strong);
 }
 
 .update-result.failed {
     color: #a33a3a;
-}
-
-.update-evidence {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.3rem;
-}
-
-.update-evidence span {
-    padding: 0.18rem 0.38rem;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--surface);
-    color: var(--muted);
-    font-size: 0.72rem;
-    font-weight: 800;
-}
-
-.update-log-tail pre {
-    max-height: 11rem;
-    overflow: auto;
-    margin: 0.35rem 0 0;
-    padding: 0.5rem;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--surface);
-    color: var(--muted);
-    font-size: 0.72rem;
-    white-space: pre-wrap;
 }
 
 .cache-inspector-list,

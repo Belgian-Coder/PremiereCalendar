@@ -41,7 +41,6 @@ services:
       AppDatabase__Provider: PostgreSql
       AppDatabase__ConnectionString: Host=database;Port=5432;Database=premierecalendar;Username=premierecalendar
       AppDatabase__PasswordFile: /run/secrets/postgres_password
-      ApplicationUpdate__Enabled: "false"
       Urls: http://0.0.0.0:8080
       TZ: Europe/Brussels
     secrets: [postgres_password]

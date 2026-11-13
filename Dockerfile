@@ -9,7 +9,6 @@ COPY tests/PremiereCalendar.IntegrationTests/PremiereCalendar.IntegrationTests.c
 COPY tests/PremiereCalendar.BrowserTests/PremiereCalendar.BrowserTests.csproj tests/PremiereCalendar.BrowserTests/
 RUN dotnet restore PremiereCalendar/PremiereCalendar.csproj --nologo
 COPY PremiereCalendar/ PremiereCalendar/
-COPY deploy/Updates/ deploy/Updates/
 ARG VERSION=0.0.0-container
 ARG SOURCE_REVISION=unknown
 ARG BUILD_ID=container

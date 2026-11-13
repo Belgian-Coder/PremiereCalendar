@@ -26,7 +26,6 @@ public sealed partial class PremiereTelemetry
     private readonly Histogram<int> _calendarCardCount = Meter.CreateHistogram<int>("premierecalendar.calendar.card.count");
     private readonly Counter<long> _circuitEvents = Meter.CreateCounter<long>("premierecalendar.blazor.circuit.events");
     private readonly Counter<long> _providerCircuitEvents = Meter.CreateCounter<long>("premierecalendar.provider.circuit.events");
-    private readonly Counter<long> _updateOutcomes = Meter.CreateCounter<long>("premierecalendar.application_update.outcomes");
     private readonly Counter<long> _databaseEvents = Meter.CreateCounter<long>("premierecalendar.database.events");
     private readonly Counter<long> _versionValidationOutcomes = Meter.CreateCounter<long>("premierecalendar.version.validation.outcomes");
     private readonly ConcurrentDictionary<string, ProviderGaugeState> _providerGauges = new(StringComparer.OrdinalIgnoreCase);
@@ -106,9 +105,6 @@ public sealed partial class PremiereTelemetry
 
     public void RecordProviderCircuitEvent(string provider, string state)
         => _providerCircuitEvents.Add(1, new TagList { { "provider", provider }, { "state", state } });
-
-    public void RecordApplicationUpdate(string operation, string outcome)
-        => _updateOutcomes.Add(1, new TagList { { "operation", operation }, { "outcome", outcome } });
 
     public void RecordDatabaseEvent(string operation, string outcome)
         => _databaseEvents.Add(1, new TagList { { "operation", operation }, { "outcome", outcome } });

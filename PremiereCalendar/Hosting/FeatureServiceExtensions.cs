@@ -25,7 +25,6 @@ public static class FeatureServiceExtensions
         services.Configure<CacheMaintenanceOptions>(configuration.GetSection("CacheMaintenance"));
         services.Configure<ImdbDatasetOptions>(configuration.GetSection("ImdbDataset"));
         services.Configure<ProviderDeltaSyncOptions>(configuration.GetSection("ProviderDeltaSync"));
-        services.Configure<ApplicationUpdateOptions>(configuration.GetSection("ApplicationUpdate"));
         services.Configure<ProviderSchedulerOptions>(configuration.GetSection("ProviderScheduler"));
         return services;
     }
@@ -90,8 +89,6 @@ public static class FeatureServiceExtensions
         services.AddSingleton<CalendarPresetService>();
         services.AddSingleton<CalendarVisitChangeService>();
         services.AddSingleton<SettingsBackupService>();
-        services.AddSingleton<IApplicationUpdateProcessStarter, DefaultApplicationUpdateProcessStarter>();
-        services.AddSingleton<IApplicationUpdateService, ApplicationUpdateService>();
         services.AddSingleton<ISingleFlightCoordinator, SingleFlightCoordinator>();
         services.AddSingleton<ProviderRequestThrottler>();
         services.AddSingleton<ImageDecodeLimiter>();

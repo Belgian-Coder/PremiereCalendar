@@ -12,9 +12,7 @@
 @inject SourceHealthService SourceHealthService
 @inject IServiceProvider ServiceProvider
 @inject CalendarDataMaintenanceService DataMaintenanceService
-@inject ReleaseUpdateService ReleaseUpdateService
 @inject SettingsBackupService SettingsBackupService
-@inject IApplicationUpdateService ApplicationUpdateService
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
 @inject Microsoft.Extensions.Logging.ILogger<PremiereCalendar.Components.Pages.Settings> Logger
@@ -182,16 +180,6 @@
                                 }
                             }
                         </section>
-
-                        <SettingsReleaseUpdatePanel ReleaseResult="_releaseResult"
-                                                    IsChecking="_isCheckingRelease"
-                                                    OnCheck="CheckForUpdatesAsync"
-                                                    UpdateStatus="_applicationUpdateStatus"
-                                                    UpdateResult="_applicationUpdateResult"
-                                                    IsStartingUpdate="_isStartingApplicationUpdate"
-                                                    OnStartUpdate="StartApplicationUpdateAsync"
-                                                    UpdateStatusText="@ApplicationUpdateStatusText()"
-                                                    UpdateResultClass="@ApplicationUpdateResultClass" />
 
                         <SettingsBackupRestorePanel @bind-BackupJson="_backupJson"
                                                     @bind-IncludeSecrets="_includeBackupSecrets"

@@ -125,12 +125,6 @@ public static class ProviderClientServiceExtensions
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             client.Timeout = TimeSpan.FromSeconds(20);
         });
-        services.AddHttpClient<ReleaseUpdateService>(client =>
-        {
-            client.BaseAddress = new Uri("https://api.github.com/");
-            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-            client.Timeout = TimeSpan.FromSeconds(20);
-        });
         return services;
     }
 

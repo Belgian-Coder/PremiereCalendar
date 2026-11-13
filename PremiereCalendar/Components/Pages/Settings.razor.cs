@@ -49,11 +49,6 @@ public partial class Settings
     private IReadOnlyList<BackgroundJobEvent> _jobEvents = [];
     private SourceHealthOverview? _sourceHealth;
     private SystemStatusSnapshot? _systemStatus;
-    private ReleaseUpdateResult? _releaseResult;
-    private bool _isCheckingRelease;
-    private ApplicationUpdateStatus? _applicationUpdateStatus;
-    private ApplicationUpdateStartResult? _applicationUpdateResult;
-    private bool _isStartingApplicationUpdate;
     private bool _isBackfillingScores;
     private bool _isRepairingExternalIds;
     private string? _maintenanceResult;
@@ -530,64 +525,10 @@ public partial class Settings
             _systemStatus = ServiceProvider.GetService<SystemStatusService>() is { } systemStatusService
                 ? await systemStatusService.GetAsync(_disposeCancellation.Token)
                 : null;
-            _applicationUpdateStatus = ApplicationUpdateService.GetStatus();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             ShowToast(ToastKind.Error, "Status failed", ex.Message);
-        }
-    }
-
-    private async Task CheckForUpdatesAsync()
-    {
-        _isCheckingRelease = true;
-        try
-        {
-            _releaseResult = await ReleaseUpdateService.CheckLatestAsync(_disposeCancellation.Token);
-            var message = !_releaseResult.HasPublishedRelease
-                ? "No published GitHub releases were found."
-                : _releaseResult.IsUpdateAvailable
-                ? $"Version {_releaseResult.LatestVersion} is available."
-                : "This install is up to date.";
-            ShowToast(ToastKind.Info, "Update check complete", message);
-        }
-        catch (Exception ex)
-        {
-            ShowToast(ToastKind.Error, "Update check failed", ex.Message);
-        }
-        finally
-        {
-            _isCheckingRelease = false;
-        }
-    }
-
-    private async Task StartApplicationUpdateAsync()
-    {
-        _isStartingApplicationUpdate = true;
-        try
-        {
-            _applicationUpdateResult = await ApplicationUpdateService.StartUpdateAsync(_disposeCancellation.Token);
-            _applicationUpdateStatus = ApplicationUpdateService.GetStatus();
-            if (_applicationUpdateResult.Started)
-            {
-                ShowToast(
-                    ToastKind.Info,
-                    "Application update started",
-                    "The signed GitHub release updater started. The app may reconnect after verified activation.");
-            }
-            else
-            {
-                ShowToast(ToastKind.Error, "Application update not started", _applicationUpdateResult.Message);
-            }
-        }
-        catch (Exception ex)
-        {
-            _applicationUpdateResult = new ApplicationUpdateStartResult(false, ex.Message, null);
-            ShowToast(ToastKind.Error, "Application update failed", ex.Message);
-        }
-        finally
-        {
-            _isStartingApplicationUpdate = false;
         }
     }
 
@@ -682,26 +623,6 @@ public partial class Settings
             BackgroundJobStatus.Skipped => "job-status skipped",
             _ => "job-status started"
         };
-    }
-
-    private string ApplicationUpdateResultClass => _applicationUpdateResult?.Started == true
-        ? "settings-help update-result started"
-        : "settings-help update-result failed";
-
-    private string ApplicationUpdateStatusText()
-    {
-        if (_applicationUpdateStatus is null)
-        {
-            return "Update status is not loaded yet.";
-        }
-
-        var prefix = _applicationUpdateStatus.IsConfigured
-            ? "Ready"
-            : "Not ready";
-        var logText = string.IsNullOrWhiteSpace(_applicationUpdateStatus.LatestLogPath)
-            ? ""
-            : $" Latest log: {Path.GetFileName(_applicationUpdateStatus.LatestLogPath)}.";
-        return $"{prefix}: signed releases from {_applicationUpdateStatus.Repository}. {_applicationUpdateStatus.Message}{logText}";
     }
 
     private IEnumerable<BackgroundJobEvent> VisibleJobEvents()
