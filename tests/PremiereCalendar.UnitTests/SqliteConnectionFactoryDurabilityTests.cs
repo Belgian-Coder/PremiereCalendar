@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.FileProviders;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
@@ -34,18 +36,42 @@ public sealed class SqliteConnectionFactoryDurabilityTests : IDisposable
     }
 
     [Fact]
-    public async Task RollbackJournalDatabasesKeepTheFullDefault()
+    public async Task CallersWritingRollbackJournalDatabasesCanKeepTheFullDefault()
     {
         Directory.CreateDirectory(_root);
         var path = Path.Combine(_root, "delete.db");
-        await using (var seed = Open(path, SqliteOpenMode.ReadWriteCreate))
+        await using (var seed = Open(path, SqliteOpenMode.ReadWriteCreate, relaxWalDurability: false))
         {
             await Scalar(seed, "CREATE TABLE Probe (Id INTEGER)");
+            Assert.Equal(SynchronousFull, Convert.ToInt64(await Scalar(seed, "PRAGMA synchronous")));
         }
 
-        await using var connection = Open(path);
+        await using var connection = Open(path, relaxWalDurability: false);
         Assert.Equal("delete", (await Scalar(connection, "PRAGMA journal_mode")).ToString(), ignoreCase: true);
         Assert.Equal(SynchronousFull, Convert.ToInt64(await Scalar(connection, "PRAGMA synchronous")));
+    }
+
+    [Fact]
+    public async Task PortableBackupSnapshotsAreWrittenWithFullDurability()
+    {
+        TestSqliteDatabase.Initialize(_root, "wal.db");
+        var initializer = new SqliteDatabaseInitializer(
+            Microsoft.Extensions.Options.Options.Create(new PremiereCalendar.Options.AppDatabaseOptions
+            {
+                Path = "wal.db",
+                MigrationBackupDirectory = Path.Combine(_root, "backups")
+            }),
+            new TestEnvironment(_root),
+            new DatabaseRecoveryState(),
+            TimeProvider.System,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<SqliteDatabaseInitializer>.Instance);
+        var snapshot = Path.Combine(_root, "snapshots", "portable.db");
+
+        var status = await initializer.CreateVerifiedSnapshotAsync(snapshot, CancellationToken.None);
+
+        Assert.True(status.IsHealthy, status.Message);
+        await using var connection = Open(snapshot, SqliteOpenMode.ReadOnly);
+        Assert.Equal("delete", (await Scalar(connection, "PRAGMA journal_mode")).ToString(), ignoreCase: true);
     }
 
     [Fact]
@@ -64,14 +90,15 @@ public sealed class SqliteConnectionFactoryDurabilityTests : IDisposable
         await Assert.ThrowsAsync<SqliteException>(() => Scalar(corrupt, "SELECT COUNT(*) FROM sqlite_master"));
     }
 
-    private static SqliteConnection Open(string path, SqliteOpenMode mode = SqliteOpenMode.ReadWrite)
+    private static SqliteConnection Open(
+        string path, SqliteOpenMode mode = SqliteOpenMode.ReadWrite, bool relaxWalDurability = true)
     {
         var connection = SqliteConnectionFactory.Create(new SqliteConnectionStringBuilder
         {
             DataSource = path,
             Mode = mode,
             Cache = SqliteCacheMode.Private
-        }.ToString());
+        }.ToString(), relaxWalDurability);
         connection.Open();
         return connection;
     }
@@ -81,6 +108,16 @@ public sealed class SqliteConnectionFactoryDurabilityTests : IDisposable
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         return (await command.ExecuteScalarAsync())!;
+    }
+
+    private sealed class TestEnvironment(string root) : IWebHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Test";
+        public string ApplicationName { get; set; } = "PremiereCalendar.UnitTests";
+        public string WebRootPath { get; set; } = root;
+        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
+        public string ContentRootPath { get; set; } = root;
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 
     public void Dispose()
