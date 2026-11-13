@@ -283,13 +283,13 @@ internal sealed record DatabaseMigration(
                 .Replace("\n", "\r\n", StringComparison.Ordinal)), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string ComputeChecksum(int version, string name, string sql) => Convert.ToHexString(
-        SHA256.HashData(Encoding.UTF8.GetBytes($"{version.ToString(CultureInfo.InvariantCulture)}\n{name}\n{sql}"))).ToLowerInvariant();
+    private static string ComputeChecksum(int version, string name, string sql) => Convert.ToHexStringLower(
+        SHA256.HashData(Encoding.UTF8.GetBytes($"{version.ToString(CultureInfo.InvariantCulture)}\n{name}\n{sql}")));
 }
 
 public sealed class DatabaseRecoveryState
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private TaskCompletionSource _healthy = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DatabaseStatusSnapshot _snapshot = new(0, DatabaseSchema.CurrentVersion, false, "Database has not been initialized.", null, null);
 

@@ -138,7 +138,7 @@ public sealed class SqliteToPostgresMigrator(
 
         await using var snapshotStream = File.OpenRead(fullSourcePath);
         return new DatabaseMigrationReport(
-            Convert.ToHexString(await SHA256.HashDataAsync(snapshotStream, cancellationToken)).ToLowerInvariant(),
+            Convert.ToHexStringLower(await SHA256.HashDataAsync(snapshotStream, cancellationToken)),
             counts,
             counts.Values.Sum());
     }

@@ -45,7 +45,7 @@ public sealed record PremiereDiscoveryCriteria
         }
 
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
-        return Convert.ToHexString(hash)[..20].ToLowerInvariant();
+        return Convert.ToHexStringLower(hash.AsSpan(0, 10));
     }
 
     public static PremiereDiscoveryCriteria FromFilters(CalendarFilters? filters)

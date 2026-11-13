@@ -87,7 +87,7 @@ public sealed class SingleFlightCoordinator : ISingleFlightCoordinator
     {
         private readonly CancellationTokenSource _cancellation = new();
         private readonly Lazy<Task<object?>> _task;
-        private readonly object _gate = new();
+        private readonly Lock _gate = new();
         private readonly Dictionary<long, Func<ProviderWorkPriority>> _waiters = new();
         private long _nextWaiterId;
         private bool _isCanceling;

@@ -608,20 +608,20 @@ public sealed partial class PremiereService
                 : string.Equals(item.ImdbId, PreviousMetadata?.ImdbId, StringComparison.OrdinalIgnoreCase) ? PreviousMetadata?.OmdbPosterUrl : null
         };
 
-        public bool ExternalNeeded(string? imdbId) => (explicitForceRefresh || ExternalRetryAllowed) && (explicitForceRefresh
+        public bool ExternalNeeded(string? imdbId) => (ExplicitForceRefresh || ExternalRetryAllowed) && (ExplicitForceRefresh
             || PreviousRatings?.MatchesImdb(imdbId) != true
             || PreviousRatings.FreshnessVerified == false
             || PreviousRatings.ExternalRequired && RefreshRatings && (PreviousRatings.ProviderFreshnessTracked ? PreviousRatings.ExternalFetchedUtc : previousRatingsFetchedUtc) < ratingsCutoffUtc
             || PreviousRatings.ExternalRequired && RefreshRatings && (PreviousRatings.ProviderFreshnessTracked ? PreviousRatings.ExternalFetchedUtc : previousRatingsFetchedUtc) is null);
 
-        public bool TomatoesNeeded(string? wikidataId, string? title, int? year) => (explicitForceRefresh || TomatoesRetryAllowed) && (explicitForceRefresh
+        public bool TomatoesNeeded(string? wikidataId, string? title, int? year) => (ExplicitForceRefresh || TomatoesRetryAllowed) && (ExplicitForceRefresh
             || PreviousRatings?.MatchesTomatoes(wikidataId, title, year) != true
             || PreviousRatings.FreshnessVerified == false
             || PreviousRatings.TomatoesRequired && RefreshRatings && (PreviousRatings.ProviderFreshnessTracked ? PreviousRatings.TomatoesFetchedUtc : previousRatingsFetchedUtc) < ratingsCutoffUtc
             || PreviousRatings.TomatoesRequired && RefreshRatings && (PreviousRatings.ProviderFreshnessTracked ? PreviousRatings.TomatoesFetchedUtc : previousRatingsFetchedUtc) is null);
 
-        public bool DatasetNeeded(string? imdbId) => DatasetRequired && !string.IsNullOrWhiteSpace(imdbId) && (DatasetRetryAllowed || explicitForceRefresh)
-            && (explicitForceRefresh || PreviousRatings?.DatasetRequired != true || PreviousRatings.Dataset is not { } dataset
+        public bool DatasetNeeded(string? imdbId) => DatasetRequired && !string.IsNullOrWhiteSpace(imdbId) && (DatasetRetryAllowed || ExplicitForceRefresh)
+            && (ExplicitForceRefresh || PreviousRatings?.DatasetRequired != true || PreviousRatings.Dataset is not { } dataset
                 || !string.Equals(dataset.ImdbId, imdbId, StringComparison.OrdinalIgnoreCase)
                 || dataset.FetchedUtc < ratingsCutoffUtc || !PreviousRatings.FreshnessVerified);
 

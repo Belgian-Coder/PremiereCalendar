@@ -2,7 +2,7 @@ namespace PremiereCalendar.Services;
 
 public class CalendarLoadCoordinator
 {
-    private readonly object _backgroundGate = new();
+    private readonly Lock _backgroundGate = new();
     private int _activeForegroundLoads;
     private int _activeBackgroundLoad;
     private CancellationTokenSource? _backgroundCancellation;
@@ -107,7 +107,7 @@ public class CalendarLoadCoordinator
 
 public sealed class CalendarPageCoordinator : CalendarLoadCoordinator
 {
-    private readonly object _stateGate = new();
+    private readonly Lock _stateGate = new();
     private CalendarPageState _state = CalendarPageState.Empty;
 
     public CalendarPageState Snapshot

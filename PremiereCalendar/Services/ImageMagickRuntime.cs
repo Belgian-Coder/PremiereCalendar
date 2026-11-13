@@ -6,7 +6,7 @@ namespace PremiereCalendar.Services;
 internal static class ImageMagickRuntime
 {
     private const ulong MemoryLimitBytes = 512UL * 1024 * 1024;
-    private static readonly object InitializationLock = new();
+    private static readonly Lock InitializationLock = new();
     private static bool _initialized;
 
     internal const int MaxFrameCount = 1000;

@@ -43,7 +43,7 @@ public sealed partial class PremiereService
         public bool Exhausted { get; set; }
         public int UnverifiedCore;
 
-        private readonly object _deadlineGate = new();
+        private readonly Lock _deadlineGate = new();
         private CancellationTokenSource? _deadline;
         private TimeSpan _inactivityBudget;
         private int _activeMappings, _waitingMappings;

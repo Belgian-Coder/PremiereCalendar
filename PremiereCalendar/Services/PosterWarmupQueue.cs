@@ -26,7 +26,7 @@ public sealed class PosterWarmupQueue : IPosterWarmupQueue, IHostedService, IDis
     internal static readonly TimeSpan DefaultStartDelay = TimeSpan.FromMilliseconds(750);
     internal static readonly TimeSpan RecentlyWarmedLifetime = TimeSpan.FromMinutes(30);
 
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly List<string> _pending = [];
     private readonly Dictionary<string, DateTimeOffset> _recent = new(StringComparer.Ordinal);
     private readonly Queue<string> _recentOrder = new();

@@ -4,8 +4,11 @@ using PremiereCalendar.Models;
 
 namespace PremiereCalendar.Services;
 
-public sealed class RatingMapper
+public sealed partial class RatingMapper
 {
+    [GeneratedRegex("\\s+")]
+    private static partial Regex WhitespaceRegex();
+
     public ExternalRatings Map(OmdbItem? item)
     {
         if (item is null || string.Equals(item.Response, "False", StringComparison.OrdinalIgnoreCase))
@@ -96,6 +99,6 @@ public sealed class RatingMapper
             return null;
         }
 
-        return Regex.Replace(value.Trim(), "\\s+", " ");
+        return WhitespaceRegex().Replace(value.Trim(), " ");
     }
 }

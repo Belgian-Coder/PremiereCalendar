@@ -211,6 +211,39 @@ public sealed class ImdbRatingsStoreTests
         finally { TryDelete(root); }
     }
 
+    [Fact]
+    public async Task SqliteImdbRatingsStore_ReusedInsertCommandBindsEveryRowAndUpsertsRepeats()
+    {
+        var root = CreateRoot();
+        try
+        {
+            var store = CreateStore(root);
+            var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
+            const int rows = 3000;
+            async IAsyncEnumerable<ImdbRatingRecord> Many()
+            {
+                for (var i = 0; i < rows; i++)
+                {
+                    if (i % 500 == 0) await Task.Yield();
+                    yield return new($"tt{i:D7}", i / 10d, i, importedAt.AddDays(-1));
+                }
+
+                // A repeat of an earlier id must replace it through the same prepared statement.
+                yield return new("TT0000007", 99.5, 777, importedAt.AddDays(-1));
+            }
+
+            Assert.Equal(rows + 1, await store.ReplaceAllStreamingAsync(Many(), importedAt, CancellationToken.None));
+
+            Assert.Equal(rows - 1, (await store.GetByImdbIdAsync("tt0002999", CancellationToken.None))!.VoteCount);
+            Assert.Equal(new ImdbRatingRecord("tt0000007", 99.5, 777, importedAt),
+                await store.GetByImdbIdAsync("tt0000007", CancellationToken.None));
+            Assert.Equal(new ImdbRatingRecord("tt0001234", 123.4, 1234, importedAt),
+                await store.GetByImdbIdAsync("tt0001234", CancellationToken.None));
+            Assert.Equal(rows + 1, (await store.GetStateAsync(CancellationToken.None)).RatingCount);
+        }
+        finally { TryDelete(root); }
+    }
+
     private static async IAsyncEnumerable<ImdbRatingRecord> PausedRatings(
         TaskCompletionSource entered,
         TaskCompletionSource release,

@@ -1221,7 +1221,7 @@ public sealed partial class PremiereService
         var media = candidate.MediaType == PremiereMediaType.Movie ? "movie" : "series";
         var titleSegment = SlugForCanonicalId(candidate.Title);
         var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(candidateKey));
-        var hash = Convert.ToHexString(hashBytes)[..16].ToLowerInvariant();
+        var hash = Convert.ToHexStringLower(hashBytes.AsSpan(0, 8));
         return $"unverified:{media}:{titleSegment}:{hash}";
     }
 

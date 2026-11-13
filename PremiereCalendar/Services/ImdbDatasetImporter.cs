@@ -223,6 +223,50 @@ public sealed class ImdbDatasetImporter : IImdbDatasetImporter
         return Path.GetFullPath(Path.Combine(root, path));
     }
 
+    /// <summary>
+    /// Parses one tab-separated <c>tconst averageRating numVotes</c> row without splitting the line.
+    /// Rows with fewer than three fields, a blank id, or an unparsable rating or vote count are rejected;
+    /// extra trailing fields are ignored and the id is trimmed.
+    /// </summary>
+    internal static bool TryParseRating(
+        ReadOnlySpan<char> line,
+        DateTimeOffset importedAtUtc,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ImdbRatingRecord? record)
+    {
+        record = null;
+        var idEnd = line.IndexOf('\t');
+        if (idEnd < 0)
+        {
+            return false;
+        }
+
+        var remaining = line[(idEnd + 1)..];
+        var ratingEnd = remaining.IndexOf('\t');
+        if (ratingEnd < 0)
+        {
+            return false;
+        }
+
+        var id = line[..idEnd];
+        var rating = remaining[..ratingEnd];
+        var votes = remaining[(ratingEnd + 1)..];
+        var votesEnd = votes.IndexOf('\t');
+        if (votesEnd >= 0)
+        {
+            votes = votes[..votesEnd];
+        }
+
+        if (id.IsWhiteSpace()
+            || !double.TryParse(rating, NumberStyles.Float, CultureInfo.InvariantCulture, out var averageRating)
+            || !int.TryParse(votes, NumberStyles.Integer, CultureInfo.InvariantCulture, out var voteCount))
+        {
+            return false;
+        }
+
+        record = new ImdbRatingRecord(new string(id.Trim()), averageRating, voteCount, importedAtUtc);
+        return true;
+    }
+
     private static async IAsyncEnumerable<ImdbRatingRecord> ReadRatingsAsync(
         StreamReader reader,
         DateTimeOffset importedAtUtc,
@@ -237,16 +281,12 @@ public sealed class ImdbDatasetImporter : IImdbDatasetImporter
                 continue;
             }
 
-            var parts = line.Split('\t');
-            if (parts.Length < 3
-                || string.IsNullOrWhiteSpace(parts[0])
-                || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var averageRating)
-                || !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var voteCount))
+            if (!TryParseRating(line, importedAtUtc, out var record))
             {
                 continue;
             }
 
-            yield return new ImdbRatingRecord(parts[0].Trim(), averageRating, voteCount, importedAtUtc);
+            yield return record;
         }
     }
 }
