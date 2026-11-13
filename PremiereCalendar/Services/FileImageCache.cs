@@ -1040,7 +1040,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
     {
         await using var stream = OpenImageReader(filePath);
         var hash = await SHA256.HashDataAsync(stream, cancellationToken);
-        return Convert.ToHexString(hash).ToLowerInvariant();
+        return Convert.ToHexStringLower(hash);
     }
 
     private static bool IsValidContentHash(string? contentHash)
@@ -1215,7 +1215,7 @@ public sealed class FileImageCache : IImageCache, IImageCacheMaintenance
             normalizedUrl += $"|format:{format.ToString().ToLowerInvariant()}";
         }
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedUrl));
-        return Convert.ToHexString(bytes).ToLowerInvariant();
+        return Convert.ToHexStringLower(bytes);
     }
 
     private static CacheKeyGateLease AcquireCacheKeyGate(string cacheKey)

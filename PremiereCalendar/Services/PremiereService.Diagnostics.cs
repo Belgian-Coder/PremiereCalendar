@@ -204,7 +204,7 @@ public sealed partial class PremiereService
     private async IAsyncEnumerable<PremiereSourceBatch> TraceSourceBatchesAsync(
         PremiereSourceFactory source, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source.Key)))[..20].ToLowerInvariant();
+        var key = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(source.Key)).AsSpan(0, 10));
         var context = (_telemetry.CaptureDiagnosticContext() ?? _telemetry.CreateDiagnosticContext()) with { SourceKey = key };
         var provider = ProviderKeyForSource(source.Name);
         var timer = Stopwatch.GetTimestamp();

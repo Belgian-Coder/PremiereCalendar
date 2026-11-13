@@ -76,7 +76,7 @@ public sealed class CalendarVisitChangeService
     private static string StoreKey(CalendarVisitScope scope)
     {
         var raw = $"{scope.PageMode}|{scope.WeekStart:yyyyMMdd}|{scope.CacheKey}";
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw))).ToLowerInvariant();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
         return $"Calendar.Visits.{hash}";
     }
 

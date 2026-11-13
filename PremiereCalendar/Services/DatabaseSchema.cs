@@ -283,8 +283,8 @@ internal sealed record DatabaseMigration(
                 .Replace("\n", "\r\n", StringComparison.Ordinal)), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string ComputeChecksum(int version, string name, string sql) => Convert.ToHexString(
-        SHA256.HashData(Encoding.UTF8.GetBytes($"{version.ToString(CultureInfo.InvariantCulture)}\n{name}\n{sql}"))).ToLowerInvariant();
+    private static string ComputeChecksum(int version, string name, string sql) => Convert.ToHexStringLower(
+        SHA256.HashData(Encoding.UTF8.GetBytes($"{version.ToString(CultureInfo.InvariantCulture)}\n{name}\n{sql}")));
 }
 
 public sealed class DatabaseRecoveryState
