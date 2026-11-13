@@ -78,14 +78,123 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     }
 
     [Fact]
-    public void AMissingPasswordFileIsReportedWhenOpeningNotWhenCreatingTheConnection()
+    public async Task APasswordFileOverridesAnInlinePasswordInsteadOfFailingToBuildTheDataSource()
+    {
+        var passwordFile = Path.Combine(_root, "file-password");
+        await File.WriteAllTextAsync(passwordFile, "file-secret\n");
+        using var server = new PasswordCapturingServer();
+        var options = Options(
+            $"Host=127.0.0.1;Port={server.Port};Database=premiere;Username=app;Password=inline-secret;SSL Mode=Disable;GSS Encryption Mode=Disable;Timeout=5",
+            passwordFile);
+
+        // Npgsql rejects a password provider combined with an inline password, so the factory must drop the latter.
+        await ExpectAuthenticationFailureAsync(options);
+
+        Assert.Equal(["file-secret"], server.Passwords);
+    }
+
+    [Fact]
+    public void AMissingPasswordFileFailsFastWithTheRawIoExceptionWhenTheConnectionIsCreated()
     {
         var options = Options("Host=127.0.0.1;Port=1;Database=premiere;Username=app;Timeout=2",
             Path.Combine(_root, "absent-password"));
 
-        using var connection = DatabaseConnectionFactory.Create(options);
+        var failure = Assert.ThrowsAny<IOException>(() => DatabaseConnectionFactory.Create(options));
 
-        Assert.ThrowsAny<Exception>(connection.Open);
+        Assert.IsType<FileNotFoundException>(failure);
+        // The initializer retries transient errors forever; a missing secret must stop the host instead.
+        Assert.False(DatabaseConnectionFactory.IsTransient(failure));
+    }
+
+    [Fact]
+    public void AMissingPasswordDirectoryFailsFastAndTheFailureIsNotCached()
+    {
+        var directory = Path.Combine(_root, "later");
+        var passwordFile = Path.Combine(directory, "password");
+        var options = Options("Host=127.0.0.1;Port=1;Database=premiere;Username=app;Timeout=2", passwordFile);
+
+        var failure = Assert.ThrowsAny<IOException>(() => DatabaseConnectionFactory.Create(options));
+        Assert.IsType<DirectoryNotFoundException>(failure);
+        Assert.False(DatabaseConnectionFactory.IsTransient(failure));
+
+        // Mounting the secret later recovers without restarting the process.
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(passwordFile, "now-present");
+        using var connection = DatabaseConnectionFactory.Create(options);
+        Assert.Equal("premiere", new NpgsqlConnectionStringBuilder(connection.ConnectionString).Database);
+    }
+
+    [Fact]
+    public async Task APasswordFileThatDisappearsAfterStartupIsPermanentNotTransientWhenOpeningAConnection()
+    {
+        var passwordFile = Path.Combine(_root, "vanishing-password");
+        await File.WriteAllTextAsync(passwordFile, "secret");
+        using var server = new PasswordCapturingServer();
+        var options = Options(
+            $"Host=127.0.0.1;Port={server.Port};Database=premiere;Username=app;SSL Mode=Disable;GSS Encryption Mode=Disable;Timeout=5",
+            passwordFile);
+        await using var connection = DatabaseConnectionFactory.Create(options);
+        File.Delete(passwordFile);
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(() => connection.OpenAsync());
+
+        Assert.False(DatabaseConnectionFactory.IsTransient(failure), failure.ToString());
+    }
+
+    [Fact]
+    public void OnlyRealPasswordFileProblemsAreExcludedFromTransientClassification()
+    {
+        Assert.False(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new FileNotFoundException())));
+        Assert.False(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new DirectoryNotFoundException())));
+        Assert.False(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new UnauthorizedAccessException())));
+        Assert.True(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new IOException("connection reset"))));
+        Assert.True(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new System.Net.Sockets.SocketException())));
+    }
+
+    [Fact]
+    public async Task ConcurrentFirstCallsBuildExactlyOneDataSource()
+    {
+        var options = Options($"Host=127.0.0.1;Port=1;Database=concurrent_{Guid.NewGuid():N};Username=app");
+        var before = DatabaseConnectionFactory.BuiltFor(options);
+        using var gate = new ManualResetEventSlim();
+
+        var tasks = Enumerable.Range(0, 32).Select(_ => Task.Run(() =>
+        {
+            gate.Wait();
+            using var connection = DatabaseConnectionFactory.Create(options);
+        })).ToArray();
+        gate.Set();
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(1, DatabaseConnectionFactory.BuiltFor(options) - before);
+        DatabaseConnectionFactory.Dispose(options);
+    }
+
+    [Fact]
+    public void DisposingOneConfigurationRemovesOnlyItsDataSources()
+    {
+        var disposed = Options($"Host=127.0.0.1;Port=1;Database=dispose_{Guid.NewGuid():N};Username=app");
+        var kept = Options($"Host=127.0.0.1;Port=1;Database=keep_{Guid.NewGuid():N};Username=app");
+        using (DatabaseConnectionFactory.Create(disposed)) { }
+        using (DatabaseConnectionFactory.Create(disposed, commandTimeoutSeconds: 0)) { }
+        using (DatabaseConnectionFactory.Create(kept)) { }
+        var keptBuilt = DatabaseConnectionFactory.BuiltFor(kept);
+        var disposedBuilt = DatabaseConnectionFactory.BuiltFor(disposed);
+        Assert.Equal(1, keptBuilt);
+        Assert.Equal(2, disposedBuilt);
+
+        DatabaseConnectionFactory.Dispose(disposed);
+        using (DatabaseConnectionFactory.Create(kept)) { }
+        Assert.Equal(keptBuilt, DatabaseConnectionFactory.BuiltFor(kept));
+
+        // Both timeout variants of the disposed configuration were removed, so each is rebuilt on next use.
+        using (DatabaseConnectionFactory.Create(disposed)) { }
+        using (DatabaseConnectionFactory.Create(disposed, commandTimeoutSeconds: 0)) { }
+        Assert.Equal(disposedBuilt + 2, DatabaseConnectionFactory.BuiltFor(disposed));
+        DatabaseConnectionFactory.Dispose(disposed);
+        DatabaseConnectionFactory.Dispose(kept);
+        // Disposing something that is not cached is a no-op, and so is disposing twice.
+        DatabaseConnectionFactory.Dispose(kept);
     }
 
     private static async Task ExpectAuthenticationFailureAsync(AppDatabaseOptions options)

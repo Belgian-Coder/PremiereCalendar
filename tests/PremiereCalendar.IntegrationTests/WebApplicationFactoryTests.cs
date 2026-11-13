@@ -83,6 +83,25 @@ public sealed class WebApplicationFactoryTests : IDisposable
     }
 
     [Fact]
+    public async Task StoppingTheHostDisposesItsDatabaseDataSources()
+    {
+        var factory = CreateFactory();
+        var database = _databases[^1];
+        using (var client = factory.CreateClient())
+        {
+            (await client.GetAsync("/health/ready")).EnsureSuccessStatusCode();
+        }
+        var built = DatabaseConnectionFactory.BuiltFor(database.AppOptions);
+        Assert.True(built >= 1);
+
+        await factory.DisposeAsync();
+
+        // The host removed its cached data source after its hosted services stopped, so the next use builds a new one.
+        using var connection = DatabaseConnectionFactory.Create(database.AppOptions);
+        Assert.Equal(built + 1, DatabaseConnectionFactory.BuiltFor(database.AppOptions));
+    }
+
+    [Fact]
     public async Task AboutPage_RendersSourceStatusWithoutSecretValues()
     {
         await using var factory = CreateFactory(new Dictionary<string, string?>
