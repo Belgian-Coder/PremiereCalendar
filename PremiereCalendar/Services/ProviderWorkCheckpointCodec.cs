@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Text;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Text;
@@ -21,29 +22,99 @@ internal static class ProviderWorkCheckpointCodec
     internal static EncodedProviderWorkCheckpoint Encode(ProviderWorkCheckpoint checkpoint)
     {
         var started = Stopwatch.GetTimestamp();
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(checkpoint, JsonOptions);
+        // The raw UTF-8 JSON lives in a pooled buffer (no exact-size array, no LOH
+        // garbage). Writer options match JsonSerializer.SerializeToUtf8Bytes, so the
+        // bytes are identical to the previous implementation.
+        using var raw = new PooledBufferWriter(initialCapacity: 16 * 1024);
+        using (var writer = new Utf8JsonWriter(raw, new JsonWriterOptions { SkipValidation = true, MaxDepth = 64 }))
+            JsonSerializer.Serialize(writer, checkpoint, JsonOptions);
+        var rawBytes = raw.WrittenSpan;
         var serialized = Stopwatch.GetTimestamp();
-        string json;
         var encoding = "json";
-        if (bytes.Length is >= MinimumCompressionBytes and <= MaximumDecodedBytes)
+        string json;
+        if (rawBytes.Length is >= MinimumCompressionBytes and <= MaximumDecodedBytes
+            && TryEncodeEnvelope(rawBytes, out var envelope))
         {
-            using var output = new MemoryStream();
-            using (var compression = new BrotliStream(output, CompressionLevel.Fastest, leaveOpen: true))
-                compression.Write(bytes);
-            var envelope = JsonSerializer.Serialize(new CompressedCheckpoint(4, "br-base64", bytes.Length,
-                Convert.ToBase64String(output.GetBuffer(), 0, checked((int)output.Length))));
-            // Base64 and envelope overhead count against the actual database bytes.
-            if (envelope.Length < bytes.Length)
+            using (envelope)
             {
-                json = envelope;
-                encoding = "br-base64";
+                // Base64 and envelope overhead count against the actual database bytes.
+                // The envelope is pure ASCII, so its byte length equals its string length.
+                if (envelope.WrittenCount < rawBytes.Length)
+                {
+                    json = Encoding.UTF8.GetString(envelope.WrittenSpan);
+                    encoding = "br-base64";
+                    return Encoded(json, rawBytes.Length, envelope.WrittenCount, encoding, started, serialized);
+                }
             }
-            else json = Encoding.UTF8.GetString(bytes);
         }
-        else json = Encoding.UTF8.GetString(bytes);
-        return new(json, bytes.Length, Encoding.UTF8.GetByteCount(json), encoding,
+        json = Encoding.UTF8.GetString(rawBytes);
+        return Encoded(json, rawBytes.Length, rawBytes.Length, encoding, started, serialized);
+    }
+
+    private static EncodedProviderWorkCheckpoint Encoded(string json, int rawBytes, int storedBytes, string encoding, long started, long serialized)
+        => new(json, rawBytes, storedBytes, encoding,
             Stopwatch.GetElapsedTime(started, serialized).TotalMilliseconds,
             Stopwatch.GetElapsedTime(serialized).TotalMilliseconds);
+
+    // Produces {"Version":4,"Encoding":"br-base64","UncompressedBytes":n,"Payload":"..."} exactly as
+    // JsonSerializer.Serialize of the former CompressedCheckpoint record did, including default-encoder escaping of '+'.
+    private static bool TryEncodeEnvelope(ReadOnlySpan<byte> raw, out PooledBufferWriter envelope)
+    {
+        envelope = null!;
+        byte[]? compressedBuffer = null, base64Buffer = null;
+        try
+        {
+            // BrotliStream(Fastest) is BrotliEncoder(quality 1, window 22) fed with PROCESS
+            // and then finished with an empty FINISH call. Mirror that exactly.
+            compressedBuffer = ArrayPool<byte>.Shared.Rent(BrotliEncoder.GetMaxCompressedLength(raw.Length));
+            var compressed = 0;
+            using (var encoder = new BrotliEncoder(quality: 1, window: 22))
+            {
+                var remaining = raw;
+                while (!remaining.IsEmpty)
+                {
+                    var status = encoder.Compress(remaining, compressedBuffer.AsSpan(compressed), out var consumed, out var written, isFinalBlock: false);
+                    remaining = remaining[consumed..];
+                    compressed += written;
+                    if (status == OperationStatus.InvalidData || (consumed == 0 && written == 0)) return false;
+                }
+                OperationStatus finish;
+                do
+                {
+                    finish = encoder.Compress(ReadOnlySpan<byte>.Empty, compressedBuffer.AsSpan(compressed), out _, out var written, isFinalBlock: true);
+                    compressed += written;
+                    if (finish == OperationStatus.InvalidData || (finish != OperationStatus.Done && written == 0)) return false;
+                } while (finish != OperationStatus.Done);
+            }
+            base64Buffer = ArrayPool<byte>.Shared.Rent(Base64.GetMaxEncodedToUtf8Length(compressed));
+            if (Base64.EncodeToUtf8(compressedBuffer.AsSpan(0, compressed), base64Buffer, out _, out var encoded) != OperationStatus.Done)
+                return false;
+            var result = new PooledBufferWriter(encoded + 128);
+            try
+            {
+                using (var writer = new Utf8JsonWriter(result, new JsonWriterOptions { SkipValidation = true, MaxDepth = 64 }))
+                {
+                    writer.WriteStartObject();
+                    writer.WriteNumber("Version", 4);
+                    writer.WriteString("Encoding", "br-base64");
+                    writer.WriteNumber("UncompressedBytes", raw.Length);
+                    writer.WriteString("Payload", base64Buffer.AsSpan(0, encoded));
+                    writer.WriteEndObject();
+                }
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
+            envelope = result;
+            return true;
+        }
+        finally
+        {
+            if (compressedBuffer is not null) ArrayPool<byte>.Shared.Return(compressedBuffer);
+            if (base64Buffer is not null) ArrayPool<byte>.Shared.Return(base64Buffer);
+        }
     }
 
     internal static JsonDocument Decode(string json)
@@ -93,7 +164,51 @@ internal static class ProviderWorkCheckpointCodec
         }
     }
 
-    private sealed record CompressedCheckpoint(int Version, string Encoding, int UncompressedBytes, string Payload);
+    private sealed class PooledBufferWriter(int initialCapacity) : IBufferWriter<byte>, IDisposable
+    {
+        private byte[] _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(initialCapacity, 256));
+        private int _written;
+
+        public ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _written);
+        public int WrittenCount => _written;
+
+        public void Advance(int count)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(count);
+            if (count > _buffer.Length - _written) throw new InvalidOperationException("Advanced past the end of the buffer.");
+            _written += count;
+        }
+
+        public Memory<byte> GetMemory(int sizeHint = 0)
+        {
+            Ensure(sizeHint);
+            return _buffer.AsMemory(_written);
+        }
+
+        public Span<byte> GetSpan(int sizeHint = 0)
+        {
+            Ensure(sizeHint);
+            return _buffer.AsSpan(_written);
+        }
+
+        private void Ensure(int sizeHint)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(sizeHint);
+            if (sizeHint == 0) sizeHint = 1;
+            if (sizeHint <= _buffer.Length - _written) return;
+            var next = ArrayPool<byte>.Shared.Rent((int)Math.Min(Array.MaxLength, Math.Max((long)_buffer.Length * 2, (long)_written + sizeHint)));
+            _buffer.AsSpan(0, _written).CopyTo(next);
+            ArrayPool<byte>.Shared.Return(_buffer);
+            _buffer = next;
+        }
+
+        public void Dispose()
+        {
+            var buffer = _buffer;
+            _buffer = [];
+            if (buffer.Length > 0) ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
 }
 
 internal sealed record EncodedProviderWorkCheckpoint(
