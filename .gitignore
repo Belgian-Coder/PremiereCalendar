@@ -62,3 +62,8 @@ secrets.json
 # README screenshots live under docs/images/readme and remain tracked.
 /*.png
 /*-snapshot.md
+
+# Local agent scratch, worktrees and benchmark harnesses (keep inside the repo)
+.scratch/
+.worktrees/
+.bench/
