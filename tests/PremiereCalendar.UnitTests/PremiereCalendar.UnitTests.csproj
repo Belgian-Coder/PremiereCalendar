@@ -16,11 +16,20 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="PremiereCalendar.TestSupport" />
   </ItemGroup>
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\..\PremiereCalendar\PremiereCalendar.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);POSTGRES_TEST_INPROCESS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\PostgresTestDatabase.cs" Link="Support\PostgresTestDatabase.cs" />
   </ItemGroup>
 
 </Project>

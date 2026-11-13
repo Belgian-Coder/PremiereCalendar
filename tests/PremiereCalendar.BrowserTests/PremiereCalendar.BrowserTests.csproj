@@ -17,5 +17,9 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="PremiereCalendar.TestSupport" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Shared\PostgresTestDatabase.cs" Link="Support\PostgresTestDatabase.cs" />
   </ItemGroup>
 </Project>

@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -9,35 +8,13 @@ namespace PremiereCalendar.IntegrationTests;
 
 public sealed partial class PostgresPersistenceTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task SQLite_InitialRatingsCorePreflightFullProposalRetryHonorsCas(bool foreignWrite)
-    {
-        var root = Path.Combine(Path.GetTempPath(), "premierecalendar-initial-ratings", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        try
-        {
-            TestSqliteDatabase.Initialize(root, "items.db");
-            var options = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "items.db" });
-            await VerifyInitialRatingsCorePreflightAsync(new SqliteItemEnrichmentStore(options, new TestEnvironment(root)), foreignWrite);
-        }
-        finally
-        {
-            SqliteConnection.ClearAllPools();
-            Directory.Delete(root, recursive: true);
-        }
-    }
-
-    [PostgresFact]
+    [Fact]
     public Task PostgreSQL_InitialRatingsCorePreflightRetriesTheFullSuccessfulProposal()
-        => WithIsolatedDatabaseAsync((options, environment, _) =>
-            VerifyInitialRatingsCorePreflightAsync(new SqliteItemEnrichmentStore(options, environment), foreignWrite: false));
+        => VerifyInitialRatingsCorePreflightAsync(new ItemEnrichmentStore(_database.Options), foreignWrite: false);
 
-    [PostgresFact]
+    [Fact]
     public Task PostgreSQL_InitialRatingsCorePreflightCannotCrossAnInterveningForeignWrite()
-        => WithIsolatedDatabaseAsync((options, environment, _) =>
-            VerifyInitialRatingsCorePreflightAsync(new SqliteItemEnrichmentStore(options, environment), foreignWrite: true));
+        => VerifyInitialRatingsCorePreflightAsync(new ItemEnrichmentStore(_database.Options), foreignWrite: true);
 
     private static async Task VerifyInitialRatingsCorePreflightAsync(IItemEnrichmentStore store, bool foreignWrite)
     {
@@ -115,31 +92,13 @@ public sealed partial class PostgresPersistenceTests
         }
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task SQLite_ContinuationRatingsFencePreservesRepairsInsideTheRetryTransaction(bool fresh)
-    {
-        var root = Path.Combine(Path.GetTempPath(), "premierecalendar-ratings-fence", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        try
-        {
-            TestSqliteDatabase.Initialize(root, "items.db");
-            var options = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "items.db" });
-            await VerifyContinuationRatingsFenceAsync(new SqliteItemEnrichmentStore(options, new TestEnvironment(root)), fresh);
-        }
-        finally { SqliteConnection.ClearAllPools(); Directory.Delete(root, recursive: true); }
-    }
-
-    [PostgresFact]
+    [Fact]
     public Task PostgreSQL_FreshContinuationRatingsFencePreservesRepairsInsideTheRetryTransaction()
-        => WithIsolatedDatabaseAsync((options, environment, _) =>
-            VerifyContinuationRatingsFenceAsync(new SqliteItemEnrichmentStore(options, environment), fresh: true));
+        => VerifyContinuationRatingsFenceAsync(new ItemEnrichmentStore(_database.Options), fresh: true);
 
-    [PostgresFact]
+    [Fact]
     public Task PostgreSQL_NormalContinuationRatingsFencePreservesRepairsInsideTheRetryTransaction()
-        => WithIsolatedDatabaseAsync((options, environment, _) =>
-            VerifyContinuationRatingsFenceAsync(new SqliteItemEnrichmentStore(options, environment), fresh: false));
+        => VerifyContinuationRatingsFenceAsync(new ItemEnrichmentStore(_database.Options), fresh: false);
 
     private static async Task VerifyContinuationRatingsFenceAsync(IItemEnrichmentStore store, bool fresh)
     {

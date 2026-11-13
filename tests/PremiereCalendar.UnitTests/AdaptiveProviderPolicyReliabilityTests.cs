@@ -1,12 +1,10 @@
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
 public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
 {
     private static readonly DateTimeOffset StartUtc = new(2026, 10, 26, 12, 0, 0, TimeSpan.Zero);
@@ -14,20 +12,19 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     private ManualTimeProvider _time = null!;
     private ProviderAdaptiveStateStore _store = null!;
     private IOptions<ProviderSchedulerOptions> _schedulerOptions = null!;
+    private PostgresTestDatabase _database = null!;
 
-    public Task InitializeAsync()
+    public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_root);
-        TestSqliteDatabase.Initialize(_root, "provider.db");
-        var database = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "provider.db" });
-        _store = new ProviderAdaptiveStateStore(database, new TestEnvironment(_root));
+        _database = await PostgresTestDatabase.CreateAsync();
+        _store = new ProviderAdaptiveStateStore(_database.Options);
         _time = new ManualTimeProvider(StartUtc);
         _schedulerOptions = Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions
         {
             RetryBaseMilliseconds = 1_000,
             RetryMaximumSeconds = 10
         });
-        return Task.CompletedTask;
     }
 
     [Fact]
@@ -531,14 +528,16 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     [Fact]
     public async Task FailedPersistedInitializationCanBeRetried()
     {
-        var database = new AppDatabaseOptions { Path = "not-created/provider.db" };
-        var store = new ProviderAdaptiveStateStore(Microsoft.Extensions.Options.Options.Create(database), new TestEnvironment(_root));
+        // Nothing listens on port 1, so the first persisted-state load fails to connect.
+        var database = new AppDatabaseOptions { ConnectionString = "Host=127.0.0.1;Port=1;Database=unavailable;Username=unavailable" };
+        var store = new ProviderAdaptiveStateStore(Microsoft.Extensions.Options.Options.Create(database));
         var policy = new AdaptiveProviderPolicy(store, _time, new PremiereTelemetry(), _schedulerOptions);
 
-        await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(
+        await Assert.ThrowsAsync<NpgsqlException>(
             () => policy.AcquireAsync("retry-load", 2, CancellationToken.None));
 
-        database.Path = "provider.db";
+        database.ConnectionString = _database.AppOptions.ConnectionString;
+        database.PasswordFile = _database.AppOptions.PasswordFile;
         await using var lease = await policy.AcquireAsync("retry-load", 2, CancellationToken.None);
         await lease.CompleteAsync(ProviderExecutionResult.Success, null, CancellationToken.None);
         Assert.Equal(0, Assert.Single(policy.GetSnapshots(), value => value.Provider == "retry-load").ConsecutiveFailures);
@@ -896,11 +895,10 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         { State = new(null, error, null); return Task.CompletedTask; }
     }
 
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        if (_database is not null) await _database.DisposeAsync();
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
-        return Task.CompletedTask;
     }
 
     private AdaptiveProviderPolicy CreatePolicy(ProviderSchedulerOptions? schedulerOptions = null)
@@ -939,16 +937,6 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     private static async Task FlushContinuationsAsync()
     {
         for (var index = 0; index < 10; index++) await Task.Yield();
-    }
-
-    private sealed class TestEnvironment(string root) : IWebHostEnvironment
-    {
-        public string EnvironmentName { get; set; } = "Test";
-        public string ApplicationName { get; set; } = "PremiereCalendar.UnitTests";
-        public string WebRootPath { get; set; } = root;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 
     private sealed class BlockingHandler(int requiredRequests) : HttpMessageHandler

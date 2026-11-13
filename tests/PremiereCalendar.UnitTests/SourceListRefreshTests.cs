@@ -217,7 +217,7 @@ public sealed partial class ProviderWorkSchedulerTests
             JsonSerializer.Serialize(payload)));
         await using var services = new ServiceCollection().AddSingleton<IPremiereLoadPipeline>(pipeline).BuildServiceProvider();
         var recovery = new DatabaseRecoveryState();
-        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null, null));
+        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null));
         using var worker = new ProviderWorkSchedulerHostedService(_scheduler, services.GetRequiredService<IServiceScopeFactory>(), recovery,
             Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 }), NullLogger<ProviderWorkSchedulerHostedService>.Instance);
         await worker.StartAsync(default);

@@ -4,16 +4,16 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
 public sealed class LocalObservabilityServiceTests : IDisposable
 {
+    // Only the AppStateStore tests need a database; create it on first use.
+    private readonly Lazy<PostgresTestDatabase> _database = new(() => PostgresTestDatabase.Create());
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-local-observability-{Guid.NewGuid():N}");
 
     [Fact]
@@ -36,7 +36,7 @@ public sealed class LocalObservabilityServiceTests : IDisposable
     [Fact]
     public async Task BackgroundJobTimeline_TrimsOldEventsAndKeepsNewestFirst()
     {
-        // Timeline trimming is an in-memory policy concern. SQLite durability is
+        // Timeline trimming is an in-memory policy concern. PostgreSQL durability is
         // covered independently by the AppStateStore tests in this class.
         var store = new InMemoryAppStateStore();
         var timeline = new BackgroundJobTimelineService(store, TimeProvider.System);
@@ -235,20 +235,18 @@ public sealed class LocalObservabilityServiceTests : IDisposable
 
     public void Dispose()
     {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        if (_database.IsValueCreated)
+        {
+            _database.Value.Dispose();
+        }
+
         if (Directory.Exists(_root))
         {
             Directory.Delete(_root, recursive: true);
         }
     }
 
-    private SqliteAppStateStore CreateAppStateStore()
-    {
-        TestSqliteDatabase.Initialize(_root, "data/app-state.db");
-        return new SqliteAppStateStore(
-            Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app-state.db" }),
-            new FakeWebHostEnvironment(_root));
-    }
+    private AppStateStore CreateAppStateStore() => new(_database.Value.Options);
 
     private sealed class FakeWebHostEnvironment : IWebHostEnvironment
     {

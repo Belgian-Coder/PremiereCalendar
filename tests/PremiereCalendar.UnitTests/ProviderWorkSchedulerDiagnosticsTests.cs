@@ -1,7 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -11,7 +10,6 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
 public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-scheduler-diagnostics", Guid.NewGuid().ToString("N"));
@@ -20,16 +18,16 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
     private PremiereTelemetry _telemetry = null!;
     private ProviderWorkStore _store = null!;
     private ProviderWorkScheduler _scheduler = null!;
+    private PostgresTestDatabase _database = null!;
 
-    public Task InitializeAsync()
+    public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_root);
-        TestSqliteDatabase.Initialize(_root, "scheduler.db");
+        _database = await PostgresTestDatabase.CreateAsync();
         _diagnostics = new(new TelemetryOptions { LogDirectory = "logs" }, _root);
         _telemetry = new(_diagnostics);
-        _store = new(Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "scheduler.db" }), new TestEnvironment(_root));
+        _store = new(_database.Options, new TestEnvironment(_root));
         _scheduler = NewScheduler();
-        return Task.CompletedTask;
     }
 
     [Fact]
@@ -43,7 +41,7 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
         _time.Advance(TimeSpan.FromMilliseconds(40));
         await using var services = new ServiceCollection().AddSingleton<IPremiereLoadPipeline>(pipeline).BuildServiceProvider();
         var recovery = new DatabaseRecoveryState();
-        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null, null));
+        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null));
         using var worker = new ProviderWorkSchedulerHostedService(_scheduler, services.GetRequiredService<IServiceScopeFactory>(),
             recovery, Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 }),
             NullLogger<ProviderWorkSchedulerHostedService>.Instance);
@@ -177,12 +175,11 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (!await predicate()) await Task.Delay(10, timeout.Token);
     }
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
         _diagnostics.Dispose();
-        SqliteConnection.ClearAllPools();
+        if (_database is not null) await _database.DisposeAsync();
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
-        return Task.CompletedTask;
     }
     private sealed class RecordingPipeline(PremiereTelemetry telemetry) : IPremiereLoadPipeline
     {

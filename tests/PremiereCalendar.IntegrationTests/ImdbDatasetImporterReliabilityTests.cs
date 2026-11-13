@@ -3,14 +3,14 @@ using System.Net;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
-public sealed class ImdbDatasetImporterReliabilityTests
+public sealed class ImdbDatasetImporterReliabilityTests : IDisposable
 {
+    private readonly PostgresTestDatabase _database = PostgresTestDatabase.Create();
     private const string ProviderName = "imdb-import-reliability";
     private static readonly Uri DatasetBaseUri = new("https://datasets.imdbws.com/");
     private static readonly string DatasetText =
@@ -24,9 +24,8 @@ public sealed class ImdbDatasetImporterReliabilityTests
         var root = CreateRoot();
         try
         {
-            TestSqliteDatabase.Initialize(root, "data/app.db");
             var time = new ManualTimeProvider();
-            var providerStore = CreateProviderStore(root);
+            var providerStore = CreateProviderStore();
             var policy = new AdaptiveProviderPolicy(providerStore, time, new PremiereTelemetry());
             var ratingsStore = new FakeImdbRatingsStore();
             var downloadDirectory = Path.Combine(root, "App_Data", "tmp", "imdb");
@@ -74,9 +73,8 @@ public sealed class ImdbDatasetImporterReliabilityTests
         var root = CreateRoot();
         try
         {
-            TestSqliteDatabase.Initialize(root, "data/app.db");
             var time = new ManualTimeProvider();
-            var policy = new AdaptiveProviderPolicy(CreateProviderStore(root), time, new PremiereTelemetry());
+            var policy = new AdaptiveProviderPolicy(CreateProviderStore(), time, new PremiereTelemetry());
             var ratingsStore = new FakeImdbRatingsStore();
             var body = new BlockingReadStream();
             using var client = CreateAdaptiveClient(policy, new StreamResponseHandler(body));
@@ -106,9 +104,8 @@ public sealed class ImdbDatasetImporterReliabilityTests
         var root = CreateRoot();
         try
         {
-            TestSqliteDatabase.Initialize(root, "data/app.db");
             var time = new ManualTimeProvider();
-            var policy = new AdaptiveProviderPolicy(CreateProviderStore(root), time, new PremiereTelemetry());
+            var policy = new AdaptiveProviderPolicy(CreateProviderStore(), time, new PremiereTelemetry());
             var ratingsStore = new FakeImdbRatingsStore();
             var body = new BlockingReadStream();
             using var client = CreateAdaptiveClient(policy, new StreamResponseHandler(body));
@@ -140,9 +137,8 @@ public sealed class ImdbDatasetImporterReliabilityTests
         var root = CreateRoot();
         try
         {
-            TestSqliteDatabase.Initialize(root, "data/app.db");
             var time = new ManualTimeProvider();
-            var policy = new AdaptiveProviderPolicy(CreateProviderStore(root), time, new PremiereTelemetry());
+            var policy = new AdaptiveProviderPolicy(CreateProviderStore(), time, new PremiereTelemetry());
             var ratingsStore = new FakeImdbRatingsStore();
             using var client = CreateAdaptiveClient(policy, new GzipResponseHandler(DatasetText, omitContentLength: true));
             var importer = CreateImporter(client, ratingsStore, time, root, maxDownloadBytes: 8);
@@ -166,9 +162,8 @@ public sealed class ImdbDatasetImporterReliabilityTests
         var root = CreateRoot();
         try
         {
-            TestSqliteDatabase.Initialize(root, "data/app.db");
             var time = new ManualTimeProvider();
-            var policy = new AdaptiveProviderPolicy(CreateProviderStore(root), time, new PremiereTelemetry());
+            var policy = new AdaptiveProviderPolicy(CreateProviderStore(), time, new PremiereTelemetry());
             var ratingsStore = new FakeImdbRatingsStore
             {
                 StateReadFailure = new IOException("state database unavailable")
@@ -223,12 +218,9 @@ public sealed class ImdbDatasetImporterReliabilityTests
         };
     }
 
-    private static ProviderAdaptiveStateStore CreateProviderStore(string root)
-    {
-        return new ProviderAdaptiveStateStore(
-            Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }),
-            new TestEnvironment(root));
-    }
+    public void Dispose() => _database.Dispose();
+
+    private ProviderAdaptiveStateStore CreateProviderStore() => new(_database.Options);
 
     private static string[] GetDownloadFiles(string root)
     {
@@ -245,7 +237,6 @@ public sealed class ImdbDatasetImporterReliabilityTests
 
     private static void TryDelete(string root)
     {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try
         {
             if (Directory.Exists(root))

@@ -54,12 +54,12 @@ public sealed partial class ProviderWorkSchedulerTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         var pending = recovery.WaitUntilHealthyAsync(cancellation.Token);
         Assert.False(pending.IsCompleted);
-        recovery.Set(new(1, 1, true, "ready", null, null));
+        recovery.Set(new(1, 1, true, "ready", null));
         await pending;
-        recovery.Set(new(1, 1, false, "unavailable", null, null));
+        recovery.Set(new(1, 1, false, "unavailable", null));
         pending = recovery.WaitUntilHealthyAsync(cancellation.Token);
         Assert.False(pending.IsCompleted);
-        recovery.Set(new(1, 1, true, "recovered", null, null));
+        recovery.Set(new(1, 1, true, "recovered", null));
         await pending;
     }
 
@@ -79,7 +79,7 @@ public sealed partial class ProviderWorkSchedulerTests
         try
         {
             Assert.Equal(ProviderWorkState.Queued, (await _scheduler.GetAsync(handle.JobId))!.State);
-            recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "recovered", null, null));
+            recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "recovered", null));
             await pipeline.Entered(start).WaitAsync(TimeSpan.FromSeconds(3));
             pipeline.Release(start);
             await WaitUntilAsync(async () => (await _scheduler.GetAsync(handle.JobId))!.State == ProviderWorkState.Completed);

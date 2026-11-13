@@ -1,7 +1,5 @@
 using System.Net;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using PremiereCalendar.IntegrationTests.Support;
 using PremiereCalendar.Models;
@@ -12,13 +10,10 @@ namespace PremiereCalendar.IntegrationTests;
 
 public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-optional-cache-" + Guid.NewGuid().ToString("N"));
+    private readonly PostgresTestDatabase _database = PostgresTestDatabase.Create();
     private readonly Clock _clock = new(DateTimeOffset.UtcNow);
-    private string DatabasePath => Path.Combine(_root, "test.db");
 
-    public ProviderOptionalCacheIntegrationTests() => TestSqliteDatabase.Initialize(_root, DatabasePath);
-    private IProviderCacheStateStore Store() => new SqliteProviderCacheStateStore(
-        Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = DatabasePath }), new Environment(_root));
+    private IProviderCacheStateStore Store() => new ProviderCacheStateStore(_database.Options);
     private ProviderResponseCache Durable() => new(Store(), NullLogger<ProviderResponseCache>.Instance, _clock, ioBudget: TimeSpan.FromSeconds(30));
     private static MemoryCache Memory() => new(new MemoryCacheOptions());
     private FanartClient Fanart(HttpMessageHandler handler, IMemoryCache memory, string key = "private-key", string version = "v3") => new(
@@ -68,8 +63,7 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     public async Task OmdbItemPayloadFailureDoesNotBlockAnotherTitleOrPersistProviderQuota(string invalid, string reason)
     {
         using var memory = Memory();
-        var store = new SqliteOmdbCacheStore(
-            Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = DatabasePath }), new Environment(_root), _clock);
+        var store = new OmdbCacheStore(_database.Options, _clock);
         var handler = new StubHttpMessageHandler(request => StubHttpMessageHandler.Json(QueryString.Parse(request.RequestUri!)["i"] == "ttbad"
             ? invalid : "{\"Response\":\"True\",\"imdbRating\":\"7.3\"}"));
         var client = new OmdbClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") }, memory,
@@ -94,8 +88,7 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     public async Task OmdbExplicitForceRetriesSoftPayloadFailureButCannotBypassGlobalDenial(string denial, string reason)
     {
         using var memory = Memory();
-        var store = new SqliteOmdbCacheStore(
-            Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = DatabasePath }), new Environment(_root), _clock);
+        var store = new OmdbCacheStore(_database.Options, _clock);
         var calls = 0;
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls switch
         {
@@ -149,8 +142,7 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     public async Task OmdbPreviouslyCachedNullRatingEntriesAreRefetched(bool persisted)
     {
         using var memory = Memory();
-        var store = new SqliteOmdbCacheStore(
-            Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = DatabasePath }), new Environment(_root), _clock);
+        var store = new OmdbCacheStore(_database.Options, _clock);
         var invalid = new OmdbItem { Response = "True", Ratings = [null!] };
         if (persisted) await store.SetAsync("tt42", invalid, _clock.UtcNow, default);
         else memory.Set("omdb:imdb:tt42", invalid);
@@ -417,11 +409,7 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     private static HttpResponseMessage Commons() => StubHttpMessageHandler.Json(
         "{\"query\":{\"pages\":{\"1\":{\"imageinfo\":[{\"url\":\"https://art.test/commons.jpg\",\"extmetadata\":{\"LicenseShortName\":{\"value\":\"CC BY-SA 4.0\"}}}]}}}}");
 
-    public void Dispose()
-    {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
-    }
+    public void Dispose() => _database.Dispose();
 
     private sealed class Clock(DateTimeOffset now) : TimeProvider
     {
@@ -431,14 +419,5 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     private sealed class AsyncHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) => respond(request, token);
-    }
-    private sealed class Environment(string root) : IWebHostEnvironment
-    {
-        public string ApplicationName { get; set; } = "PremiereCalendar.IntegrationTests";
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public string WebRootPath { get; set; } = root;
-        public string EnvironmentName { get; set; } = "Testing";
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

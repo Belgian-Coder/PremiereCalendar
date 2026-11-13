@@ -11,6 +11,7 @@ namespace PremiereCalendar.IntegrationTests;
 public sealed class ItemCacheMaintenanceIntegrationTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-maintenance-item-cache", Guid.NewGuid().ToString("N"));
+    private readonly PostgresTestDatabase _database = PostgresTestDatabase.Create();
 
     [Theory]
     [InlineData(false)]
@@ -19,9 +20,7 @@ public sealed class ItemCacheMaintenanceIntegrationTests : IDisposable
     {
         var now = DateTimeOffset.UtcNow;
         var environment = new Environment(_root);
-        var database = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "test.db" });
-        TestSqliteDatabase.Initialize(_root, "test.db");
-        var store = new SqliteItemEnrichmentStore(database, environment);
+        var store = new ItemEnrichmentStore(_database.Options);
         var coordinator = new ItemEnrichmentCacheCoordinator(store,
             Microsoft.Extensions.Options.Options.Create(new ItemEnrichmentCacheOptions()),
             Microsoft.Extensions.Options.Options.Create(new TmdbOptions()), NullLogger<ItemEnrichmentCacheCoordinator>.Instance);
@@ -61,7 +60,7 @@ public sealed class ItemCacheMaintenanceIntegrationTests : IDisposable
 
     public void Dispose()
     {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        _database.Dispose();
         if (Directory.Exists(_root)) Directory.Delete(_root, true);
     }
 

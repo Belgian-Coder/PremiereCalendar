@@ -8,10 +8,22 @@ public sealed class BrowserAppFixture : IAsyncLifetime
 {
     private Process? _process;
     private string? _temporaryRoot;
+    private PostgresTestDatabase? _database;
     private readonly List<string> _output = [];
     public string BaseUrl { get; private set; } = "";
 
     public async Task InitializeAsync()
+    {
+        try { await StartAsync(); }
+        catch
+        {
+            // xunit does not dispose a fixture whose initialization failed; never leak the process or the database.
+            await DisposeAsync();
+            throw;
+        }
+    }
+
+    private async Task StartAsync()
     {
         var repositoryRoot = FindRepositoryRoot();
         var port = ReservePort();
@@ -40,8 +52,9 @@ public sealed class BrowserAppFixture : IAsyncLifetime
         Set(startInfo, "ProviderDeltaSync__Enabled", "false");
         Set(startInfo, "ImdbDataset__Enabled", "false");
         Set(startInfo, "Tmdb__BearerToken", "deterministic-browser-token");
-        Set(startInfo, "AppDatabase__Path", Path.Combine(_temporaryRoot, "data", "calendar.db"));
-        Set(startInfo, "AppDatabase__MigrationBackupDirectory", Path.Combine(_temporaryRoot, "backups"));
+        // The launched application creates and migrates the schema itself during startup.
+        _database = await PostgresTestDatabase.CreateAsync(initializeSchema: false);
+        foreach (var (key, value) in _database.AppEnvironment) Set(startInfo, key, value);
         Set(startInfo, "CalendarCache__Directory", Path.Combine(_temporaryRoot, "calendar-cache"));
         Set(startInfo, "ImageCache__Directory", Path.Combine(_temporaryRoot, "image-cache"));
         Set(startInfo, "Telemetry__LogDirectory", Path.Combine(_temporaryRoot, "logs"));
@@ -70,7 +83,7 @@ public sealed class BrowserAppFixture : IAsyncLifetime
         throw new TimeoutException($"PremiereCalendar did not become ready for browser tests.{Environment.NewLine}{diagnostics}");
     }
 
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
         if (_process is { HasExited: false })
         {
@@ -78,8 +91,11 @@ public sealed class BrowserAppFixture : IAsyncLifetime
             _process.WaitForExit(10_000);
         }
         _process?.Dispose();
+        _process = null;
+        if (_database is not null) await _database.DisposeAsync();
+        _database = null;
         if (_temporaryRoot is not null && Directory.Exists(_temporaryRoot)) Directory.Delete(_temporaryRoot, recursive: true);
-        return Task.CompletedTask;
+        _temporaryRoot = null;
     }
 
     private static void Set(ProcessStartInfo startInfo, string key, string value) => startInfo.Environment[key] = value;

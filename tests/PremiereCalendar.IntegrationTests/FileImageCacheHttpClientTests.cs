@@ -8,6 +8,7 @@ namespace PremiereCalendar.IntegrationTests;
 public sealed class FileImageCacheHttpClientTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-image-client-{Guid.NewGuid():N}");
+    private readonly List<PostgresTestDatabase> _databases = [];
 
     [Fact]
     public void ImageCacheHttpClientDoesNotFollowRedirectsItself()
@@ -18,12 +19,13 @@ public sealed class FileImageCacheHttpClientTests : IDisposable
             ["CalendarWarmup:Enabled"] = "false",
             ["ProviderDeltaSync:Enabled"] = "false",
             ["ImdbDataset:Enabled"] = "false",
-            ["AppDatabase:Path"] = Path.Combine(_root, "data", "calendar.db"),
-            ["AppDatabase:MigrationBackupDirectory"] = Path.Combine(_root, "backups"),
             ["CalendarCache:Directory"] = Path.Combine(_root, "calendar-cache"),
             ["ImageCache:Directory"] = Path.Combine(_root, "image-cache"),
             ["Telemetry:LogDirectory"] = Path.Combine(_root, "logs")
         };
+        var database = PostgresTestDatabase.Create();
+        _databases.Add(database);
+        foreach (var setting in database.AppSettings) settings[setting.Key] = setting.Value;
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
             builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(settings)));
 
@@ -38,6 +40,7 @@ public sealed class FileImageCacheHttpClientTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var database in _databases) database.Dispose();
         try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }

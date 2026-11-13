@@ -12,6 +12,7 @@ namespace PremiereCalendar.IntegrationTests;
 public sealed class WebApplicationFactoryTests : IDisposable
 {
     private readonly string _temporaryRoot = Path.Combine(Path.GetTempPath(), $"premiere-web-factory-{Guid.NewGuid():N}");
+    private readonly List<PostgresTestDatabase> _databases = [];
     private readonly WebApplicationFactory<Program> _factory;
     private readonly HttpClient _client;
     private readonly WebApplicationFactory<Program> _imageCacheDisabledFactory;
@@ -74,7 +75,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
     }
 
     [Fact]
-    public async Task HostShutdown_IsBoundedForWindowsServiceUpdates()
+    public async Task HostShutdown_IsBoundedForContainerStops()
     {
         var options = _factory.Services.GetRequiredService<IOptions<HostOptions>>().Value;
 
@@ -159,12 +160,13 @@ public sealed class WebApplicationFactoryTests : IDisposable
             ["CalendarWarmup:Enabled"] = "false",
             ["ProviderDeltaSync:Enabled"] = "false",
             ["ImdbDataset:Enabled"] = "false",
-            ["AppDatabase:Path"] = Path.Combine(instanceRoot, "data", "calendar.db"),
-            ["AppDatabase:MigrationBackupDirectory"] = Path.Combine(instanceRoot, "backups"),
             ["CalendarCache:Directory"] = Path.Combine(instanceRoot, "calendar-cache"),
             ["ImageCache:Directory"] = Path.Combine(instanceRoot, "image-cache"),
             ["Telemetry:LogDirectory"] = Path.Combine(instanceRoot, "logs")
         };
+        var database = PostgresTestDatabase.Create();
+        _databases.Add(database);
+        foreach (var setting in database.AppSettings) settings[setting.Key] = setting.Value;
         if (overrides is not null)
         {
             foreach (var pair in overrides)
@@ -183,6 +185,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
         _imageCacheDisabledFactory.Dispose();
         _client.Dispose();
         _factory.Dispose();
+        foreach (var database in _databases) database.Dispose();
         if (Directory.Exists(_temporaryRoot))
         {
             Directory.Delete(_temporaryRoot, recursive: true);

@@ -47,7 +47,7 @@ public sealed class BackgroundProducerStartupGateTests
         Assert.False(service.ExecuteTask!.IsCompleted);
         if (recover)
         {
-            recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "initialized", null, null));
+            recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "initialized", null));
             await probe.Touched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         }
         await service.StopAsync(default).WaitAsync(TimeSpan.FromSeconds(2));

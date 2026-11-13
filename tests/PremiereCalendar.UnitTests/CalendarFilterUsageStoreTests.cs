@@ -1,16 +1,11 @@
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
-using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
 public sealed class CalendarFilterUsageStoreTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-usage-store-{Guid.NewGuid():N}");
+    private readonly PostgresTestDatabase _database = PostgresTestDatabase.Create();
 
     [Fact]
     public async Task GetTopProfilesAsync_OrdersByUseCountAndDoesNotPinStoredWeek()
@@ -88,38 +83,7 @@ public sealed class CalendarFilterUsageStoreTests : IDisposable
         Assert.Contains(afterCleanup, profile => profile.PageMode == CalendarPageMode.All);
     }
 
-    public void Dispose()
-    {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        if (Directory.Exists(_root))
-        {
-            Directory.Delete(_root, recursive: true);
-        }
-    }
+    public void Dispose() => _database.Dispose();
 
-    private SqliteCalendarFilterUsageStore CreateStore()
-    {
-        TestSqliteDatabase.Initialize(_root, "data/usage.db");
-        return new SqliteCalendarFilterUsageStore(
-            Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/usage.db" }),
-            new FakeWebHostEnvironment(_root));
-    }
-
-    private sealed class FakeWebHostEnvironment : IWebHostEnvironment
-    {
-        public FakeWebHostEnvironment(string root)
-        {
-            ContentRootPath = root;
-            WebRootPath = root;
-            ContentRootFileProvider = new PhysicalFileProvider(root);
-            WebRootFileProvider = new PhysicalFileProvider(root);
-        }
-
-        public string EnvironmentName { get; set; } = "Development";
-        public string ApplicationName { get; set; } = "PremiereCalendar.Tests";
-        public string WebRootPath { get; set; }
-        public IFileProvider WebRootFileProvider { get; set; }
-        public string ContentRootPath { get; set; }
-        public IFileProvider ContentRootFileProvider { get; set; }
-    }
+    private CalendarFilterUsageStore CreateStore() => new(_database.Options);
 }

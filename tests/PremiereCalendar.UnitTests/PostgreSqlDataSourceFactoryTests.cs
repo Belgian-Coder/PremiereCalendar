@@ -20,7 +20,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
         File.WriteAllText(passwordFile, "initial-secret\n");
         var options = Options("Host=127.0.0.1;Port=1;Database=premiere;Username=app;Application Name=ignored", passwordFile);
 
-        using var connection = Assert.IsType<NpgsqlConnection>(DatabaseConnectionFactory.Create(options, _root));
+        using var connection = Assert.IsType<NpgsqlConnection>(DatabaseConnectionFactory.Create(options));
         var settings = new NpgsqlConnectionStringBuilder(connection.ConnectionString);
 
         Assert.True(settings.Pooling);
@@ -29,7 +29,6 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
         Assert.Equal("PremiereCalendar", settings.ApplicationName);
         Assert.Equal("premiere", settings.Database);
         Assert.Null(settings.Password);
-        Assert.True(DatabaseConnectionFactory.IsPostgreSql(connection));
     }
 
     [Fact]
@@ -37,13 +36,13 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     {
         var options = Options("Host=127.0.0.1;Port=1;Database=shared;Username=app");
 
-        using var first = DatabaseConnectionFactory.Create(options, _root);
-        using var second = DatabaseConnectionFactory.Create(options, _root);
+        using var first = DatabaseConnectionFactory.Create(options);
+        using var second = DatabaseConnectionFactory.Create(options);
 
         Assert.NotSame(first, second);
         Assert.Equal(first.ConnectionString, second.ConnectionString);
         // A different configuration must not reuse the data source (and therefore the pool).
-        using var other = DatabaseConnectionFactory.Create(Options("Host=127.0.0.1;Port=1;Database=other;Username=app"), _root);
+        using var other = DatabaseConnectionFactory.Create(Options("Host=127.0.0.1;Port=1;Database=other;Username=app"));
         Assert.NotEqual(first.ConnectionString, other.ConnectionString);
     }
 
@@ -52,8 +51,8 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     {
         var options = Options("Host=127.0.0.1;Port=1;Database=bulk;Username=app");
 
-        using var regular = DatabaseConnectionFactory.CreatePostgreSql(options);
-        using var bulk = DatabaseConnectionFactory.CreatePostgreSql(options, commandTimeoutSeconds: 0);
+        using var regular = DatabaseConnectionFactory.Create(options);
+        using var bulk = DatabaseConnectionFactory.Create(options, commandTimeoutSeconds: 0);
 
         Assert.Equal(30, new NpgsqlConnectionStringBuilder(regular.ConnectionString).CommandTimeout);
         Assert.Equal(0, new NpgsqlConnectionStringBuilder(bulk.ConnectionString).CommandTimeout);
@@ -84,21 +83,20 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
         var options = Options("Host=127.0.0.1;Port=1;Database=premiere;Username=app;Timeout=2",
             Path.Combine(_root, "absent-password"));
 
-        using var connection = DatabaseConnectionFactory.Create(options, _root);
+        using var connection = DatabaseConnectionFactory.Create(options);
 
         Assert.ThrowsAny<Exception>(connection.Open);
     }
 
     private static async Task ExpectAuthenticationFailureAsync(AppDatabaseOptions options)
     {
-        await using var connection = DatabaseConnectionFactory.Create(options, "unused");
+        await using var connection = DatabaseConnectionFactory.Create(options);
         var failure = await Assert.ThrowsAsync<PostgresException>(() => connection.OpenAsync());
         Assert.Equal("28P01", failure.SqlState);
     }
 
     private static AppDatabaseOptions Options(string connectionString, string? passwordFile = null) => new()
     {
-        Provider = "PostgreSql",
         ConnectionString = connectionString,
         PasswordFile = passwordFile ?? ""
     };

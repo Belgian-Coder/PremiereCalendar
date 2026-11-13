@@ -12,19 +12,19 @@ public sealed class PerformanceDiagnosticHostLifecycleTests
     {
         var root = Path.Combine(Path.GetTempPath(), "premiere-diagnostic-host-tests", Guid.NewGuid().ToString("N"));
         var logs = Path.Combine(root, "logs");
+        using var database = PostgresTestDatabase.Create();
+        var settings = new Dictionary<string, string?>(database.AppSettings)
+        {
+            ["ProviderScheduler:Enabled"] = "false", ["CalendarWarmup:Enabled"] = "false",
+            ["ProviderDeltaSync:Enabled"] = "false", ["ImdbDataset:Enabled"] = "false",
+            ["CalendarCache:Directory"] = Path.Combine(root, "calendar-cache"),
+            ["ImageCache:Directory"] = Path.Combine(root, "image-cache"),
+            ["Telemetry:LogDirectory"] = logs
+        };
         try
         {
             using (var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-                       builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
-                       {
-                           ["ProviderScheduler:Enabled"] = "false", ["CalendarWarmup:Enabled"] = "false",
-                           ["ProviderDeltaSync:Enabled"] = "false", ["ImdbDataset:Enabled"] = "false",
-                           ["AppDatabase:Path"] = Path.Combine(root, "data", "calendar.db"),
-                           ["AppDatabase:MigrationBackupDirectory"] = Path.Combine(root, "backups"),
-                           ["CalendarCache:Directory"] = Path.Combine(root, "calendar-cache"),
-                           ["ImageCache:Directory"] = Path.Combine(root, "image-cache"),
-                           ["Telemetry:LogDirectory"] = logs
-                       }))))
+                       builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(settings))))
             {
                 using var client = factory.CreateClient();
                 var telemetry = factory.Services.GetRequiredService<PremiereTelemetry>();
@@ -45,7 +45,6 @@ public sealed class PerformanceDiagnosticHostLifecycleTests
         }
         finally
         {
-            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }

@@ -1,13 +1,9 @@
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
 public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-scheduler-tests", Guid.NewGuid().ToString("N"));
@@ -15,19 +11,20 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
     private ProviderWorkScheduler _scheduler = null!;
     private AdaptiveProviderPolicy _providerPolicy = null!;
     private ProviderAdaptiveStateStore _providerStore = null!;
+    private PostgresTestDatabase _database = null!;
 
     public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_root);
         var environment = new TestEnvironment(_root);
-        var database = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "scheduler.db" });
-        await new SqliteDatabaseInitializer(database, environment, NullLogger<SqliteDatabaseInitializer>.Instance).InitializeAsync();
+        _database = await PostgresTestDatabase.CreateAsync();
+        var database = _database.Options;
         _store = new ProviderWorkStore(database, environment);
         _scheduler = new ProviderWorkScheduler(
             _store,
             TimeProvider.System,
             Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30, MaximumAttempts = 3 }));
-        _providerStore = new ProviderAdaptiveStateStore(database, environment);
+        _providerStore = new ProviderAdaptiveStateStore(database);
         _providerPolicy = new AdaptiveProviderPolicy(_providerStore, TimeProvider.System, new PremiereTelemetry());
     }
 
@@ -50,26 +47,24 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
 
         var claimed = await _scheduler.ClaimNextAsync(false, "test", CancellationToken.None);
         Assert.Equal(foreground.JobId, claimed!.JobId);
-        await using (var legacy = new SqliteConnection($"Data Source={Path.Combine(_root, "scheduler.db")}"))
+        await using (var legacy = await _database.OpenAsync())
         {
-            await legacy.OpenAsync();
             await using var seed = legacy.CreateCommand();
-            seed.CommandText = "UPDATE ProviderWorkJobs SET ProgressJson='legacy duplicate' WHERE JobId=$id";
-            seed.Parameters.AddWithValue("$id", claimed.JobId);
+            seed.CommandText = "UPDATE ProviderWorkJobs SET ProgressJson='legacy duplicate' WHERE JobId=@id";
+            seed.Parameters.AddWithValue("id", claimed.JobId);
             await seed.ExecuteNonQueryAsync();
         }
         await _scheduler.PublishAsync(claimed, new ProviderWorkProgress(claimed.JobId, ProviderWorkState.Running, "page 2", 2, 5), CancellationToken.None);
         var persisted = await _scheduler.GetAsync(claimed.JobId);
         Assert.Contains("page 2", persisted!.CheckpointJson);
-        await using var connection = new SqliteConnection($"Data Source={Path.Combine(_root, "scheduler.db")}");
-        await connection.OpenAsync();
+        await using var connection = await _database.OpenAsync();
         await using var leases = connection.CreateCommand();
-        leases.CommandText = "SELECT COUNT(*) FROM ProviderWorkLeases WHERE JobId=$id";
-        leases.Parameters.AddWithValue("$id", claimed.JobId);
+        leases.CommandText = "SELECT COUNT(*) FROM ProviderWorkLeases WHERE JobId=@id";
+        leases.Parameters.AddWithValue("id", claimed.JobId);
         Assert.Equal(1L, await leases.ExecuteScalarAsync());
         await using var payload = connection.CreateCommand();
-        payload.CommandText = "SELECT ProgressJson FROM ProviderWorkJobs WHERE JobId=$id";
-        payload.Parameters.AddWithValue("$id", claimed.JobId);
+        payload.CommandText = "SELECT ProgressJson FROM ProviderWorkJobs WHERE JobId=@id";
+        payload.Parameters.AddWithValue("id", claimed.JobId);
         Assert.Equal(DBNull.Value, await payload.ExecuteScalarAsync());
     }
 
@@ -248,11 +243,10 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
         Assert.Equal(newer, persisted.UpdatedUtc);
     }
 
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        if (_database is not null) await _database.DisposeAsync();
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
-        return Task.CompletedTask;
     }
 
     private sealed class TestEnvironment(string root) : IWebHostEnvironment

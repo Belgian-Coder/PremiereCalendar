@@ -2,32 +2,25 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Options;
 using PremiereCalendar.Hosting;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
 public sealed class ProviderCompressionTransportTests : IAsyncLifetime
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-provider-compression-tests", Guid.NewGuid().ToString("N"));
     private AdaptiveProviderPolicy _policy = null!;
+    private PostgresTestDatabase _database = null!;
 
-    public Task InitializeAsync()
+    public async Task InitializeAsync()
     {
-        Directory.CreateDirectory(_root);
-        TestSqliteDatabase.Initialize(_root, "provider.db");
-        var database = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "provider.db" });
+        _database = await PostgresTestDatabase.CreateAsync();
         _policy = new AdaptiveProviderPolicy(
-            new ProviderAdaptiveStateStore(database, new Environment(_root)),
+            new ProviderAdaptiveStateStore(_database.Options),
             TimeProvider.System,
             new PremiereTelemetry(),
             Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions()));
-        return Task.CompletedTask;
     }
 
     [Fact]
@@ -126,13 +119,9 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         return output.ToArray();
     }
 
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-        return Task.CompletedTask;
+        if (_database is not null) await _database.DisposeAsync();
     }
 
     /// <summary>Single-purpose HTTP/1.1 peer that answers every request with a fixed pre-encoded body.</summary>
@@ -208,15 +197,5 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
             try { await _loop.WaitAsync(TimeSpan.FromSeconds(2)); } catch (Exception) { }
             _stop.Dispose();
         }
-    }
-
-    private sealed class Environment(string root) : IWebHostEnvironment
-    {
-        public string EnvironmentName { get; set; } = "Test";
-        public string ApplicationName { get; set; } = "PremiereCalendar.UnitTests";
-        public string WebRootPath { get; set; } = root;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

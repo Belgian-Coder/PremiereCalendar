@@ -1,8 +1,5 @@
-using Microsoft.AspNetCore.Hosting;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -12,23 +9,23 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
-public sealed class ItemEnrichmentStoreTests
+public sealed class ItemEnrichmentStoreTests : IDisposable
 {
+    private readonly PostgresTestDatabase _database = PostgresTestDatabase.Create();
+
+    public void Dispose() => _database.Dispose();
+
     [Fact]
-    public Task SQLite_SchemaThreeUpgradePreservesDataAndHistory() =>
-        WithStoreAsync(false, fixture => SchemaThreeUpgradeAsync(fixture, false));
-
-    [ConfiguredPostgresFact]
     public Task PostgreSQL_SchemaThreeUpgradePreservesDataAndHistory() =>
-        WithStoreAsync(true, fixture => SchemaThreeUpgradeAsync(fixture, true));
+        WithStoreAsync(fixture => SchemaThreeUpgradeAsync(fixture));
 
-    [ConfiguredPostgresFact]
-    public Task PostgreSQL_UnrelatedRowsRemainAvailableDuringBlockedWrite() => WithStoreAsync(true, async fixture =>
+    [Fact]
+    public Task PostgreSQL_UnrelatedRowsRemainAvailableDuringBlockedWrite() => WithStoreAsync(async fixture =>
     {
         var blockedKey = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 1);
         var independentKey = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 2);
         await fixture.Store.ReadManyAsync("a", [blockedKey, independentKey], true, CancellationToken.None);
-        await using var blocker = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+        await using var blocker = DatabaseConnectionFactory.Create(fixture.Options.Value);
         await blocker.OpenAsync();
         await using var transaction = await blocker.BeginTransactionAsync();
         await using (var hold = new NpgsqlCommand("SELECT 1 FROM ItemEnrichments WHERE PartitionKey = 'a' AND TmdbId = 1 FOR UPDATE", blocker, transaction))
@@ -37,7 +34,7 @@ public sealed class ItemEnrichmentStoreTests
         var pendingWrite = fixture.Store.WriteManyAsync("a", [new(blockedKey, 0, "{}", fixture.Clock.GetUtcNow())], budget.Token);
         try
         {
-            await using var observer = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+            await using var observer = DatabaseConnectionFactory.Create(fixture.Options.Value);
             await observer.OpenAsync(budget.Token);
             while (true)
             {
@@ -56,14 +53,14 @@ public sealed class ItemEnrichmentStoreTests
         }
     });
 
-    [ConfiguredPostgresFact]
-    public Task PostgreSQL_ConcurrentAcceptedWritesReturnTheWinnerInsideEachTransaction() => WithStoreAsync(true, async fixture =>
+    [Fact]
+    public Task PostgreSQL_ConcurrentAcceptedWritesReturnTheWinnerInsideEachTransaction() => WithStoreAsync(async fixture =>
     {
         var key = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 703);
         var now = fixture.Clock.GetUtcNow();
         await fixture.Store.ReadManyAsync("accepted", [key], true, CancellationToken.None);
-        var other = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
-        await using var blocker = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+        var other = new ItemEnrichmentStore(fixture.Options, fixture.Clock);
+        await using var blocker = DatabaseConnectionFactory.Create(fixture.Options.Value);
         await blocker.OpenAsync();
         await using var transaction = await blocker.BeginTransactionAsync();
         await using (var hold = new NpgsqlCommand("SELECT 1 FROM ItemEnrichments WHERE PartitionKey = 'accepted' AND TmdbId = 703 FOR UPDATE", blocker, transaction))
@@ -87,7 +84,7 @@ public sealed class ItemEnrichmentStoreTests
 
         async Task WaitForLockWaitersAsync(int count)
         {
-            await using var observer = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+            await using var observer = DatabaseConnectionFactory.Create(fixture.Options.Value);
             await observer.OpenAsync(budget.Token);
             while (true)
             {
@@ -113,24 +110,7 @@ public sealed class ItemEnrichmentStoreTests
     [InlineData("local-known-and-all-partitions-dirty")]
     [InlineData("tvmaze-reservation-retention")]
     [InlineData("tvmaze-reservation-expiry")]
-    public Task SQLite_StoreContract(string scenario) => WithStoreAsync(false, fixture => RunScenarioAsync(scenario, fixture));
-
-    [ConfiguredPostgresTheory]
-    [InlineData("batch-restart-partitions")]
-    [InlineData("independent-components")]
-    [InlineData("metadata-revision-and-observation")]
-    [InlineData("ratings-metadata-revision")]
-    [InlineData("batched-provider-invalidation")]
-    [InlineData("invalidation-race")]
-    [InlineData("tvmaze-invalidation")]
-    [InlineData("unmapped-tvmaze-reservation")]
-    [InlineData("calendar-month-retention")]
-    [InlineData("duplicate-writes")]
-    [InlineData("pure-validation-and-accepted-winners")]
-    [InlineData("local-known-and-all-partitions-dirty")]
-    [InlineData("tvmaze-reservation-retention")]
-    [InlineData("tvmaze-reservation-expiry")]
-    public Task PostgreSQL_StoreContract(string scenario) => WithStoreAsync(true, fixture => RunScenarioAsync(scenario, fixture));
+    public Task PostgreSQL_StoreContract(string scenario) => WithStoreAsync(fixture => RunScenarioAsync(scenario, fixture));
 
     [Theory]
     [InlineData("external-first")]
@@ -151,36 +131,15 @@ public sealed class ItemEnrichmentStoreTests
     [InlineData("dataset-identity-removal")]
     [InlineData("exact-ratings-repair")]
     [InlineData("stale-exact-ratings-repair")]
-    public Task SQLite_TrackedRatingsContract(string scenario) => WithStoreAsync(false, fixture => TrackedRatingsContractAsync(scenario, fixture));
+    public Task PostgreSQL_TrackedRatingsContract(string scenario) => WithStoreAsync(fixture => TrackedRatingsContractAsync(scenario, fixture));
 
-    [ConfiguredPostgresTheory]
-    [InlineData("external-first")]
-    [InlineData("tomatoes-first")]
-    [InlineData("equal-component-clocks")]
-    [InlineData("verified-empty")]
-    [InlineData("verified-empty-tomatoes")]
-    [InlineData("dedicated-empty-over-external-fallback")]
-    [InlineData("foreign-identities")]
-    [InlineData("imdb-identity-only")]
-    [InlineData("tomatoes-identity-only")]
-    [InlineData("generation-invalidation")]
-    [InlineData("dataset-with-omdb-failure")]
-    [InlineData("dataset-before-providers")]
-    [InlineData("dataset-after-providers")]
-    [InlineData("dataset-null-fallback")]
-    [InlineData("dataset-identity-change")]
-    [InlineData("dataset-identity-removal")]
-    [InlineData("exact-ratings-repair")]
-    [InlineData("stale-exact-ratings-repair")]
-    public Task PostgreSQL_TrackedRatingsContract(string scenario) => WithStoreAsync(true, fixture => TrackedRatingsContractAsync(scenario, fixture));
-
-    [ConfiguredPostgresFact]
-    public Task PostgreSQL_OverlappingTrackedWritesFromSeparateStoresPreserveIndependentSuccesses() => WithStoreAsync(true, async fixture =>
+    [Fact]
+    public Task PostgreSQL_OverlappingTrackedWritesFromSeparateStoresPreserveIndependentSuccesses() => WithStoreAsync(async fixture =>
     {
         var seed = await SeedTrackedRatingsAsync(fixture);
         var (external, tomatoes) = IndependentTrackedWrites(fixture, seed);
-        var otherStore = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
-        await using var blocker = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+        var otherStore = new ItemEnrichmentStore(fixture.Options, fixture.Clock);
+        await using var blocker = DatabaseConnectionFactory.Create(fixture.Options.Value);
         await blocker.OpenAsync();
         await using var transaction = await blocker.BeginTransactionAsync();
         await using (var hold = new NpgsqlCommand("SELECT 1 FROM ItemEnrichments WHERE PartitionKey = 'tracked' AND TmdbId = 901 FOR UPDATE", blocker, transaction))
@@ -190,7 +149,7 @@ public sealed class ItemEnrichmentStoreTests
         var second = otherStore.WriteManyAsync("tracked", [tomatoes], budget.Token);
         try
         {
-            await using var observer = (NpgsqlConnection)DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+            await using var observer = DatabaseConnectionFactory.Create(fixture.Options.Value);
             await observer.OpenAsync(budget.Token);
             while (true)
             {
@@ -544,7 +503,7 @@ public sealed class ItemEnrichmentStoreTests
         Assert.Equal(130, JsonSerializer.Deserialize<ItemEnrichmentMetadata>(record.MetadataJson!)?.RuntimeMinutes);
         Assert.Equal(seed.Record.MetadataRevision + 1, record.MetadataRevision);
         Assert.Equal(0, record.Generation);
-        var restarted = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
+        var restarted = new ItemEnrichmentStore(fixture.Options, fixture.Clock);
         var persisted = (await restarted.ReadManyAsync("tracked", [seed.Key], false, CancellationToken.None))[seed.Key];
         Assert.Equal(record.RatingsJson, persisted.RatingsJson);
         Assert.Equal(record.RatingsFetchedUtc, persisted.RatingsFetchedUtc);
@@ -639,7 +598,7 @@ public sealed class ItemEnrichmentStoreTests
             key, 0, $"{{\"id\":{key.TmdbId},\"kind\":\"{key.MediaType}\"}}", now.AddHours(-2), "{\"score\":8}", now.AddHours(-1))).ToArray(), CancellationToken.None);
         Assert.Equal(keys.Length, written);
         fixture.Clock.UtcNow = now.AddDays(2);
-        var restarted = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
+        var restarted = new ItemEnrichmentStore(fixture.Options, fixture.Clock);
         var restored = await restarted.ReadManyAsync("config-a", keys, false, CancellationToken.None);
         Assert.Equal(keys.Length, restored.Count);
         Assert.All(restored.Values, record =>
@@ -917,7 +876,7 @@ public sealed class ItemEnrichmentStoreTests
         var earlierChange = now.AddHours(-3);
         Assert.Equal(1, await fixture.Store.InvalidateTmdbAsync(PremiereMediaType.Series, [cachedWithInvalidation.TmdbId], earlierChange, CancellationToken.None));
         await using var firstLookup = await fixture.Store.ReserveTvmazeLookupAsync("a", cachedWithoutMap, CancellationToken.None);
-        await using var overlappingLookup = await new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock)
+        await using var overlappingLookup = await new ItemEnrichmentStore(fixture.Options, fixture.Clock)
             .ReserveTvmazeLookupAsync("a", cachedWithoutMap, CancellationToken.None);
         await using var invalidatedLookup = await fixture.Store.ReserveTvmazeLookupAsync("a", cachedWithInvalidation, CancellationToken.None);
         await firstLookup.DisposeAsync(); // One session cannot remove the other session's reservation.
@@ -933,7 +892,7 @@ public sealed class ItemEnrichmentStoreTests
             new(cachedWithoutMap, 0, "{\"title\":\"late cached lookup\"}", epoch, TvmazeShowId: 1102),
             new(cachedWithInvalidation, 1, "{\"title\":\"late cached lookup after prior change\"}", epoch, TvmazeShowId: 1105)
         ], CancellationToken.None));
-        await using (var connection = DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath))
+        await using (var connection = DatabaseConnectionFactory.Create(fixture.Options.Value))
         {
             await connection.OpenAsync();
             await using var retention = connection.CreateCommand();
@@ -1056,7 +1015,7 @@ public sealed class ItemEnrichmentStoreTests
 
         async Task<int> CountLeasesAsync()
         {
-            await using var connection = DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+            await using var connection = DatabaseConnectionFactory.Create(fixture.Options.Value);
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
             command.CommandText = "SELECT COUNT(*) FROM ProviderCacheState WHERE Provider = 'item-cache.tvmaze-lookup'";
@@ -1100,7 +1059,7 @@ public sealed class ItemEnrichmentStoreTests
         Assert.Equal(epoch, rejected.MetadataInvalidatedUtc);
         Assert.Null(rejected.TvmazeShowId);
 
-        var other = new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment, fixture.Clock);
+        var other = new ItemEnrichmentStore(fixture.Options, fixture.Clock);
         var winner = (await other.WriteAcceptedAsync("expiry", [new(foreign, captured[foreign].Generation,
             "{\"title\":\"fresh other writer\"}", epoch, ExpectedMetadataRevision: captured[foreign].MetadataRevision)], CancellationToken.None))[foreign];
         var preserved = (await fixture.Store.WriteAcceptedAsync("expiry", [new(foreign, captured[foreign].Generation,
@@ -1152,9 +1111,9 @@ public sealed class ItemEnrichmentStoreTests
         Assert.Equal("{\"score\":9}", row.RatingsJson);
     }
 
-    private static async Task SchemaThreeUpgradeAsync(Fixture fixture, bool postgres)
+    private static async Task SchemaThreeUpgradeAsync(Fixture fixture)
     {
-        await using var connection = DatabaseConnectionFactory.Create(fixture.Options.Value, fixture.Environment.ContentRootPath);
+        await using var connection = DatabaseConnectionFactory.Create(fixture.Options.Value);
         await connection.OpenAsync();
         await using (var prepare = connection.CreateCommand())
         {
@@ -1165,17 +1124,13 @@ public sealed class ItemEnrichmentStoreTests
                     VALUES ('tmdb', 'Global', 'preserved-delta', '2026-01-01', '2026-01-01', 'saved-watermark', '{}');
                 DROP TABLE ItemEnrichments;
                 DELETE FROM SchemaMigrations WHERE Version = 4;
-                """ + (postgres ? "" : "PRAGMA user_version = 3;");
+                """;
             await prepare.ExecuteNonQueryAsync();
         }
         var previousHistory = await ReadHistoryAsync();
         var recovery = new DatabaseRecoveryState();
-        if (postgres)
-            await new PostgresDatabaseInitializer(fixture.Options, fixture.Environment, recovery, TimeProvider.System,
-                NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry()).InitializeAsync();
-        else
-            await new SqliteDatabaseInitializer(fixture.Options, fixture.Environment, recovery, TimeProvider.System,
-                NullLogger<SqliteDatabaseInitializer>.Instance).InitializeAsync();
+        await new PostgresDatabaseInitializer(fixture.Options, recovery, TimeProvider.System,
+            NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry()).InitializeAsync();
         Assert.True(recovery.Snapshot.IsHealthy, recovery.Snapshot.Message);
         Assert.Equal(4, recovery.Snapshot.CurrentVersion);
         Assert.Equal(previousHistory, await ReadHistoryAsync());
@@ -1187,7 +1142,7 @@ public sealed class ItemEnrichmentStoreTests
         verify.CommandText = "SELECT Watermark FROM ProviderCacheState WHERE CacheKey = 'preserved-delta'";
         Assert.Equal("saved-watermark", await verify.ExecuteScalarAsync());
         var key = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 9);
-        Assert.Single(await new SqliteItemEnrichmentStore(fixture.Options, fixture.Environment)
+        Assert.Single(await new ItemEnrichmentStore(fixture.Options)
             .ReadManyAsync("upgraded", [key], true, CancellationToken.None));
 
         async Task<string[]> ReadHistoryAsync()
@@ -1201,82 +1156,16 @@ public sealed class ItemEnrichmentStoreTests
         }
     }
 
-    private static async Task WithStoreAsync(bool postgres, Func<Fixture, Task> action)
+    private async Task WithStoreAsync(Func<Fixture, Task> action)
     {
-        var root = Path.Combine(Path.GetTempPath(), "premierecalendar-item-store-tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        NpgsqlConnection? admin = null;
-        var database = $"premierecalendar_items_test_{Guid.NewGuid():N}";
-        try
-        {
-            var environment = new StoreEnvironment(root);
-            IOptions<AppDatabaseOptions> options;
-            if (postgres)
-            {
-                var builder = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("PREMIERECALENDAR_TEST_POSTGRES")) { Database = "postgres" };
-                var passwordFile = Environment.GetEnvironmentVariable("PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE");
-                if (!string.IsNullOrWhiteSpace(passwordFile)) builder.Password = File.ReadAllText(passwordFile).TrimEnd('\r', '\n');
-                admin = new NpgsqlConnection(builder.ConnectionString);
-                await admin.OpenAsync();
-                await using (var create = new NpgsqlCommand($"CREATE DATABASE \"{database}\"", admin)) await create.ExecuteNonQueryAsync();
-                builder.Database = database;
-                options = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Provider = "PostgreSql", ConnectionString = builder.ConnectionString });
-                var recovery = new DatabaseRecoveryState();
-                await new PostgresDatabaseInitializer(options, environment, recovery, TimeProvider.System, NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry()).InitializeAsync();
-                Assert.True(recovery.Snapshot.IsHealthy, recovery.Snapshot.Message);
-            }
-            else
-            {
-                options = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "items.db" });
-                TestSqliteDatabase.Initialize(root, "items.db");
-            }
-            var clock = new StoreClock { UtcNow = DateTimeOffset.Parse("2026-11-03T12:00:00Z") };
-            await action(new Fixture(options, environment, clock, new SqliteItemEnrichmentStore(options, environment, clock)));
-        }
-        finally
-        {
-            if (admin is not null)
-            {
-                // Close only this fixture's pooled connections; other integration
-                // tests can be using independent databases concurrently.
-                await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)", admin);
-                await drop.ExecuteNonQueryAsync();
-                await admin.DisposeAsync();
-            }
-            SqliteConnection.ClearAllPools();
-            Directory.Delete(root, recursive: true);
-        }
+        var clock = new StoreClock { UtcNow = DateTimeOffset.Parse("2026-11-03T12:00:00Z") };
+        await action(new Fixture(_database.Options, clock, new ItemEnrichmentStore(_database.Options, clock)));
     }
 
-    private sealed record Fixture(IOptions<AppDatabaseOptions> Options, StoreEnvironment Environment, StoreClock Clock, SqliteItemEnrichmentStore Store);
+    private sealed record Fixture(IOptions<AppDatabaseOptions> Options, StoreClock Clock, ItemEnrichmentStore Store);
     private sealed class StoreClock : TimeProvider
     {
         public DateTimeOffset UtcNow { get; set; }
         public override DateTimeOffset GetUtcNow() => UtcNow;
-    }
-    private sealed class StoreEnvironment(string root) : IWebHostEnvironment
-    {
-        public string ApplicationName { get; set; } = "PremiereCalendar.IntegrationTests";
-        public string EnvironmentName { get; set; } = "Testing";
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
-        public string WebRootPath { get; set; } = root;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-    }
-    private sealed class ConfiguredPostgresTheoryAttribute : TheoryAttribute
-    {
-        public ConfiguredPostgresTheoryAttribute()
-        {
-            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PREMIERECALENDAR_TEST_POSTGRES")))
-                Skip = "Configure PREMIERECALENDAR_TEST_POSTGRES for isolated PostgreSQL item-store coverage.";
-        }
-    }
-    private sealed class ConfiguredPostgresFactAttribute : FactAttribute
-    {
-        public ConfiguredPostgresFactAttribute()
-        {
-            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PREMIERECALENDAR_TEST_POSTGRES")))
-                Skip = "Configure PREMIERECALENDAR_TEST_POSTGRES for isolated PostgreSQL item-store coverage.";
-        }
     }
 }

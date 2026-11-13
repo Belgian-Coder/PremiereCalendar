@@ -17,6 +17,7 @@ namespace PremiereCalendar.IntegrationTests;
 public sealed class CachedImageEndpointTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-cached-image-endpoint-{Guid.NewGuid():N}");
+    private readonly List<PostgresTestDatabase> _databases = [];
 
     [Fact]
     public async Task CachedImageEndpoint_UsesEncodedContentHashAndShortFreshnessForStaleImage()
@@ -262,12 +263,13 @@ public sealed class CachedImageEndpointTests : IDisposable
             ["CalendarWarmup:Enabled"] = "false",
             ["ProviderDeltaSync:Enabled"] = "false",
             ["ImdbDataset:Enabled"] = "false",
-            ["AppDatabase:Path"] = Path.Combine(instanceRoot, "data", "calendar.db"),
-            ["AppDatabase:MigrationBackupDirectory"] = Path.Combine(instanceRoot, "backups"),
             ["CalendarCache:Directory"] = Path.Combine(instanceRoot, "calendar-cache"),
             ["ImageCache:Directory"] = Path.Combine(instanceRoot, "image-cache"),
             ["Telemetry:LogDirectory"] = Path.Combine(instanceRoot, "logs")
         };
+        var database = PostgresTestDatabase.Create();
+        _databases.Add(database);
+        foreach (var setting in database.AppSettings) settings[setting.Key] = setting.Value;
 
         return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -282,6 +284,7 @@ public sealed class CachedImageEndpointTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var database in _databases) database.Dispose();
         if (Directory.Exists(_root))
         {
             Directory.Delete(_root, recursive: true);

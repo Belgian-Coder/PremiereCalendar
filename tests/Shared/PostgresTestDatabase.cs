@@ -24,6 +24,18 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
     private static readonly Lazy<ServerConfiguration> Server = new(ReadServerConfiguration);
     private int _disposed;
 
+    /// <summary>
+    /// Many tests create their database synchronously from a constructor (xUnit has no async constructors). Those
+    /// blocked threads must not starve the pool the same databases need to complete their I/O, nor delay the timers
+    /// of unrelated timing-sensitive tests, so the pool starts with generous minimum thread counts.
+    /// </summary>
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void ConfigureThreadPool()
+    {
+        ThreadPool.GetMinThreads(out var worker, out var io);
+        ThreadPool.SetMinThreads(Math.Max(worker, 64), Math.Max(io, 64));
+    }
+
     private PostgresTestDatabase(string name, NpgsqlConnectionStringBuilder application, string? passwordFile, string? password)
     {
         Name = name;
@@ -101,10 +113,13 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
     }
 
 #if POSTGRES_TEST_INPROCESS
-    /// <summary>Runs the application's migrations against this database and asserts that they succeeded.</summary>
-    public async Task InitializeSchemaAsync()
+    /// <summary>
+    /// Runs the application's migrations against this database and throws when they did not succeed. Pass the
+    /// <see cref="DatabaseRecoveryState"/> that the code under test waits on to mark it healthy as well.
+    /// </summary>
+    public async Task InitializeSchemaAsync(DatabaseRecoveryState? recoveryState = null)
     {
-        var recovery = new DatabaseRecoveryState();
+        var recovery = recoveryState ?? new DatabaseRecoveryState();
         await new PostgresDatabaseInitializer(Options, recovery, TimeProvider.System,
             NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry()).InitializeAsync();
         if (!recovery.Snapshot.IsHealthy) throw new InvalidOperationException(recovery.Snapshot.Message);

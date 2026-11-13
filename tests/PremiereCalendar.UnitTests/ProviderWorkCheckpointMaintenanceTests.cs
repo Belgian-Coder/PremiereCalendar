@@ -2,21 +2,16 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.FileProviders;
-using PremiereCalendar.Options;
+using Npgsql;
+using NpgsqlTypes;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
 public sealed class ProviderWorkCheckpointMaintenanceTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-checkpoint-maintenance", Guid.NewGuid().ToString("N"));
+    private readonly PostgresTestDatabase _database = PostgresTestDatabase.Create();
     private readonly DateTimeOffset _now = DateTimeOffset.UtcNow;
-
-    public ProviderWorkCheckpointMaintenanceTests() => TestSqliteDatabase.Initialize(_root, "maintenance.db");
 
     [Fact]
     public async Task OfflineConversionPreservesExactFullJsonAndEveryOtherJobAndLeaseColumn()
@@ -81,58 +76,52 @@ public sealed class ProviderWorkCheckpointMaintenanceTests : IDisposable
         Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await SnapshotAsync("ProviderWorkJobs")));
     }
 
-    private ProviderWorkCheckpointMaintenance Maintenance() => new(
-        Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "maintenance.db" }),
-        new TestEnvironment(_root), new FixedTimeProvider(_now));
+    private ProviderWorkCheckpointMaintenance Maintenance() => new(_database.Options, new FixedTimeProvider(_now));
 
     private async Task SeedAsync(string id, string? checkpoint, string state = "Completed")
     {
-        await using var connection = Connection();
-        await connection.OpenAsync();
+        await using var connection = await _database.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO ProviderWorkJobs (JobId, Kind, DedupeKey, Priority, PayloadJson, CheckpointJson, State, AttemptCount,
                 EnqueuedUtc, StartedUtc, CompletedUtc, NextAttemptUtc, LeaseOwner, LeaseExpiresUtc, ProgressJson, LastError)
-            VALUES ($id, 'CalendarForeground', $id, 200, '{"preserve":"payload"}', $checkpoint, $state, 7,
+            VALUES (@id, 'CalendarForeground', @id, 200, '{"preserve":"payload"}', @checkpoint, @state, 7,
                 '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', '2026-01-01T00:02:00Z', '2026-01-01T00:03:00Z',
                 'saved-owner', '2026-01-01T00:04:00Z', '{"preserve":"progress"}', 'saved error')
             """;
-        command.Parameters.AddWithValue("$id", id);
-        command.Parameters.AddWithValue("$checkpoint", (object?)checkpoint ?? DBNull.Value);
-        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.Add(new NpgsqlParameter("checkpoint", NpgsqlDbType.Text) { Value = (object?)checkpoint ?? DBNull.Value });
+        command.Parameters.AddWithValue("state", state);
         await command.ExecuteNonQueryAsync();
     }
 
     private async Task SeedLeaseAsync(string id, DateTimeOffset expiry)
     {
-        await using var connection = Connection();
-        await connection.OpenAsync();
+        await using var connection = await _database.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO ProviderWorkLeases VALUES ($id, 'saved-owner', $expiry, '2026-01-01T00:00:00Z')";
-        command.Parameters.AddWithValue("$id", id);
-        command.Parameters.AddWithValue("$expiry", expiry.ToString("O", CultureInfo.InvariantCulture));
+        command.CommandText = "INSERT INTO ProviderWorkLeases VALUES (@id, 'saved-owner', @expiry, '2026-01-01T00:00:00Z')";
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("expiry", expiry.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync();
     }
 
     private async Task<List<Dictionary<string, object?>>> SnapshotAsync(string table)
     {
-        await using var connection = Connection();
-        await connection.OpenAsync();
+        await using var connection = await _database.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM " + table + " ORDER BY JobId";
         await using var reader = await command.ExecuteReaderAsync();
         var rows = new List<Dictionary<string, object?>>();
         while (await reader.ReadAsync())
         {
-            var row = new Dictionary<string, object?>();
+            // PostgreSQL folds unquoted column names to lower case; keep lookups by the schema's spelling working.
+            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
             for (var column = 0; column < reader.FieldCount; column++)
                 row[reader.GetName(column)] = reader.IsDBNull(column) ? null : reader.GetValue(column);
             rows.Add(row);
         }
         return rows;
     }
-
-    private SqliteConnection Connection() => new($"Data Source={Path.Combine(_root, "maintenance.db")}");
 
     private static string LegacyJson()
     {
@@ -150,24 +139,10 @@ public sealed class ProviderWorkCheckpointMaintenanceTests : IDisposable
         return JsonSerializer.Serialize(new { Version = 4, Encoding = "br-base64", UncompressedBytes = bytes.Length, Payload = Convert.ToBase64String(stream.ToArray()) });
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        Directory.Delete(_root, recursive: true);
-    }
+    public void Dispose() => _database.Dispose();
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
-    }
-
-    private sealed class TestEnvironment(string root) : IWebHostEnvironment
-    {
-        public string ApplicationName { get; set; } = "MaintenanceTests";
-        public string EnvironmentName { get; set; } = "Test";
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
-        public string WebRootPath { get; set; } = root;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

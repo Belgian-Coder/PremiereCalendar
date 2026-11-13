@@ -1,15 +1,11 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
 public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-provider-diagnostics", Guid.NewGuid().ToString("N"));
@@ -17,16 +13,16 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
     private PerformanceDiagnosticStore _diagnostics = null!;
     private PremiereTelemetry _telemetry = null!;
     private AdaptiveProviderPolicy _policy = null!;
+    private PostgresTestDatabase _database = null!;
 
-    public Task InitializeAsync()
+    public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_root);
-        TestSqliteDatabase.Initialize(_root, "provider.db");
+        _database = await PostgresTestDatabase.CreateAsync();
         _diagnostics = new(new TelemetryOptions { LogDirectory = "logs" }, _root);
         _telemetry = new(_diagnostics);
-        _policy = new(new ProviderAdaptiveStateStore(Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "provider.db" }), new TestEnvironment(_root)),
+        _policy = new(new ProviderAdaptiveStateStore(_database.Options),
             _time, _telemetry, Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { RetryBaseMilliseconds = 50, RetryMaximumSeconds = 10 }));
-        return Task.CompletedTask;
     }
 
     [Fact]
@@ -306,28 +302,17 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
             await Task.Delay(1);
         }
     }
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
         _diagnostics.Dispose();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        if (_database is not null) await _database.DisposeAsync();
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
-        return Task.CompletedTask;
     }
     private sealed class ResponseHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             => Task.FromResult(send(request));
     }
-    private sealed class TestEnvironment(string root) : IWebHostEnvironment
-    {
-        public string EnvironmentName { get; set; } = "Test";
-        public string ApplicationName { get; set; } = "PremiereCalendar.UnitTests";
-        public string WebRootPath { get; set; } = root;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
-    }
-
     private sealed class ControlledBodyStream : Stream
     {
         private readonly System.Threading.Channels.Channel<byte[]> _chunks = System.Threading.Channels.Channel.CreateUnbounded<byte[]>();

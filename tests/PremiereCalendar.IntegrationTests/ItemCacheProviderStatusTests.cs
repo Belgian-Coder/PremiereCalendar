@@ -1,7 +1,5 @@
 using System.Net;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.IntegrationTests.Support;
@@ -13,7 +11,7 @@ namespace PremiereCalendar.IntegrationTests;
 
 public sealed class ItemCacheProviderStatusTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-item-cache-status-" + Guid.NewGuid().ToString("N"));
+    private PostgresTestDatabase? _database;
 
     [Fact]
     public async Task TvmazeLookupWithStatus_TreatsNotFoundAndValidShowAsSuccessful()
@@ -146,8 +144,6 @@ public sealed class ItemCacheProviderStatusTests : IDisposable
     [Fact]
     public async Task ProviderResponseCache_PreservesExplicitExpiryAcrossRestartWithoutExtendingItOnReads()
     {
-        var databasePath = Path.Combine(_root, "test.db");
-        TestSqliteDatabase.Initialize(_root, databasePath);
         var now = DateTimeOffset.Parse("2026-11-03T12:00:00Z");
         var clock = new TestTimeProvider(now);
         var lifetime = TimeSpan.FromHours(8);
@@ -155,29 +151,29 @@ public sealed class ItemCacheProviderStatusTests : IDisposable
         const string requestKey = "movie/detail/42";
         const string value = "cached response fixture";
 
-        var firstStore = CreateStore(databasePath);
+        var firstStore = CreateStore();
         var firstCache = Cache(firstStore, clock);
         await firstCache.SaveAsync(provider, requestKey, value, CancellationToken.None, lifetime: lifetime);
 
         var persisted = Assert.Single(await firstStore.GetByProviderAsync("responsecache-tmdb", 10, CancellationToken.None));
         Assert.Equal(now, persisted.LastCheckedUtc);
 
-        var initialRead = await Cache(CreateStore(databasePath), clock).GetAsync<string>(
+        var initialRead = await Cache(CreateStore(), clock).GetAsync<string>(
             provider, requestKey, TimeSpan.FromDays(30), CancellationToken.None);
         Assert.NotNull(initialRead);
         Assert.Equal(value, initialRead.Value);
         Assert.Equal(now.Add(lifetime), initialRead.ExpiresAtUtc);
 
         clock.UtcNow = now.AddHours(7);
-        var restartedCache = Cache(CreateStore(databasePath), clock);
+        var restartedCache = Cache(CreateStore(), clock);
         var restartedRead = await restartedCache.GetAsync<string>(provider, requestKey, TimeSpan.FromDays(30), CancellationToken.None);
 
         Assert.NotNull(restartedRead);
         Assert.Equal(now.Add(lifetime), restartedRead.ExpiresAtUtc);
-        Assert.Equal(now, (await CreateStore(databasePath).GetByProviderAsync("responsecache-tmdb", 10, CancellationToken.None)).Single().LastCheckedUtc);
+        Assert.Equal(now, (await CreateStore().GetByProviderAsync("responsecache-tmdb", 10, CancellationToken.None)).Single().LastCheckedUtc);
 
         clock.UtcNow = now.AddHours(8);
-        var afterExpiry = await Cache(CreateStore(databasePath), clock).GetAsync<string>(
+        var afterExpiry = await Cache(CreateStore(), clock).GetAsync<string>(
             provider, requestKey, TimeSpan.FromDays(30), CancellationToken.None);
 
         Assert.Null(afterExpiry);
@@ -220,31 +216,17 @@ public sealed class ItemCacheProviderStatusTests : IDisposable
             EnableAvailabilityEnrichment = true
         }));
 
-    private IProviderCacheStateStore CreateStore(string databasePath) => new SqliteProviderCacheStateStore(
-        Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = databasePath }), new TestEnvironment(_root));
+    // Only the response-cache restart test needs a database, so it is created on first use.
+    private IProviderCacheStateStore CreateStore() => new ProviderCacheStateStore((_database ??= PostgresTestDatabase.Create()).Options);
 
     private static ProviderResponseCache Cache(IProviderCacheStateStore store, TimeProvider clock) =>
         new(store, NullLogger<ProviderResponseCache>.Instance, clock);
 
-    public void Dispose()
-    {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
-    }
+    public void Dispose() => _database?.Dispose();
 
     private sealed class TestTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public DateTimeOffset UtcNow { get; set; } = now;
         public override DateTimeOffset GetUtcNow() => UtcNow;
-    }
-
-    private sealed class TestEnvironment(string root) : IWebHostEnvironment
-    {
-        public string ApplicationName { get; set; } = "PremiereCalendar.IntegrationTests";
-        public string EnvironmentName { get; set; } = "Testing";
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
-        public string WebRootPath { get; set; } = root;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

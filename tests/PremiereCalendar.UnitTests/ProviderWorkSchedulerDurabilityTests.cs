@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using PremiereCalendar.Models;
@@ -25,7 +24,7 @@ public sealed partial class ProviderWorkSchedulerTests
         var pipeline = new BlockingResumePipeline();
         await using var services = new ServiceCollection().AddSingleton<IPremiereLoadPipeline>(pipeline).BuildServiceProvider();
         var recovery = new DatabaseRecoveryState();
-        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null, null));
+        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null));
         using var worker = new ProviderWorkSchedulerHostedService(_scheduler, services.GetRequiredService<IServiceScopeFactory>(),
             recovery, Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 }),
             NullLogger<ProviderWorkSchedulerHostedService>.Instance);
@@ -199,7 +198,7 @@ public sealed partial class ProviderWorkSchedulerTests
         var pipeline = new ResumeCapturePipeline();
         await using var services = new ServiceCollection().AddSingleton<IPremiereLoadPipeline>(pipeline).BuildServiceProvider();
         var recovery = new DatabaseRecoveryState();
-        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null, null));
+        recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null));
         using var worker = new ProviderWorkSchedulerHostedService(_scheduler, services.GetRequiredService<IServiceScopeFactory>(),
             recovery, Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 }),
             NullLogger<ProviderWorkSchedulerHostedService>.Instance);
@@ -295,7 +294,7 @@ public sealed partial class ProviderWorkSchedulerTests
         var clock = new MutableTimeProvider(DateTimeOffset.UtcNow);
         _scheduler = NewScheduler(clock);
         var job = await ClaimCalendarAsync("cache-publication-cancel");
-        var before = await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkLeases WHERE JobId = $id", job.JobId);
+        var before = await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkLeases WHERE JobId = @id", job.JobId);
         clock.Advance(TimeSpan.FromSeconds(5));
         using var cancellation = new CancellationTokenSource();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -307,11 +306,11 @@ public sealed partial class ProviderWorkSchedulerTests
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await cancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => publication);
-        Assert.Equal(before, await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkLeases WHERE JobId = $id", job.JobId));
-        Assert.Equal(before, await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkJobs WHERE JobId = $id", job.JobId));
+        Assert.Equal(before, await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkLeases WHERE JobId = @id", job.JobId));
+        Assert.Equal(before, await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkJobs WHERE JobId = @id", job.JobId));
         Assert.Equal(ProviderWorkState.Running, (await _scheduler.GetAsync(job.JobId))!.State);
         await _scheduler.PublishOwnedCacheAsync(job, _ => Task.CompletedTask, CancellationToken.None);
-        Assert.NotEqual(before, await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkLeases WHERE JobId = $id", job.JobId));
+        Assert.NotEqual(before, await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkLeases WHERE JobId = @id", job.JobId));
     }
 
     [Fact]
@@ -419,7 +418,7 @@ public sealed partial class ProviderWorkSchedulerTests
         Assert.Equal(current.LeaseOwner, persisted.LeaseOwner);
         Assert.Equal(0, persisted.AttemptCount);
         Assert.Equal("current", ProviderWorkScheduler.TryReadCheckpoint(persisted.CheckpointJson)!.Message);
-        Assert.Equal(1L, await ScalarAsync("SELECT COUNT(*) FROM ProviderWorkLeases WHERE JobId = $id AND LeaseOwner = $owner", old.JobId, current.LeaseOwner));
+        Assert.Equal(1L, await ScalarAsync("SELECT COUNT(*) FROM ProviderWorkLeases WHERE JobId = @id AND LeaseOwner = @owner", old.JobId, current.LeaseOwner));
     }
 
     [Fact]
@@ -435,13 +434,13 @@ public sealed partial class ProviderWorkSchedulerTests
             clock.Advance(TimeSpan.FromSeconds(11));
             await WaitUntilAsync(async () =>
             {
-                var expiration = await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkLeases WHERE JobId = $id", job.JobId);
+                var expiration = await ScalarAsync("SELECT LeaseExpiresUtc FROM ProviderWorkLeases WHERE JobId = @id", job.JobId);
                 return DateTimeOffset.Parse((string)expiration!, CultureInfo.InvariantCulture) > clock.GetUtcNow().AddSeconds(29);
             });
             clock.Advance(TimeSpan.FromSeconds(20));
             await _scheduler.RecoverAsync(CancellationToken.None);
             Assert.Equal(ProviderWorkState.Running, (await _scheduler.GetAsync(job.JobId))!.State);
-            await ExecuteSqlAsync("UPDATE ProviderWorkJobs SET LeaseOwner = 'replacement' WHERE JobId = $id", job.JobId);
+            await ExecuteSqlAsync("UPDATE ProviderWorkJobs SET LeaseOwner = 'replacement' WHERE JobId = @id", job.JobId);
             clock.Advance(TimeSpan.FromSeconds(11));
             await heartbeat.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.True(execution.IsCancellationRequested);
@@ -623,22 +622,20 @@ public sealed partial class ProviderWorkSchedulerTests
 
     private async Task<object?> ScalarAsync(string sql, string jobId, string? owner = null)
     {
-        await using var connection = new SqliteConnection($"Data Source={Path.Combine(_root, "scheduler.db")}");
-        await connection.OpenAsync();
+        await using var connection = await _database.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Parameters.AddWithValue("$id", jobId);
-        if (owner is not null) command.Parameters.AddWithValue("$owner", owner);
+        command.Parameters.AddWithValue("id", jobId);
+        if (owner is not null) command.Parameters.AddWithValue("owner", owner);
         return await command.ExecuteScalarAsync();
     }
 
     private async Task ExecuteSqlAsync(string sql, string jobId)
     {
-        await using var connection = new SqliteConnection($"Data Source={Path.Combine(_root, "scheduler.db")}");
-        await connection.OpenAsync();
+        await using var connection = await _database.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Parameters.AddWithValue("$id", jobId);
+        if (sql.Contains("@id", StringComparison.Ordinal)) command.Parameters.AddWithValue("id", jobId);
         await command.ExecuteNonQueryAsync();
     }
 

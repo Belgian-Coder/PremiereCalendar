@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -26,11 +25,12 @@ public sealed partial class PremiereServiceTests
     {
         var root = Path.Combine(Path.GetTempPath(), "premiere-load-evidence", Guid.NewGuid().ToString("N"));
         var environment = new PerformanceEnvironment(root);
-        var database = Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "evidence.db" });
+        await using var evidenceDatabase = await PostgresTestDatabase.CreateAsync(initializeSchema: false);
+        var database = evidenceDatabase.Options;
+        // The scheduler's hosted service waits for this state to become healthy before it claims work.
         var recovery = new DatabaseRecoveryState();
-        await new SqliteDatabaseInitializer(database, environment, recovery, TimeProvider.System,
-            NullLogger<SqliteDatabaseInitializer>.Instance).InitializeAsync();
-        InstallWriteCounters(root);
+        await evidenceDatabase.InitializeSchemaAsync(recovery);
+        await InstallWriteCountersAsync(evidenceDatabase);
         var options = Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 });
         var store = new ProviderWorkStore(database, environment);
         var scheduler = new ProviderWorkScheduler(store, TimeProvider.System, options);
@@ -68,7 +68,7 @@ public sealed partial class PremiereServiceTests
             await worker.StartAsync(CancellationToken.None);
             await pipeline.Occupied.Task.WaitAsync(TimeSpan.FromSeconds(10));
             release = ReleaseWorkersAsync(pipeline);
-            ResetWriteCounters(root);
+            await ResetWriteCountersAsync(evidenceDatabase);
             var allocated = GC.GetTotalAllocatedBytes();
             var timer = Stopwatch.StartNew();
             // Leave enough room to measure the archived baseline as well as the candidate.
@@ -85,9 +85,9 @@ public sealed partial class PremiereServiceTests
             var allocatedBytes = GC.GetTotalAllocatedBytes() - allocated;
             var counts = await store.GetStateCountsAsync(CancellationToken.None);
             var jobs = counts.Values.Sum();
-            var writeCounts = ReadWriteCounters(root);
+            var writeCounts = await ReadWriteCountersAsync(evidenceDatabase);
             _evidence.WriteLine($"PERFORMANCE state={cacheState} items={items.Count} first_ms={firstMilliseconds:F2} completion_ms={completionMilliseconds:F2} allocated_bytes={allocatedBytes} jobs={jobs} discover_calls={tmdb.MovieCalls.Count} job_row_writes={writeCounts.JobRowWrites} lease_row_writes={writeCounts.LeaseRowWrites} checkpoint_writes={writeCounts.CheckpointWrites}");
-            _evidence.WriteLine("Write counts are SQL row mutations captured by SQLite triggers, not physical disk I/O.");
+            _evidence.WriteLine("Write counts are SQL row mutations captured by PostgreSQL triggers, not physical disk I/O.");
             Assert.True(writeCounts.JobRowWrites >= 0);
             Assert.True(writeCounts.LeaseRowWrites >= 0);
             Assert.True(writeCounts.CheckpointWrites >= 0);
@@ -113,7 +113,7 @@ public sealed partial class PremiereServiceTests
             await release;
             using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await worker.StopAsync(stop.Token);
-            Directory.Delete(root, recursive: true);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
 
@@ -123,78 +123,57 @@ public sealed partial class PremiereServiceTests
         pipeline.Release.TrySetResult();
     }
 
-    private static void InstallWriteCounters(string root)
+    // Counters are an append-only log (one row per mutated row) rather than a counter row that every trigger
+    // updates: concurrent job transactions would otherwise serialize on, and could deadlock over, shared counter rows.
+    private static async Task InstallWriteCountersAsync(PostgresTestDatabase database)
     {
-        using var connection = OpenEvidenceDatabase(root);
-        using var command = connection.CreateCommand();
+        await using var connection = await database.OpenAsync();
+        await using var command = connection.CreateCommand();
         command.CommandText = """
-            CREATE TABLE PerformanceSqlWriteCounters (
-                Name TEXT PRIMARY KEY,
-                Count INTEGER NOT NULL
+            CREATE UNLOGGED TABLE PerformanceSqlWriteLog (
+                Name TEXT NOT NULL
             );
-            INSERT INTO PerformanceSqlWriteCounters (Name, Count) VALUES
-                ('job_row_writes', 0),
-                ('lease_row_writes', 0),
-                ('checkpoint_writes', 0);
 
-            CREATE TRIGGER PerformanceCountProviderWorkJobsInsert
-            AFTER INSERT ON ProviderWorkJobs
+            CREATE FUNCTION PerformanceCountRowWrite() RETURNS trigger AS $$
             BEGIN
-                UPDATE PerformanceSqlWriteCounters SET Count = Count + 1 WHERE Name = 'job_row_writes';
+                INSERT INTO PerformanceSqlWriteLog (Name) VALUES (TG_ARGV[0]);
+                RETURN NULL;
             END;
-            CREATE TRIGGER PerformanceCountProviderWorkJobsUpdate
-            AFTER UPDATE ON ProviderWorkJobs
-            BEGIN
-                UPDATE PerformanceSqlWriteCounters SET Count = Count + 1 WHERE Name = 'job_row_writes';
-            END;
-            CREATE TRIGGER PerformanceCountProviderWorkJobsDelete
-            AFTER DELETE ON ProviderWorkJobs
-            BEGIN
-                UPDATE PerformanceSqlWriteCounters SET Count = Count + 1 WHERE Name = 'job_row_writes';
-            END;
+            $$ LANGUAGE plpgsql;
 
-            CREATE TRIGGER PerformanceCountProviderWorkLeasesInsert
-            AFTER INSERT ON ProviderWorkLeases
-            BEGIN
-                UPDATE PerformanceSqlWriteCounters SET Count = Count + 1 WHERE Name = 'lease_row_writes';
-            END;
-            CREATE TRIGGER PerformanceCountProviderWorkLeasesUpdate
-            AFTER UPDATE ON ProviderWorkLeases
-            BEGIN
-                UPDATE PerformanceSqlWriteCounters SET Count = Count + 1 WHERE Name = 'lease_row_writes';
-            END;
-            CREATE TRIGGER PerformanceCountProviderWorkLeasesDelete
-            AFTER DELETE ON ProviderWorkLeases
-            BEGIN
-                UPDATE PerformanceSqlWriteCounters SET Count = Count + 1 WHERE Name = 'lease_row_writes';
-            END;
+            CREATE TRIGGER PerformanceCountProviderWorkJobs
+            AFTER INSERT OR UPDATE OR DELETE ON ProviderWorkJobs
+            FOR EACH ROW EXECUTE FUNCTION PerformanceCountRowWrite('job_row_writes');
+
+            CREATE TRIGGER PerformanceCountProviderWorkLeases
+            AFTER INSERT OR UPDATE OR DELETE ON ProviderWorkLeases
+            FOR EACH ROW EXECUTE FUNCTION PerformanceCountRowWrite('lease_row_writes');
 
             CREATE TRIGGER PerformanceCountProviderWorkCheckpoints
             AFTER UPDATE OF CheckpointJson ON ProviderWorkJobs
-            WHEN OLD.CheckpointJson IS NOT NEW.CheckpointJson
-            BEGIN
-                UPDATE PerformanceSqlWriteCounters SET Count = Count + 1 WHERE Name = 'checkpoint_writes';
-            END;
+            FOR EACH ROW WHEN (OLD.CheckpointJson IS DISTINCT FROM NEW.CheckpointJson)
+            EXECUTE FUNCTION PerformanceCountRowWrite('checkpoint_writes');
             """;
-        command.ExecuteNonQuery();
+        await command.ExecuteNonQueryAsync();
     }
 
-    private static void ResetWriteCounters(string root)
+    private static async Task ResetWriteCountersAsync(PostgresTestDatabase database)
     {
-        using var connection = OpenEvidenceDatabase(root);
-        using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE PerformanceSqlWriteCounters SET Count = 0";
-        command.ExecuteNonQuery();
+        await using var connection = await database.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM PerformanceSqlWriteLog";
+        await command.ExecuteNonQueryAsync();
     }
 
-    private static (long JobRowWrites, long LeaseRowWrites, long CheckpointWrites) ReadWriteCounters(string root)
+    private static async Task<(long JobRowWrites, long LeaseRowWrites, long CheckpointWrites)> ReadWriteCountersAsync(
+        PostgresTestDatabase database)
     {
-        using var connection = OpenEvidenceDatabase(root);
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Name, Count FROM PerformanceSqlWriteCounters";
-        using var reader = command.ExecuteReader();
+        await using var connection = await database.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT Name, COUNT(*) FROM PerformanceSqlWriteLog GROUP BY Name";
+        await using var reader = await command.ExecuteReaderAsync();
         var counters = new Dictionary<string, long>(StringComparer.Ordinal);
-        while (reader.Read())
+        while (await reader.ReadAsync())
         {
             counters[reader.GetString(0)] = reader.GetInt64(1);
         }
@@ -203,18 +182,6 @@ public sealed partial class PremiereServiceTests
             counters.GetValueOrDefault("job_row_writes"),
             counters.GetValueOrDefault("lease_row_writes"),
             counters.GetValueOrDefault("checkpoint_writes"));
-    }
-
-    private static SqliteConnection OpenEvidenceDatabase(string root)
-    {
-        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = Path.Combine(root, "evidence.db"),
-            Mode = SqliteOpenMode.ReadWrite,
-            Pooling = false
-        }.ToString());
-        connection.Open();
-        return connection;
     }
 
     private sealed class OccupiedCalendarPipeline(PremiereService service, DateOnly visibleStart) : IPremiereLoadPipeline

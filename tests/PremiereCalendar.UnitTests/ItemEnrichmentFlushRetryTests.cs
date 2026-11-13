@@ -1,8 +1,5 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -86,40 +83,30 @@ public sealed partial class PremiereServiceTests
     }
 
     [Fact]
-    public async Task LargeSqliteItemBatchReturnsEveryAcceptedWinnerAndValidationDoesNotTouchRetention()
+    public async Task LargeItemBatchReturnsEveryAcceptedWinnerAndValidationDoesNotTouchRetention()
     {
-        var root = Path.Combine(Path.GetTempPath(), "premiere-item-bulk-" + Guid.NewGuid().ToString("N"));
-        try
+        await using var database = await PostgresTestDatabase.CreateAsync();
+        var clock = new ItemCacheClock();
+        var now = clock.GetUtcNow();
+        var store = new ItemEnrichmentStore(database.Options, clock);
+        var keys = Enumerable.Range(1, 2500).Select(id => new ItemEnrichmentIdentity(PremiereMediaType.Movie, id)).ToArray();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        Assert.Equal(keys.Length, (await store.ReadManyAsync("bulk", keys, true, deadline.Token)).Count);
+        var writes = keys.Select(key => new ItemEnrichmentWrite(key, 0,
+            JsonSerializer.Serialize(new { Title = $"Bulk {key.TmdbId}", RuntimeMinutes = key.TmdbId }), now,
+            ExpectedMetadataRevision: 0)).ToArray();
+        var accepted = await store.WriteAcceptedAsync("bulk", writes, deadline.Token);
+        Assert.Equal(keys.Length, accepted.Count);
+        Assert.All(accepted, pair =>
         {
-            TestSqliteDatabase.Initialize(root, "items.db");
-            var clock = new ItemCacheClock();
-            var now = clock.GetUtcNow();
-            var store = new SqliteItemEnrichmentStore(
-                Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "items.db" }), new FlushBudgetEnvironment(root), clock);
-            var keys = Enumerable.Range(1, 2500).Select(id => new ItemEnrichmentIdentity(PremiereMediaType.Movie, id)).ToArray();
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            Assert.Equal(keys.Length, (await store.ReadManyAsync("bulk", keys, true, deadline.Token)).Count);
-            var writes = keys.Select(key => new ItemEnrichmentWrite(key, 0,
-                JsonSerializer.Serialize(new { Title = $"Bulk {key.TmdbId}", RuntimeMinutes = key.TmdbId }), now,
-                ExpectedMetadataRevision: 0)).ToArray();
-            var accepted = await store.WriteAcceptedAsync("bulk", writes, deadline.Token);
-            Assert.Equal(keys.Length, accepted.Count);
-            Assert.All(accepted, pair =>
-            {
-                Assert.Equal(now, pair.Value.MetadataFetchedUtc);
-                Assert.Equal(1, pair.Value.MetadataRevision);
-                Assert.Equal(pair.Key.TmdbId, JsonSerializer.Deserialize<ItemEnrichmentMetadata>(pair.Value.MetadataJson!)!.RuntimeMinutes);
-            });
-            clock.Advance(TimeSpan.FromHours(1));
-            var validated = await store.ReadCurrentManyAsync("bulk", keys, deadline.Token);
-            Assert.Equal(keys.Length, validated.Count);
-            Assert.All(validated.Values, record => Assert.Equal(now, record.LastSeenUtc));
-        }
-        finally
-        {
-            SqliteConnection.ClearAllPools();
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-        }
+            Assert.Equal(now, pair.Value.MetadataFetchedUtc);
+            Assert.Equal(1, pair.Value.MetadataRevision);
+            Assert.Equal(pair.Key.TmdbId, JsonSerializer.Deserialize<ItemEnrichmentMetadata>(pair.Value.MetadataJson!)!.RuntimeMinutes);
+        });
+        clock.Advance(TimeSpan.FromHours(1));
+        var validated = await store.ReadCurrentManyAsync("bulk", keys, deadline.Token);
+        Assert.Equal(keys.Length, validated.Count);
+        Assert.All(validated.Values, record => Assert.Equal(now, record.LastSeenUtc));
     }
 
     private sealed class FlushRetryStore(IItemEnrichmentStore inner, Func<CancellationToken, Task> beforeFailure) : IItemEnrichmentStore
@@ -144,15 +131,5 @@ public sealed partial class PremiereServiceTests
         public Task<int> InvalidateTvmazeAsync(IReadOnlyCollection<int> showIds, DateTimeOffset changedAtUtc, CancellationToken cancellationToken)
             => inner.InvalidateTvmazeAsync(showIds, changedAtUtc, cancellationToken);
         public Task<int> CleanupAsync(DateTimeOffset cutoffUtc, CancellationToken cancellationToken) => inner.CleanupAsync(cutoffUtc, cancellationToken);
-    }
-
-    private sealed class FlushBudgetEnvironment(string root) : IWebHostEnvironment
-    {
-        public string ApplicationName { get; set; } = "PremiereCalendar.Tests";
-        public string EnvironmentName { get; set; } = "Testing";
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
-        public string WebRootPath { get; set; } = root;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

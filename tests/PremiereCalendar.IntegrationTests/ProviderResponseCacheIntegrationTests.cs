@@ -2,10 +2,9 @@ using System.Net;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using PremiereCalendar.IntegrationTests.Support;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
@@ -15,17 +14,9 @@ namespace PremiereCalendar.IntegrationTests;
 
 public sealed class ProviderResponseCacheIntegrationTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-response-cache-" + Guid.NewGuid().ToString("N"));
+    private readonly PostgresTestDatabase _database = PostgresTestDatabase.Create();
 
-    public ProviderResponseCacheIntegrationTests()
-    {
-        Directory.CreateDirectory(_root);
-        TestSqliteDatabase.Initialize(_root, DatabasePath);
-    }
-
-    private string DatabasePath => Path.Combine(_root, "test.db");
-    private IProviderCacheStateStore CreateStore() => new SqliteProviderCacheStateStore(
-        Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = DatabasePath }), new TestEnvironment(_root));
+    private IProviderCacheStateStore CreateStore() => new ProviderCacheStateStore(_database.Options);
     // Generous by default so a loaded host never turns a held read into a fallback; budget tests pass a small one explicitly.
     private static readonly TimeSpan GenerousIoBudget = TimeSpan.FromSeconds(30);
     private static ProviderResponseCache Cache(IProviderCacheStateStore store, TimeProvider? time = null, TimeSpan? ioBudget = null) =>
@@ -460,11 +451,14 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     }
 
     [Fact]
-    public async Task SqliteHeldWriter_ResponseCacheUsesOneSecondBusyBound_BackoffAndRecovery_CallerCancellationStillThrows()
+    public async Task PostgreSqlHeldWriteLock_ResponseCacheUsesIoBudget_BackoffAndRecovery_CallerCancellationStillThrows()
     {
-        await using var writer = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={DatabasePath};Pooling=False");
-        await writer.OpenAsync();
-        await using var transaction = writer.BeginTransaction(deferred: false);
+        // EXCLUSIVE mode blocks every INSERT/UPDATE on the table but still lets readers through: writes wait
+        // on the lock until the response cache's I/O budget (or the caller's token) cancels them.
+        await using var writer = await _database.OpenAsync();
+        await using var transaction = await writer.BeginTransactionAsync();
+        await using (var hold = new NpgsqlCommand("LOCK TABLE ProviderCacheState IN EXCLUSIVE MODE", writer, transaction))
+            await hold.ExecuteNonQueryAsync();
         var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
         var responseCache = Cache(CreateStore(), clock, TimeSpan.FromMilliseconds(500));
         var started = Stopwatch.GetTimestamp();
@@ -677,11 +671,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         client.GetScoresAsync(PremiereMediaType.Movie, "Example", 2026, null, CancellationToken.None, forceRefresh);
     private static HttpResponseMessage Html(string content) => new(HttpStatusCode.OK) { Content = new StringContent(content, Encoding.UTF8, "text/html") };
 
-    public void Dispose()
-    {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        Directory.Delete(_root, true);
-    }
+    public void Dispose() => _database.Dispose();
 
     private sealed class TestTimeProvider(DateTimeOffset now) : TimeProvider
     {
@@ -709,16 +699,6 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         public Task RecordUseAsync(CalendarPageMode mode, CalendarFilters filters, int count, DateTimeOffset now, CancellationToken token) => Task.CompletedTask;
         public Task MarkWarmedAsync(string key, CalendarPageMode mode, CalendarFilters filters, bool isDefault, int count, DateTimeOffset now, CancellationToken token) => Task.CompletedTask;
         public Task MarkWarmFailedAsync(string key, CalendarPageMode mode, CalendarFilters filters, bool isDefault, string failure, DateTimeOffset now, CancellationToken token) => Task.CompletedTask;
-    }
-
-    private sealed class TestEnvironment(string root) : IWebHostEnvironment
-    {
-        public string EnvironmentName { get; set; } = "Test";
-        public string ApplicationName { get; set; } = "PremiereCalendar.IntegrationTests";
-        public string WebRootPath { get; set; } = root;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 
     private sealed class InterceptingStore(IProviderCacheStateStore inner) : IProviderCacheStateStore

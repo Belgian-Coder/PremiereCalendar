@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+using Npgsql;
 using PremiereCalendar.Models;
 using PremiereCalendar.Services;
 
@@ -47,12 +47,12 @@ public sealed partial class PremiereServiceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task TvmazeReservationStorageOutageUsesTheSharedReadBackoffWithoutExtendingIt(bool transientSqlite)
+    public async Task TvmazeReservationStorageOutageUsesTheSharedReadBackoffWithoutExtendingIt(bool transientPostgres)
     {
         var clock = new ItemCacheClock();
         var memory = new MemoryItemEnrichmentStore(clock);
         var store = new ReservationFailureStore(memory)
-            { Failure = transientSqlite ? new SqliteException("Transient busy connection", 5) : new IOException("Unavailable store") };
+            { Failure = transientPostgres ? new PostgresException("Transient serialization failure", "ERROR", "ERROR", "40001") : new IOException("Unavailable store") };
         var coordinator = ItemCacheCoordinatorForReservation(store, clock);
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, 901);
         var providers = 0;

@@ -23,114 +23,140 @@ public sealed partial class PostgresPersistenceTests
         "f55d950663157a8a11ccabac4ea25e685bb1db6170c82f0ddeca3874136fa3fd"
     ];
 
-    [PostgresFact]
+    [Fact]
     public async Task PostgreSqlHistoricalChecksumLineagesStartAndVerifyWithoutRewritingRows()
     {
-        await WithIsolatedDatabaseAsync(async (options, environment, connectionString) =>
+        await SeedLineageUserDataAsync();
+        foreach (var lineage in new[] { "lf", "crlf", "mixed" })
         {
-            await SeedLineageUserDataAsync(connectionString);
-            foreach (var lineage in new[] { "lf", "crlf", "mixed" })
+            await using (var connection = await _database.OpenAsync())
             {
-                await using (var connection = new NpgsqlConnection(connectionString))
+                for (var version = 1; version <= 4; version++)
                 {
-                    await connection.OpenAsync();
-                    for (var version = 1; version <= 4; version++)
-                    {
-                        var hashes = lineage == "crlf" || lineage == "mixed" && version % 2 == 0
-                            ? HistoricalCrlfChecksums : HistoricalLfChecksums;
-                        await using var update = new NpgsqlCommand("UPDATE SchemaMigrations SET Checksum=@checksum WHERE Version=@version", connection);
-                        update.Parameters.AddWithValue("checksum", hashes[version - 1]);
-                        update.Parameters.AddWithValue("version", version);
-                        Assert.Equal(1, await update.ExecuteNonQueryAsync());
-                    }
+                    var hashes = lineage == "crlf" || lineage == "mixed" && version % 2 == 0
+                        ? HistoricalCrlfChecksums : HistoricalLfChecksums;
+                    await using var update = new NpgsqlCommand("UPDATE SchemaMigrations SET Checksum=@checksum WHERE Version=@version", connection);
+                    update.Parameters.AddWithValue("checksum", hashes[version - 1]);
+                    update.Parameters.AddWithValue("version", version);
+                    Assert.Equal(1, await update.ExecuteNonQueryAsync());
                 }
-                var before = await ReadMigrationLineageSnapshotAsync(connectionString);
-                var recovery = new DatabaseRecoveryState();
-                var initializer = new PostgresDatabaseInitializer(options, environment, recovery, TimeProvider.System,
-                    NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-                await initializer.InitializeAsync();
-                Assert.True(recovery.Snapshot.IsHealthy, recovery.Snapshot.Message);
-                Assert.False(initializer.RetryPending);
-                Assert.True((await initializer.VerifyAsync()).IsHealthy);
-                Assert.Equal(before, await ReadMigrationLineageSnapshotAsync(connectionString));
             }
-        });
+            var before = await ReadMigrationLineageSnapshotAsync();
+            var recovery = new DatabaseRecoveryState();
+            var initializer = new PostgresDatabaseInitializer(_database.Options, recovery, TimeProvider.System,
+                NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
+            await initializer.InitializeAsync();
+            Assert.True(recovery.Snapshot.IsHealthy, recovery.Snapshot.Message);
+            Assert.False(initializer.RetryPending);
+            Assert.True((await initializer.VerifyAsync()).IsHealthy);
+            Assert.Equal(before, await ReadMigrationLineageSnapshotAsync());
+        }
     }
 
-    [PostgresFact]
+    [Fact]
     public async Task PostgreSqlChangedMigrationNameOrRealAlteredSqlDigestIsStillRejected()
     {
-        await WithIsolatedDatabaseAsync(async (options, environment, connectionString) =>
+        await SeedLineageUserDataAsync();
+        var migration = DatabaseSchema.Migrations[0];
+        var alteredChecksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{migration.Version}\n{migration.Name}\n{migration.Sql}\nSELECT 1;"))).ToLowerInvariant();
+        foreach (var changeName in new[] { true, false })
         {
-            await SeedLineageUserDataAsync(connectionString);
-            var migration = DatabaseSchema.Migrations[0];
-            var alteredChecksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-                $"{migration.Version}\n{migration.Name}\n{migration.Sql}\nSELECT 1;"))).ToLowerInvariant();
-            foreach (var changeName in new[] { true, false })
+            await using (var connection = await _database.OpenAsync())
             {
-                await using (var connection = new NpgsqlConnection(connectionString))
-                {
-                    await connection.OpenAsync();
-                    await using var corrupt = new NpgsqlCommand("UPDATE SchemaMigrations SET Name=@name,Checksum=@checksum WHERE Version=1", connection);
-                    corrupt.Parameters.AddWithValue("name", changeName ? "different-migration-name" : migration.Name);
-                    corrupt.Parameters.AddWithValue("checksum", changeName ? HistoricalLfChecksums[0] : alteredChecksum);
-                    await corrupt.ExecuteNonQueryAsync();
-                }
-                var before = await ReadMigrationLineageSnapshotAsync(connectionString);
-                var recovery = new DatabaseRecoveryState();
-                var initializer = new PostgresDatabaseInitializer(options, environment, recovery, TimeProvider.System,
-                    NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-                await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync());
-                Assert.False(recovery.Snapshot.IsHealthy);
-                Assert.False(initializer.RetryPending);
-                await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.VerifyAsync());
-                Assert.Equal(before, await ReadMigrationLineageSnapshotAsync(connectionString));
+                await using var corrupt = new NpgsqlCommand("UPDATE SchemaMigrations SET Name=@name,Checksum=@checksum WHERE Version=1", connection);
+                corrupt.Parameters.AddWithValue("name", changeName ? "different-migration-name" : migration.Name);
+                corrupt.Parameters.AddWithValue("checksum", changeName ? HistoricalLfChecksums[0] : alteredChecksum);
+                await corrupt.ExecuteNonQueryAsync();
             }
-        });
-    }
-
-    [PostgresFact]
-    public async Task PostgreSqlHistoricalChecksumAllowanceDoesNotBypassActualSchemaValidation()
-    {
-        await WithIsolatedDatabaseAsync(async (options, environment, connectionString) =>
-        {
-            await using var connection = new NpgsqlConnection(connectionString);
-            await connection.OpenAsync();
-            await using var corrupt = new NpgsqlCommand("UPDATE SchemaMigrations SET Checksum=@checksum WHERE Version=1; ALTER TABLE ProviderWorkJobs DROP COLUMN ProgressJson;", connection);
-            corrupt.Parameters.AddWithValue("checksum", HistoricalCrlfChecksums[0]);
-            await corrupt.ExecuteNonQueryAsync();
-            var initializer = new PostgresDatabaseInitializer(options, environment, new DatabaseRecoveryState(), TimeProvider.System,
-                NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-            var failure = await Assert.ThrowsAsync<PostgresException>(() => initializer.InitializeAsync());
-            Assert.Equal("42703", failure.SqlState);
-            Assert.False(initializer.RetryPending);
-            await Assert.ThrowsAsync<PostgresException>(() => initializer.VerifyAsync());
-        });
-    }
-
-    [PostgresFact]
-    public async Task PostgreSqlMissingHistoricalMigrationRemainsRejected()
-    {
-        await WithIsolatedDatabaseAsync(async (options, environment, connectionString) =>
-        {
-            await using var connection = new NpgsqlConnection(connectionString);
-            await connection.OpenAsync();
-            await using var corrupt = new NpgsqlCommand("DELETE FROM SchemaMigrations WHERE Version=2", connection);
-            await corrupt.ExecuteNonQueryAsync();
-            var before = await ReadMigrationLineageSnapshotAsync(connectionString);
-            var initializer = new PostgresDatabaseInitializer(options, environment, new DatabaseRecoveryState(), TimeProvider.System,
+            var before = await ReadMigrationLineageSnapshotAsync();
+            var recovery = new DatabaseRecoveryState();
+            var initializer = new PostgresDatabaseInitializer(_database.Options, recovery, TimeProvider.System,
                 NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
             await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync());
+            Assert.False(recovery.Snapshot.IsHealthy);
             Assert.False(initializer.RetryPending);
             await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.VerifyAsync());
-            Assert.Equal(before, await ReadMigrationLineageSnapshotAsync(connectionString));
-        });
+            Assert.Equal(before, await ReadMigrationLineageSnapshotAsync());
+        }
     }
 
-    private static async Task SeedLineageUserDataAsync(string connectionString)
+    [Fact]
+    public async Task PostgreSqlHistoricalChecksumAllowanceDoesNotBypassActualSchemaValidation()
     {
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _database.OpenAsync();
+        await using var corrupt = new NpgsqlCommand("UPDATE SchemaMigrations SET Checksum=@checksum WHERE Version=1; ALTER TABLE ProviderWorkJobs DROP COLUMN ProgressJson;", connection);
+        corrupt.Parameters.AddWithValue("checksum", HistoricalCrlfChecksums[0]);
+        await corrupt.ExecuteNonQueryAsync();
+        var initializer = new PostgresDatabaseInitializer(_database.Options, new DatabaseRecoveryState(), TimeProvider.System,
+            NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
+        var failure = await Assert.ThrowsAsync<PostgresException>(() => initializer.InitializeAsync());
+        Assert.Equal("42703", failure.SqlState);
+        Assert.False(initializer.RetryPending);
+        await Assert.ThrowsAsync<PostgresException>(() => initializer.VerifyAsync());
+    }
+
+    [Fact]
+    public async Task PostgreSqlMissingHistoricalMigrationRemainsRejected()
+    {
+        await using var connection = await _database.OpenAsync();
+        await using var corrupt = new NpgsqlCommand("DELETE FROM SchemaMigrations WHERE Version=2", connection);
+        await corrupt.ExecuteNonQueryAsync();
+        var before = await ReadMigrationLineageSnapshotAsync();
+        var initializer = new PostgresDatabaseInitializer(_database.Options, new DatabaseRecoveryState(), TimeProvider.System,
+            NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync());
+        Assert.False(initializer.RetryPending);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.VerifyAsync());
+        Assert.Equal(before, await ReadMigrationLineageSnapshotAsync());
+    }
+
+    [Fact]
+    public async Task PostgreSqlUpgradesSchemaTwoToCurrentAndBackfillsDurableLeasesFromRunningJobs()
+    {
+        await using (var connection = await _database.OpenAsync())
+        {
+            await using var downgrade = connection.CreateCommand();
+            downgrade.CommandText = """
+                DROP TABLE ItemEnrichments;
+                DROP TABLE ProviderWorkLeases;
+                DELETE FROM SchemaMigrations WHERE Version >= 3;
+                INSERT INTO ProviderWorkJobs (JobId, Kind, DedupeKey, Priority, PayloadJson, State, AttemptCount,
+                    EnqueuedUtc, StartedUtc, LeaseOwner, LeaseExpiresUtc)
+                VALUES ('running-job', 'CalendarForeground', 'dedupe-running', 100, '{}', 'Running', 1,
+                    '2026-05-01T09:00:00Z', '2026-05-01T09:05:00Z', 'worker-a', '2026-05-01T09:35:00Z'),
+                    ('queued-job', 'CalendarForeground', 'dedupe-queued', 100, '{}', 'Queued', 0,
+                    '2026-05-01T09:00:00Z', NULL, NULL, NULL);
+                """;
+            await downgrade.ExecuteNonQueryAsync();
+        }
+
+        var recovery = new DatabaseRecoveryState();
+        var initializer = new PostgresDatabaseInitializer(_database.Options, recovery, TimeProvider.System,
+            NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
+        await initializer.InitializeAsync();
+
+        Assert.True(recovery.Snapshot.IsHealthy, recovery.Snapshot.Message);
+        Assert.Equal(DatabaseSchema.CurrentVersion, recovery.Snapshot.CurrentVersion);
+        Assert.Equal("normalized-item-enrichment-cache", recovery.Snapshot.LastMigration);
+        Assert.True((await initializer.VerifyAsync()).IsHealthy);
+        // Migration 3 is stored with SQLite's INSERT OR REPLACE and translated to an upsert for PostgreSQL;
+        // only Running jobs with a lease are copied into the lease table.
+        await using var verify = await _database.OpenAsync();
+        await using var leases = new NpgsqlCommand(
+            "SELECT JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc FROM ProviderWorkLeases ORDER BY JobId", verify);
+        await using var reader = await leases.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("running-job", reader.GetString(0));
+        Assert.Equal("worker-a", reader.GetString(1));
+        Assert.Equal("2026-05-01T09:35:00Z", reader.GetString(2));
+        Assert.Equal("2026-05-01T09:05:00Z", reader.GetString(3));
+        Assert.False(await reader.ReadAsync());
+    }
+
+    private async Task SeedLineageUserDataAsync()
+    {
+        await using var connection = await _database.OpenAsync();
         await using var seed = new NpgsqlCommand("""
             INSERT INTO AppParameters(Key,Value,UpdatedUtc) VALUES ('lineage-preference','manual value','2026-05-01T12:00:00Z');
             INSERT INTO ItemEnrichments(PartitionKey,MediaType,TmdbId,MetadataJson,RatingsJson,
@@ -141,10 +167,9 @@ public sealed partial class PostgresPersistenceTests
         await seed.ExecuteNonQueryAsync();
     }
 
-    private static async Task<string> ReadMigrationLineageSnapshotAsync(string connectionString)
+    private async Task<string> ReadMigrationLineageSnapshotAsync()
     {
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _database.OpenAsync();
         var rows = new List<string>();
         foreach (var sql in new[]
         {

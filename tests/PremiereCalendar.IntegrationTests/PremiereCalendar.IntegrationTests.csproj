@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="PremiereCalendar.TestSupport" />
   </ItemGroup>
 
   <ItemGroup>
@@ -26,6 +27,14 @@
 
   <ItemGroup>
     <Content Include="Fixtures\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);POSTGRES_TEST_INPROCESS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\PostgresTestDatabase.cs" Link="Support\PostgresTestDatabase.cs" />
   </ItemGroup>
 
 </Project>

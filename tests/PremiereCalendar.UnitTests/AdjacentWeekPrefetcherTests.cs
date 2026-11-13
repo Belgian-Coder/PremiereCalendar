@@ -416,7 +416,7 @@ public sealed class AdjacentWeekPrefetcherTests
         Assert.False(lifetime.ApplicationStopping.IsCancellationRequested);
         if (recover)
         {
-            recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "initialized", null, null));
+            recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "initialized", null));
             await scheduler.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         }
         await prefetcher.StopAsync(default).WaitAsync(TimeSpan.FromSeconds(2));

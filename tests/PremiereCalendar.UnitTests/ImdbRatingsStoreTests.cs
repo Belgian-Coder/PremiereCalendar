@@ -1,116 +1,90 @@
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Options;
-using PremiereCalendar.Options;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
-[Collection(SqliteTestCollection.Name)]
-public sealed class ImdbRatingsStoreTests
+public sealed class ImdbRatingsStoreTests : IDisposable
 {
+    private readonly PostgresTestDatabase _database = PostgresTestDatabase.Create();
+
     [Fact]
-    public async Task SqliteImdbRatingsStore_RoundTripsRatingsByImdbId()
+    public async Task ImdbRatingsStore_RoundTripsRatingsByImdbId()
     {
-        var root = CreateRoot();
-        try
-        {
-            var store = CreateStore(root);
-            var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
+        var store = CreateStore();
+        var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
 
-            await store.ReplaceAllAsync(
-                [new ImdbRatingRecord("tt0000001", 7.6, 12345, importedAt)],
-                importedAt,
-                CancellationToken.None);
+        await store.ReplaceAllAsync(
+            [new ImdbRatingRecord("tt0000001", 7.6, 12345, importedAt)],
+            importedAt,
+            CancellationToken.None);
 
-            var rating = await store.GetByImdbIdAsync("tt0000001", CancellationToken.None);
-            var missing = await store.GetByImdbIdAsync("tt-missing", CancellationToken.None);
-            var state = await store.GetStateAsync(CancellationToken.None);
+        var rating = await store.GetByImdbIdAsync("tt0000001", CancellationToken.None);
+        var missing = await store.GetByImdbIdAsync("tt-missing", CancellationToken.None);
+        var state = await store.GetStateAsync(CancellationToken.None);
 
-            Assert.NotNull(rating);
-            Assert.Equal(7.6, rating.AverageRating);
-            Assert.Equal(12345, rating.VoteCount);
-            Assert.Null(missing);
-            Assert.Equal(importedAt, state.LastImportedUtc);
-            Assert.Equal(1, state.RatingCount);
-            Assert.Null(state.LastError);
-        }
-        finally
-        {
-            TryDelete(root);
-        }
+        Assert.NotNull(rating);
+        // ImdbRatings.AverageRating is a PostgreSQL REAL (4-byte float), so a stored 7.6 reads back as 7.5999999...
+        Assert.Equal(7.6, rating.AverageRating, precision: 5);
+        Assert.Equal(12345, rating.VoteCount);
+        Assert.Null(missing);
+        Assert.Equal(importedAt, state.LastImportedUtc);
+        Assert.Equal(1, state.RatingCount);
+        Assert.Null(state.LastError);
     }
 
     [Fact]
-    public async Task SqliteImdbRatingsStore_BatchesLookupAcrossSqliteParameterLimits()
+    public async Task ImdbRatingsStore_BatchesLookupAcrossLookupBatchBoundaries()
     {
-        var root = CreateRoot();
-        try
-        {
-            var store = CreateStore(root);
-            var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
-            var records = Enumerable.Range(1, 925)
-                .Select(index => new ImdbRatingRecord($"tt{index:0000000}", 7.5, index, importedAt))
-                .ToArray();
-            await store.ReplaceAllAsync(records, importedAt, CancellationToken.None);
+        var store = CreateStore();
+        var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
+        var records = Enumerable.Range(1, 925)
+            .Select(index => new ImdbRatingRecord($"tt{index:0000000}", 7.5, index, importedAt))
+            .ToArray();
+        await store.ReplaceAllAsync(records, importedAt, CancellationToken.None);
 
-            var ids = records.Select(record => record.ImdbId).Append("tt-missing").ToArray();
-            var ratings = await store.GetByImdbIdsAsync(ids, CancellationToken.None);
+        var ids = records.Select(record => record.ImdbId).Append("tt-missing").ToArray();
+        var ratings = await store.GetByImdbIdsAsync(ids, CancellationToken.None);
 
-            Assert.Equal(925, ratings.Count);
-            Assert.Equal(925, ratings["tt0000925"].VoteCount);
-            Assert.False(ratings.ContainsKey("tt-missing"));
-        }
-        finally
-        {
-            TryDelete(root);
-        }
+        Assert.Equal(925, ratings.Count);
+        Assert.Equal(925, ratings["tt0000925"].VoteCount);
+        Assert.False(ratings.ContainsKey("tt-missing"));
     }
 
     [Fact]
-    public async Task SqliteImdbRatingsStore_ReplaceAllRemovesRatingsMissingFromNewDataset()
+    public async Task ImdbRatingsStore_ReplaceAllRemovesRatingsMissingFromNewDataset()
     {
-        var root = CreateRoot();
-        try
-        {
-            var store = CreateStore(root);
-            var firstImport = DateTimeOffset.Parse("2026-05-08T10:00:00Z");
-            var secondImport = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
+        var store = CreateStore();
+        var firstImport = DateTimeOffset.Parse("2026-05-08T10:00:00Z");
+        var secondImport = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
 
-            await store.ReplaceAllAsync(
-                [
-                    new ImdbRatingRecord("tt0000001", 7.6, 12345, firstImport),
-                    new ImdbRatingRecord("tt0000002", 8.1, 10, firstImport)
-                ],
-                firstImport,
-                CancellationToken.None);
-            await store.ReplaceAllAsync(
-                [new ImdbRatingRecord("tt0000002", 8.2, 11, secondImport)],
-                secondImport,
-                CancellationToken.None);
+        await store.ReplaceAllAsync(
+            [
+                new ImdbRatingRecord("tt0000001", 7.6, 12345, firstImport),
+                new ImdbRatingRecord("tt0000002", 8.1, 10, firstImport)
+            ],
+            firstImport,
+            CancellationToken.None);
+        await store.ReplaceAllAsync(
+            [new ImdbRatingRecord("tt0000002", 8.2, 11, secondImport)],
+            secondImport,
+            CancellationToken.None);
 
-            Assert.Null(await store.GetByImdbIdAsync("tt0000001", CancellationToken.None));
-            var rating = await store.GetByImdbIdAsync("tt0000002", CancellationToken.None);
+        Assert.Null(await store.GetByImdbIdAsync("tt0000001", CancellationToken.None));
+        var rating = await store.GetByImdbIdAsync("tt0000002", CancellationToken.None);
 
-            Assert.NotNull(rating);
-            Assert.Equal(8.2, rating.AverageRating);
-            Assert.Equal(11, rating.VoteCount);
-        }
-        finally
-        {
-            TryDelete(root);
-        }
+        Assert.NotNull(rating);
+        // ImdbRatings.AverageRating is a PostgreSQL REAL (4-byte float), so a stored 7.6 reads back as 7.5999999...
+        Assert.Equal(8.2, rating.AverageRating, precision: 5);
+        Assert.Equal(11, rating.VoteCount);
     }
 
     [Fact]
-    public async Task SqliteImdbRatingsStore_ReadsPreviousDatasetWhileStreamingThenPublishesRatingsAndState()
+    public async Task ImdbRatingsStore_ReadsPreviousDatasetWhileStreamingThenPublishesRatingsAndState()
     {
-        var root = CreateRoot();
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task<int>? import = null;
         try
         {
-            var store = CreateStore(root);
+            var store = CreateStore();
             var oldImport = DateTimeOffset.Parse("2026-05-08T10:00:00Z");
             var newImport = oldImport.AddDays(1);
             var records = Enumerable.Range(1, 925)
@@ -143,105 +117,94 @@ public sealed class ImdbRatingsStoreTests
         {
             release.TrySetResult();
             if (import is not null) await import;
-            TryDelete(root);
         }
     }
 
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task SqliteImdbRatingsStore_CancellationOrSourceFailureRollsBackRatingsAndState(bool cancel)
+    public async Task ImdbRatingsStore_CancellationOrSourceFailureRollsBackRatingsAndState(bool cancel)
     {
-        var root = CreateRoot();
-        try
+        var store = CreateStore();
+        var oldImport = DateTimeOffset.Parse("2026-05-08T10:00:00Z");
+        var oldRating = new ImdbRatingRecord("tt-original", 7.5, 10, oldImport);
+        await store.ReplaceAllAsync([oldRating], oldImport, CancellationToken.None);
+        var oldState = new ImdbDatasetState(oldImport, 1, "existing error");
+        await store.SaveStateAsync(oldState, CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+
+        async IAsyncEnumerable<ImdbRatingRecord> FailedRatings()
         {
-            var store = CreateStore(root);
-            var oldImport = DateTimeOffset.Parse("2026-05-08T10:00:00Z");
-            var oldRating = new ImdbRatingRecord("tt-original", 7.5, 10, oldImport);
-            await store.ReplaceAllAsync([oldRating], oldImport, CancellationToken.None);
-            var oldState = new ImdbDatasetState(oldImport, 1, "existing error");
-            await store.SaveStateAsync(oldState, CancellationToken.None);
-            using var cancellation = new CancellationTokenSource();
-
-            async IAsyncEnumerable<ImdbRatingRecord> FailedRatings()
+            yield return new ImdbRatingRecord("tt-partial", 8, 20, oldImport.AddDays(1));
+            await Task.Yield();
+            if (cancel)
             {
-                yield return new ImdbRatingRecord("tt-partial", 8, 20, oldImport.AddDays(1));
-                await Task.Yield();
-                if (cancel)
-                {
-                    cancellation.Cancel();
-                    cancellation.Token.ThrowIfCancellationRequested();
-                }
-                throw new InvalidDataException("Interrupted dataset");
+                cancellation.Cancel();
+                cancellation.Token.ThrowIfCancellationRequested();
             }
-
-            var failure = await Record.ExceptionAsync(() => store.ReplaceAllStreamingAsync(FailedRatings(), oldImport.AddDays(1), cancellation.Token));
-            if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(failure);
-            else Assert.IsType<InvalidDataException>(failure);
-            Assert.Equal(oldRating, await store.GetByImdbIdAsync(oldRating.ImdbId, CancellationToken.None));
-            Assert.Null(await store.GetByImdbIdAsync("tt-partial", CancellationToken.None));
-            Assert.Equal(oldState, await store.GetStateAsync(CancellationToken.None));
-
-            // A failed import releases the writer gate and leaves a usable connection.
-            await store.ReplaceAllAsync([], oldImport.AddDays(2), CancellationToken.None);
-            Assert.Equal(0, (await store.GetStateAsync(CancellationToken.None)).RatingCount);
+            throw new InvalidDataException("Interrupted dataset");
         }
-        finally { TryDelete(root); }
+
+        var failure = await Record.ExceptionAsync(() => store.ReplaceAllStreamingAsync(FailedRatings(), oldImport.AddDays(1), cancellation.Token));
+        if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(failure);
+        else Assert.IsType<InvalidDataException>(failure);
+        Assert.Equal(oldRating, await store.GetByImdbIdAsync(oldRating.ImdbId, CancellationToken.None));
+        Assert.Null(await store.GetByImdbIdAsync("tt-partial", CancellationToken.None));
+        Assert.Equal(oldState, await store.GetStateAsync(CancellationToken.None));
+
+        // A failed import releases the writer gate and leaves a usable connection.
+        await store.ReplaceAllAsync([], oldImport.AddDays(2), CancellationToken.None);
+        Assert.Equal(0, (await store.GetStateAsync(CancellationToken.None)).RatingCount);
     }
 
     [Fact]
-    public async Task SqliteImdbRatingsStore_DuplicatesKeepLastValueAndAcceptedRowCount()
+    public async Task ImdbRatingsStore_DuplicatesKeepLastValueAndAcceptedRowCount()
     {
-        var root = CreateRoot();
-        try
-        {
-            var store = CreateStore(root);
-            var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
-            await store.ReplaceAllAsync(
-            [
-                new(" TT0000001 ", 7.5, 10, importedAt.AddDays(-1)),
-                new(" ", 1, 1, importedAt),
-                new("tt0000001", 8.5, 20, importedAt.AddDays(-1))
-            ], importedAt, CancellationToken.None);
+        var store = CreateStore();
+        var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
+        await store.ReplaceAllAsync(
+        [
+            new(" TT0000001 ", 7.5, 10, importedAt.AddDays(-1)),
+            new(" ", 1, 1, importedAt),
+            new("tt0000001", 8.5, 20, importedAt.AddDays(-1))
+        ], importedAt, CancellationToken.None);
 
-            Assert.Equal(new ImdbRatingRecord("tt0000001", 8.5, 20, importedAt),
-                await store.GetByImdbIdAsync("TT0000001", CancellationToken.None));
-            Assert.Equal(2, (await store.GetStateAsync(CancellationToken.None)).RatingCount);
-        }
-        finally { TryDelete(root); }
+        Assert.Equal(new ImdbRatingRecord("tt0000001", 8.5, 20, importedAt),
+            await store.GetByImdbIdAsync("TT0000001", CancellationToken.None));
+        Assert.Equal(2, (await store.GetStateAsync(CancellationToken.None)).RatingCount);
     }
 
     [Fact]
-    public async Task SqliteImdbRatingsStore_ReusedInsertCommandBindsEveryRowAndUpsertsRepeats()
+    public async Task ImdbRatingsStore_ReusedInsertCommandBindsEveryRowAndUpsertsRepeats()
     {
-        var root = CreateRoot();
-        try
+        var store = CreateStore();
+        var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
+        const int rows = 3000;
+        async IAsyncEnumerable<ImdbRatingRecord> Many()
         {
-            var store = CreateStore(root);
-            var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
-            const int rows = 3000;
-            async IAsyncEnumerable<ImdbRatingRecord> Many()
+            for (var i = 0; i < rows; i++)
             {
-                for (var i = 0; i < rows; i++)
-                {
-                    if (i % 500 == 0) await Task.Yield();
-                    yield return new($"tt{i:D7}", i / 10d, i, importedAt.AddDays(-1));
-                }
-
-                // A repeat of an earlier id must replace it through the same prepared statement.
-                yield return new("TT0000007", 99.5, 777, importedAt.AddDays(-1));
+                if (i % 500 == 0) await Task.Yield();
+                yield return new($"tt{i:D7}", i / 10d, i, importedAt.AddDays(-1));
             }
 
-            Assert.Equal(rows + 1, await store.ReplaceAllStreamingAsync(Many(), importedAt, CancellationToken.None));
-
-            Assert.Equal(rows - 1, (await store.GetByImdbIdAsync("tt0002999", CancellationToken.None))!.VoteCount);
-            Assert.Equal(new ImdbRatingRecord("tt0000007", 99.5, 777, importedAt),
-                await store.GetByImdbIdAsync("tt0000007", CancellationToken.None));
-            Assert.Equal(new ImdbRatingRecord("tt0001234", 123.4, 1234, importedAt),
-                await store.GetByImdbIdAsync("tt0001234", CancellationToken.None));
-            Assert.Equal(rows + 1, (await store.GetStateAsync(CancellationToken.None)).RatingCount);
+            // A repeat of an earlier id must replace it through the same prepared statement.
+            yield return new("TT0000007", 99.5, 777, importedAt.AddDays(-1));
         }
-        finally { TryDelete(root); }
+
+        Assert.Equal(rows + 1, await store.ReplaceAllStreamingAsync(Many(), importedAt, CancellationToken.None));
+
+        Assert.Equal(rows - 1, (await store.GetByImdbIdAsync("tt0002999", CancellationToken.None))!.VoteCount);
+        Assert.Equal(new ImdbRatingRecord("tt0000007", 99.5, 777, importedAt),
+            await store.GetByImdbIdAsync("tt0000007", CancellationToken.None));
+        var fractional = await store.GetByImdbIdAsync("tt0001234", CancellationToken.None);
+        Assert.NotNull(fractional);
+        Assert.Equal("tt0001234", fractional.ImdbId);
+        // REAL is a 4-byte float on PostgreSQL: 123.4 reads back as 123.4000015...
+        Assert.Equal(123.4, fractional.AverageRating, precision: 4);
+        Assert.Equal(1234, fractional.VoteCount);
+        Assert.Equal(importedAt, fractional.ImportedAtUtc);
+        Assert.Equal(rows + 1, (await store.GetStateAsync(CancellationToken.None)).RatingCount);
     }
 
     private static async IAsyncEnumerable<ImdbRatingRecord> PausedRatings(
@@ -255,42 +218,7 @@ public sealed class ImdbRatingsStoreTests
         yield return new ImdbRatingRecord("tt-new", 9, 200, importedAt);
     }
 
-    private static SqliteImdbRatingsStore CreateStore(string root)
-    {
-        TestSqliteDatabase.Initialize(root, "data/app.db");
-        return new SqliteImdbRatingsStore(
-            Microsoft.Extensions.Options.Options.Create(new AppDatabaseOptions { Path = "data/app.db" }),
-            new FakeWebHostEnvironment(root));
-    }
+    public void Dispose() => _database.Dispose();
 
-    private static string CreateRoot()
-    {
-        var root = Path.Combine(Path.GetTempPath(), $"premiere-calendar-imdb-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(root);
-        return root;
-    }
-
-    private static void TryDelete(string root)
-    {
-        try
-        {
-            if (Directory.Exists(root))
-            {
-                Directory.Delete(root, recursive: true);
-            }
-        }
-        catch (IOException)
-        {
-        }
-    }
-
-    private sealed class FakeWebHostEnvironment(string contentRootPath) : IWebHostEnvironment
-    {
-        public string ApplicationName { get; set; } = "PremiereCalendar.Tests";
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
-        public string ContentRootPath { get; set; } = contentRootPath;
-        public string EnvironmentName { get; set; } = "Development";
-        public string WebRootPath { get; set; } = contentRootPath;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-    }
+    private ImdbRatingsStore CreateStore() => new(_database.Options);
 }
