@@ -14,6 +14,9 @@ internal static class ProviderWorkCheckpointCodec
 {
     internal const int MaximumDecodedBytes = 64 * 1024 * 1024;
     private const int MinimumCompressionBytes = 4096;
+    // ArrayPool.Shared keeps rented arrays of up to 1 GiB alive; checkpoints can reach tens of megabytes, so only
+    // buffers up to this size are pooled and anything larger is allocated (and later collected) directly.
+    internal const int PooledBufferLimit = 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -22,9 +25,10 @@ internal static class ProviderWorkCheckpointCodec
     internal static EncodedProviderWorkCheckpoint Encode(ProviderWorkCheckpoint checkpoint)
     {
         var started = Stopwatch.GetTimestamp();
-        // The raw UTF-8 JSON lives in a pooled buffer (no exact-size array, no LOH
-        // garbage). Writer options match JsonSerializer.SerializeToUtf8Bytes, so the
-        // bytes are identical to the previous implementation.
+        // The raw UTF-8 JSON lives in a pooled buffer while it stays below PooledBufferLimit, which avoids an
+        // exact-size array per checkpoint. Larger payloads use plain arrays that become ordinary (LOH) garbage
+        // instead of being parked in ArrayPool.Shared. Writer options match
+        // JsonSerializer.SerializeToUtf8Bytes, so the bytes are identical to the previous implementation.
         using var raw = new PooledBufferWriter(initialCapacity: 16 * 1024);
         using (var writer = new Utf8JsonWriter(raw, new JsonWriterOptions { SkipValidation = true, MaxDepth = 64 }))
             JsonSerializer.Serialize(writer, checkpoint, JsonOptions);
@@ -58,6 +62,16 @@ internal static class ProviderWorkCheckpointCodec
 
     // Produces {"Version":4,"Encoding":"br-base64","UncompressedBytes":n,"Payload":"..."} exactly as
     // JsonSerializer.Serialize of the former CompressedCheckpoint record did, including default-encoder escaping of '+'.
+    internal static byte[] RentBuffer(int minimumLength) => minimumLength > PooledBufferLimit
+        ? GC.AllocateUninitializedArray<byte>(minimumLength)
+        : ArrayPool<byte>.Shared.Rent(minimumLength);
+
+    // Arrays above the limit were never rented, so they are simply dropped.
+    internal static void ReturnBuffer(byte[]? buffer)
+    {
+        if (buffer is { Length: > 0 and <= PooledBufferLimit }) ArrayPool<byte>.Shared.Return(buffer);
+    }
+
     private static bool TryEncodeEnvelope(ReadOnlySpan<byte> raw, out PooledBufferWriter envelope)
     {
         envelope = null!;
@@ -66,7 +80,7 @@ internal static class ProviderWorkCheckpointCodec
         {
             // BrotliStream(Fastest) is BrotliEncoder(quality 1, window 22) fed with PROCESS
             // and then finished with an empty FINISH call. Mirror that exactly.
-            compressedBuffer = ArrayPool<byte>.Shared.Rent(BrotliEncoder.GetMaxCompressedLength(raw.Length));
+            compressedBuffer = RentBuffer(BrotliEncoder.GetMaxCompressedLength(raw.Length));
             var compressed = 0;
             using (var encoder = new BrotliEncoder(quality: 1, window: 22))
             {
@@ -86,7 +100,7 @@ internal static class ProviderWorkCheckpointCodec
                     if (finish == OperationStatus.InvalidData || (finish != OperationStatus.Done && written == 0)) return false;
                 } while (finish != OperationStatus.Done);
             }
-            base64Buffer = ArrayPool<byte>.Shared.Rent(Base64.GetMaxEncodedToUtf8Length(compressed));
+            base64Buffer = RentBuffer(Base64.GetMaxEncodedToUtf8Length(compressed));
             if (Base64.EncodeToUtf8(compressedBuffer.AsSpan(0, compressed), base64Buffer, out _, out var encoded) != OperationStatus.Done)
                 return false;
             var result = new PooledBufferWriter(encoded + 128);
@@ -112,8 +126,8 @@ internal static class ProviderWorkCheckpointCodec
         }
         finally
         {
-            if (compressedBuffer is not null) ArrayPool<byte>.Shared.Return(compressedBuffer);
-            if (base64Buffer is not null) ArrayPool<byte>.Shared.Return(base64Buffer);
+            ReturnBuffer(compressedBuffer);
+            ReturnBuffer(base64Buffer);
         }
     }
 
@@ -166,7 +180,7 @@ internal static class ProviderWorkCheckpointCodec
 
     private sealed class PooledBufferWriter(int initialCapacity) : IBufferWriter<byte>, IDisposable
     {
-        private byte[] _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(initialCapacity, 256));
+        private byte[] _buffer = RentBuffer(Math.Max(initialCapacity, 256));
         private int _written;
 
         public ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _written);
@@ -196,9 +210,9 @@ internal static class ProviderWorkCheckpointCodec
             ArgumentOutOfRangeException.ThrowIfNegative(sizeHint);
             if (sizeHint == 0) sizeHint = 1;
             if (sizeHint <= _buffer.Length - _written) return;
-            var next = ArrayPool<byte>.Shared.Rent((int)Math.Min(Array.MaxLength, Math.Max((long)_buffer.Length * 2, (long)_written + sizeHint)));
+            var next = RentBuffer((int)Math.Min(Array.MaxLength, Math.Max((long)_buffer.Length * 2, (long)_written + sizeHint)));
             _buffer.AsSpan(0, _written).CopyTo(next);
-            ArrayPool<byte>.Shared.Return(_buffer);
+            ReturnBuffer(_buffer);
             _buffer = next;
         }
 
@@ -206,7 +220,7 @@ internal static class ProviderWorkCheckpointCodec
         {
             var buffer = _buffer;
             _buffer = [];
-            if (buffer.Length > 0) ArrayPool<byte>.Shared.Return(buffer);
+            ReturnBuffer(buffer);
         }
     }
 }
