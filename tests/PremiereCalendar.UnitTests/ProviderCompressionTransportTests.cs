@@ -30,7 +30,8 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
 
         Assert.Equal(DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli, handler.AutomaticDecompression);
         Assert.Equal(TimeSpan.FromMinutes(5), handler.PooledConnectionLifetime);
-        Assert.False(handler.UseCookies);
+        // Cookies keep the SocketsHttpHandler default instead of being silently disabled.
+        Assert.True(handler.UseCookies);
         Assert.True(handler.AllowAutoRedirect);
     }
 
@@ -85,6 +86,20 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         Assert.Equal(payload.Length, 16 + rest.Length);
     }
 
+    [Fact]
+    public async Task ProviderTransportKeepsCookiesBetweenRequestsLikeTheDefaultHandler()
+    {
+        await using var server = new LoopbackServer("identity", Encoding.UTF8.GetBytes("{}"), "session=abc123; Path=/");
+        using var client = new HttpClient(ProviderClientServiceExtensions.CreateProviderPrimaryHandler());
+
+        using (await client.GetAsync(server.Url)) { }
+        using (await client.GetAsync(server.Url)) { }
+
+        Assert.Equal(2, server.AllRequestHeaders.Count);
+        Assert.DoesNotContain("Cookie:", server.AllRequestHeaders[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Cookie: session=abc123", server.AllRequestHeaders[1], StringComparison.OrdinalIgnoreCase);
+    }
+
     private HttpClient CreateClient(string provider)
     {
         var handler = new AdaptiveProviderHandlerFactory(_policy).Create(provider, 1, TimeSpan.FromSeconds(30));
@@ -132,18 +147,26 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         private readonly string _encoding;
         private readonly byte[] _body;
         private readonly Task _loop;
+        private readonly string? _setCookie;
+        private readonly List<string> _allRequestHeaders = [];
         private volatile string _lastRequestHeaders = "";
 
-        public LoopbackServer(string encoding, byte[] body)
+        public LoopbackServer(string encoding, byte[] body, string? setCookie = null)
         {
             _encoding = encoding;
             _body = body;
+            _setCookie = setCookie;
             _listener.Start();
             _loop = Task.Run(AcceptLoopAsync);
         }
 
         public string Url => $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/";
         public string LastRequestHeaders => _lastRequestHeaders;
+
+        public IReadOnlyList<string> AllRequestHeaders
+        {
+            get { lock (_allRequestHeaders) return [.. _allRequestHeaders]; }
+        }
 
         private async Task AcceptLoopAsync()
         {
@@ -174,8 +197,10 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
                         request.Append((char)single[0]);
                     }
                     _lastRequestHeaders = request.ToString();
+                    lock (_allRequestHeaders) _allRequestHeaders.Add(_lastRequestHeaders);
                     var header = Encoding.ASCII.GetBytes(
                         $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: {_encoding}\r\n"
+                        + (_setCookie is null ? "" : $"Set-Cookie: {_setCookie}\r\n")
                         + $"Content-Length: {_body.Length}\r\nConnection: close\r\n\r\n");
                     await stream.WriteAsync(header, _stop.Token);
                     // Trickle the body so a consumer cannot finish inside the first read.

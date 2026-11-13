@@ -146,9 +146,8 @@ public static class ProviderClientServiceExtensions
     internal static SocketsHttpHandler CreateProviderPrimaryHandler() => new()
     {
         AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
-        PooledConnectionLifetime = ProviderPooledConnectionLifetime,
-        // The factory default for primary handlers is cookie-less; keep it so providers cannot track sessions.
-        UseCookies = false
+        PooledConnectionLifetime = ProviderPooledConnectionLifetime
+        // Cookies keep SocketsHttpHandler's default (enabled), as the clients behaved before this transport was introduced.
     };
 
     private static void ConfigureAdaptiveJson(HttpClient client, string baseUrl)

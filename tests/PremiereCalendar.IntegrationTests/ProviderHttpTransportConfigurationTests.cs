@@ -38,7 +38,8 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
         var sockets = Assert.IsType<SocketsHttpHandler>(primary);
         Assert.Equal(DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli, sockets.AutomaticDecompression);
         Assert.Equal(TimeSpan.FromMinutes(5), sockets.PooledConnectionLifetime);
-        Assert.False(sockets.UseCookies);
+        // Cookies keep the SocketsHttpHandler default instead of being disabled.
+        Assert.True(sockets.UseCookies);
         Assert.Equal(
             Timeout.InfiniteTimeSpan,
             factory.Services.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>().Get(clientName).HandlerLifetime);
