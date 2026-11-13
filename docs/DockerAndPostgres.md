@@ -1,6 +1,6 @@
 # Docker and PostgreSQL
 
-PremiereCalendar supports SQLite for the signed Windows service and PostgreSQL for containers. The persistence services keep their historical `Sqlite...` class names for compatibility, but use the configured `AppDatabase:Provider` and provider-neutral ADO.NET commands.
+PremiereCalendar is PostgreSQL-only and ships only as a Docker container. SQLite, the Windows service and the signed self-updater were removed; `AppDatabase:Provider=Sqlite` and `AppDatabase:Path` now stop startup with a clear error instead of silently starting against an empty database. The configuration is described in [Configuration](Configuration.md#database).
 
 ## Local development
 
@@ -13,7 +13,9 @@ Use Ubuntu 24.04 on WSL with Docker Engine and the Compose plugin installed insi
 .\eng\wsl-docker.ps1 down
 ```
 
-The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for migration tests and debugging. The development password lives in the ignored `.secrets` directory. `reset` is destructive only to the named PremiereCalendar development volumes.
+The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and for running the app outside the container (`dotnet run` or the `launchSettings.json` profiles use `appsettings.Development.json`, which points at that port and reads the password from `.secrets/dev-postgres-password`). The development password lives in the ignored `.secrets` directory. `reset` is destructive only to the named PremiereCalendar development volumes.
+
+Run the automated tests with `eng\Test-WithPostgres.ps1`, which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)).
 
 ## Production container
 
@@ -30,7 +32,6 @@ Deploy by digest. The runtime:
 - has a read-only root filesystem, no added Linux capabilities, and `no-new-privileges`;
 - uses an internal-only database network;
 - reads the PostgreSQL password from a Docker secret file;
-- disables the Windows signed updater;
 - exposes `/health`, `/health/ready`, and `/health/version`.
 
 The project explicitly pins `Microsoft.AspNetCore.App.Internal.Assets` to the
@@ -41,26 +42,22 @@ before publication. The pinned Alpine 3.24.4 runtime contains `libcrypto3` and
 `libssl3` version `3.5.9-r0`, above the fixed `3.5.8-r0` security threshold,
 and `zlib` `1.4-r0`, so the image no longer upgrades zlib itself.
 
-## SQLite migration
-
-First create and verify an online SQLite snapshot with the Windows release. Configure the target PostgreSQL connection and password file, then run:
+## Database commands
 
 ```text
-dotnet PremiereCalendar.dll database migrate-postgres --source /absolute/source.db
 dotnet PremiereCalendar.dll database verify
+dotnet PremiereCalendar.dll database prepare-legacy-checkpoints
 ```
 
-The importer requires a schema-current SQLite source and an empty PostgreSQL target. It verifies `PRAGMA quick_check`, the source SHA-256, every copied table count, and commits all application rows in one transaction. It uses PostgreSQL binary COPY and refuses to merge or overwrite existing target rows.
+`verify` checks connectivity, migration history checksums and the schema shape of an initialized database. `prepare-legacy-checkpoints` converts provider-work checkpoints for an offline downgrade to an older release. The earlier SQLite snapshot, restore and `migrate-postgres` commands were removed together with SQLite; installations that still hold a SQLite database must migrate it with the last release that contained the importer before upgrading.
 
 ## Backup and recovery boundary
 
-SQLite snapshots are migration inputs, not ongoing PostgreSQL backups. Production PostgreSQL requires scheduled `pg_dump` output with SHA-256 and completion manifests, retention, an isolated restore test, and off-host backup coverage. The canonical NAS deployment and operational instructions live under `\\NAS\Data\Backups\Infrastructure\NAS\services\premierecalendar`.
+Production PostgreSQL requires scheduled `pg_dump` output with SHA-256 and completion manifests, retention, an isolated restore test, and off-host backup coverage. The canonical NAS deployment and operational instructions live under `\\NAS\Data\Backups\Infrastructure\NAS\services\premierecalendar`.
 
-The Windows installation has been retired. Roll back by deploying a previously
-accepted digest-pinned container image while preserving the PostgreSQL volume.
-Recover data only from a checksum-verified PostgreSQL dump that first passes an
-isolated restore. The final SQLite migration input is retained as restricted
-historical evidence on the NAS, not as an executable fallback.
+Roll back by deploying a previously accepted digest-pinned container image while
+preserving the PostgreSQL volume. Recover data only from a checksum-verified
+PostgreSQL dump that first passes an isolated restore.
 
 ## Read-only runtime logging
 

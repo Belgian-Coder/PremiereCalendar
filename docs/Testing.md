@@ -2,7 +2,7 @@
 
 Normal automated tests must not call live external providers. TMDb, OMDb, TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, Wikimedia, Sonarr, and Radarr behavior must be covered with fake HTTP handlers, test doubles, and JSON fixtures.
 
-Use `dotnet test PremiereCalendar.slnx -c Release -m:1` for acceptance that includes browser timing budgets. Running the memory/CPU-intensive service fixtures concurrently with Playwright can distort those timings. Keep all existing assertions unchanged. See [speed and reliability validation](SpeedReliabilityValidation.md) for the measured workload, PostgreSQL and container evidence, and review results.
+Use `dotnet test PremiereCalendar.slnx -c Release -m:1` (with the PostgreSQL variables below set) for acceptance that includes browser timing budgets. Running the memory/CPU-intensive service fixtures concurrently with Playwright can distort those timings. Keep all existing assertions unchanged. See [speed and reliability validation](SpeedReliabilityValidation.md) for the measured workload, PostgreSQL and container evidence, and review results.
 
 ## Layers
 
@@ -75,16 +75,20 @@ Component tests cover Blazor rendering:
 - Adjacent-week prefetch trigger after visible week load.
 - Incremental loaded-source display while source batches report progress.
 - View sync Settings controls, explicit URL publishing, route-specific plain URL takeover, and same-route live-follow navigation.
-- Settings source health, score backfill, missing-ID repair, update evidence, and rollback configuration rendering.
+- Settings source health, score backfill, and missing-ID repair rendering.
 - Mobile filter drawer review text without reintroducing noisy header filter chips.
 
 ## Run
 
 ```powershell
-dotnet test
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 ```
 
-PostgreSQL acceptance requires `PREMIERECALENDAR_TEST_POSTGRES` and, when needed, `PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE`. Use a dedicated test server: the tests create and drop randomly named isolated databases. Missing configuration is reported as skipped, not as a passing persistence test.
+Every test runs against PostgreSQL (SQLite no longer exists). The script starts a throwaway `postgres` container (the digest-pinned image from `compose.yaml`, data on tmpfs, `max_connections=300`) on a private Docker network with an explicit `10.141.x.0/24` subnet, runs `dotnet test` for the unit, component and integration projects inside `premierecalendar-dev-app:latest` (build it once with `eng\wsl-docker.ps1 build`) and always removes the server and the network. It works from any folder. Useful switches: `-Project IntegrationTests`, `-Filter "FullyQualifiedName~ViewSync"`, `-ExtraTestArguments '-p:UseRuntimeAsync=false'`, `-BuildVolume <docker volume>` for incremental builds.
+
+To run against your own server instead, set `PREMIERECALENDAR_TEST_POSTGRES` to an Npgsql connection string (its database is only used for `CREATE DATABASE`/`DROP DATABASE`) and, when the server needs a password, `PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE` to a file containing it. The development Compose app container already sets both for `docker compose -f compose.dev.yaml run --rm app dotnet test ...`. Use a dedicated test server with `max_connections` of at least 300: tests run in parallel and each test or test class gets its own randomly named database (`tests/Shared/PostgresTestDatabase.cs` creates it and drops it with `DROP DATABASE ... WITH (FORCE)`).
+
+There are no skipped PostgreSQL tests: when `PREMIERECALENDAR_TEST_POSTGRES` is missing, every database-backed test fails with a message that names the variable. One test is skipped on Linux because it depends on Windows file-lock semantics.
 
 `ProviderWorkSchedulerDurabilityTests` covers checkpoint accumulation, failure exclusion, deferred work, independent lease renewal, stale-owner fencing, watcher priority, and bounded progress replay. `CalendarLoadPerformanceTests` uses the real scheduler with both workers occupied for 300 ms and 2,000 deterministic rows split across seven days. It covers cold, fresh, and stale caches. Its `PERFORMANCE` output is retained in TRX results or shown with `--logger 'console;verbosity=detailed'`.
 
@@ -114,8 +118,7 @@ After configuring real secrets, run the app and verify:
 - Card provenance explains the date source and missing score or ID reasons.
 - Settings source health lists provider cache state, OMDb state, IMDb state, and recent background jobs.
 - Settings backfill and repair actions complete without changing unrelated weeks.
-- Signed GitHub release update evidence shows the active version, configured repository, latest result, and persistent transcript tail.
-- Release acceptance is performed through Settings: publish a newer signed release, click `Install latest signed GitHub release`, allow the circuit to reconnect, then verify the active marker, junction target, runtime version and transcript.
+- Release acceptance deploys the new digest-pinned image and checks `/health/ready` and `/health/version` (container, database schema and version).
 
 ## Browser Performance Checks
 

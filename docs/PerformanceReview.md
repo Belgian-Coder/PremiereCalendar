@@ -72,17 +72,7 @@ References:
 
 ## Hosting
 
-This app does not run under IIS, so there is no IIS application-pool idle timeout. When installed as a Windows Service, the .NET process should remain running until the service is stopped, the machine restarts, or the process fails.
-
-The service installer configures:
-
-- Automatic service start.
-- Service failure recovery with restart attempts.
-- optional LAN firewall access for the configured port.
-- Cleanup of any manually started `PremiereCalendar.exe` process before the service starts, so the service can bind to the configured port.
-- Cleanup of old user Startup-folder shortcuts that would otherwise start duplicate manual app instances.
-
-If the app is only started as a background process, service recovery is not active. Run the root `Install-PremiereCalendar.ps1` wrapper from an elevated PowerShell session to make hosting persistent.
+The app runs only as a container (restart policy `unless-stopped`; see [Docker and PostgreSQL](DockerAndPostgres.md)). It does not run under IIS, so there is no IIS application-pool idle timeout. Earlier Windows service hosting notes were removed together with the Windows distribution.
 
 ## Cache And Images
 

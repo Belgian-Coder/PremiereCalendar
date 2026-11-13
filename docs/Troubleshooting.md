@@ -48,8 +48,6 @@ Arrow keys are ignored while you type in an input field.
 | IMDb or TVDB IDs are missing | Run Repair IDs in Settings after TMDb is configured |
 | Posters are missing | Check artwork provider settings, then click Refresh sources |
 | Settings do not match `appsettings.json` | The Settings page wins; change values in the app |
-| Signed GitHub update is disabled | Check `ApplicationUpdate:UpdaterScriptPath`, `InstallRoot`, `DataRoot`, and the latest transcript in Settings > Local status |
-| Signed GitHub update refuses to run | Confirm an offline install pinned `updater/signing.cer`, the service account can write the data/install roots, and no other update is running |
 | Sonarr add fails | The series needs a TVDB ID and valid Sonarr settings |
 | Radarr add fails | Check Radarr URL, API key, root folder, and quality profile |
 

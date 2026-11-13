@@ -18,7 +18,7 @@ The application has one source of truth for calendar rows:
 flowchart LR
     Browser["Browser UI"] --> Page["Calendar.razor"]
     Browser --> Settings["Settings.razor"]
-    Settings --> SettingsDb["SQLite or PostgreSQL state database"]
+    Settings --> SettingsDb["PostgreSQL state database"]
     Page --> SettingsDb
     Page --> Service["PremiereService"]
     Service --> WeekCache["FileCalendarCache"]
@@ -96,7 +96,7 @@ TMDb's movie and TV filter surfaces are not identical. Movies use release-date f
 
 ## Sonarr And Radarr Adds
 
-The cog icon in the top bar opens the Settings page. Sonarr, Radarr, and source API settings are stored server-side in the local SQLite parameter database, not in browser storage. Each integration has an enable flag; disabling Sonarr removes the `Add to Sonarr` card action, and disabling Radarr removes the `Add to Radarr` action.
+The cog icon in the top bar opens the Settings page. Sonarr, Radarr, and source API settings are stored server-side in the PostgreSQL parameter tables, not in browser storage. Each integration has an enable flag; disabling Sonarr removes the `Add to Sonarr` card action, and disabling Radarr removes the `Add to Radarr` action.
 
 The Settings page can call Sonarr/Radarr for root folders and quality profiles. Root folders are offered as input suggestions, and quality profiles are shown as name-based dropdowns after options are loaded. The app still stores the selected profile ID because that is what the Sonarr/Radarr add endpoints require.
 
@@ -221,11 +221,9 @@ The app is configured to listen on:
 http://0.0.0.0:5298
 ```
 
-That makes it reachable from other LAN devices when Windows Firewall allows inbound TCP `5298`.
+That makes it reachable from other LAN devices. In the container deployment the app listens on `http://0.0.0.0:8080` inside the container and is published on a loopback port behind the reverse proxy (see [Docker and PostgreSQL](DockerAndPostgres.md)).
 
-Use the root `Install-PremiereCalendar.ps1` wrapper only for development/source-tree installation. Production updates use immutable, signed GitHub releases.
-
-Settings starts the installed `updater/install-github-release.ps1` through `Signed GitHub release update`. The detached updater downloads the stable manifest and its exact declared package, verifies the administrator-pinned certificate, RSA signature and SHA-256, rejects unsafe or oversized archives, backs up SQLite, activates an immutable version directory, and requires both liveness and the expected `/health/version` before success. After health succeeds, the signed package transactionally refreshes its installed updater scripts. Failure restores the previous junction, service binary, database files and any partially replaced updater payload. The Blazor circuit disconnects while the Windows Service restarts and reconnects to the verified release. Attempt transcripts are retained under the external data root.
+Updates are new digest-pinned container images; see [Docker and PostgreSQL](DockerAndPostgres.md).
 
 The health endpoint is:
 
@@ -243,8 +241,6 @@ GET /health
 - `PremiereCalendar/Services/CacheInspectorService.cs` - file counts, sizes, and newest-write timestamps for calendar and image caches.
 - `PremiereCalendar/Services/CalendarPresetService.cs` - route-scoped saved filter presets that preserve the current week when applied.
 - `PremiereCalendar/Services/CalendarVisitChangeService.cs` - subtle per-week change summaries comparing the current visible IDs to the last visit.
-- `PremiereCalendar/Services/ReleaseUpdateService.cs` - on-demand GitHub latest-release check used by Settings.
-- `PremiereCalendar/Services/ApplicationUpdateService.cs` - Settings-triggered signed GitHub release updater with active-version and persistent transcript evidence.
 - `PremiereCalendar/Services/WeekDiagnosticsService.cs` - week-level source counts, score coverage, language distribution, and anomaly detection.
 - `PremiereCalendar/Services/SourceHealthService.cs` - Settings source-health drilldown from provider cache, OMDb, IMDb, and background jobs.
 - `PremiereCalendar/Services/ScoreBackfillService.cs` - cached-card rating hydration from IMDb and OMDb.

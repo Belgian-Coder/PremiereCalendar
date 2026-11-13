@@ -2,10 +2,10 @@
 
 Configuration is handled with two layers:
 
-- Runtime app settings edited on the Settings page are stored in the configured application database: SQLite for the signed Windows service or PostgreSQL for containers.
+- Runtime app settings edited on the Settings page are stored in the PostgreSQL application database.
 - Infrastructure values still use standard ASP.NET Core providers. Non-secret defaults live in `PremiereCalendar/appsettings.json`; API credentials must not be committed.
 
-Startup validates the database provider and its path or connection string, plus enabled image-cache limits. Invalid startup-critical values fail before the service begins accepting requests.
+Startup validates the PostgreSQL connection string (and rejects the removed SQLite provider and path settings, see [Database](#application-database)), plus enabled image-cache limits. Invalid startup-critical values fail before the service begins accepting requests.
 
 When a reverse proxy terminates HTTPS, add each trusted proxy IP under `Hosting:ForwardedProxies`. Loopback proxies are trusted by default. The household deployment pins `192.168.68.22`; update it if the proxy moves. Forwarded headers are processed before HTTPS redirection and HSTS; browser responses also receive content-type, referrer-policy, and content-security-policy headers. This hosting hardening does not add application authentication or change access to Settings and integration actions.
 
@@ -17,22 +17,19 @@ When a reverse proxy terminates HTTPS, add each trusted proxy IP under `Hosting:
 }
 ```
 
-Release installs write infrastructure values such as `AppDatabase__Path`, `CalendarCache__Directory`, and `ImageCache__Directory` to the Windows Service `Environment` registry value. Source API credentials are configured only in the app Settings page and are stored in the SQLite settings database. The release package builder clears API credentials from packaged `appsettings.json`.
+Infrastructure values such as `AppDatabase__ConnectionString`, `CalendarCache__Directory`, and `ImageCache__Directory` are set as container environment variables (see `compose.yaml`). Source API credentials are configured only in the app Settings page and are stored in the application database.
 
-Local application settings edited through the Settings page are stored in a SQLite parameter database. Development launches store this database and other mutable files in the sibling `PremiereCalendar.LocalData` directory so the source checkout stays clean. Release installs set `AppDatabase__Path` to `D:\Apps\PremiereCalendarData\data\premiere-calendar.db` by default.
+Local application settings edited through the Settings page are stored in the PostgreSQL parameter tables. Development launches store caches and logs in the sibling `PremiereCalendar.LocalData` directory so the source checkout stays clean, and use the Compose development database (`127.0.0.1:55432`, password in `.secrets/dev-postgres-password`).
 
-Startup owns the database schema centrally. It runs `PRAGMA quick_check`, checkpoints WAL before a pending migration, creates a verified pre-migration backup, applies migrations transactionally, records their checksums in `SchemaMigrations`, advances `PRAGMA user_version`, and checks integrity again. `/health/ready`, `/health/version`, and Settings > Local status report the active and target schema versions. Migration failure restores only the pre-migration snapshot and leaves readiness unhealthy; unrelated corruption is never restored automatically.
+Startup owns the database schema centrally. It applies pending migrations transactionally, records their checksums in `SchemaMigrations`, validates the migration history and the expected table shape, and retries transient connection failures. `/health/ready`, `/health/version`, and Settings > Local status report the active and target schema versions. A schema newer than the application, a changed migration checksum, or a missing required column stops initialization with an operator error instead of being retried. Back up PostgreSQL with `pg_dump` before upgrading; the application does not create database backups itself.
 
-Offline verification and recovery commands are:
+Offline verification command (run it with the application's configuration, for example `docker compose run --rm app dotnet PremiereCalendar.dll database verify`):
 
-```powershell
-PremiereCalendar.exe database verify
-PremiereCalendar.exe database restore --backup "D:\absolute\path\verified-backup.db"
+```text
+dotnet PremiereCalendar.dll database verify
 ```
 
-Stop the `PremiereCalendar` Windows Service before restore. Restore rejects relative paths, verifies integrity and supported schema first, requires exclusive access, preserves the previous database and WAL sidecars with a `.damaged-<timestamp>` suffix, and stages the replacement on the same volume before activation.
-
-Durable provider work is stored in SQLite and controlled by `ProviderScheduler`. Foreground jobs retain a reserved worker and can checkpoint/requeue adjacent-week, warmup, delta-sync, and IMDb-maintenance work without charging a retry. Provider concurrency remains below each configured hard ceiling and adapts to throttling, transient failures, latency, `Retry-After`, and persisted circuit state.
+Durable provider work is stored in PostgreSQL and controlled by `ProviderScheduler`. Foreground jobs retain a reserved worker and can checkpoint/requeue adjacent-week, warmup, delta-sync, and IMDb-maintenance work without charging a retry. Provider concurrency remains below each configured hard ceiling and adapts to throttling, transient failures, latency, `Retry-After`, and persisted circuit state.
 
 Structured operational logs are rolling NDJSON files under `Telemetry:LogDirectory`, limited to 50 MB each with 14 retained files by default. Trace and metric OTLP export remains disabled until `Telemetry:OtlpEndpoint` is an absolute endpoint. Metrics use provider/operation names and bounded outcome tags; correlation and per-item identifiers are confined to diagnostic events. Telemetry omits query strings, filter contents, media titles, credentials, and backup payloads.
 
@@ -89,7 +86,7 @@ Default non-secret settings:
 
 The same TMDb token is also used by `TmdbFilterCatalogService` to load official filter values for genres, languages, countries, watch providers, and certifications. These catalog responses are cached in memory and have local fallback values so the filter pane still opens if a catalog request fails.
 
-Successful movie/TV details and season-one responses persist in the application database for their existing 12-hour freshness lifetime; Rotten Tomatoes scores use their configured lifetime. External-ID and title resolution also persist: positive results remain fresh for 90 days and negative results for six hours. Restart reads keep the original expiry, and forced refresh bypasses both cache tiers. Response envelopes are limited to 256 KiB; larger responses remain usable without persistence. Cache I/O is best effort with a 500 ms cooperative budget and five-second backoff per provider. SQLite response-cache connections additionally limit native busy retries to one second. PostgreSQL serves at most four response-cache operations concurrently; remote request limits are unchanged. Scheduled maintenance retains these response-cache rows for three calendar months. Retention does not extend their freshness. See [item caching](ItemEnrichmentCache.md) and [earlier movie-week measurements](MovieWeekSpeedValidation.md).
+Successful movie/TV details and season-one responses persist in the application database for their existing 12-hour freshness lifetime; Rotten Tomatoes scores use their configured lifetime. External-ID and title resolution also persist: positive results remain fresh for 90 days and negative results for six hours. Restart reads keep the original expiry, and forced refresh bypasses both cache tiers. Response envelopes are limited to 256 KiB; larger responses remain usable without persistence. Cache I/O is best effort with a 500 ms cooperative budget and five-second backoff per provider. PostgreSQL serves at most four response-cache operations concurrently; remote request limits are unchanged. Scheduled maintenance retains these response-cache rows for three calendar months. Retention does not extend their freshness. See [item caching](ItemEnrichmentCache.md) and [earlier movie-week measurements](MovieWeekSpeedValidation.md).
 
 ## OMDb
 
@@ -97,7 +94,7 @@ OMDb is disabled by default. Enable it from the Settings page only when an API k
 
 When disabled, Rotten Tomatoes and Metacritic show as `n/a`, OMDb plot/poster fallback is skipped, and the app still uses TMDb and local IMDb dataset scores normally.
 
-OMDb responses are cached in SQLite. If OMDb reports a limit or quota problem, the app records a cooldown and serves stale cached data when it has it.
+OMDb responses are cached in PostgreSQL. If OMDb reports a limit or quota problem, the app records a cooldown and serves stale cached data when it has it.
 
 ## IMDb Ratings Dataset
 
@@ -127,40 +124,24 @@ GET /health
 
 ## Application Database
 
-The Windows service defaults to SQLite:
+PostgreSQL is the only supported database. Configure a password-free Npgsql connection string and, optionally, a password file (normally a Docker secret):
 
 ```json
 "AppDatabase": {
-  "Provider": "Sqlite",
-  "Path": "App_Data/data/premiere-calendar.db"
+  "ConnectionString": "Host=database;Port=5432;Database=premierecalendar;Username=premierecalendar",
+  "PasswordFile": "/run/secrets/postgres_password"
 }
 ```
 
-Containers set `Provider=PostgreSql`, a password-free Npgsql connection string, and `PasswordFile` pointing to the Docker secret. See [Docker and PostgreSQL](DockerAndPostgres.md). Never put the database password in committed configuration.
+`PasswordFile` overrides any password in the connection string and is read whenever a new physical connection is opened, so a rotated secret is picked up without a restart. A missing or unreadable password file stops startup instead of retrying. Never put the database password in committed configuration. See [Docker and PostgreSQL](DockerAndPostgres.md).
 
-Stored parameters currently include Sonarr and Radarr enable flags, URLs, API keys, root folder paths, quality profile IDs, tag-on-add values, add behavior, and source API settings for TMDb, TVmaze, Trakt, Watchmode, SIMKL, OMDb, Fanart.tv, TheTVDB, and Wikimedia. The same parameter table stores local app state such as saved filter presets, visit-change snapshots, and the background job timeline. In release installs this path is overridden to `C:\ProgramData\PremiereCalendar\data\premiere-calendar.db` so updates can replace binaries without touching local settings.
+SQLite was removed. `AppDatabase:Provider` is no longer needed (`PostgreSql` is still accepted so existing container configuration keeps working), but any other provider value, such as `Sqlite`, and any `AppDatabase:Path` value fail startup with an explicit error, so a container that still carries SQLite configuration cannot silently start against an empty database. `AppDatabase:MigrationBackupDirectory` and `MigrationBackupRetentionCount` are ignored.
+
+Stored parameters currently include Sonarr and Radarr enable flags, URLs, API keys, root folder paths, quality profile IDs, tag-on-add values, add behavior, and source API settings for TMDb, TVmaze, Trakt, Watchmode, SIMKL, OMDb, Fanart.tv, TheTVDB, and Wikimedia. The same parameter table stores local app state such as saved filter presets, visit-change snapshots, and the background job timeline.
 
 The Settings page can export and import a JSON backup of integration settings and local calendar state. Export includes saved presets and visit state. API secrets are redacted by default; enable `Include API secrets` only for a private backup you intend to restore as-is. Import replaces the saved settings and matching local calendar-state keys from the provided JSON without overwriting volatile diagnostics such as the background job timeline.
 
-The same SQLite file also stores IMDb ratings, OMDb response cache, and provider-sync markers such as TMDb/TVmaze change checks.
-
-## Application Updates
-
-Settings includes a `Signed GitHub release update` action for installed releases. It uses the non-secret `ApplicationUpdate` infrastructure settings from `appsettings.json`, not the SQLite settings database:
-
-```json
-"ApplicationUpdate": {
-  "Enabled": true,
-  "UpdaterScriptPath": "D:\\Apps\\PremiereCalendar\\updater\\install-github-release.ps1",
-  "LogDirectory": "D:\\Apps\\PremiereCalendarData\\logs\\application-updates",
-  "PowerShellPath": "powershell.exe",
-  "InstallRoot": "D:\\Apps\\PremiereCalendar",
-  "DataRoot": "D:\\Apps\\PremiereCalendarData",
-  "Repository": "Belgian-Coder/PremiereCalendar"
-}
-```
-
-The app starts the fixed updater script as a detached Windows PowerShell process. The UI cannot provide arbitrary commands or asset URLs. The updater accepts only the configured GitHub `owner/name`, downloads the stable release manifest first, selects its exact package, enforces size and archive-path limits, verifies the pinned certificate/signature/hash, and writes a transcript under `ApplicationUpdate:LogDirectory`. Activation and rollback behavior is documented in [Signed GitHub Releases and Updates](ReleaseUpdates.md).
+The same database also stores IMDb ratings, OMDb response cache, and provider-sync markers such as TMDb/TVmaze change checks.
 
 ## Sonarr And Radarr
 
@@ -207,7 +188,7 @@ The default host URL is configured as:
 "Urls": "http://0.0.0.0:5298"
 ```
 
-This lets the app listen on all network interfaces. Other LAN devices still require the Windows firewall to allow inbound TCP `5298`.
+This lets the app listen on all network interfaces. Containers set `Urls` to `http://0.0.0.0:8080` and publish it on the loopback port described in [Docker and PostgreSQL](DockerAndPostgres.md).
 
 ## TVmaze
 
