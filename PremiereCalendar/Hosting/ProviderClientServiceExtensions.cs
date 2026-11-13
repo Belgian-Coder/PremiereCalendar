@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
@@ -11,6 +12,7 @@ public static class ProviderClientServiceExtensions
     {
         services.AddHttpClient<ITmdbClient, TmdbClient>((sp, client) =>
             ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<TmdbOptions>>().Value.BaseUrl))
+            .ConfigureProviderTransport()
             .AddHttpMessageHandler(sp =>
             {
                 var options = sp.GetRequiredService<IOptions<TmdbOptions>>().Value;
@@ -19,6 +21,7 @@ public static class ProviderClientServiceExtensions
             });
         services.AddHttpClient<IOmdbClient, OmdbClient>((sp, client) =>
             ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<OmdbOptions>>().Value.BaseUrl))
+            .ConfigureProviderTransport()
             .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
                 .Create("omdb", 2, TimeSpan.FromSeconds(30)));
         services.AddHttpClient<IImdbDatasetImporter, ImdbDatasetImporter>((sp, client) =>
@@ -37,7 +40,8 @@ public static class ProviderClientServiceExtensions
             var options = sp.GetRequiredService<IOptions<TvmazeOptions>>().Value;
             ConfigureAdaptiveJson(client, options.BaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp =>
+        }).ConfigureProviderTransport()
+            .AddHttpMessageHandler(sp =>
         {
             var options = sp.GetRequiredService<IOptions<TvmazeOptions>>().Value;
             return sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
@@ -45,23 +49,27 @@ public static class ProviderClientServiceExtensions
         });
         services.AddHttpClient<IFanartClient, FanartClient>((sp, client) =>
             ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<FanartOptions>>().Value.BaseUrl))
+            .ConfigureProviderTransport()
             .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
                 .Create("fanart", 2, TimeSpan.FromSeconds(30)));
         services.AddHttpClient<ITraktClient, TraktClient>((sp, client) =>
         {
             ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<TraktOptions>>().Value.BaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+        }).ConfigureProviderTransport()
+            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
             .Create("trakt", 2, TimeSpan.FromSeconds(30)));
         services.AddHttpClient<ITheTvdbClient, TheTvdbClient>((sp, client) =>
             ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<TheTvdbOptions>>().Value.BaseUrl))
+            .ConfigureProviderTransport()
             .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
                 .Create("thetvdb", 2, TimeSpan.FromSeconds(30)));
         services.AddHttpClient<WikimediaClient>((sp, client) =>
         {
             ConfigureAdaptiveJson(client, sp.GetRequiredService<IOptions<WikimediaOptions>>().Value.WikidataBaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
+        }).ConfigureProviderTransport()
+            .AddHttpMessageHandler(sp => sp.GetRequiredService<AdaptiveProviderHandlerFactory>()
             .Create("wikimedia", 2, TimeSpan.FromSeconds(100)));
         // Artwork and identifier callers share one short-lived batching queue.
         services.AddSingleton<IWikimediaClient>(sp => sp.GetRequiredService<WikimediaClient>());
@@ -72,7 +80,8 @@ public static class ProviderClientServiceExtensions
             client.Timeout = Timeout.InfiniteTimeSpan;
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp =>
+        }).ConfigureProviderTransport()
+            .AddHttpMessageHandler(sp =>
         {
             var timeout = TimeSpan.FromSeconds(Math.Clamp(
                 sp.GetRequiredService<IOptions<RottenTomatoesOptions>>().Value.RequestTimeoutSeconds, 5, 120));
@@ -83,7 +92,8 @@ public static class ProviderClientServiceExtensions
             var options = sp.GetRequiredService<IOptions<WatchmodeOptions>>().Value;
             ConfigureAdaptiveJson(client, options.BaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp =>
+        }).ConfigureProviderTransport()
+            .AddHttpMessageHandler(sp =>
         {
             var timeout = TimeSpan.FromSeconds(Math.Clamp(
                 sp.GetRequiredService<IOptions<WatchmodeOptions>>().Value.RequestTimeoutSeconds, 5, 120));
@@ -94,7 +104,8 @@ public static class ProviderClientServiceExtensions
             var options = sp.GetRequiredService<IOptions<SimklOptions>>().Value;
             ConfigureAdaptiveJson(client, options.BaseUrl);
             AddUserAgent(client);
-        }).AddHttpMessageHandler(sp =>
+        }).ConfigureProviderTransport()
+            .AddHttpMessageHandler(sp =>
         {
             var timeout = TimeSpan.FromSeconds(Math.Clamp(
                 sp.GetRequiredService<IOptions<SimklOptions>>().Value.RequestTimeoutSeconds, 5, 120));
@@ -122,6 +133,29 @@ public static class ProviderClientServiceExtensions
         });
         return services;
     }
+
+    /// <summary>Lifetime of a pooled provider connection; bounds how long a stale DNS answer can be reused.</summary>
+    internal static readonly TimeSpan ProviderPooledConnectionLifetime = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Shared transport for the JSON/HTML provider clients: negotiates gzip, deflate or Brotli (never zstd, whose
+    /// multi-frame decoding is not trusted yet) and keeps connections pooled across factory handler rotation.
+    /// Decompression strips Content-Length/Content-Encoding from the response seen by the adaptive handler, so body
+    /// completion for those responses relies on end-of-stream rather than a declared length.
+    /// </summary>
+    internal static IHttpClientBuilder ConfigureProviderTransport(this IHttpClientBuilder builder) => builder
+        .ConfigurePrimaryHttpMessageHandler(CreateProviderPrimaryHandler)
+        // Connection rotation is owned by PooledConnectionLifetime; recycling the whole handler chain every two
+        // minutes would only discard warm connections and TLS sessions.
+        .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
+
+    internal static SocketsHttpHandler CreateProviderPrimaryHandler() => new()
+    {
+        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+        PooledConnectionLifetime = ProviderPooledConnectionLifetime,
+        // The factory default for primary handlers is cookie-less; keep it so providers cannot track sessions.
+        UseCookies = false
+    };
 
     private static void ConfigureAdaptiveJson(HttpClient client, string baseUrl)
     {
