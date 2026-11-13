@@ -124,7 +124,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                 config.Append('\n').Append(setting.Key).Append('=').Append(setting.Value);
             }
         }
-        Partition = "item-v1:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(config.ToString()))).ToLowerInvariant();
+        Partition = "item-v1:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(config.ToString())));
     }
 
     internal async Task<ItemEnrichmentSession> CreateSessionAsync(CancellationToken cancellationToken)
@@ -139,7 +139,7 @@ public sealed class ItemEnrichmentCacheCoordinator
             Regions = sources.Watchmode.Regions.Select(region => region.Trim().ToUpperInvariant()).Order().ToArray(),
             sources.Watchmode.EnableAvailabilityEnrichment
         });
-        var partition = Partition + ":" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(effective))).ToLowerInvariant();
+        var partition = Partition + ":" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(effective)));
         return new(this, partition, await CanImportLegacyAsync(partition, cancellationToken), cancellationToken);
     }
 
@@ -802,7 +802,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                 : coreContinuation is not null ? FindCoreProposalCohort(identity, current.Record.Generation) : null;
             var observationStarted = _providerObservationStarts.GetOrAdd((identity, current.Record.Generation), current.Record.LastSeenUtc);
             var flightHash = owner._telemetry.DiagnosticsHealth.Enabled
-                ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(flightKey)))[..20].ToLowerInvariant() : null;
+                ? Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(flightKey)))[..20] : null;
             void TraceFlight(string outcome)
             {
                 if (flightHash is null) return;
@@ -932,19 +932,26 @@ public sealed class ItemEnrichmentCacheCoordinator
             if (outcome.PreserveRatings) DropPendingRatings(identity);
             if (current.Record.Generation >= 0)
             {
-                var metadataChanged = outcome.Record.MetadataFetchedUtc != current.Record.MetadataFetchedUtc
-                    || JsonSerializer.Serialize(outcome.Metadata) != JsonSerializer.Serialize(current.Metadata);
-                var ratingsChanged = !outcome.PreserveRatings && (outcome.Record.RatingsFetchedUtc != current.Record.RatingsFetchedUtc
-                    || JsonSerializer.Serialize(outcome.Ratings) != JsonSerializer.Serialize(current.Ratings));
+                // Each snapshot is serialized at most once per outcome; the same
+                // string drives the comparison, the pending write and any merge.
+                string? outcomeMetadataJson = null, outcomeRatingsJson = null;
+                var metadataChanged = outcome.Record.MetadataFetchedUtc != current.Record.MetadataFetchedUtc;
+                if (!metadataChanged && !ReferenceEquals(outcome.Metadata, current.Metadata))
+                    metadataChanged = (outcomeMetadataJson = JsonSerializer.Serialize(outcome.Metadata)) != JsonSerializer.Serialize(current.Metadata);
+                var ratingsChanged = !outcome.PreserveRatings && outcome.Record.RatingsFetchedUtc != current.Record.RatingsFetchedUtc;
+                if (!outcome.PreserveRatings && !ratingsChanged && !ReferenceEquals(outcome.Ratings, current.Ratings))
+                    ratingsChanged = (outcomeRatingsJson = JsonSerializer.Serialize(outcome.Ratings)) != JsonSerializer.Serialize(current.Ratings);
+                if (metadataChanged) outcomeMetadataJson ??= JsonSerializer.Serialize(outcome.Metadata);
+                if (ratingsChanged) outcomeRatingsJson ??= JsonSerializer.Serialize(outcome.Ratings);
                 if (ratingsChanged)
-                    _ratingChanges.AddOrUpdate(identity, new RatingProjectionChange(current.Ratings, outcome.Ratings),
-                        (_, previous) => new RatingProjectionChange(previous.Before, outcome.Ratings));
+                    _ratingChanges.AddOrUpdate(identity, new RatingProjectionChange(current.Ratings, outcome.Ratings, outcomeRatingsJson),
+                        (_, previous) => new RatingProjectionChange(previous.Before, outcome.Ratings, outcomeRatingsJson));
                 if (metadataChanged || ratingsChanged)
                 {
                     var write = new ItemEnrichmentWrite(identity, current.Record.Generation,
-                        metadataChanged ? JsonSerializer.Serialize(outcome.Metadata) : null,
+                        metadataChanged ? outcomeMetadataJson : null,
                         metadataChanged ? outcome.Record.MetadataFetchedUtc : null,
-                        ratingsChanged ? JsonSerializer.Serialize(outcome.Ratings) : null,
+                        ratingsChanged ? outcomeRatingsJson : null,
                         ratingsChanged ? outcome.Record.RatingsFetchedUtc : null, outcome.Metadata?.TvmazeShowId,
                         outcome.Metadata?.TmdbVotes?.TmdbObservedUtc, current.Record.MetadataRevision)
                     { CoreContinuation = metadataChanged ? coreContinuation : null,
@@ -955,9 +962,9 @@ public sealed class ItemEnrichmentCacheCoordinator
                             ? outcome.RatingsReadBaseline : null };
                     _writes.AddOrUpdate(identity, write,
                         (_, previous) => previous.ExpectedMetadataRevision != current.Record.MetadataRevision ? write : new(identity, current.Record.Generation,
-                            metadataChanged ? JsonSerializer.Serialize(outcome.Metadata) : previous.MetadataJson,
+                            metadataChanged ? outcomeMetadataJson : previous.MetadataJson,
                             metadataChanged ? outcome.Record.MetadataFetchedUtc : previous.MetadataFetchedUtc,
-                            outcome.PreserveRatings ? null : ratingsChanged ? JsonSerializer.Serialize(outcome.Ratings) : previous.RatingsJson,
+                            outcome.PreserveRatings ? null : ratingsChanged ? outcomeRatingsJson : previous.RatingsJson,
                             outcome.PreserveRatings ? null : ratingsChanged ? outcome.Record.RatingsFetchedUtc : previous.RatingsFetchedUtc,
                             outcome.Metadata?.TvmazeShowId ?? previous.TvmazeShowId,
                             outcome.Metadata?.TmdbVotes?.TmdbObservedUtc ?? previous.TmdbObservedUtc, current.Record.MetadataRevision)
@@ -1102,7 +1109,7 @@ public sealed class ItemEnrichmentCacheCoordinator
                         writes.Add(TagLookupWrite(ContinueAcceptedCore(write)));
                         if (_ratingChanges.TryRemove(identity, out var change))
                         {
-                            if (JsonSerializer.Serialize(change.Proposed) == write.RatingsJson) ratingChanges[identity] = change;
+                            if ((change.ProposedJson ?? JsonSerializer.Serialize(change.Proposed)) == write.RatingsJson) ratingChanges[identity] = change;
                             else _ratingChanges.TryAdd(identity, change);
                         }
                     }
@@ -1505,7 +1512,7 @@ public sealed class ItemEnrichmentCacheCoordinator
 
         private sealed record AcceptedTomatoes(long Generation, long MetadataRevision, string? WikidataId,
             string? Title, int? Year, ItemEnrichmentRatingValues Values, DateTimeOffset FetchedUtc, bool Required);
-        private sealed record RatingProjectionChange(ItemEnrichmentRatings? Before, ItemEnrichmentRatings? Proposed);
+        private sealed record RatingProjectionChange(ItemEnrichmentRatings? Before, ItemEnrichmentRatings? Proposed, string? ProposedJson = null);
     }
 
     private static T? Deserialize<T>(string? json)
