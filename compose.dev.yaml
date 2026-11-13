@@ -8,6 +8,8 @@ services:
       POSTGRES_USER: premierecalendar
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       PGDATA: /var/lib/postgresql/18/docker
+    # Tests run in parallel and each test class creates its own database; give them connection headroom.
+    command: ["postgres", "-c", "max_connections=300"]
     secrets:
       - postgres_password
     volumes:

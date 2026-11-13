@@ -23,8 +23,11 @@ output/**
 tests/**
 !tests/*/*.csproj
 *.png
-*.db
-*.db-shm
-*.db-wal
+.worktrees
+.worktrees/**
+.scratch
+.scratch/**
+.bench
+.bench/**
 .secrets
 .secrets/**
