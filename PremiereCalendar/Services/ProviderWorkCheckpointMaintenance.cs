@@ -2,7 +2,6 @@ using System.Data.Common;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Options;
 
@@ -14,19 +13,15 @@ public sealed record ProviderWorkCheckpointMaintenanceResult(
 /// <summary>Converts checkpoint storage for an offline application downgrade without changing job state.</summary>
 public sealed class ProviderWorkCheckpointMaintenance(
     IOptions<AppDatabaseOptions> options,
-    IWebHostEnvironment environment,
     TimeProvider timeProvider)
 {
     public async Task<ProviderWorkCheckpointMaintenanceResult> PrepareLegacyCheckpointsAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = DatabaseConnectionFactory.Create(options.Value, environment.ContentRootPath);
+        await using var connection = DatabaseConnectionFactory.Create(options.Value);
         await connection.OpenAsync(cancellationToken);
-        await using var transaction = connection is SqliteConnection sqlite
-            ? sqlite.BeginTransaction(deferred: false)
-            : (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
-        if (DatabaseConnectionFactory.IsPostgreSql(connection))
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var tableLock = connection.CreateCommand())
         {
-            await using var tableLock = connection.CreateCommand();
             tableLock.Transaction = transaction;
             // This also blocks SELECT FOR UPDATE claims. Existing claims finish
             // before the lock is granted and are then caught by the lease check.

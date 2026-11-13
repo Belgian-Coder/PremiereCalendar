@@ -6,17 +6,15 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class SqliteAppStateStore : IAppStateStore
+public sealed class AppStateStore : IAppStateStore
 {
     private readonly AppDatabaseOptions _options;
-    private readonly IWebHostEnvironment _environment;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _initialized;
 
-    public SqliteAppStateStore(IOptions<AppDatabaseOptions> options, IWebHostEnvironment environment)
+    public AppStateStore(IOptions<AppDatabaseOptions> options)
     {
         _options = options.Value;
-        _environment = environment;
     }
 
     public async Task<string?> GetValueAsync(string key, CancellationToken cancellationToken)
@@ -186,17 +184,6 @@ public sealed class SqliteAppStateStore : IAppStateStore
 
     private DbConnection CreateConnection()
     {
-        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
-    }
-
-    private string ResolveDatabasePath()
-    {
-        var configuredPath = string.IsNullOrWhiteSpace(_options.Path)
-            ? "App_Data/data/premiere-calendar.db"
-            : _options.Path.Trim();
-
-        return Path.IsPathFullyQualified(configuredPath)
-            ? configuredPath
-            : Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configuredPath));
+        return DatabaseConnectionFactory.Create(_options);
     }
 }

@@ -6,7 +6,7 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class SqliteSimklSyncStateStore : ISimklSyncStateStore
+public sealed class SimklSyncStateStore : ISimklSyncStateStore
 {
     private const string LastActivitiesAllKey = "LastActivitiesAllUtc";
     private const string LastActivitiesJsonKey = "LastActivitiesJson";
@@ -14,16 +14,13 @@ public sealed class SqliteSimklSyncStateStore : ISimklSyncStateStore
     private const string LastCheckedUtcKey = "LastCheckedUtc";
 
     private readonly AppDatabaseOptions _options;
-    private readonly IWebHostEnvironment _environment;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _initialized;
 
-    public SqliteSimklSyncStateStore(
-        IOptions<AppDatabaseOptions> options,
-        IWebHostEnvironment environment)
+    public SimklSyncStateStore(
+        IOptions<AppDatabaseOptions> options)
     {
         _options = options.Value;
-        _environment = environment;
     }
 
     public async Task<SimklSyncState> GetAsync(CancellationToken cancellationToken)
@@ -119,18 +116,7 @@ public sealed class SqliteSimklSyncStateStore : ISimklSyncStateStore
 
     private DbConnection CreateConnection()
     {
-        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
-    }
-
-    private string ResolveDatabasePath()
-    {
-        var configuredPath = string.IsNullOrWhiteSpace(_options.Path)
-            ? "App_Data/data/premiere-calendar.db"
-            : _options.Path.Trim();
-
-        return Path.IsPathFullyQualified(configuredPath)
-            ? configuredPath
-            : Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configuredPath));
+        return DatabaseConnectionFactory.Create(_options);
     }
 
     private static string? GetString(IReadOnlyDictionary<string, string> values, string key)

@@ -9,7 +9,7 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
+public sealed class OmdbCacheStore : IOmdbCacheStore
 {
     private const string RateLimitedUntilUtcKey = "RateLimitedUntilUtc";
     private const string LastErrorKey = "LastError";
@@ -18,18 +18,15 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly AppDatabaseOptions _options;
-    private readonly IWebHostEnvironment _environment;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _initialized;
 
-    public SqliteOmdbCacheStore(
+    public OmdbCacheStore(
         IOptions<AppDatabaseOptions> options,
-        IWebHostEnvironment environment,
         TimeProvider timeProvider)
     {
         _options = options.Value;
-        _environment = environment;
         _timeProvider = timeProvider;
     }
 
@@ -237,18 +234,7 @@ public sealed class SqliteOmdbCacheStore : IOmdbCacheStore
 
     private DbConnection CreateConnection()
     {
-        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
-    }
-
-    private string ResolveDatabasePath()
-    {
-        var configuredPath = string.IsNullOrWhiteSpace(_options.Path)
-            ? "App_Data/data/premiere-calendar.db"
-            : _options.Path.Trim();
-
-        return Path.IsPathFullyQualified(configuredPath)
-            ? configuredPath
-            : Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configuredPath));
+        return DatabaseConnectionFactory.Create(_options);
     }
 
     private static string NormalizeImdbId(string imdbId)

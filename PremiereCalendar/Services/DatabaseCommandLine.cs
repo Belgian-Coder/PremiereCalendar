@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
@@ -12,7 +13,6 @@ public static class DatabaseCommandLine
     public static async Task<int> RunAsync(
         string[] args,
         IConfiguration configuration,
-        IWebHostEnvironment environment,
         CancellationToken cancellationToken = default)
     {
         using var loggerFactory = LoggerFactory.Create(logging => logging.AddSimpleConsole(options =>
@@ -22,12 +22,12 @@ public static class DatabaseCommandLine
             options.UseUtcTimestamp = true;
         }));
         var databaseOptions = configuration.GetSection("AppDatabase").Get<AppDatabaseOptions>() ?? new AppDatabaseOptions();
-        var initializer = new SqliteDatabaseInitializer(
-            Microsoft.Extensions.Options.Options.Create(databaseOptions),
-            environment,
-            new DatabaseRecoveryState(),
-            TimeProvider.System,
-            loggerFactory.CreateLogger<SqliteDatabaseInitializer>());
+        var configurationError = AppDatabaseOptionsValidator.Validate(configuration, databaseOptions);
+        if (configurationError is not null)
+        {
+            Console.Error.WriteLine($"Database command failed: {configurationError}");
+            return 2;
+        }
 
         try
         {
@@ -36,7 +36,7 @@ public static class DatabaseCommandLine
                 try
                 {
                     var maintenance = new ProviderWorkCheckpointMaintenance(
-                        Microsoft.Extensions.Options.Options.Create(databaseOptions), environment, TimeProvider.System);
+                        Microsoft.Extensions.Options.Options.Create(databaseOptions), TimeProvider.System);
                     var result = await maintenance.PrepareLegacyCheckpointsAsync(cancellationToken);
                     Console.WriteLine(JsonSerializer.Serialize(result));
                     return 0;
@@ -50,99 +50,27 @@ public static class DatabaseCommandLine
                 }
             }
 
-            if (args.Length == 4
-                && string.Equals(args[1], "migrate-postgres", StringComparison.OrdinalIgnoreCase)
-                && string.Equals(args[2], "--source", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!Path.IsPathFullyQualified(args[3])) throw new ArgumentException("--source must be an absolute path.");
-                var recoveryState = new DatabaseRecoveryState();
-                var telemetry = new PremiereTelemetry();
-                var postgres = new PostgresDatabaseInitializer(
-                    Microsoft.Extensions.Options.Options.Create(databaseOptions), environment, recoveryState,
-                    TimeProvider.System, loggerFactory.CreateLogger<PostgresDatabaseInitializer>(), telemetry);
-                await postgres.InitializeAsync(cancellationToken);
-                if (!recoveryState.Snapshot.IsHealthy) throw new InvalidOperationException(recoveryState.Snapshot.Message);
-                var migrator = new SqliteToPostgresMigrator(
-                    Microsoft.Extensions.Options.Options.Create(databaseOptions), environment);
-                var report = await migrator.MigrateAsync(args[3], cancellationToken);
-                Console.WriteLine(JsonSerializer.Serialize(report));
-                return 0;
-            }
-
             if (args.Length == 2 && string.Equals(args[1], "verify", StringComparison.OrdinalIgnoreCase))
             {
-                DatabaseStatusSnapshot result;
-                if (DatabaseConnectionFactory.IsPostgreSql(databaseOptions))
-                {
-                    var postgres = new PostgresDatabaseInitializer(
-                        Microsoft.Extensions.Options.Options.Create(databaseOptions), environment, new DatabaseRecoveryState(),
-                        TimeProvider.System, loggerFactory.CreateLogger<PostgresDatabaseInitializer>(), new PremiereTelemetry());
-                    result = await postgres.VerifyAsync(cancellationToken);
-                }
-                else
-                {
-                    result = await initializer.VerifyAsync(null, cancellationToken);
-                }
+                var postgres = new PostgresDatabaseInitializer(
+                    Microsoft.Extensions.Options.Options.Create(databaseOptions), new DatabaseRecoveryState(),
+                    TimeProvider.System, loggerFactory.CreateLogger<PostgresDatabaseInitializer>(), new PremiereTelemetry());
+                var result = await postgres.VerifyAsync(cancellationToken);
                 Console.WriteLine(JsonSerializer.Serialize(result));
                 return result.IsHealthy ? 0 : 2;
             }
 
-            if (args.Length == 4
-                && string.Equals(args[1], "snapshot", StringComparison.OrdinalIgnoreCase)
-                && string.Equals(args[2], "--output", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!Path.IsPathFullyQualified(args[3]))
-                {
-                    throw new ArgumentException("--output must be an absolute path.");
-                }
-
-                var result = await initializer.CreateVerifiedSnapshotAsync(args[3], cancellationToken);
-                Console.WriteLine(JsonSerializer.Serialize(result));
-                return result.IsHealthy ? 0 : 2;
-            }
-
-            if (args.Length == 4
-                && string.Equals(args[1], "restore", StringComparison.OrdinalIgnoreCase)
-                && string.Equals(args[2], "--backup", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!Path.IsPathFullyQualified(args[3]))
-                {
-                    throw new ArgumentException("--backup must be an absolute path.");
-                }
-
-                EnsureDatabaseIsOffline(initializer.ResolvePath());
-                await initializer.RestoreAsync(args[3], cancellationToken);
-                var result = await initializer.VerifyAsync(null, cancellationToken);
-                Console.WriteLine(JsonSerializer.Serialize(result));
-                return result.IsHealthy ? 0 : 2;
-            }
-
-            Console.Error.WriteLine("Usage: PremiereCalendar.exe database verify | database prepare-legacy-checkpoints | database snapshot --output <absolute-path> | database restore --backup <absolute-path> | database migrate-postgres --source <absolute-sqlite-snapshot>");
+            Console.Error.WriteLine("Usage: dotnet PremiereCalendar.dll database verify | database prepare-legacy-checkpoints");
             return 64;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or Microsoft.Data.Sqlite.SqliteException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NpgsqlException)
         {
             Console.Error.WriteLine($"Database command failed: {exception.Message}");
             return 2;
         }
-    }
-
-    private static void EnsureDatabaseIsOffline(string databasePath)
-    {
-        if (!File.Exists(databasePath))
+        finally
         {
-            return;
-        }
-
-        try
-        {
-            using var stream = new FileStream(databasePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        }
-        catch (IOException exception)
-        {
-            throw new InvalidOperationException(
-                "The database is in use. Stop the PremiereCalendar Windows Service before restoring.",
-                exception);
+            DatabaseConnectionFactory.Dispose(databaseOptions);
         }
     }
 }

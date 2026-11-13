@@ -390,7 +390,6 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }
         catch (Exception exception) when (exception is DbException or IOException or OperationCanceledException)
         {
-            _telemetry.RecordDatabaseException(exception);
             _telemetry.RecordDiagnostic("scheduler.preemption.reconcile.failed", details: new()
             { Stage = "dispatch", Outcome = "failed", Reason = exception.GetType().Name });
         }
@@ -749,7 +748,6 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         catch (OperationCanceledException) when (execution.IsCancellationRequested) { }
         catch (DbException exception)
         {
-            _telemetry.RecordDatabaseException(exception);
             RecordDiagnostic(job, "scheduler.lease.error", new() { Stage = "lease", Outcome = "failed", Reason = exception.GetType().Name });
             execution.Cancel();
         }
@@ -899,7 +897,6 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         {
             // Requeue and view cleanup have already succeeded. Interest changes
             // are best effort and must not replace the delivered outcome.
-            _telemetry.RecordDatabaseException(exception);
         }
     }
 
@@ -1064,7 +1061,6 @@ public sealed class ProviderWorkScheduler : IProviderWorkScheduler
         }
         catch (Exception exception) when (exception is DbException or OperationCanceledException)
         {
-            _telemetry.RecordDatabaseException(exception);
         }
         finally { _countGate.Release(); }
     }
@@ -1404,8 +1400,8 @@ public sealed class ProviderWorkSchedulerHostedService(
             }
             catch (Exception ex) when (stoppingToken.IsCancellationRequested)
             {
-                // SQLite can report a final lock error instead of cancellation while the host is
-                // stopping. Do not turn an otherwise normal Windows Service stop into a crash.
+                // A final database error can surface instead of cancellation while the host is
+                // stopping. Do not turn an otherwise normal container stop into a crash.
                 logger.LogDebug(ex, "Provider worker {ProviderWorkOwner} stopped during shutdown.", owner);
                 return;
             }
@@ -1699,7 +1695,7 @@ public sealed class ProviderWorkStore(
               {(foregroundOnly ? "AND Priority <= 100" : string.Empty)}
             ORDER BY Priority, COALESCE(NextAttemptUtc, EnqueuedUtc), EnqueuedUtc
             LIMIT 1
-            {(DatabaseConnectionFactory.IsPostgreSql(connection) ? "FOR UPDATE SKIP LOCKED" : string.Empty)}
+            FOR UPDATE SKIP LOCKED
             """;
         DatabaseParameters.Add(select, "@now", Format(now));
         ProviderWorkSnapshot? snapshot = null;
@@ -1814,16 +1810,12 @@ public sealed class ProviderWorkStore(
     {
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        // SQLite's immediate transaction reserves the writer before checking the
-        // claim. PostgreSQL instead holds this job's row lock through publication.
-        await using var transaction = connection is Microsoft.Data.Sqlite.SqliteConnection sqlite
-            ? sqlite.BeginTransaction(deferred: false)
-            : (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        // The row lock taken below is held through publication.
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using (var claimLock = connection.CreateCommand())
         {
             claimLock.Transaction = transaction;
-            claimLock.CommandText = "SELECT JobId FROM ProviderWorkJobs WHERE JobId = @id"
-                + (DatabaseConnectionFactory.IsPostgreSql(connection) ? " FOR UPDATE" : string.Empty);
+            claimLock.CommandText = "SELECT JobId FROM ProviderWorkJobs WHERE JobId = @id FOR UPDATE";
             DatabaseParameters.Add(claimLock, "@id", jobId);
             if (await claimLock.ExecuteScalarAsync(cancellationToken) is null) return false;
         }
@@ -1973,7 +1965,7 @@ public sealed class ProviderWorkStore(
 
     private DbConnection CreateConnection()
     {
-        return DatabaseConnectionFactory.Create(_options, environment.ContentRootPath);
+        return DatabaseConnectionFactory.Create(_options);
     }
 
     private static ProviderWorkSnapshot Read(DbDataReader reader) => new(

@@ -8,7 +8,7 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
+public sealed class CalendarFilterUsageStore : ICalendarFilterUsageStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -16,16 +16,13 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
     };
 
     private readonly AppDatabaseOptions _options;
-    private readonly IWebHostEnvironment _environment;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _initialized;
 
-    public SqliteCalendarFilterUsageStore(
-        IOptions<AppDatabaseOptions> options,
-        IWebHostEnvironment environment)
+    public CalendarFilterUsageStore(
+        IOptions<AppDatabaseOptions> options)
     {
         _options = options.Value;
-        _environment = environment;
     }
 
     public async Task RecordUseAsync(
@@ -368,18 +365,7 @@ public sealed class SqliteCalendarFilterUsageStore : ICalendarFilterUsageStore
 
     private DbConnection CreateConnection()
     {
-        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
-    }
-
-    private string ResolveDatabasePath()
-    {
-        var configuredPath = string.IsNullOrWhiteSpace(_options.Path)
-            ? "App_Data/data/premiere-calendar.db"
-            : _options.Path.Trim();
-
-        return Path.IsPathFullyQualified(configuredPath)
-            ? configuredPath
-            : Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configuredPath));
+        return DatabaseConnectionFactory.Create(_options);
     }
 
     private static void AddProfileParameters(

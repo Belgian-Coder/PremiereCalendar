@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
-using Microsoft.Data.Sqlite;
 using Npgsql;
 using PremiereCalendar.Options;
 
@@ -9,34 +8,13 @@ namespace PremiereCalendar.Services;
 
 internal static class DatabaseConnectionFactory
 {
-    public static bool IsPostgreSql(AppDatabaseOptions options) =>
-        string.Equals(options.Provider, "PostgreSql", StringComparison.OrdinalIgnoreCase);
-
-    public static DbConnection Create(AppDatabaseOptions options, string contentRootPath)
-    {
-        if (IsPostgreSql(options)) return CreatePostgreSql(options);
-
-        var configuredPath = string.IsNullOrWhiteSpace(options.Path)
-            ? "App_Data/data/premiere-calendar.db"
-            : options.Path.Trim();
-        var path = Path.IsPathFullyQualified(configuredPath)
-            ? configuredPath
-            : Path.GetFullPath(Path.Combine(contentRootPath, configuredPath));
-        return SqliteConnectionFactory.Create(new SqliteConnectionStringBuilder
-        {
-            DataSource = path,
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Private
-        }.ToString());
-    }
-
     /// <summary>
     /// Opens a connection through a cached <see cref="NpgsqlDataSource"/>. The connection string is parsed and
     /// validated once per distinct configuration instead of per call, and the password file is read asynchronously
     /// by Npgsql only when a new physical connection is established (never while a pooled one is reused), so a
     /// rotated password is still picked up by the next physical connection exactly as before.
     /// </summary>
-    internal static NpgsqlConnection CreatePostgreSql(AppDatabaseOptions options, int? commandTimeoutSeconds = null)
+    public static NpgsqlConnection Create(AppDatabaseOptions options, int? commandTimeoutSeconds = null)
     {
         var connectionString = options.ConnectionString.Trim();
         var passwordFile = string.IsNullOrWhiteSpace(options.PasswordFile)
@@ -48,6 +26,29 @@ internal static class DatabaseConnectionFactory
             dataSource = PostgreSqlDataSources.GetOrAdd(key, static candidate => BuildPostgreSqlDataSource(candidate));
         }
         return dataSource.CreateConnection();
+    }
+
+    /// <summary>
+    /// Disposes the cached data sources of one configuration (every command-timeout variant), closing their pooled
+    /// connections. Hosts call it after their hosted services have stopped.
+    /// </summary>
+    internal static void Dispose(AppDatabaseOptions options)
+    {
+        var connectionString = options.ConnectionString.Trim();
+        var passwordFile = string.IsNullOrWhiteSpace(options.PasswordFile)
+            ? null
+            : Path.GetFullPath(options.PasswordFile.Trim());
+        foreach (var key in PostgreSqlDataSources.Keys)
+        {
+            if (!string.Equals(key.ConnectionString, connectionString, StringComparison.Ordinal)
+                || !string.Equals(key.PasswordFile, passwordFile, StringComparison.Ordinal)
+                || !PostgreSqlDataSources.TryRemove(key, out var dataSource))
+            {
+                continue;
+            }
+            try { dataSource.Dispose(); }
+            catch (Exception) { /* Shutdown must not fail because a pool could not close cleanly. */ }
+        }
     }
 
     /// <summary>Disposes every cached PostgreSQL data source, closing its pooled connections.</summary>
@@ -93,11 +94,8 @@ internal static class DatabaseConnectionFactory
     private static string ReadPassword(string passwordFile)
         => File.ReadAllText(passwordFile).TrimEnd('\r', '\n');
 
-    public static bool IsPostgreSql(DbConnection connection) => connection is NpgsqlConnection;
-
     public static bool IsTransient(Exception exception) => exception switch
     {
-        SqliteException { SqliteErrorCode: 5 or 6 } => true,
         PostgresException { SqlState: "40001" or "40P01" or "55P03" } => true,
         NpgsqlException { IsTransient: true } => true,
         _ => false

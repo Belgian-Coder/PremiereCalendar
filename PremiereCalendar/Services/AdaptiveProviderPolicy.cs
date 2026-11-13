@@ -840,9 +840,7 @@ public sealed class AdaptiveProviderHandlerFactory(AdaptiveProviderPolicy policy
         => new AdaptiveProviderHandler(provider, Math.Max(1, maximumConcurrency), policy, requestTimeout, deferFinalThrottle);
 }
 
-public sealed class ProviderAdaptiveStateStore(
-    IOptions<AppDatabaseOptions> options,
-    IWebHostEnvironment environment)
+public sealed class ProviderAdaptiveStateStore(IOptions<AppDatabaseOptions> options)
 {
     private readonly AppDatabaseOptions _options = options.Value;
 
@@ -947,7 +945,7 @@ public sealed class ProviderAdaptiveStateStore(
 
     private DbConnection CreateConnection()
     {
-        return DatabaseConnectionFactory.Create(_options, environment.ContentRootPath);
+        return DatabaseConnectionFactory.Create(_options);
     }
 
     private static object DbDate(DateTimeOffset? value)

@@ -109,14 +109,6 @@ public sealed partial class PremiereTelemetry
     public void RecordDatabaseEvent(string operation, string outcome)
         => _databaseEvents.Add(1, new TagList { { "operation", operation }, { "outcome", outcome } });
 
-    public void RecordDatabaseException(Exception exception)
-    {
-        if (exception is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 5 or 6 })
-        {
-            RecordDatabaseEvent("busy", "observed");
-        }
-    }
-
     public void RecordVersionValidation(string contract, bool valid)
         => _versionValidationOutcomes.Add(1,
             new TagList { { "contract", contract }, { "outcome", valid ? "valid" : "invalid" } });

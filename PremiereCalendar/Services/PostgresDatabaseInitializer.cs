@@ -6,7 +6,6 @@ namespace PremiereCalendar.Services;
 
 public sealed class PostgresDatabaseInitializer(
     IOptions<AppDatabaseOptions> options,
-    IWebHostEnvironment environment,
     DatabaseRecoveryState recoveryState,
     TimeProvider timeProvider,
     ILogger<PostgresDatabaseInitializer> logger,
@@ -21,7 +20,7 @@ public sealed class PostgresDatabaseInitializer(
         RetryPending = false;
         try
         {
-            await using var connection = DatabaseConnectionFactory.Create(_options, environment.ContentRootPath);
+            await using var connection = DatabaseConnectionFactory.Create(_options);
             await connection.OpenAsync(cancellationToken);
             await using (var history = connection.CreateCommand())
             {
@@ -93,8 +92,7 @@ public sealed class PostgresDatabaseInitializer(
                 DatabaseSchema.CurrentVersion,
                 true,
                 "PostgreSQL schema and connectivity checks passed.",
-                lastMigration,
-                null));
+                lastMigration));
             logger.LogInformation("PostgreSQL initialized with schema {DatabaseSchemaVersion}.", currentVersion);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -104,16 +102,14 @@ public sealed class PostgresDatabaseInitializer(
         catch (Exception exception) when (DatabaseConnectionFactory.IsTransient(exception))
         {
             RetryPending = true;
-            telemetry.RecordDatabaseException(exception);
             logger.LogWarning(exception, "PostgreSQL is temporarily unavailable; initialization will retry.");
             recoveryState.Set(new DatabaseStatusSnapshot(0, DatabaseSchema.CurrentVersion, false,
-                "PostgreSQL is temporarily unavailable; initialization will retry.", null, null));
+                "PostgreSQL is temporarily unavailable; initialization will retry.", null));
         }
         catch (Exception exception)
         {
-            telemetry.RecordDatabaseException(exception);
             recoveryState.Set(new DatabaseStatusSnapshot(0, DatabaseSchema.CurrentVersion, false,
-                "PostgreSQL initialization or schema validation failed; operator intervention is required.", null, null));
+                "PostgreSQL initialization or schema validation failed; operator intervention is required.", null));
             logger.LogCritical(exception, "PostgreSQL initialization failed with a non-transient error.");
             throw;
         }
@@ -121,7 +117,7 @@ public sealed class PostgresDatabaseInitializer(
 
     public async Task<DatabaseStatusSnapshot> VerifyAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = DatabaseConnectionFactory.Create(_options, environment.ContentRootPath);
+        await using var connection = DatabaseConnectionFactory.Create(_options);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COALESCE(MAX(Version), 0) FROM SchemaMigrations";
@@ -134,7 +130,6 @@ public sealed class PostgresDatabaseInitializer(
             DatabaseSchema.CurrentVersion,
             version == DatabaseSchema.CurrentVersion,
             "PostgreSQL connectivity and schema checks passed.",
-            null,
             null);
     }
 
@@ -181,6 +176,8 @@ public sealed class PostgresDatabaseInitializer(
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    // Migration 3 is immutable (its checksum is recorded in existing databases), so its SQL keeps the original
+    // INSERT OR REPLACE statement and is translated to the PostgreSQL upsert here.
     private static string ToPostgresSql(string sql) => sql.Replace(
         "INSERT OR REPLACE INTO ProviderWorkLeases (JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc)",
         "INSERT INTO ProviderWorkLeases (JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc)",
@@ -192,15 +189,11 @@ public sealed class PostgresDatabaseInitializer(
 
 public sealed class DatabaseInitializerHostedService(
     IOptions<AppDatabaseOptions> options,
-    SqliteDatabaseInitializer sqlite,
     PostgresDatabaseInitializer postgres) : BackgroundService
 {
     public override async Task StartAsync(CancellationToken cancellationToken)
     {
-        if (DatabaseConnectionFactory.IsPostgreSql(options.Value))
-            await postgres.InitializeAsync(cancellationToken);
-        else
-            await sqlite.InitializeAsync(cancellationToken);
+        await postgres.InitializeAsync(cancellationToken);
         await base.StartAsync(cancellationToken);
     }
 

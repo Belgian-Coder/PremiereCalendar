@@ -1,7 +1,6 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
@@ -9,24 +8,21 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
+public sealed class ImdbRatingsStore : IImdbRatingsStore
 {
     private const string LastImportedUtcKey = "LastImportedUtc";
     private const string RatingCountKey = "RatingCount";
     private const string LastErrorKey = "LastError";
 
     private readonly AppDatabaseOptions _options;
-    private readonly IWebHostEnvironment _environment;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly SemaphoreSlim _initializationGate = new(1, 1);
     private volatile bool _initialized;
 
-    public SqliteImdbRatingsStore(
-        IOptions<AppDatabaseOptions> options,
-        IWebHostEnvironment environment)
+    public ImdbRatingsStore(
+        IOptions<AppDatabaseOptions> options)
     {
         _options = options.Value;
-        _environment = environment;
     }
 
     public async Task<ImdbRatingRecord?> GetByImdbIdAsync(string imdbId, CancellationToken cancellationToken)
@@ -69,10 +65,8 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
         // Every batch must see the same committed dataset if an import publishes
-        // between queries. A deferred SQLite transaction does not acquire a writer lock.
-        await using var transaction = connection is SqliteConnection sqlite
-            ? sqlite.BeginTransaction(IsolationLevel.Serializable, deferred: true)
-            : await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        // between queries.
+        await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
         var ratings = new Dictionary<string, ImdbRatingRecord>(normalizedIds.Length, StringComparer.OrdinalIgnoreCase);
 
         foreach (var batch in normalizedIds.Chunk(400))
@@ -123,9 +117,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            var count = connection is NpgsqlConnection postgres
-                ? await ReplacePostgresRatingsAsync(postgres, transaction, ratings, importedAtUtc, cancellationToken)
-                : await ReplaceSqliteRatingsAsync(connection, transaction, ratings, importedAtUtc, cancellationToken);
+            var count = await ReplacePostgresRatingsAsync(connection, transaction, ratings, importedAtUtc, cancellationToken);
 
             cancellationToken.ThrowIfCancellationRequested();
             await UpsertStateAsync(connection, transaction, LastImportedUtcKey, importedAtUtc.ToString("O", CultureInfo.InvariantCulture), cancellationToken);
@@ -188,7 +180,7 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         // lookup timeout. Keep it bounded while honoring caller cancellation.
         publish.CommandTimeout = 600;
         // DELETE preserves MVCC snapshots; TRUNCATE would block readers. The last
-        // occurrence of a normalized ID wins, as with the SQLite upsert path.
+        // occurrence of a normalized ID wins.
         publish.CommandText = """
             DELETE FROM ImdbRatings;
             INSERT INTO ImdbRatings (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
@@ -198,54 +190,6 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
             """;
         DatabaseParameters.Add(publish, "@importedAtUtc", importedAtUtc.ToString("O", CultureInfo.InvariantCulture));
         await publish.ExecuteNonQueryAsync(cancellationToken);
-        return count;
-    }
-
-    private static async Task<int> ReplaceSqliteRatingsAsync(
-        DbConnection connection,
-        DbTransaction transaction,
-        IAsyncEnumerable<ImdbRatingRecord> ratings,
-        DateTimeOffset importedAtUtc,
-        CancellationToken cancellationToken)
-    {
-        await using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText = "DELETE FROM ImdbRatings";
-            await command.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        var count = 0;
-        await using var insert = connection.CreateCommand();
-        insert.Transaction = transaction;
-        insert.CommandText = """
-            INSERT INTO ImdbRatings (ImdbId, AverageRating, VoteCount, ImportedAtUtc)
-            VALUES (@imdbId, @averageRating, @voteCount, @importedAtUtc)
-            ON CONFLICT(ImdbId) DO UPDATE SET
-                AverageRating = excluded.AverageRating,
-                VoteCount = excluded.VoteCount,
-                ImportedAtUtc = excluded.ImportedAtUtc
-            """;
-        var imdbIdParameter = DatabaseParameters.Add(insert, "@imdbId", DbType.String);
-        var ratingParameter = DatabaseParameters.Add(insert, "@averageRating", DbType.Double);
-        var voteCountParameter = DatabaseParameters.Add(insert, "@voteCount", DbType.Int64);
-        var importedAtParameter = DatabaseParameters.Add(insert, "@importedAtUtc", DbType.String);
-        importedAtParameter.Value = importedAtUtc.ToString("O", CultureInfo.InvariantCulture);
-        // Compile the statement once; every row below only rebinds the three changing parameters.
-        insert.Prepare();
-
-        await foreach (var rating in ratings.WithCancellation(cancellationToken))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (string.IsNullOrWhiteSpace(rating.ImdbId)) continue;
-            imdbIdParameter.Value = NormalizeImdbId(rating.ImdbId);
-            ratingParameter.Value = rating.AverageRating;
-            voteCountParameter.Value = rating.VoteCount;
-            // Microsoft.Data.Sqlite completes ExecuteNonQueryAsync synchronously, so the async call
-            // only added a Task and a state machine per row; the cancellation check above is kept.
-            insert.ExecuteNonQuery();
-            count++;
-        }
         return count;
     }
 
@@ -366,9 +310,9 @@ public sealed class SqliteImdbRatingsStore : IImdbRatingsStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private DbConnection CreateConnection()
+    private NpgsqlConnection CreateConnection()
     {
-        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
+        return DatabaseConnectionFactory.Create(_options);
     }
 
     private static string NormalizeImdbId(string imdbId)

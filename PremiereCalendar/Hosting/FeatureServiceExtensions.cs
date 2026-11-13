@@ -38,17 +38,17 @@ public static class FeatureServiceExtensions
         services.AddSingleton<CalendarLoadCacheOrchestrator>();
         services.AddTransient<IImageCache>(provider => provider.GetRequiredService<FileImageCache>());
         services.AddTransient<IImageCacheMaintenance>(provider => provider.GetRequiredService<FileImageCache>());
-        services.AddSingleton<IIntegrationSettingsStore, SqliteIntegrationSettingsStore>();
-        services.AddSingleton<IAppStateStore, SqliteAppStateStore>();
-        services.AddSingleton<ICalendarFilterUsageStore, SqliteCalendarFilterUsageStore>();
-        services.AddSingleton<ISimklSyncStateStore, SqliteSimklSyncStateStore>();
-        services.AddSingleton<IImdbRatingsStore, SqliteImdbRatingsStore>();
-        services.AddSingleton<IOmdbCacheStore, SqliteOmdbCacheStore>();
-        services.AddSingleton<IProviderCacheStateStore, SqliteProviderCacheStateStore>();
-        services.AddSingleton<IItemEnrichmentStore, SqliteItemEnrichmentStore>();
+        services.AddSingleton<IIntegrationSettingsStore, IntegrationSettingsStore>();
+        services.AddSingleton<IAppStateStore, AppStateStore>();
+        services.AddSingleton<ICalendarFilterUsageStore, CalendarFilterUsageStore>();
+        services.AddSingleton<ISimklSyncStateStore, SimklSyncStateStore>();
+        services.AddSingleton<IImdbRatingsStore, ImdbRatingsStore>();
+        services.AddSingleton<IOmdbCacheStore, OmdbCacheStore>();
+        services.AddSingleton<IProviderCacheStateStore, ProviderCacheStateStore>();
+        services.AddSingleton<IItemEnrichmentStore, ItemEnrichmentStore>();
         services.AddSingleton<ItemEnrichmentCacheCoordinator>();
         services.AddSingleton<ProviderResponseCache>();
-        services.AddSingleton<IViewSyncStore, SqliteViewSyncStore>();
+        services.AddSingleton<IViewSyncStore, ViewSyncStore>();
         services.AddSingleton<IViewSyncService, ViewSyncService>();
         return services;
     }

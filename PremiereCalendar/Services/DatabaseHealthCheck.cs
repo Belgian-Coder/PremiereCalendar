@@ -4,9 +4,8 @@ using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class SqliteHealthCheck(
+public sealed class DatabaseHealthCheck(
     IOptions<AppDatabaseOptions> options,
-    IWebHostEnvironment environment,
     DatabaseRecoveryState recoveryState) : IHealthCheck
 {
     public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default)
@@ -23,7 +22,7 @@ public sealed class SqliteHealthCheck(
 
         try
         {
-            await using var connection = DatabaseConnectionFactory.Create(options.Value, environment.ContentRootPath);
+            await using var connection = DatabaseConnectionFactory.Create(options.Value);
             await connection.OpenAsync(cancellationToken);
             await using var command = connection.CreateCommand();
             command.CommandText = "SELECT 1";

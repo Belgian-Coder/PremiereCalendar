@@ -3,7 +3,6 @@ using System.Data.Common;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.Data.Sqlite;
 
 namespace PremiereCalendar.Services;
 
@@ -13,7 +12,7 @@ public static class DatabaseSchema
 
     internal static IReadOnlyList<DatabaseMigration> Migrations { get; } =
     [
-        new(1, "baseline-current-schema", BaselineSql, ApplyLegacyViewSyncMigrationAsync),
+        new(1, "baseline-current-schema", BaselineSql),
         new(2, "durable-provider-scheduler", SchedulerSql),
         new(3, "scheduler-leases-and-centralized-stores", SchedulerLeaseSql),
         new(4, "normalized-item-enrichment-cache", ItemEnrichmentSql)
@@ -33,48 +32,13 @@ public static class DatabaseSchema
     internal static async Task AssertCurrentAsync(DbConnection connection, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = DatabaseConnectionFactory.IsPostgreSql(connection)
-            ? "SELECT COALESCE(MAX(Version), 0) FROM SchemaMigrations"
-            : "PRAGMA user_version";
+        command.CommandText = "SELECT COALESCE(MAX(Version), 0) FROM SchemaMigrations";
         var version = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         if (version != CurrentVersion)
         {
             throw new InvalidOperationException(
                 $"Database schema {version} is not ready; startup migration must complete schema {CurrentVersion} before stores are used.");
         }
-    }
-
-    private static async Task ApplyLegacyViewSyncMigrationAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        CancellationToken cancellationToken)
-    {
-        await using var info = connection.CreateCommand();
-        info.Transaction = transaction;
-        info.CommandText = "PRAGMA table_info(ViewSyncGroupState)";
-        var hasRows = false;
-        var hasRouteKey = false;
-        await using (var reader = await info.ExecuteReaderAsync(cancellationToken))
-        {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                hasRows = true;
-                if (string.Equals(reader.GetString(1), "RouteKey", StringComparison.OrdinalIgnoreCase))
-                {
-                    hasRouteKey = true;
-                }
-            }
-        }
-
-        if (!hasRows || hasRouteKey)
-        {
-            return;
-        }
-
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = LegacyViewSyncSql;
-        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private const string BaselineSql = """
@@ -238,37 +202,12 @@ public static class DatabaseSchema
         CREATE INDEX IF NOT EXISTS IX_ItemEnrichments_LastSeen
             ON ItemEnrichments (LastSeenUtc);
         """;
-
-    private const string LegacyViewSyncSql = """
-        ALTER TABLE ViewSyncGroupState RENAME TO ViewSyncGroupState_Old;
-        CREATE TABLE ViewSyncGroupState (
-            GroupId TEXT NOT NULL,
-            RouteKey TEXT NOT NULL,
-            RelativeUrl TEXT NOT NULL,
-            Revision INTEGER NOT NULL,
-            UpdatedUtc TEXT NOT NULL,
-            UpdatedByDeviceId TEXT NOT NULL,
-            UpdatedByDeviceName TEXT NOT NULL,
-            PRIMARY KEY (GroupId, RouteKey),
-            FOREIGN KEY (GroupId) REFERENCES ViewSyncGroups(GroupId) ON DELETE CASCADE
-        );
-        INSERT INTO ViewSyncGroupState (
-            GroupId, RouteKey, RelativeUrl, Revision, UpdatedUtc, UpdatedByDeviceId, UpdatedByDeviceName)
-        SELECT GroupId,
-            CASE WHEN RelativeUrl LIKE '/series%' THEN 'series'
-                 WHEN RelativeUrl LIKE '/movies%' THEN 'movies'
-                 ELSE 'all' END,
-            RelativeUrl, Revision, UpdatedUtc, UpdatedByDeviceId, UpdatedByDeviceName
-        FROM ViewSyncGroupState_Old;
-        DROP TABLE ViewSyncGroupState_Old;
-        """;
 }
 
 internal sealed record DatabaseMigration(
     int Version,
     string Name,
-    string Sql,
-    Func<SqliteConnection, SqliteTransaction, CancellationToken, Task>? AfterSql = null)
+    string Sql)
 {
     public string Checksum { get; } = ComputeChecksum(Version, Name, Sql.Replace("\r\n", "\n", StringComparison.Ordinal));
 
@@ -291,7 +230,7 @@ public sealed class DatabaseRecoveryState
 {
     private readonly Lock _gate = new();
     private TaskCompletionSource _healthy = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private DatabaseStatusSnapshot _snapshot = new(0, DatabaseSchema.CurrentVersion, false, "Database has not been initialized.", null, null);
+    private DatabaseStatusSnapshot _snapshot = new(0, DatabaseSchema.CurrentVersion, false, "Database has not been initialized.", null);
 
     public DatabaseStatusSnapshot Snapshot
     {
@@ -320,5 +259,4 @@ public sealed record DatabaseStatusSnapshot(
     int TargetVersion,
     bool IsHealthy,
     string Message,
-    string? LastMigration,
-    string? LastBackupPath);
+    string? LastMigration);

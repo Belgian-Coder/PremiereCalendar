@@ -1,37 +1,30 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-// Like the other application stores, this name preserves the original SQLite
-// convention while DatabaseConnectionFactory selects SQLite or PostgreSQL.
-public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
+public sealed class ItemEnrichmentStore : IItemEnrichmentStore
 {
     private const int ReadBatchSize = 250;
     private const int WriteBatchSize = 90;
     private const string TvmazeLookupProvider = "item-cache.tvmaze-lookup";
     private static readonly TimeSpan TvmazeLookupLifetime = TimeSpan.FromMinutes(30);
     private readonly AppDatabaseOptions _options;
-    private readonly IWebHostEnvironment _environment;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _operationGate;
     private bool _initialized;
 
-    public SqliteItemEnrichmentStore(
+    public ItemEnrichmentStore(
         IOptions<AppDatabaseOptions> options,
-        IWebHostEnvironment environment,
         TimeProvider? timeProvider = null)
     {
         _options = options.Value;
-        _environment = environment;
         _timeProvider = timeProvider ?? TimeProvider.System;
-        var concurrency = DatabaseConnectionFactory.IsPostgreSql(_options) ? 4 : 1;
-        _operationGate = new SemaphoreSlim(concurrency, concurrency);
+        _operationGate = new SemaphoreSlim(4, 4);
     }
 
     public async Task<IReadOnlyDictionary<ItemEnrichmentIdentity, ItemEnrichmentRecord>> ReadManyAsync(
@@ -52,8 +45,7 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
             await using var transaction = await connection.BeginTransactionAsync(operationToken);
             // Retention touches also take row locks. Use the same global order
             // as provider writes before their UPDATE/UPSERT statements run.
-            if (DatabaseConnectionFactory.IsPostgreSql(_options))
-                await LockWriteRowsAsync(connection, transaction, partition, keys, operationToken);
+            await LockWriteRowsAsync(connection, transaction, partition, keys, operationToken);
             foreach (var batch in keys.Chunk(ReadBatchSize))
             {
                 await using (var touch = connection.CreateCommand())
@@ -110,9 +102,8 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
         return await WithConnectionAsync(async (connection, operationToken) =>
         {
             await using var transaction = await connection.BeginTransactionAsync(operationToken);
-            if (DatabaseConnectionFactory.IsPostgreSql(_options))
-                await LockWriteRowsAsync(connection, transaction, partition,
-                    validWrites.Select(write => write.Identity).Distinct().ToArray(), operationToken);
+            await LockWriteRowsAsync(connection, transaction, partition,
+                validWrites.Select(write => write.Identity).Distinct().ToArray(), operationToken);
             var authorizedWrites = await FenceExpiredTvmazeWritesAsync(connection, transaction, partition, validWrites, operationToken);
             var updated = 0;
             var batch = new List<ItemEnrichmentWrite>(WriteBatchSize);
@@ -283,7 +274,7 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
             return await command.ExecuteNonQueryAsync(operationToken);
         }, CancellationToken.None);
 
-    private sealed class TvmazeLookupLease(SqliteItemEnrichmentStore store, string partition, string reservation, DateTimeOffset expires) : IItemEnrichmentLookupLease
+    private sealed class TvmazeLookupLease(ItemEnrichmentStore store, string partition, string reservation, DateTimeOffset expires) : IItemEnrichmentLookupLease
     {
         public string Token => reservation;
         public DateTimeOffset ExpiresUtc => expires;
@@ -603,15 +594,13 @@ public sealed class SqliteItemEnrichmentStore : IItemEnrichmentStore
         { throw new ItemEnrichmentStoreBusyException(exception); }
         try
         {
-            await using var connection = DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
-            if (connection is SqliteConnection sqlite) sqlite.DefaultTimeout = 1;
+            await using var connection = DatabaseConnectionFactory.Create(_options);
             using (var opening = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
                 opening.CancelAfter(TimeSpan.FromSeconds(5));
                 try
                 {
                     await connection.OpenAsync(opening.Token);
-                    if (connection is SqliteConnection openedSqlite) SQLitePCL.raw.sqlite3_busy_timeout(openedSqlite.Handle, 0);
                     if (!Volatile.Read(ref _initialized))
                     {
                         await DatabaseSchema.AssertCurrentAsync(connection, opening.Token);

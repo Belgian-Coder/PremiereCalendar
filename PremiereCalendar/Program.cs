@@ -13,7 +13,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 if (DatabaseCommandLine.IsDatabaseCommand(args))
 {
-    Environment.ExitCode = await DatabaseCommandLine.RunAsync(args, builder.Configuration, builder.Environment);
+    Environment.ExitCode = await DatabaseCommandLine.RunAsync(args, builder.Configuration);
     return;
 }
 
@@ -63,11 +63,10 @@ builder.Services.AddResponseCompression(options =>
 });
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddHealthChecks()
-    .AddCheck<SqliteHealthCheck>("sqlite", tags: ["ready"]);
+    .AddCheck<DatabaseHealthCheck>("database", tags: ["ready"]);
 builder.Services.AddSingleton<DatabaseRecoveryState>();
-builder.Services.AddSingleton<SqliteDatabaseInitializer>();
 builder.Services.AddSingleton<PostgresDatabaseInitializer>();
-// Register first so WAL and busy-timeout settings are applied before cache warmers start.
+// Register first so the schema is migrated and verified before cache warmers start.
 builder.Services.AddHostedService<DatabaseInitializerHostedService>();
 builder.Services.AddSingleton<CircuitHandler, CalendarCircuitDiagnostics>();
 
@@ -78,6 +77,9 @@ builder.Services
     .AddPremiereCalendarServices(builder.Configuration);
 
 var app = builder.Build();
+// Dispose this host's PostgreSQL pools only after every hosted service has stopped using them.
+app.Lifetime.ApplicationStopped.Register(() =>
+    DatabaseConnectionFactory.Dispose(app.Services.GetRequiredService<IOptions<AppDatabaseOptions>>().Value));
 app.Lifetime.ApplicationStarted.Register(() =>
     app.Services.GetRequiredService<PremiereTelemetry>().RecordDiagnostic("diagnostics.started",
         details: new() { Stage = "startup", Outcome = "running" }));
@@ -112,7 +114,7 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
 {
     Predicate = check => check.Tags.Contains("ready")
 });
-app.MapGet("/health/version", (DatabaseRecoveryState databaseState, IOptions<AppDatabaseOptions> databaseOptions, PremiereTelemetry telemetry) => Results.Json(new
+app.MapGet("/health/version", (DatabaseRecoveryState databaseState, PremiereTelemetry telemetry) => Results.Json(new
 {
     version = BuildVersionInfo.Current.Version,
     informationalVersion = BuildVersionInfo.Current.InformationalVersion,
@@ -129,9 +131,7 @@ app.MapGet("/health/version", (DatabaseRecoveryState databaseState, IOptions<App
         healthy = databaseState.Snapshot.IsHealthy,
         integrity = databaseState.Snapshot.Message,
         lastMigration = databaseState.Snapshot.LastMigration,
-        recovery = DatabaseConnectionFactory.IsPostgreSql(databaseOptions.Value)
-            ? "Run 'dotnet PremiereCalendar.dll database verify'. Restore only a checksum-verified pg_dump into an isolated PostgreSQL instance before production recovery."
-            : "Stop the Windows Service, run 'PremiereCalendar.exe database verify', then use 'database restore --backup <absolute-path>' only with a verified backup."
+        recovery = "Run 'dotnet PremiereCalendar.dll database verify'. Restore only a checksum-verified pg_dump into an isolated PostgreSQL instance before production recovery."
     }
 }));
 app.MapGet(

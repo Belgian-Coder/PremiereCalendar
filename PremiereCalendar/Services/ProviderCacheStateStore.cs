@@ -2,26 +2,22 @@ using System.Data;
 using System.Data.Common;
 using System.Globalization;
 using Microsoft.Extensions.Options;
-using Microsoft.Data.Sqlite;
 using PremiereCalendar.Options;
 
 namespace PremiereCalendar.Services;
 
-public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
+public sealed class ProviderCacheStateStore : IProviderCacheStateStore
 {
     private readonly AppDatabaseOptions _options;
-    private readonly IWebHostEnvironment _environment;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _responseGate = new(4, 4);
     private readonly SemaphoreSlim _initializationGate = new(1, 1);
     private bool _initialized;
 
-    public SqliteProviderCacheStateStore(
-        IOptions<AppDatabaseOptions> options,
-        IWebHostEnvironment environment)
+    public ProviderCacheStateStore(
+        IOptions<AppDatabaseOptions> options)
     {
         _options = options.Value;
-        _environment = environment;
     }
 
     public async Task<ProviderCacheState?> GetAsync(
@@ -39,12 +35,9 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         await operationGate.WaitAsync(cancellationToken);
         try
         {
-            var responseCacheOperation = IsResponseCacheProvider(provider);
-            await EnsureInitializedAsync(cancellationToken, responseCacheOperation);
+            await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
-            ConfigureResponseCacheConnection(connection, responseCacheOperation);
             await connection.OpenAsync(cancellationToken);
-            ConfigureResponseCacheConnection(connection, responseCacheOperation);
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 SELECT Provider, Scope, CacheKey, LastCheckedUtc, LastChangedUtc, Watermark, ItemCount, MetadataJson
@@ -79,12 +72,9 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         await operationGate.WaitAsync(cancellationToken);
         try
         {
-            var responseCacheOperation = IsResponseCacheProvider(state.Provider);
-            await EnsureInitializedAsync(cancellationToken, responseCacheOperation);
+            await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
-            ConfigureResponseCacheConnection(connection, responseCacheOperation);
             await connection.OpenAsync(cancellationToken);
-            ConfigureResponseCacheConnection(connection, responseCacheOperation);
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 INSERT INTO ProviderCacheState (
@@ -195,11 +185,9 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            await EnsureInitializedAsync(cancellationToken, responseCacheOperation: true);
+            await EnsureInitializedAsync(cancellationToken);
             await using var connection = CreateConnection();
-            ConfigureResponseCacheConnection(connection, responseCacheOperation: true);
             await connection.OpenAsync(cancellationToken);
-            ConfigureResponseCacheConnection(connection, responseCacheOperation: true);
             await using var transaction = (DbTransaction)await connection.BeginTransactionAsync(cancellationToken);
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
@@ -278,7 +266,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         }
     }
 
-    private async Task EnsureInitializedAsync(CancellationToken cancellationToken, bool responseCacheOperation = false)
+    private async Task EnsureInitializedAsync(CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _initialized))
         {
@@ -290,9 +278,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
         {
             if (_initialized) return;
             await using var connection = CreateConnection();
-            ConfigureResponseCacheConnection(connection, responseCacheOperation);
             await connection.OpenAsync(cancellationToken);
-            ConfigureResponseCacheConnection(connection, responseCacheOperation);
             await DatabaseSchema.AssertCurrentAsync(connection, cancellationToken);
             Volatile.Write(ref _initialized, true);
         }
@@ -304,21 +290,11 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
 
     // PostgreSQL can serve unrelated response keys independently. Keep bounded
     // database parallelism without queuing every cache hit behind one slow write.
-    // SQLite retains the existing single writer/read gate.
     private SemaphoreSlim GetOperationGate(string provider)
-        => DatabaseConnectionFactory.IsPostgreSql(_options) && IsResponseCacheProvider(provider) ? _responseGate : _gate;
+        => IsResponseCacheProvider(provider) ? _responseGate : _gate;
 
     private static bool IsResponseCacheProvider(string provider)
         => Normalize(provider) is "responsecache-tmdb" or "responsecache-rottentomatoes" or "responsecache-fanart" or "responsecache-watchmode" or "responsecache-tvmaze" or "responsecache-omdb";
-
-    private static void ConfigureResponseCacheConnection(DbConnection connection, bool responseCacheOperation)
-    {
-        if (!responseCacheOperation || connection is not SqliteConnection sqlite) return;
-        // SQLite async commands perform native work synchronously. Keep their managed
-        // busy retries to one second and avoid an additional five-second native wait.
-        sqlite.DefaultTimeout = 1;
-        if (sqlite.State == ConnectionState.Open) SQLitePCL.raw.sqlite3_busy_timeout(sqlite.Handle, 0);
-    }
 
     private const string UpsertCommandText = """
         INSERT INTO ProviderCacheState (
@@ -351,18 +327,7 @@ public sealed class SqliteProviderCacheStateStore : IProviderCacheStateStore
 
     private DbConnection CreateConnection()
     {
-        return DatabaseConnectionFactory.Create(_options, _environment.ContentRootPath);
-    }
-
-    private string ResolveDatabasePath()
-    {
-        var configuredPath = string.IsNullOrWhiteSpace(_options.Path)
-            ? "App_Data/data/premiere-calendar.db"
-            : _options.Path.Trim();
-
-        return Path.IsPathFullyQualified(configuredPath)
-            ? configuredPath
-            : Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configuredPath));
+        return DatabaseConnectionFactory.Create(_options);
     }
 
     private static ProviderCacheState ReadState(DbDataReader reader)
