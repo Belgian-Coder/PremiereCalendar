@@ -23,11 +23,13 @@ Local application settings edited through the Settings page are stored in the Po
 
 Startup owns the database schema centrally. It applies pending migrations transactionally, records their checksums in `SchemaMigrations`, validates the migration history and the expected table shape, and retries transient connection failures. `/health/ready`, `/health/version`, and Settings > Local status report the active and target schema versions. A schema newer than the application, a changed migration checksum, or a missing required column stops initialization with an operator error instead of being retried. Back up PostgreSQL with `pg_dump` before upgrading; the application does not create database backups itself.
 
-Offline verification command (run it with the application's configuration, for example `docker compose run --rm app dotnet PremiereCalendar.dll database verify`):
+Verification command. The image entrypoint is already `dotnet PremiereCalendar.dll`, so `database verify` is all the container needs. Run it on the Docker host, in the folder that contains `compose.yaml`, with the same `PREMIERECALENDAR_IMAGE` and `PREMIERECALENDAR_POSTGRES_PASSWORD_FILE` values as the running stack; the database container must already be running:
 
 ```text
-dotnet PremiereCalendar.dll database verify
+docker compose run --rm --no-deps app database verify
 ```
+
+Against a running app container, `docker compose exec app dotnet PremiereCalendar.dll database verify` runs the same check inside it (`exec` bypasses the entrypoint, so it needs the full command). Do not append `dotnet PremiereCalendar.dll` to `docker compose run`: the entrypoint would receive it as arguments and start a second full application instance.
 
 Durable provider work is stored in PostgreSQL and controlled by `ProviderScheduler`. Foreground jobs retain a reserved worker and can checkpoint/requeue adjacent-week, warmup, delta-sync, and IMDb-maintenance work without charging a retry. Provider concurrency remains below each configured hard ceiling and adapts to throttling, transient failures, latency, `Retry-After`, and persisted circuit state.
 
