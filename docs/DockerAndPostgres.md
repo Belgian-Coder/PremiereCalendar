@@ -4,16 +4,19 @@ PremiereCalendar is PostgreSQL-only and ships only as a Docker container. SQLite
 
 ## Local development
 
-Use Ubuntu 24.04 on WSL with Docker Engine and the Compose plugin installed inside the distribution:
+Use the existing Ubuntu 24.04 WSL distribution with Docker Engine and the Compose plugin.
+The daemon must already be running; helpers do not install tools, start services,
+or keep WSL alive. `-Plan` previews commands without invoking WSL/Docker:
 
 ```powershell
 .\eng\wsl-docker.ps1 up
+.\eng\wsl-docker.ps1 check -Plan
 .\eng\wsl-docker.ps1 test
 .\eng\wsl-docker.ps1 logs
 .\eng\wsl-docker.ps1 down
 ```
 
-The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and for running the app outside the container (`dotnet run` or the `launchSettings.json` profiles use `appsettings.Development.json`, which points at that port and reads the password from `.secrets/dev-postgres-password`). The development password lives in the ignored `.secrets` directory. `reset` is destructive only to the named PremiereCalendar development volumes.
+The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and native development. The password remains in ignored `.secrets`; worktrees do not copy credentials or databases. Worktrees get a path-derived Compose project name and separate named volumes; the primary checkout keeps `premierecalendar-dev`. Ports are unchanged, so only one stack can own them. Never stop/reset another stack to free a port without authorization. `reset` deletes that stack's named volumes and requires permission for that exact deletion. The existing PostgreSQL and application-data volumes are retained, while build/package bind mounts stay under this project. Obsolete package volumes and sibling output directories are preserved.
 
 Run the automated tests with `eng\Test-WithPostgres.ps1`, which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)).
 
@@ -26,6 +29,17 @@ root HTML and the Blazor boot asset, reject fixable HIGH or CRITICAL
 vulnerability findings, retain a CycloneDX SBOM and scan report, then publish
 the scanned image to GitHub Container Registry. Registry hosting does not
 require hosted CI.
+
+Keep release work under the releasing checkout's ignored `artifacts/releases/<version>`.
+Use normal Docker layer caching: the Dockerfile restores the app project before
+copying application source, so ordinary source-only changes can reuse dependency
+restore layers. Do not add `--no-cache` or `--pull` to routine builds; refresh
+base/dependency pins deliberately and still run current vulnerability checks.
+Build the candidate runtime image once with explicit version/source/build metadata,
+run every acceptance gate on that immutable image ID, and publish that same image.
+Rebuilding after acceptance requires revalidating the replacement. Scoped checks,
+cached restore results and a green health endpoint do not replace complete
+regression, browser, scan, SBOM, database, boot-asset and hardened-runtime checks.
 Deploy by digest. The runtime:
 
 - runs as the image's non-root application user;

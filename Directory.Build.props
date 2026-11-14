@@ -7,9 +7,10 @@
     <!-- .NET 11 runtime async: the compiler emits runtime-implemented async
          methods instead of state machines. Opt out with UseRuntimeAsync=false. -->
     <Features Condition="'$(UseRuntimeAsync)' != 'false'">$(Features);runtime-async=on</Features>
-    <!-- Keep routine local build output out of the source checkout. Hosted CI
-         keeps its conventional layout for existing artifact collection. -->
+    <!-- Each checkout owns its mutable build state. Container helpers override
+         this with /build, bound to this checkout's artifacts/build/linux. -->
     <UseArtifactsOutput Condition="'$(UseArtifactsOutput)' == '' and '$(CI)' != 'true'">true</UseArtifactsOutput>
-    <ArtifactsPath Condition="'$(ArtifactsPath)' == '' and '$(CI)' != 'true'">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../PremiereCalendar.Build'))</ArtifactsPath>
+    <ArtifactsPath Condition="'$(ArtifactsPath)' == '' and '$(CI)' != 'true'">$(MSBuildThisFileDirectory)artifacts/build/host</ArtifactsPath>
+    <RestorePackagesPath Condition="'$(RestorePackagesPath)' == '' and '$(NUGET_PACKAGES)' == '' and '$(CI)' != 'true'">$(MSBuildThisFileDirectory)artifacts/packages/host</RestorePackagesPath>
   </PropertyGroup>
 </Project>

@@ -1,6 +1,6 @@
 # Standalone check: pwsh -NoProfile -File tests/PerformanceLogAudit.Tests.ps1
 [CmdletBinding()]
-param([string] $OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('premiere-log-audit-' + [guid]::NewGuid().ToString('N'))))
+param([string] $OutputDirectory = (Join-Path $PSScriptRoot ('../artifacts/harness-tests/log-audit-' + [guid]::NewGuid().ToString('N'))))
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $instance = '11111111111111111111111111111111'

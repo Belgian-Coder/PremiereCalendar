@@ -84,7 +84,58 @@ Component tests cover Blazor rendering:
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 ```
 
-Every test runs against PostgreSQL (SQLite no longer exists). The script starts a throwaway `postgres` container (the digest-pinned image from `compose.yaml`, data on tmpfs, `max_connections=300`) on a private Docker network with an explicit `10.141.x.0/24` subnet, runs `dotnet test` for the unit, component and integration projects inside `premierecalendar-dev-app:latest` (build it once with `eng\wsl-docker.ps1 build`) and always removes the server and the network. It works from any folder. Useful switches: `-Project IntegrationTests`, `-Filter "FullyQualifiedName~ViewSync"`, `-NoRuntimeAsync`, `-BuildVolume <docker volume>` for incremental builds.
+Every test runs against PostgreSQL (SQLite no longer exists). The script starts a throwaway `postgres` container (the digest-pinned image from `compose.yaml`, data on tmpfs, `max_connections=300`) on a private Docker network with an explicit `10.141.x.0/24` subnet, runs the requested projects sequentially inside `premierecalendar-dev-app:latest` (build it once with `eng\wsl-docker.ps1 build`) and removes only its own server/network on exit. It works from any folder. Docker must already be running in Ubuntu-24.04. Useful switches: `-Project IntegrationTests`, `-Filter "FullyQualifiedName~ViewSync"`, `-NoRuntimeAsync`, and `-Plan`. Incremental builds and the project package cache are now the default; no volume setup is required.
+
+## Scoped feedback and output ownership
+
+```powershell
+# No Docker/WSL execution: inspect the selected suite, filter and output paths.
+.\eng\Test-WithPostgres.ps1 -Project ComponentTests -Filter 'FullyQualifiedName~Calendar' -Plan
+# Compile the app (including Razor/static assets), without starting PostgreSQL.
+.\eng\wsl-docker.ps1 check
+# Run only the behavior under development, then its complete affected suite.
+.\eng\Test-WithPostgres.ps1 -Project UnitTests -Filter 'FullyQualifiedName~ViewSync'
+.\eng\Test-WithPostgres.ps1 -Project UnitTests
+# Check the harness itself without SDK, PostgreSQL, Docker or WSL.
+pwsh -NoProfile -File .\tests\Harness.Tests.ps1
+```
+
+| Change | Feedback | Acceptance before release |
+| --- | --- | --- |
+| Documentation or harness | `Harness.Tests.ps1`, relevant command `-Plan`, diff review | Exercise changed execution paths in a prepared local environment; disclose anything unrun |
+| Pure logic/provider/cache | Relevant unit/integration project plus a focused filter | Complete unit, component and integration suites |
+| Razor/CSS/JavaScript/navigation | App build and relevant component tests; affected browser cases | Complete suites and serial browser performance/accessibility checks |
+| Database, dependency, container or cross-cutting change | Affected integration/project build first | Complete regression, database and exact-image release gates |
+
+Each checkout/worktree owns `artifacts/build/linux` for checks, `artifacts/build/linux-dev`
+for the watcher, `artifacts/build/host` for native builds, and unique
+`artifacts/test-results/<run-id>` TRX directories. `-NoRuntimeAsync` has a separate
+build directory. Helpers lock check outputs to reject concurrent writers in one
+worktree. Do not bypass that lock with concurrent raw `dotnet` commands.
+The primary project's `artifacts/packages/linux` is shared across worktrees;
+native packages stay separate under each checkout's `artifacts/packages/host`.
+Sharing downloaded packages does not share `obj`/`bin`, test databases, results or
+development volumes. No files are moved from old sibling output directories.
+
+`-NoRestore` and `-NoBuild` are explicit rerun options only after a successful
+matching restore/build of the same worktree, configuration and runtime-async mode.
+Normal runs keep restore validation and incremental compilation enabled. Legacy
+`-BuildVolume`/`-NugetVolume` overrides remain available for existing Docker caches;
+a build-volume override must belong exclusively to that worktree/mode. A filtered
+run is feedback, never proof that the complete regression suite passed.
+
+The default helper covers unit, component and integration projects. Browser tests
+are opt-in (`-Project BrowserTests -DevImage <prepared-image>`): the Alpine SDK
+development image does not include compatible Playwright browsers. Use the
+established prepared browser environment, run after service tests (not alongside
+them), and retain all timing/assertion budgets. Never report default tests as
+complete browser acceptance. There is no npm toolchain in this Blazor project.
+
+Test credentials are generated per run and passed over stdin/inherited container
+environment; the helper writes no secret-bearing files to WSL `/tmp`. The only
+password file is inside the disposable test container. Test failures stop later
+projects and still clean up the disposable PostgreSQL server/network. No
+development or production database is used.
 
 To run against your own server instead, set `PREMIERECALENDAR_TEST_POSTGRES` to an Npgsql connection string (its database is only used for `CREATE DATABASE`/`DROP DATABASE`) and, when the server needs a password, `PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE` to a file containing it. The development Compose app container already sets both for `docker compose -f compose.dev.yaml run --rm app dotnet test ...`. Use a dedicated test server with `max_connections` of at least 300: tests run in parallel and each test or test class gets its own randomly named database (`tests/Shared/PostgresTestDatabase.cs` creates it and drops it with `DROP DATABASE ... WITH (FORCE)`).
 
