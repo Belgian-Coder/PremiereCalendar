@@ -239,7 +239,7 @@ function Invoke-LocalShell {
 }
 
 function Assert-LocalDockerAvailable {
-    if (-not (Test-LocalDocker info)) { throw 'The explicit local Docker socket in Ubuntu-24.04 is unavailable (start it with eng\wsl-docker.ps1 build).' }
+    if (-not (Test-LocalDocker info)) { throw 'The explicit local Docker socket in Ubuntu-24.04 is unavailable (it must already be running; the helpers never start it).' }
 }
 
 function Assert-DockerNamesFree {

@@ -10,6 +10,8 @@
 .playwright-mcp/**
 artifacts
 artifacts/**
+.local-data
+.local-data/**
 output
 output/**
 **/App_Data

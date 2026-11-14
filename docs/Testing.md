@@ -80,37 +80,67 @@ Component tests cover Blazor rendering:
 
 ## Run
 
-Build the development image once (it is also used by the test script), then run the tests. All commands work from any folder:
+Docker Engine must already be running in the Ubuntu-24.04 WSL distribution and the development image must exist: the helpers never start the daemon, install tools or build the image implicitly (build the image once with `wsl-docker.ps1 build`). All commands work from any folder; each script works on the checkout that contains it, so for a worktree use the script under `D:\Projects\PremiereCalendar\.worktrees\<name>\eng`. Add `-Plan` to any command to print the selected projects, build and runner arguments and output paths without invoking WSL or Docker.
 
 ```powershell
+# Preview only (no WSL/Docker): what would run and where the output goes
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit -Filter ViewSync -Plan
+
+# Build the development image once (it is also used by the test script)
 pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 build
 
 # Unit + Component + Integration
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 
-# One suite (Unit | Component | Integration | Browser | All; a comma list is allowed)
-pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Suite Unit
+# One suite (Unit | Component | Integration | Browser | All, or UnitTests ...; a comma list is allowed; -Suite is an alias of -Project)
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit
 
 # A subset: substrings of the full test name, combined with OR (FullyQualifiedName~X is still accepted)
-pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Suite Unit,Component -Filter ViewSync,Wikimedia
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit,Component -Filter ViewSync,Wikimedia
 
 # An xUnit.net query filter
-pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Suite Integration -QueryFilter '/*/*/PostgresResponseCacheTests/*'
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Integration -QueryFilter '/*/*/PostgresResponseCacheTests/*'
+
+# Compile only (no PostgreSQL): the app, or one test project
+pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 check -Project App
 ```
 
-Every test runs against PostgreSQL (SQLite no longer exists). The script starts a throwaway `postgres` container (the digest-pinned image from `compose.yaml`, data on tmpfs, `max_connections=300`) on a private Docker network with an explicit `10.141.x.0/24` subnet, builds the requested projects inside `premierecalendar-dev-app:latest`, runs each test executable directly (faster than `dotnet test`) and always removes the server and the network. Other switches: `-NoBuild`, `-FreshBuild`, `-NoRuntimeAsync`, `-Cpus`, `-Parallel`, `-MaxThreads` and `-RunnerArguments` (see the script's built-in help). `wsl-docker.ps1 test` is a shortcut that builds the development image and then runs the script with its defaults. The release process runs the same script and records the outcome (see [Releasing](Releasing.md)).
+Every test runs against PostgreSQL (SQLite no longer exists). In one WSL shell the script takes this checkout's check lock, starts a throwaway `postgres` container (the digest-pinned image from `compose.yaml`, data on tmpfs, `max_connections=300`) on a private Docker network with an explicit `10.141.x.0/24` subnet, builds the requested projects inside `premierecalendar-dev-app:latest`, runs each test executable directly (faster than `dotnet test`) and removes its own server, runner and network on exit, however it exits. Other switches: `-NoBuild`, `-NoRestore`, `-FreshBuild`, `-NoRuntimeAsync`, `-Cpus`, `-Parallel`, `-MaxThreads` and `-RunnerArguments` (see the script's built-in help). `wsl-docker.ps1 test` forwards `-Project` and `-Filter` to the script; it does not build the image. The release process runs the same script and records the outcome (see [Releasing](Releasing.md)).
 
-Results go to `<repo>\TestResults\<yyyyMMdd-HHmmss>\<Suite>.trx`, `<Suite>.ctrf.json` and `<Suite>.log` (the folder is git-ignored). The incremental build output lives in the Docker volume `premierecalendar-test-build-<hash of the repository path>`, one per checkout; `-FreshBuild` bypasses it. `-Project` is only an alias of `-Suite`; the old way of naming a build volume is not needed any more.
+Results go to this checkout's ignored `artifacts\test-results\<yyyyMMdd-HHmmss>\<Suite>.trx`, `<Suite>.ctrf.json` and `<Suite>.log`, and the run ends with a `Results:` line naming that folder. All requested suites run even when an earlier one fails; the script prints a per-suite summary and exits non-zero if any failed. Test credentials are generated per run and passed over stdin and inherited container environment; the helper writes no secret-bearing files to WSL `/tmp`, and no development or production database is used.
 
 Plain `dotnet test` also works, because `global.json` selects the Microsoft.Testing.Platform runner, for example inside the development container: `dotnet test tests/PremiereCalendar.UnitTests/PremiereCalendar.UnitTests.csproj -c Release --filter-class '*ViewSync*'`. It needs `PREMIERECALENDAR_TEST_POSTGRES` (below); the script sets everything up for you.
 
 To run against your own server instead, set `PREMIERECALENDAR_TEST_POSTGRES` to an Npgsql connection string (its database is only used for `CREATE DATABASE`/`DROP DATABASE`) and, when the server needs a password, `PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE` to a file containing it. The development Compose app container already sets both variables for the development database. Use a dedicated test server with `max_connections` of at least 300: tests run in parallel and every test database is cloned from a migrated template database that each test process creates once (about 67 ms per test instead of about 795 ms); `tests/Shared/PostgresTestDatabase.cs` creates the clone and drops it with `DROP DATABASE ... WITH (FORCE)`.
 
-Every test case runs in parallel (`ParallelMode.All`, see `tests/*/AssemblyConfiguration.cs`). A test or class opts out with `[Collection]` or `[Fact(DisableParallelization = true)]`; the existing opt-outs cover ImageMagick, telemetry listeners, the 2,000-item load benchmark and the Wikimedia/IMDb batchers. Browser tests need Playwright browsers, which the Alpine development image lacks, so `-Suite Browser` is never part of the default set.
+Every test case runs in parallel (`ParallelMode.All`, see `tests/*/AssemblyConfiguration.cs`). A test or class opts out with `[Collection]` or `[Fact(DisableParallelization = true)]`; the existing opt-outs cover ImageMagick, telemetry listeners, the 2,000-item load benchmark and the Wikimedia/IMDb batchers.
+
+## Scoped feedback and output ownership
+
+```powershell
+# Check the harness itself without SDK, PostgreSQL, Docker or WSL.
+pwsh -NoProfile -File D:\Projects\PremiereCalendar\tests\Harness.Tests.ps1
+# Run only the behavior under development, then its complete affected suite.
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit -Filter ViewSync
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit
+```
+
+| Change | Feedback | Acceptance before release |
+| --- | --- | --- |
+| Documentation or harness | `Harness.Tests.ps1`, relevant command `-Plan`, diff review | Exercise changed execution paths in a prepared local environment; disclose anything unrun |
+| Pure logic/provider/cache | Relevant unit/integration project plus a focused filter | Complete unit, component and integration suites |
+| Razor/CSS/JavaScript/navigation | App build and relevant component tests; affected browser cases | Complete suites and serial browser performance/accessibility checks |
+| Database, dependency, container or cross-cutting change | Affected integration/project build first | Complete regression, database and exact-image release gates |
+
+Each checkout/worktree owns `artifacts/build/linux` for checks, `artifacts/build/linux-dev` for the watcher, `artifacts/build/host` for native builds, and a timestamped `artifacts/test-results/<run>` folder per run. `-NoRuntimeAsync` has a separate build directory (`artifacts/build/linux-no-runtime-async`). Helpers lock check outputs to reject concurrent writers in one worktree. Do not bypass that lock with concurrent raw `dotnet` commands. The primary project's `artifacts/packages/linux` is shared across worktrees; native packages stay separate under each checkout's `artifacts/packages/host`. Sharing downloaded packages does not share `obj`/`bin`, test databases, results or development volumes. No files are moved from old sibling output directories.
+
+`-NoRestore` and `-NoBuild` are explicit rerun options only after a successful matching restore/build of the same worktree, configuration and runtime-async mode. Normal runs keep restore validation and incremental compilation enabled; `-FreshBuild` builds from scratch in a throwaway container location. Legacy `-BuildVolume`/`-NugetVolume` overrides remain available for existing Docker caches; a build-volume override must belong exclusively to that worktree/mode. A filtered run is feedback, never proof that the complete regression suite passed.
+
+The default helper covers unit, component and integration projects. Browser tests are opt-in (`-Project Browser -DevImage <prepared-image>`): the Alpine SDK development image does not include compatible Playwright browsers. Use the established prepared browser environment, run after service tests (not alongside them), and retain all timing/assertion budgets. Never report default tests as complete browser acceptance. There is no npm toolchain in this Blazor project.
 
 There are no skipped PostgreSQL tests: when `PREMIERECALENDAR_TEST_POSTGRES` is missing, every database-backed test fails with a message that names the variable. One test is skipped on Linux because it depends on Windows file-lock semantics.
 
-`ProviderWorkSchedulerDurabilityTests` covers checkpoint accumulation, failure exclusion, deferred work, independent lease renewal, stale-owner fencing, watcher priority, and bounded progress replay. `CalendarLoadPerformanceTests` uses the real scheduler with both workers occupied for 300 ms and 2,000 deterministic rows split across seven days. It covers cold, fresh, and stale caches. Its `PERFORMANCE` output is retained in the suite's `.log` and `.trx` files under `TestResults\`.
+`ProviderWorkSchedulerDurabilityTests` covers checkpoint accumulation, failure exclusion, deferred work, independent lease renewal, stale-owner fencing, watcher priority, and bounded progress replay. `CalendarLoadPerformanceTests` uses the real scheduler with both workers occupied for 300 ms and 2,000 deterministic rows split across seven days. It covers cold, fresh, and stale caches. Its `PERFORMANCE` output is retained in the suite's `.log` and `.trx` files under `artifacts\test-results\<timestamp>\`.
 
 The browser fixture deliberately replaces live providers and disables background scheduling. Its desktop/mobile rendering checks complement scheduler-enabled service tests; they do not establish PostgreSQL or live-provider acceptance. See [speed and reliability validation](SpeedReliabilityValidation.md).
 

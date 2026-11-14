@@ -88,7 +88,7 @@ Local development is container-only: Docker Engine runs inside Ubuntu 24.04 on W
 pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 up
 ```
 
-Open `http://localhost:5299`. The first `up` creates the ignored development password file `.secrets/dev-postgres-password`. Use `build`, `test`, `logs`, `down`, or `reset` as the action when needed. `reset` removes only the PremiereCalendar development containers and named development volumes. The development database listens on `127.0.0.1:55432`, so a locally started app (Development environment, `launchSettings.json` profiles) connects to it with the password in `.secrets/dev-postgres-password`; see [Configuration](docs/Configuration.md#application-database).
+Docker must already be running in Ubuntu-24.04; the helper never starts services. Open `http://localhost:5299`. The first `up` creates the ignored development password file `.secrets/dev-postgres-password`. Use `build`, `check`, `test`, `logs`, `down`, or `reset` as the action when needed; `-Plan` previews a command without WSL/Docker execution. `reset` removes this checkout's development containers and named volumes and requires explicit permission for that deletion. The development database listens on `127.0.0.1:55432`, so a locally started app (Development environment, `launchSettings.json` profiles) connects to it with the password in `.secrets/dev-postgres-password`; see [Configuration](docs/Configuration.md#application-database).
 
 See [Docker and PostgreSQL](docs/DockerAndPostgres.md) for production Compose, migration, health, security, backup, and recovery details. The Docker/PostgreSQL stack is the only deployment.
 
@@ -193,29 +193,38 @@ afterwards (build the development image once with `wsl-docker.ps1 build`):
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 ```
 
-Pass `-Suite Unit` (or `Component`, `Integration`, a comma list) or `-Filter ViewSync` to narrow
-the run; results land in the git-ignored `TestResults\<timestamp>` folder. See [Testing](docs/Testing.md) for the environment variables and details.
+Docker must already be running in Ubuntu-24.04; nothing is started or built implicitly. Add `-Plan` to preview the
+run without WSL/Docker, and pass `-Project Unit` (or `Component`, `Integration`, a comma list) or `-Filter ViewSync`
+to narrow it. Results (TRX, CTRF and a console log per suite) land in this checkout's ignored
+`artifacts\test-results\<timestamp>` folder. See [Testing](docs/Testing.md) for the environment variables and details.
 Tests use fake providers. They must not call live external services.
 
-Local builds write to the sibling `PremiereCalendar.Build` directory and a
-Development launch writes its caches and logs to the sibling
-`PremiereCalendar.LocalData` directory (its database is the Compose development
-PostgreSQL). This keeps generated and mutable files out of the checkout. Production
-containers keep their explicitly configured storage layouts. Scratch worktrees and
-benchmark folders belong inside the checkout under the ignored `.worktrees`,
-`.scratch` and `.bench` directories.
+Builds and test reports stay under this checkout's ignored `artifacts/`.
+Container checks retain incremental build outputs across runs; Linux packages
+are shared with worktrees through this project's primary `artifacts/packages/linux`.
+Native Development caches/logs stay in `.local-data/`; Compose preserves its
+named application-data and PostgreSQL volumes. Previous sibling build/data
+directories are untouched. Scratch worktrees belong inside the checkout under
+the ignored `.worktrees` directory (benchmark and scratch folders under `.bench`
+and `.scratch`). See [Testing](docs/Testing.md#scoped-feedback-and-output-ownership)
+for scoped checks and release acceptance.
 
-Check workspace hygiene after local work, or remove all known generated files
-and the shared local build output:
+Check workspace hygiene after local work. Preview cleanup only when a deliberate
+reset of this checkout's build/test output has been approved:
 
 ```powershell
 pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Check
-pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Clean
+pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Clean -WhatIf
 ```
 
-The check fails if generated files return inside the checkout, the shared build
-directory exceeds 1.5 GB, or Development data exceeds 512 MB. A deliberate
-local-data reset is available with `-Mode Clean -RemoveDevelopmentData`.
+After every commit and release, follow the [bounded cleanup checkpoint](AGENTS.md#cleanup-checkpoint).
+It preserves warm caches and evidence; the separate `Clean` reset above is not
+the checkpoint's default action.
+
+The check fails for unexpected `bin`/`obj`/`TestResults` directories, build output
+over 1.5 GB, or native Development data over 512 MB. Cleanup preserves package
+caches, SDKs, credentials, sibling paths and other worktrees. A deliberate native
+local-data reset additionally requires `-RemoveDevelopmentData`.
 
 Before committing documentation or script changes, check that every relative link and
 referenced script path exists and that every PowerShell and Python script parses:
@@ -223,6 +232,7 @@ referenced script path exists and that every PowerShell and Python script parses
 ```powershell
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-Docs.ps1
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-ScriptSyntax.ps1
+pwsh -NoProfile -File D:\Projects\PremiereCalendar\tests\Harness.Tests.ps1
 ```
 
 ## Build And Release

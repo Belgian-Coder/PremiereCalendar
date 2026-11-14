@@ -24,6 +24,7 @@ TestResults/
 .playwright-cli/
 .playwright-mcp/
 artifacts/
+.local-data/
 .secrets/
 output/
 node_modules/

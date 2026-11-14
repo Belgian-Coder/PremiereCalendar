@@ -13,7 +13,8 @@ test-summary.json (per suite: passed, failed, skipped, source revision, fingerpr
 Close gates read; a focused or partial run can never satisfy them.
 
 The runner is eng\Test-WithPostgres.ps1 (xUnit.net 4 on Microsoft.Testing.Platform). It writes <Suite>.ctrf.json (CTRF),
-<Suite>.trx and <Suite>.log into <repo>\TestResults\<timestamp>\ and prints that folder in a "Results:" line; the counts
+<Suite>.trx and <Suite>.log into <repo>\artifacts\test-results\<timestamp>\ (this checkout's ignored artifacts folder) and
+prints that folder in a "Results:" line; the counts
 come from the CTRF summary (tests, passed, failed, skipped, pending, other). If a CTRF file is missing, the xUnit.net
 "Total: n, Errors: n, Failed: n, Skipped: n, Not Run: n" line of the suite's log is used instead. The CTRF, TRX and log
 files are copied into the bundle under tests\ as evidence.

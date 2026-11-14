@@ -4,24 +4,44 @@ PremiereCalendar is PostgreSQL-only and ships only as a Docker container. SQLite
 
 ## Local development
 
-Use Ubuntu 24.04 on WSL with Docker Engine and the Compose plugin installed inside the distribution:
+Use the existing Ubuntu 24.04 WSL distribution with Docker Engine and the Compose plugin.
+The daemon must already be running; helpers do not install tools, start services,
+or keep WSL alive. `-Plan` previews commands without invoking WSL/Docker:
 
 ```powershell
 pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 up
+pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 check -Project App -Plan
+pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 test -Project Unit -Plan
 pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 logs
 pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 down
 ```
 
-The script starts Docker in the distribution when needed, and the first `up` creates the ignored development password file `.secrets/dev-postgres-password` (it is never overwritten and never printed). Other actions are `build` (rebuild the development image, which the test script needs), `test` and `reset`.
+The first `up` or `build` creates the ignored development password file `.secrets/dev-postgres-password` (it is never overwritten and never printed). Other actions are `build` (rebuild the development image, which the test script needs), `check` (compile one project without PostgreSQL), `test` (forwards `-Project` and `-Filter` to `Test-WithPostgres.ps1`; it does not build the image) and `reset`.
 
-The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and for running the app outside the container (`dotnet run` or the `launchSettings.json` profiles use `appsettings.Development.json`, which points at that port and reads the password from `.secrets/dev-postgres-password`). The development password lives in the ignored `.secrets` directory. `reset` is destructive only to the named PremiereCalendar development volumes.
+The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and for running the app outside the container (`dotnet run` or the `launchSettings.json` profiles use `appsettings.Development.json`, which points at that port and reads the password from `.secrets/dev-postgres-password`). The password remains in the ignored `.secrets` directory; worktrees do not copy credentials or databases. Worktrees get a path-derived Compose project name and separate named volumes; the primary checkout keeps `premierecalendar-dev`. Ports are unchanged, so only one stack can own them. Never stop/reset another stack to free a port without authorization. `reset` deletes that stack's named volumes and requires permission for that exact deletion. The existing PostgreSQL and application-data volumes are retained, while build/package bind mounts stay under this project. Obsolete package volumes and sibling output directories are preserved.
 
-Run the automated tests with `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` (or `wsl-docker.ps1 test`), which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)).
+Run the automated tests with `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` (or `wsl-docker.ps1 test`; add `-Plan` to preview), which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)).
 
 ## Production container
 
-The household installation is a Portainer stack on the NAS (stack 20, endpoint 2) made of the application, PostgreSQL and a backup service. Builds, tests, vulnerability scans, SBOM generation and container publication run locally; do not use GitHub Actions, including manual workflow dispatches (the CI and Container workflows are disabled). The scripted release process in [Releasing](Releasing.md) builds the runtime image once from the committed source archive, launches that exact image to prove readiness, non-root identity, root HTML and the Blazor boot asset, rejects any vulnerability, secret or misconfiguration finding, retains a CycloneDX SBOM and scan report, exports the scanned image as a Docker archive, loads that archive onto the NAS engine and activates it by pinning the image configuration digest in the stack (pulling and pruning stay disabled). Publishing the same scanned image to a registry is optional and is also done locally; it does not require hosted CI.
+The household installation is a Portainer stack on the NAS (stack 20, endpoint 2) made of the application, PostgreSQL and a backup service. Do not use GitHub Actions, including manual workflow dispatches (the CI and Container workflows are disabled). Builds, tests, vulnerability scans, SBOM generation and container publication run locally. The scripted release process in [Releasing](Releasing.md) builds the runtime image once from the committed source archive, launches that exact image to prove readiness, non-root identity, root HTML and the Blazor boot asset, rejects any vulnerability, secret or misconfiguration finding, retains a CycloneDX SBOM and scan report, exports the scanned image as a Docker archive, loads that archive onto the NAS engine and activates it by pinning the image configuration digest in the stack (pulling and pruning stay disabled). Publishing the same scanned image to a registry is optional and is also done locally; registry hosting does not require hosted CI.
 
+Keep release work under the releasing checkout's ignored `artifacts/release/<bundle>` (see [Releasing](Releasing.md)).
+Use normal Docker layer caching: the Dockerfile restores the app project before
+copying application source, so ordinary source-only changes can reuse dependency
+restore layers. Do not add `--no-cache` or `--pull` to routine builds; refresh
+base/dependency pins deliberately and still run current vulnerability checks.
+Build the candidate runtime image once with explicit version/source/build metadata,
+run every acceptance gate on that immutable image ID, and activate that same image.
+Rebuilding after acceptance requires revalidating the replacement. Scoped checks,
+cached restore results and a green health endpoint do not replace complete
+regression, browser, scan, SBOM, database, boot-asset and hardened-runtime checks.
+After every release, complete the [bounded cleanup checkpoint](../AGENTS.md#cleanup-checkpoint)
+before reporting completion, as after every commit and again after pushing.
+Retain release/rollback/audit evidence and warm build/dependency caches; remove
+only verified task-owned disposable files and eligible completed worktrees.
+`Workspace-Maintenance.ps1 -Mode Clean` is a separate, explicitly authorized
+reset, not an automatic release step. No release script currently calls it.
 Deploy by digest. The runtime:
 
 - runs as the image's non-root application user;
