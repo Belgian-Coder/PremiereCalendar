@@ -20,7 +20,7 @@ public sealed partial class ProviderDeltaSyncServiceTests
             new FixedOptionsMonitor<ProviderDeltaSyncOptions>(new() { UseTmdbChanges = false }),
             new FixedTimeProvider(now), NullLogger<ProviderDeltaSyncService>.Instance, itemEnrichmentStore: store);
 
-        await service.RunOnceAsync(default);
+        await service.RunOnceAsync(TestContext.Current.CancellationToken);
 
         // The lookup was reserved before the feed observation. Its first mapping
         // must either be generation-fenced or be seen by targeted invalidation.
@@ -28,7 +28,7 @@ public sealed partial class ProviderDeltaSyncServiceTests
         Assert.Equal(publishBeforeFence, store.MappingAccepted);
         Assert.Equal(publishBeforeFence, store.TargetedInvalidation);
         Assert.Equal(!publishBeforeFence, store.UnmappedFence);
-        Assert.Equal(1, (await states.GetAsync("tvmaze", ProviderCacheScope.Global, "show-updates", default))!.ItemCount);
+        Assert.Equal(1, (await states.GetAsync("tvmaze", ProviderCacheScope.Global, "show-updates", TestContext.Current.CancellationToken))!.ItemCount);
     }
 
     private sealed class FirstMappingRaceStore(bool publishBeforeFence) : IItemEnrichmentStore

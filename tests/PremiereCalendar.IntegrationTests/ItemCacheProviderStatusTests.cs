@@ -191,11 +191,11 @@ public sealed class ItemCacheProviderStatusTests : IDisposable
                 : StubHttpMessageHandler.Json("{}", HttpStatusCode.BadRequest);
         });
         var client = Watchmode(handler);
-        var result = await client.GetTitleSourcesWithStatusAsync(PremiereMediaType.Series, 1396, null, ["BE", "NL"], default);
+        var result = await client.GetTitleSourcesWithStatusAsync(PremiereMediaType.Series, 1396, null, ["BE", "NL"], TestContext.Current.CancellationToken);
         Assert.False(result.Successful);
         Assert.Equal("Netflix", Assert.Single(result.Value).Name);
         Assert.Equal(4, handler.Requests.Count);
-        var retried = await client.GetTitleSourcesWithStatusAsync(PremiereMediaType.Series, 1396, null, ["BE", "NL"], default);
+        var retried = await client.GetTitleSourcesWithStatusAsync(PremiereMediaType.Series, 1396, null, ["BE", "NL"], TestContext.Current.CancellationToken);
         Assert.False(retried.Successful);
         Assert.Equal(7, handler.Requests.Count); // Positive identity reused; incomplete sources were not cached as complete.
     }

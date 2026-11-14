@@ -19,16 +19,16 @@ public sealed partial class ProviderDeltaSyncServiceTests
             new InMemoryProviderCacheStateStore(), new FixedOptionsMonitor<ProviderDeltaSyncOptions>(new()
                 { RunOnStartup = true, StartupDelaySeconds = 0 }), TimeProvider.System,
             NullLogger<ProviderDeltaSyncService>.Instance, workScheduler: scheduler, databaseState: recovery);
-        await service.StartAsync(default);
-        await Assert.ThrowsAsync<TimeoutException>(() => scheduler.Enqueued.Task.WaitAsync(TimeSpan.FromMilliseconds(100)));
+        await service.StartAsync(TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<TimeoutException>(() => scheduler.Enqueued.Task.WaitAsync(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken));
         Assert.Equal(0, scheduler.Calls);
         Assert.False(service.ExecuteTask!.IsCompleted);
         if (recover)
         {
             recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "initialized", null));
-            await scheduler.Enqueued.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await scheduler.Enqueued.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         }
-        await service.StopAsync(default).WaitAsync(TimeSpan.FromSeconds(2));
+        await service.StopAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         Assert.Equal(recover ? 1 : 0, scheduler.Calls);
     }
 
@@ -55,7 +55,7 @@ public sealed partial class ProviderDeltaSyncServiceTests
                 Version = corruption == "version" ? 2 : 1
             })
         };
-        await states.SaveAsync(new("tmdb", ProviderCacheScope.Global, "movie-history-session", now, null, null, 1, json), default);
+        await states.SaveAsync(new("tmdb", ProviderCacheScope.Global, "movie-history-session", now, null, null, 1, json), TestContext.Current.CancellationToken);
         var histories = 0;
         var tmdb = new RecordingTmdbClient
         {
@@ -63,13 +63,13 @@ public sealed partial class ProviderDeltaSyncServiceTests
             History = (_, _) => { histories++; return Task.FromResult<DateTimeOffset?>(null); }
         };
         var tvmaze = new EmptyTvmazeClient();
-        await Delta(tmdb, states, new DeltaItems(), new(), tvmaze).RunOnceAsync(default);
+        await Delta(tmdb, states, new DeltaItems(), new(), tvmaze).RunOnceAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, histories);
         Assert.Equal(1, tmdb.MovieCalls);
         Assert.Equal(1, tmdb.TvCalls);
         Assert.Equal(1, tvmaze.Calls);
-        Assert.NotNull(await states.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", default));
-        using var replaced = JsonDocument.Parse((await states.GetAsync("tmdb", ProviderCacheScope.Global, "movie-history-session", default))!.MetadataJson!);
+        Assert.NotNull(await states.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", TestContext.Current.CancellationToken));
+        using var replaced = JsonDocument.Parse((await states.GetAsync("tmdb", ProviderCacheScope.Global, "movie-history-session", TestContext.Current.CancellationToken))!.MetadataJson!);
         Assert.Equal(1, replaced.RootElement.GetProperty("Version").GetInt32());
         Assert.Equal(JsonValueKind.Object, replaced.RootElement.GetProperty("Histories").ValueKind);
     }
@@ -93,12 +93,12 @@ public sealed partial class ProviderDeltaSyncServiceTests
         var tvmaze = new EmptyTvmazeClient();
         var service = Delta(tmdb, new InMemoryProviderCacheStateStore(), new DeltaItems(),
             new() { ProviderBudgetSeconds = 1, ChangeHistoryConcurrency = 1 }, tvmaze, clock);
-        var continuation = await Assert.ThrowsAsync<ProviderWorkContinuationException>(() => service.RunOnceAsync(default));
+        var continuation = await Assert.ThrowsAsync<ProviderWorkContinuationException>(() => service.RunOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal(1, tmdb.TvCalls);
         Assert.Equal(1, tvmaze.Calls);
         slow = false;
         clock.Now = continuation.RetryAtUtc;
-        await service.RunOnceAsync(default);
+        await service.RunOnceAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, calls[1]);
         Assert.Equal(2, calls[2]);
     }
@@ -120,14 +120,14 @@ public sealed partial class ProviderDeltaSyncServiceTests
         };
         var states = new InMemoryProviderCacheStateStore();
         var service = Delta(tmdb, states, new DeltaItems(), new() { UseTvmazeUpdates = false, ChangeHistoryConcurrency = 1 });
-        await Assert.ThrowsAsync<ExternalApiException>(() => service.RunOnceAsync(default));
+        await Assert.ThrowsAsync<ExternalApiException>(() => service.RunOnceAsync(TestContext.Current.CancellationToken));
         fail = false;
-        await service.RunOnceAsync(default);
+        await service.RunOnceAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, calls[1]);
         Assert.Equal(2, calls[2]);
         Assert.Equal(1, tmdb.MovieCalls);
         Assert.Equal(1, tmdb.TvCalls);
-        Assert.NotNull(await states.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", default));
+        Assert.NotNull(await states.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -145,7 +145,7 @@ public sealed partial class ProviderDeltaSyncServiceTests
             }
         };
         await Delta(tmdb, new InMemoryProviderCacheStateStore(), items,
-            new() { UseTvmazeUpdates = false }).RunOnceAsync(default);
+            new() { UseTvmazeUpdates = false }).RunOnceAsync(TestContext.Current.CancellationToken);
         Assert.Equal([2], fetched);
         Assert.Equal(DateTimeOffset.Parse("2026-05-16T12:00:00Z"), items.Invalidations[1]);
         Assert.Equal(DateTimeOffset.Parse("2026-05-16T10:00:00Z"), items.Invalidations[2]);
@@ -164,13 +164,13 @@ public sealed partial class ProviderDeltaSyncServiceTests
         };
         var service = Delta(tmdb, states, new DeltaItems(),
             new() { UseTvmazeUpdates = false, HistoryMaximumItemsPerCycle = 1 }, clock: clock);
-        var continuation = await Assert.ThrowsAsync<ProviderWorkContinuationException>(() => service.RunOnceAsync(default));
-        Assert.Null(await states.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", default));
+        var continuation = await Assert.ThrowsAsync<ProviderWorkContinuationException>(() => service.RunOnceAsync(TestContext.Current.CancellationToken));
+        Assert.Null(await states.GetAsync("tmdb", ProviderCacheScope.Global, "movie-changes", TestContext.Current.CancellationToken));
         Assert.Equal(clock.GetUtcNow().AddSeconds(60), continuation.RetryAtUtc);
-        await Assert.ThrowsAsync<ProviderWorkContinuationException>(() => service.RunOnceAsync(default));
+        await Assert.ThrowsAsync<ProviderWorkContinuationException>(() => service.RunOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal([1], fetched);
         clock.Now = continuation.RetryAtUtc;
-        await service.RunOnceAsync(default);
+        await service.RunOnceAsync(TestContext.Current.CancellationToken);
         Assert.Equal([1, 2], fetched);
         Assert.Equal(1, tmdb.MovieCalls);
     }
@@ -183,8 +183,8 @@ public sealed partial class ProviderDeltaSyncServiceTests
         var service = new ProviderDeltaSyncService(tmdb, new EmptyTvmazeClient(), new InMemoryProviderCacheStateStore(),
             new FixedOptionsMonitor<ProviderDeltaSyncOptions>(new() { HistoryMaximumItemsPerCycle = 1, UseTvmazeUpdates = false }),
             TimeProvider.System, NullLogger<ProviderDeltaSyncService>.Instance, timeline: timeline, itemEnrichmentStore: new DeltaItems());
-        await service.RunOnceSafelyAsync(default);
-        var events = await timeline.GetRecentAsync(default);
+        await service.RunOnceSafelyAsync(TestContext.Current.CancellationToken);
+        var events = await timeline.GetRecentAsync(TestContext.Current.CancellationToken);
         Assert.Contains(events, entry => entry.Status == BackgroundJobStatus.Skipped && entry.Message.Contains("saved progress", StringComparison.Ordinal));
         Assert.DoesNotContain(events, entry => entry.Status == BackgroundJobStatus.Failed);
     }
@@ -201,12 +201,12 @@ public sealed partial class ProviderDeltaSyncServiceTests
         };
         var service = Delta(new RecordingTmdbClient(), states, items,
             new() { UseTmdbChanges = false }, tvmaze);
-        await service.RunOnceAsync(default);
-        var itemStates = (await states.GetRecentAsync(100, default)).Where(state => state.Scope == ProviderCacheScope.Item);
+        await service.RunOnceAsync(TestContext.Current.CancellationToken);
+        var itemStates = (await states.GetRecentAsync(100, TestContext.Current.CancellationToken)).Where(state => state.Scope == ProviderCacheScope.Item);
         Assert.Equal("show:7", Assert.Single(itemStates).Key);
         Assert.Equal([7], items.TvmazeInvalidations.Keys);
-        Assert.Equal(2, (await states.GetAsync("tvmaze", ProviderCacheScope.Global, "show-updates", default))!.ItemCount);
-        await service.RunOnceAsync(default);
+        Assert.Equal(2, (await states.GetAsync("tvmaze", ProviderCacheScope.Global, "show-updates", TestContext.Current.CancellationToken))!.ItemCount);
+        await service.RunOnceAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, tvmaze.Calls);
     }
 
@@ -219,7 +219,7 @@ public sealed partial class ProviderDeltaSyncServiceTests
             History = (_, _) => throw new InvalidOperationException("code defect")
         };
         await Assert.ThrowsAsync<InvalidOperationException>(() => Delta(tmdb, new InMemoryProviderCacheStateStore(),
-            new DeltaItems(), new() { UseTvmazeUpdates = false }).RunOnceSafelyAsync(default));
+            new DeltaItems(), new() { UseTvmazeUpdates = false }).RunOnceSafelyAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -229,10 +229,10 @@ public sealed partial class ProviderDeltaSyncServiceTests
         var tvmaze = new EmptyTvmazeClient();
         var items = new DeltaItems { TimeoutMovieLookup = true };
         var service = Delta(tmdb, new InMemoryProviderCacheStateStore(), items, new(), tvmaze);
-        await service.RunOnceSafelyAsync(default);
+        await service.RunOnceSafelyAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, tmdb.TvCalls);
         Assert.Equal(1, tvmaze.Calls);
-        await service.RunOnceAsync(default);
+        await service.RunOnceAsync(TestContext.Current.CancellationToken);
         Assert.Equal(2, tmdb.MovieCalls);
         Assert.Equal(1, tmdb.TvCalls);
         Assert.Equal(1, tvmaze.Calls);

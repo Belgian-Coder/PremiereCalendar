@@ -80,13 +80,13 @@ public sealed class DegradedCalendarCacheTests : IDisposable
     {
         var refreshStarted = DateTimeOffset.UtcNow.AddMinutes(-1);
         await WriteEnvelopeAsync(completeness, DateTimeOffset.UtcNow, "newer-generation");
-        var before = await File.ReadAllBytesAsync(CachePath);
+        var before = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
 
         var saved = await CreateCache().SetDegradedWeekAsync(Start, End, "default", [Item(2, "Old refresh result")],
             [Notice()], refreshStarted, CancellationToken.None, "newer-generation");
 
         Assert.False(saved);
-        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath));
+        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
         Assert.Equal("newer-generation", (await CreateCache().GetWeekSnapshotAsync(Start, End, "default", CancellationToken.None))!.Generation);
         Assert.Empty(Directory.GetFiles(DirectoryPath, "*.tmp"));
     }
@@ -105,11 +105,11 @@ public sealed class DegradedCalendarCacheTests : IDisposable
                 [Notice()], refreshStarted, CancellationToken.None);
             Assert.False(pending.IsCompleted);
             await WriteEnvelopeAsync(CalendarCacheCompleteness.Complete, DateTimeOffset.UtcNow, "complete-winner");
-            complete = await File.ReadAllBytesAsync(CachePath);
+            complete = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
         }
 
-        Assert.False(await pending.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.Equal(complete, await File.ReadAllBytesAsync(CachePath));
+        Assert.False(await pending.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.Equal(complete, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
         Assert.True((await CreateCache().GetWeekSnapshotAsync(Start, End, "default", CancellationToken.None))!.IsComplete);
     }
 
@@ -176,13 +176,13 @@ public sealed class DegradedCalendarCacheTests : IDisposable
         var maintained = (await cache.GetWeekSnapshotAsync(Start, End, "default", CancellationToken.None))!;
         Assert.NotEqual(baseline.Generation, maintained.Generation);
         Assert.Equal(baseline.Metadata.CachedAtUtc, maintained.Metadata.CachedAtUtc);
-        var before = await File.ReadAllBytesAsync(CachePath);
+        var before = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
 
         var saved = await cache.SetDegradedWeekAsync(Start, End, "default", [item], [Notice()], refreshStarted,
             CancellationToken.None, baseline.Generation);
 
         Assert.False(saved);
-        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath));
+        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
         Assert.Equal(8.5, Assert.Single((await cache.GetWeekSnapshotAsync(Start, End, "default", CancellationToken.None))!.Items).ImdbScore);
     }
 
@@ -258,12 +258,12 @@ public sealed class DegradedCalendarCacheTests : IDisposable
         var winner = (await cache.GetWeekSnapshotAsync(Start, End, "default", CancellationToken.None))!;
         if (maintenanceOnly) Assert.Equal(baseline.Metadata.CachedAtUtc, winner.Metadata.CachedAtUtc);
         Assert.NotEqual(baseline.Generation, winner.Generation);
-        var before = await File.ReadAllBytesAsync(CachePath);
+        var before = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
 
         Assert.False(await cache.SetValidatedPartialWeekAsync(Start, End, "default", [], refreshStarted,
             CancellationToken.None, baseline.Generation));
 
-        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath));
+        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
         Assert.Empty(Directory.GetFiles(DirectoryPath, "*.tmp"));
     }
 

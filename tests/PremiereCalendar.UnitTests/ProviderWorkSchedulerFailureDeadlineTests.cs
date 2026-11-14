@@ -17,7 +17,7 @@ public sealed partial class ProviderWorkSchedulerTests
             UnavailableSources = [new("trakt", "authentication_denied", 403, clock.GetUtcNow().AddMinutes(15))]
         }), CancellationToken.None);
         await _scheduler.CompleteAsync(job, CancellationToken.None);
-        Assert.Equal(ProviderWorkState.Completed, (await _scheduler.GetAsync(job.JobId))!.State);
+        Assert.Equal(ProviderWorkState.Completed, (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!.State);
         clock.Advance(TimeSpan.FromHours(1));
         Assert.Null(await _scheduler.ClaimNextAsync(false, "no-mixed-requeue", CancellationToken.None));
     }
@@ -40,7 +40,7 @@ public sealed partial class ProviderWorkSchedulerTests
 
         await _scheduler.CompleteAsync(job, CancellationToken.None);
 
-        var saved = (await _scheduler.GetAsync(job.JobId))!;
+        var saved = (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!;
         Assert.Equal(completes ? ProviderWorkState.Completed : ProviderWorkState.RetryWaiting, saved.State);
         Assert.Equal(0, saved.AttemptCount);
         if (completes)
@@ -66,7 +66,7 @@ public sealed partial class ProviderWorkSchedulerTests
 
         await _scheduler.FailAsync(job, failure, CancellationToken.None);
 
-        var saved = (await _scheduler.GetAsync(job.JobId))!;
+        var saved = (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!;
         Assert.Equal(ProviderWorkState.RetryWaiting, saved.State);
         Assert.Equal(deadline, saved.NextAttemptUtc);
         Assert.Equal(0, saved.AttemptCount);

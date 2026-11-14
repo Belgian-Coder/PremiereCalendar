@@ -29,7 +29,7 @@ public sealed class FileCalendarCacheFormatGoldenTests : IDisposable
     public async Task CompleteWeekFileHasTheFormerPropertyOrderAndByteIdenticalItems()
     {
         var items = PerformanceGoldenSupport.Items(500);
-        await CreateCache().SetWeekAsync(Start, End, "golden", items, default);
+        await CreateCache().SetWeekAsync(Start, End, "golden", items, TestContext.Current.CancellationToken);
         var bytes = File.ReadAllBytes(SingleCacheFile());
 
         using var document = JsonDocument.Parse(bytes);
@@ -47,7 +47,7 @@ public sealed class FileCalendarCacheFormatGoldenTests : IDisposable
     public async Task WholeEnvelopeEqualsReferenceSerializationApartFromGenerationAndTimestamp()
     {
         var items = PerformanceGoldenSupport.Items(120);
-        await CreateCache().SetWeekAsync(Start, End, "golden", items, default);
+        await CreateCache().SetWeekAsync(Start, End, "golden", items, TestContext.Current.CancellationToken);
         var text = File.ReadAllText(SingleCacheFile());
         using var document = JsonDocument.Parse(text);
         var root = document.RootElement;
@@ -70,7 +70,7 @@ public sealed class FileCalendarCacheFormatGoldenTests : IDisposable
     {
         var items = PerformanceGoldenSupport.Items(200);
         var cache = CreateCache();
-        await cache.SetWeekAsync(Start, End, "golden", items, default);
+        await cache.SetWeekAsync(Start, End, "golden", items, TestContext.Current.CancellationToken);
         var path = SingleCacheFile();
         using (var first = JsonDocument.Parse(File.ReadAllBytes(path)))
         {
@@ -86,14 +86,14 @@ public sealed class FileCalendarCacheFormatGoldenTests : IDisposable
             }, ReferenceOptions);
             // Former writer: File.Create + JsonSerializer.SerializeAsync.
             await using (var stream = File.Create(path))
-                await JsonSerializer.SerializeAsync(stream, JsonDocument.Parse(legacy).RootElement, ReferenceOptions);
+                await JsonSerializer.SerializeAsync(stream, JsonDocument.Parse(legacy).RootElement, ReferenceOptions, TestContext.Current.CancellationToken);
         }
-        var read = await cache.GetWeekAsync(Start, End, "golden", default, allowExpired: true);
+        var read = await cache.GetWeekAsync(Start, End, "golden", TestContext.Current.CancellationToken, allowExpired: true);
         Assert.NotNull(read);
         Assert.Equal(items.Count, read.Count);
         Assert.Equal(JsonSerializer.Serialize(items, ReferenceOptions), JsonSerializer.Serialize(read, ReferenceOptions));
 
-        for (var round = 0; round < 3; round++) await cache.SetWeekAsync(Start, End, "golden", items, default);
+        for (var round = 0; round < 3; round++) await cache.SetWeekAsync(Start, End, "golden", items, TestContext.Current.CancellationToken);
         using var again = JsonDocument.Parse(File.ReadAllBytes(path));
         Assert.Equal(JsonSerializer.Serialize(items, ReferenceOptions), again.RootElement.GetProperty("items").GetRawText());
     }
@@ -103,13 +103,13 @@ public sealed class FileCalendarCacheFormatGoldenTests : IDisposable
     {
         var items = PerformanceGoldenSupport.Items(60);
         var cache = CreateCache();
-        await cache.SetPartialWeekAsync(Start, End, "golden", items, default);
+        await cache.SetPartialWeekAsync(Start, End, "golden", items, TestContext.Current.CancellationToken);
         var path = SingleCacheFile();
         using var document = JsonDocument.Parse(File.ReadAllBytes(path));
         Assert.Equal(["schemaVersion", "generation", "cachedAtUtc", "completeness", "itemCount", "unavailableSources", "items"],
             document.RootElement.EnumerateObject().Select(property => property.Name).ToArray());
         Assert.Equal(JsonSerializer.Serialize(items, ReferenceOptions), document.RootElement.GetProperty("items").GetRawText());
-        var snapshot = await cache.GetWeekSnapshotAsync(Start, End, "golden", default);
+        var snapshot = await cache.GetWeekSnapshotAsync(Start, End, "golden", TestContext.Current.CancellationToken);
         Assert.NotNull(snapshot);
         Assert.Equal(items.Count, snapshot.Items.Count);
         Assert.Empty(Directory.GetFiles(Path.Combine(_root, "cache"), "*.tmp", SearchOption.AllDirectories));

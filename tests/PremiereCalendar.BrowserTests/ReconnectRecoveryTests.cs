@@ -80,7 +80,7 @@ public sealed class ReconnectRecoveryTests(BrowserAppFixture application) : Page
                     new CustomEvent('components-reconnect-state-changed', { detail: { state: 'rejected' } }));
             }
             """, reconnectReturnsFalse);
-        await navigation.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await navigation.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
 
     private async Task PrepareRecoveryPageAsync()

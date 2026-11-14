@@ -69,13 +69,13 @@ public sealed class ProviderRefreshScopeTests
         var scope = ProviderRefreshScope.Create();
         using var cancelled = new CancellationTokenSource();
         var first = scope.RunAsync("key", true, Fetch, cancelled.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var second = scope.RunAsync("key", true, Fetch, CancellationToken.None);
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
         Assert.False(underlying.IsCancellationRequested);
         release.TrySetResult();
-        Assert.Equal(42, await second.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(42, await second.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Equal(1, calls);
     }
 
@@ -98,7 +98,7 @@ public sealed class ProviderRefreshScopeTests
         Task<int> background;
         using (ProviderExecutionContext.Push(() => ProviderWorkPriority.Adjacent))
             background = flights.RunAsync("same", Fetch, CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderWorkPriority.Adjacent, actualPriority!());
         using var foregroundCancellation = new CancellationTokenSource();
         Task<int> foreground;
@@ -109,7 +109,7 @@ public sealed class ProviderRefreshScopeTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => foreground);
         Assert.Equal(ProviderWorkPriority.Adjacent, actualPriority!());
         release.TrySetResult();
-        Assert.Equal(1, await background.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(1, await background.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Equal(1, calls);
         Assert.Equal(ProviderWorkPriority.Foreground, ProviderExecutionContext.CapturePriorityAccessor()());
     }

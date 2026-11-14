@@ -20,25 +20,25 @@ public sealed partial class PremiereServiceTests
         };
         var coordinator = ItemCacheCoordinatorForReservation(store, clock);
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, 901);
-        await using var failedSession = await coordinator.CreateSessionAsync(default);
-        await failedSession.PrepareAsync([identity], null, default);
+        await using var failedSession = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await failedSession.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         var providers = 0;
         Task<ItemEnrichmentRefresh> Refresh(ItemEnrichmentSnapshot previous, bool _, bool __, CancellationToken token)
         { providers++; return Task.FromResult(new ItemEnrichmentRefresh(null, null, RefreshMetadataClock: false, RefreshRatingsClock: false)); }
 
-        var first = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => failedSession.GetAsync(identity, true, Refresh, default));
+        var first = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => failedSession.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken));
         Assert.Equal(clock.GetUtcNow().AddSeconds(5), first.RetryAtUtc);
         Assert.Equal(1, store.Reservations);
         Assert.Equal(0, providers);
         clock.Advance(TimeSpan.FromSeconds(1));
-        var sameSession = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => failedSession.GetAsync(identity, true, Refresh, default));
+        var sameSession = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => failedSession.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken));
         Assert.Equal(first.RetryAtUtc, sameSession.RetryAtUtc);
         Assert.Equal(1, store.Reservations);
 
         store.Failure = null;
-        await using var healthySession = await coordinator.CreateSessionAsync(default);
-        await healthySession.PrepareAsync([identity], null, default);
-        await healthySession.GetAsync(identity, true, Refresh, default);
+        await using var healthySession = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await healthySession.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
+        await healthySession.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken);
         Assert.Equal(2, store.Reservations);
         Assert.Equal(1, providers);
         Assert.Equal(0, store.Writes);
@@ -58,14 +58,14 @@ public sealed partial class PremiereServiceTests
         var providers = 0;
         Task<ItemEnrichmentRefresh> Refresh(ItemEnrichmentSnapshot previous, bool _, bool __, CancellationToken token)
         { providers++; return Task.FromResult(new ItemEnrichmentRefresh(null, null, RefreshMetadataClock: false, RefreshRatingsClock: false)); }
-        await using var failedSession = await coordinator.CreateSessionAsync(default);
-        await failedSession.PrepareAsync([identity], null, default);
-        var first = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => failedSession.GetAsync(identity, true, Refresh, default));
+        await using var failedSession = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await failedSession.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
+        var first = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => failedSession.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken));
         Assert.Equal(clock.GetUtcNow().AddSeconds(30), first.RetryAtUtc);
         clock.Advance(TimeSpan.FromSeconds(10));
-        await using var deferredSession = await coordinator.CreateSessionAsync(default);
-        await deferredSession.PrepareAsync([identity], null, default);
-        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => deferredSession.GetAsync(identity, true, Refresh, default));
+        await using var deferredSession = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await deferredSession.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
+        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => deferredSession.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken));
         Assert.Equal(first.RetryAtUtc, deferred.RetryAtUtc);
         Assert.Equal(1, store.Reads);
         Assert.Equal(1, store.Reservations);
@@ -73,9 +73,9 @@ public sealed partial class PremiereServiceTests
 
         clock.Advance(TimeSpan.FromSeconds(21));
         store.Failure = null;
-        await using var recoveredSession = await coordinator.CreateSessionAsync(default);
-        await recoveredSession.PrepareAsync([identity], null, default);
-        await recoveredSession.GetAsync(identity, true, Refresh, default);
+        await using var recoveredSession = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await recoveredSession.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
+        await recoveredSession.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken);
         Assert.Equal(2, store.Reads);
         Assert.Equal(2, store.Reservations);
         Assert.Equal(1, providers);
@@ -91,22 +91,22 @@ public sealed partial class PremiereServiceTests
         var providers = 0;
         Task<ItemEnrichmentRefresh> Refresh(ItemEnrichmentSnapshot previous, bool _, bool __, CancellationToken token)
         { providers++; return Task.FromResult(new ItemEnrichmentRefresh(null, null, RefreshMetadataClock: false, RefreshRatingsClock: false)); }
-        await using var session = await coordinator.CreateSessionAsync(default);
-        await session.PrepareAsync([identity], null, default);
-        var failed = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, Refresh, default));
+        await using var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
+        var failed = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken));
         Assert.Equal(clock.GetUtcNow().AddSeconds(30), failed.RetryAtUtc);
         var readsAfterFailure = store.Reads;
 
         // Inside the backoff window the session keeps failing fast without touching the store.
         clock.Advance(TimeSpan.FromSeconds(10));
-        await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, Refresh, default));
+        await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken));
         Assert.Equal(readsAfterFailure, store.Reads);
         Assert.Equal(0, providers);
 
         // Once the retry time has passed, the missing read is repeated and the item is usable again.
         clock.Advance(TimeSpan.FromSeconds(21));
         store.ReadFailure = null;
-        await session.GetAsync(identity, true, Refresh, default);
+        await session.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken);
         Assert.True(store.Reads > readsAfterFailure);
         Assert.Equal(1, providers);
     }
@@ -142,7 +142,7 @@ public sealed partial class PremiereServiceTests
         Assert.Equal(-1, session.Find(identity)!.Record.Generation);
         store.BeforeRead = null;
         var reads = store.Reads;
-        await session.GetAsync(identity, true, NoopRefresh, default);
+        await session.GetAsync(identity, true, NoopRefresh, TestContext.Current.CancellationToken);
         Assert.True(store.Reads > reads);
         Assert.True(session.Find(identity)!.Record.Generation >= 0);
     }
@@ -157,14 +157,14 @@ public sealed partial class PremiereServiceTests
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         store.BeforeRead = async token => { started.TrySetResult(); await release.Task.WaitAsync(token); };
 
-        var recovering = session.GetAsync(identity, true, NoopRefresh, default);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var concurrent = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, NoopRefresh, default));
+        var recovering = session.GetAsync(identity, true, NoopRefresh, TestContext.Current.CancellationToken);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var concurrent = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => session.GetAsync(identity, true, NoopRefresh, TestContext.Current.CancellationToken));
         Assert.True(concurrent.RetryAtUtc > DateTimeOffset.MinValue);
         Assert.Equal(-1, session.Find(identity)!.Record.Generation);
 
         release.SetResult();
-        await recovering.WaitAsync(TimeSpan.FromSeconds(5));
+        await recovering.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(session.Find(identity)!.Record.Generation >= 0);
     }
 
@@ -184,20 +184,20 @@ public sealed partial class PremiereServiceTests
         };
         var coordinator = ItemCacheCoordinatorForReservation(store, clock);
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, 901);
-        await using var session = await coordinator.CreateSessionAsync(default);
-        await session.PrepareAsync([identity], null, default);
+        await using var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         var providers = 0;
         Task<ItemEnrichmentRefresh> Refresh(ItemEnrichmentSnapshot previous, bool _, bool __, CancellationToken token)
         { providers++; return Task.FromResult(new ItemEnrichmentRefresh(null, null, RefreshMetadataClock: false, RefreshRatingsClock: false)); }
         using var cancellation = new CancellationTokenSource();
         var abandoned = session.GetAsync(identity, true, Refresh, cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await cancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => abandoned);
-        var surviving = session.GetAsync(identity, true, Refresh, default);
+        var surviving = session.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken);
         Assert.Equal(1, store.Reservations);
         release.SetResult();
-        await surviving.WaitAsync(TimeSpan.FromSeconds(5));
+        await surviving.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(1, providers);
         await session.DisposeAsync();
         Assert.Equal(1, disposed);
@@ -220,17 +220,17 @@ public sealed partial class PremiereServiceTests
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, 901);
         using var lifetime = new CancellationTokenSource();
         await using var cancelledSession = await coordinator.CreateSessionAsync(lifetime.Token);
-        await cancelledSession.PrepareAsync([identity], null, default);
+        await cancelledSession.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         Task<ItemEnrichmentRefresh> Refresh(ItemEnrichmentSnapshot previous, bool _, bool __, CancellationToken token)
             => Task.FromResult(new ItemEnrichmentRefresh(null, null, RefreshMetadataClock: false, RefreshRatingsClock: false));
-        var abandoned = cancelledSession.GetAsync(identity, true, Refresh, default);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var abandoned = cancelledSession.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await lifetime.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => abandoned);
         release.SetResult();
-        await using var nextSession = await coordinator.CreateSessionAsync(default);
-        await nextSession.PrepareAsync([identity], null, default);
-        await nextSession.GetAsync(identity, true, Refresh, default).WaitAsync(TimeSpan.FromSeconds(5));
+        await using var nextSession = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await nextSession.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
+        await nextSession.GetAsync(identity, true, Refresh, TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(2, store.Reads);
         Assert.Equal(2, store.Reservations);
     }

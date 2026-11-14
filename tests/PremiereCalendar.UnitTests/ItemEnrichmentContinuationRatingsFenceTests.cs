@@ -25,10 +25,10 @@ public sealed partial class PremiereServiceTests
             if (Assert.Single(writes).ExpectedMetadataRevision == 1) repair = fixture.RepairRatings();
             return Task.CompletedTask;
         };
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.AssertRepairAndMetadata(repair!);
         var reused = await fixture.Session.GetAsync(fixture.Identity, true, (_, _, _, _) =>
-            throw new InvalidOperationException("A later duplicate must retain the guarded repair."), default);
+            throw new InvalidOperationException("A later duplicate must retain the guarded repair."), TestContext.Current.CancellationToken);
         Assert.Equal(repair!.Json, JsonSerializer.Serialize(reused.Ratings));
         Assert.Equal(1, fixture.RefreshCalls);
     }
@@ -45,7 +45,7 @@ public sealed partial class PremiereServiceTests
         };
         await fixture.QueueOptionalAsync();
         fixture.Store.BeforeWrite = null;
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.AssertRepairAndMetadata(repair!);
     }
 
@@ -58,11 +58,11 @@ public sealed partial class PremiereServiceTests
         await fixture.QueueOptionalAsync();
         fixture.Store.BeforeWrite = (writes, _) => Assert.Single(writes).ExpectedMetadataRevision == 1
             ? throw new IOException("Retry transaction unavailable.") : Task.CompletedTask;
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         Assert.True(fixture.Session.HasPendingWrites);
         fixture.Store.BeforeWrite = null;
         var repair = fixture.RepairRatings();
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.AssertRepairAndMetadata(repair);
         Assert.Equal(1, fixture.RefreshCalls);
     }
@@ -80,7 +80,7 @@ public sealed partial class PremiereServiceTests
             if (Assert.Single(writes).ExpectedMetadataRevision == 1) fixture.RepairRatings();
             return Task.CompletedTask;
         };
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.Store.BeforeWrite = null;
         var current = fixture.Current;
         var metadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(current.MetadataJson!)!;
@@ -91,7 +91,7 @@ public sealed partial class PremiereServiceTests
             "generation" => current with { Generation = 1, MetadataInvalidatedUtc = fixture.Clock.GetUtcNow().AddMinutes(1) },
             _ => current with { RatingsJson = JsonSerializer.Serialize(ratings with { ImdbScore = 9.8 }) }
         });
-        await fixture.Session.ReconcileAsync([], includeConsumed: true, default);
+        await fixture.Session.ReconcileAsync([], includeConsumed: true, TestContext.Current.CancellationToken);
         var accepted = fixture.Session.Find(fixture.Identity)!;
         Assert.Equal(change == "ratings", accepted.PreserveRatings);
         if (change == "ratings") Assert.Equal(9.8, accepted.Ratings!.ImdbScore);
@@ -111,17 +111,17 @@ public sealed partial class PremiereServiceTests
                 repair = fixture.RepairRatings();
             return Task.CompletedTask;
         };
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.AssertRepairAndMetadata(repair!);
         var cachedSource = fixture.Complete.Apply(new PremiereItem { CanonicalId = "movie:901", TmdbId = 901,
             MediaType = PremiereMediaType.Movie, Type = PremiereItemType.MovieFirstRelease, Title = fixture.Core.Title!,
             PremiereDate = new DateOnly(2026, 11, 2), ImdbScore = 6.5 });
         Assert.Equal(9.9, Assert.Single(fixture.Session.ApplyPreservedRatings([cachedSource])).ImdbScore);
         fixture.Session.SynchronizeMaintainedProjection([cachedSource]);
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.AssertRepairAndMetadata(repair!);
         var hydrated = await fixture.Session.GetAsync(fixture.Identity, false, (_, _, _, _) =>
-            throw new InvalidOperationException("Failed providers cannot replay stale cached scores after a repair."), default, ratingsOnly: true);
+            throw new InvalidOperationException("Failed providers cannot replay stale cached scores after a repair."), TestContext.Current.CancellationToken, ratingsOnly: true);
         Assert.Equal(9.9, hydrated.Ratings!.ImdbScore);
     }
 
@@ -177,25 +177,23 @@ public sealed partial class PremiereServiceTests
             MovieFilters = { RuntimeMaxMinutes = 60 } };
         if (baseline != "null")
         {
-            await memory.ReadManyAsync(coordinator.Partition, [new(PremiereMediaType.Movie, 901)], true, default);
+            await memory.ReadManyAsync(coordinator.Partition, [new(PremiereMediaType.Movie, 901)], true, TestContext.Current.CancellationToken);
             var pair = Assert.Single(memory.Records);
             var seed = new ItemEnrichmentRatings(baseline == "clock" ? repairedScore : 6.5, 6500, 77, 78, 79,
                 "tt0000901", "Q901", "Cached movie", 2026, FreshnessVerified: false);
             memory.Records[pair.Key] = pair.Value with { RatingsJson = JsonSerializer.Serialize(seed), RatingsFetchedUtc = clock.GetUtcNow().AddHours(-2) };
         }
-        var rejected = CreateService(rejectedTmdb, itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default,
-            forceRefresh: true, filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 45 } });
+        var rejected = CreateService(rejectedTmdb, itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 45 } });
         Task<IReadOnlyList<PremiereItem>>? eligible = null;
         string? repairedJson = null;
         var repairedClock = clock.GetUtcNow().AddHours(-1);
         try
         {
-            await rejectedEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            eligible = EligibleService().GetPremieresAsync(date, date, default, forceRefresh: true,
-                progress: new RecordingProgress<PremiereLoadProgress>(reports.Add), filters: eligibleFilters);
-            await eligibleEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await rejectedEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+            eligible = EligibleService().GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, progress: new RecordingProgress<PremiereLoadProgress>(reports.Add), filters: eligibleFilters);
+            await eligibleEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             releaseRejected.TrySetResult();
-            Assert.Empty(await rejected.WaitAsync(TimeSpan.FromSeconds(3)));
+            Assert.Empty(await rejected.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
             store.BeforeWrite = (writes, _) =>
             {
                 if (repairedJson is null && Assert.Single(writes).ExpectedMetadataRevision == (beforeInitial ? 0 : 1))
@@ -209,7 +207,7 @@ public sealed partial class PremiereServiceTests
                 return Task.CompletedTask;
             };
             releaseEligible.TrySetResult();
-            var items = await eligible.WaitAsync(TimeSpan.FromSeconds(5));
+            var items = await eligible.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.NotNull(repairedJson);
             if (scoreFilter == "winner-fails") Assert.Empty(items);
             else
@@ -235,7 +233,7 @@ public sealed partial class PremiereServiceTests
             Assert.Equal(1, artwork.Calls);
             Assert.Single(watchmode.SourceCalls);
 
-            var following = await EligibleService(useCache: false).GetPremieresAsync(date, date, default, filters: eligibleFilters);
+            var following = await EligibleService(useCache: false).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: eligibleFilters);
             if (scoreFilter == "winner-passes") Assert.Empty(following);
             else Assert.Equal(proposedScore, Assert.Single(following).ImdbScore);
             Assert.Equal(2, omdb.Calls.Count);
@@ -247,8 +245,8 @@ public sealed partial class PremiereServiceTests
         {
             releaseRejected.TrySetResult();
             releaseEligible.TrySetResult();
-            await rejected.WaitAsync(TimeSpan.FromSeconds(5));
-            if (eligible is not null) await eligible.WaitAsync(TimeSpan.FromSeconds(5));
+            await rejected.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            if (eligible is not null) await eligible.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         }
     }
 
@@ -276,10 +274,9 @@ public sealed partial class PremiereServiceTests
             OriginalLanguage = "en", RuntimeMinutes = 112, CoreMetadataOnly = false,
             PosterUrl = "https://fixture.invalid/cached.jpg", ImageSource = ArtworkSources.Fanart,
             ArtworkComplete = true, OptionalMetadataComplete = true, AvailabilityComplete = true };
-        await memory.ReadManyAsync(coordinator.Partition, [identity], true, default);
-        await memory.WriteManyAsync(coordinator.Partition,
-            [new(identity, 0, JsonSerializer.Serialize(cachedMetadata), fetched, JsonSerializer.Serialize(cachedRatings), fetched,
-                ExpectedMetadataRevision: 0)], default);
+        await memory.ReadManyAsync(coordinator.Partition, [identity], true, TestContext.Current.CancellationToken);
+        await memory.WriteManyAsync(coordinator.Partition, [new(identity, 0, JsonSerializer.Serialize(cachedMetadata), fetched, JsonSerializer.Serialize(cachedRatings), fetched,
+                ExpectedMetadataRevision: 0)], TestContext.Current.CancellationToken);
         var initial = Assert.Single(memory.Records.Values);
         Assert.Equal(1, initial.MetadataRevision);
         Assert.False(cachedMetadata.CoreMetadataOnly);
@@ -319,8 +316,7 @@ public sealed partial class PremiereServiceTests
             MovieFilters = { OriginalLanguages = ["en"] } };
         var service = CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes, artworkProviders: [artwork],
             watchmode: watchmode, scoreBackfill: backfill, calendarCache: cache, itemEnrichmentCache: coordinator);
-        var items = await service.GetPremieresAsync(date, date, default, forceRefresh: true, filters: filters,
-            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+        var items = await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: filters, progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
 
         Assert.Equal(1, repairs);
         if (scoreFilter == "winner-fails") Assert.Empty(items);
@@ -365,10 +361,9 @@ public sealed partial class PremiereServiceTests
             OriginalLanguage = "en", RuntimeMinutes = 20, Overview = "Stored core fallback", CoreMetadataOnly = true,
             ArtworkComplete = false, OptionalMetadataComplete = false, AvailabilityComplete = false,
             TmdbVotes = new(6.0, 6000, fetched) };
-        await memory.ReadManyAsync(coordinator.Partition, [identity], true, default);
-        await memory.WriteManyAsync(coordinator.Partition,
-            [new(identity, 0, JsonSerializer.Serialize(core), fetched, JsonSerializer.Serialize(cachedRatings), fetched,
-                TmdbObservedUtc: fetched, ExpectedMetadataRevision: 0)], default);
+        await memory.ReadManyAsync(coordinator.Partition, [identity], true, TestContext.Current.CancellationToken);
+        await memory.WriteManyAsync(coordinator.Partition, [new(identity, 0, JsonSerializer.Serialize(core), fetched, JsonSerializer.Serialize(cachedRatings), fetched,
+                TmdbObservedUtc: fetched, ExpectedMetadataRevision: 0)], TestContext.Current.CancellationToken);
         var repairedJson = JsonSerializer.Serialize(cachedRatings with { ImdbScore = repairedScore, FreshnessVerified = false });
         var repairedClock = fetched.AddMinutes(1);
         var repairs = 0;
@@ -401,8 +396,7 @@ public sealed partial class PremiereServiceTests
             MinScore = scoreFilter == "none" ? 0 : 8, IncludeUnknownScores = false,
             MovieFilters = { OriginalLanguages = ["en"], RuntimeMaxMinutes = 60 } };
         var items = await CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes, artworkProviders: [artwork], watchmode: watchmode,
-            scoreBackfill: backfill, calendarCache: cache, itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default,
-                forceRefresh: true, filters: filters, progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+            scoreBackfill: backfill, calendarCache: cache, itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: filters, progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
 
         Assert.Equal(1, repairs);
         if (scoreFilter == "winner-fails") Assert.Empty(items);
@@ -448,10 +442,9 @@ public sealed partial class PremiereServiceTests
             ExternalValues = new(ImdbScore: 5.0, ImdbVoteCount: 5000, MetacriticScore: 62),
             TomatoesValues = new(RottenTomatoesScore: 60, RottenTomatoesAudienceScore: 61)
         };
-        await memory.ReadManyAsync(coordinator.Partition, [identity], true, default);
-        await memory.WriteManyAsync(coordinator.Partition,
-            [new(identity, 0, JsonSerializer.Serialize(metadata), oldClock, JsonSerializer.Serialize(seed), oldClock,
-                ExpectedMetadataRevision: 0)], default);
+        await memory.ReadManyAsync(coordinator.Partition, [identity], true, TestContext.Current.CancellationToken);
+        await memory.WriteManyAsync(coordinator.Partition, [new(identity, 0, JsonSerializer.Serialize(metadata), oldClock, JsonSerializer.Serialize(seed), oldClock,
+                ExpectedMetadataRevision: 0)], TestContext.Current.CancellationToken);
         DateTimeOffset? competingClock = null;
         store.BeforeWrite = (writes, _) =>
         {
@@ -476,10 +469,8 @@ public sealed partial class PremiereServiceTests
         var cache = new FakeCalendarCache();
         var reports = new List<PremiereLoadProgress>();
         var items = await CreateService(ItemCacheMovie(date), omdb: omdb, rottenTomatoes: tomatoes, calendarCache: cache,
-            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default, forceRefresh: true,
-                filters: new CalendarFilters { ShowSeries = false, ScoreSource = ScoreSource.Imdb, MinScore = 8,
-                    IncludeUnknownScores = false, MovieFilters = { OriginalLanguages = ["en"] } },
-                progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
+            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: new CalendarFilters { ShowSeries = false, ScoreSource = ScoreSource.Imdb, MinScore = 8,
+                    IncludeUnknownScores = false, MovieFilters = { OriginalLanguages = ["en"] } }, progress: new RecordingProgress<PremiereLoadProgress>(reports.Add));
         var item = Assert.Single(items);
         Assert.Equal(9.0, item.ImdbScore);
         Assert.Equal(94, item.RottenTomatoesScore);
@@ -509,7 +500,7 @@ public sealed partial class PremiereServiceTests
             entered.TrySetResult();
             await release.Task.WaitAsync(token);
             return new(null, fixture.Ratings with { ImdbScore = 7.0 }, RefreshMetadataClock: false);
-        }, default, ratingsOnly: true, refreshVariant: "held-ratings");
+        }, TestContext.Current.CancellationToken, ratingsOnly: true, refreshVariant: "held-ratings");
         ItemEnrichmentRatingsBaseline? repair = null;
         fixture.Store.BeforeWrite = async (writes, _) =>
         {
@@ -522,20 +513,20 @@ public sealed partial class PremiereServiceTests
         };
         try
         {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            await fixture.Session.FlushAsync(default);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+            await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         }
         finally { release.TrySetResult(); }
-        var protectedRatings = await lateRatings.WaitAsync(TimeSpan.FromSeconds(3));
+        var protectedRatings = await lateRatings.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.Equal(9.9, protectedRatings.Ratings!.ImdbScore);
         Assert.False(fixture.Session.HasPendingWrites); // The older queued payload is gone, not merely hidden.
         Assert.Equal(repair!.Json, fixture.Current.RatingsJson);
         fixture.Store.BeforeWrite = null;
         var completed = await fixture.Session.GetAsync(fixture.Identity, false, (_, _, _, _) =>
-            Task.FromResult(new ItemEnrichmentRefresh(fixture.Complete, null, RefreshMetadataClock: false, RefreshRatingsClock: false)), default);
+            Task.FromResult(new ItemEnrichmentRefresh(fixture.Complete, null, RefreshMetadataClock: false, RefreshRatingsClock: false)), TestContext.Current.CancellationToken);
         Assert.Equal(0, completed.Record.MetadataRevision); // Producer revision is not rebased to the accepted core's revision1.
         Assert.Equal(fixture.Complete.PosterUrl, completed.Metadata!.PosterUrl);
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.AssertRepairAndMetadata(repair);
         Assert.Null(Assert.Single(fixture.Store.Attempts.Last()).RatingsJson);
         Assert.Equal(0, Assert.Single(fixture.Store.Attempts.Last()).CoreContinuation!.MetadataRevision);

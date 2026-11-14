@@ -65,14 +65,14 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     public async Task PasswordFileIsReadWhenAPhysicalConnectionIsEstablishedSoRotationIsPickedUp()
     {
         var passwordFile = Path.Combine(_root, "rotating-password");
-        await File.WriteAllTextAsync(passwordFile, "first-secret\r\n");
+        await File.WriteAllTextAsync(passwordFile, "first-secret\r\n", TestContext.Current.CancellationToken);
         using var server = new PasswordCapturingServer();
         var options = Options(
             $"Host=127.0.0.1;Port={server.Port};Database=premiere;Username=app;SSL Mode=Disable;GSS Encryption Mode=Disable;Timeout=5",
             passwordFile);
 
         await ExpectAuthenticationFailureAsync(options);
-        await File.WriteAllTextAsync(passwordFile, "second-secret\n");
+        await File.WriteAllTextAsync(passwordFile, "second-secret\n", TestContext.Current.CancellationToken);
         await ExpectAuthenticationFailureAsync(options);
 
         Assert.Equal(["first-secret", "second-secret"], server.Passwords);
@@ -82,7 +82,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     public async Task APasswordFileOverridesAnInlinePasswordInsteadOfFailingToBuildTheDataSource()
     {
         var passwordFile = Path.Combine(_root, "file-password");
-        await File.WriteAllTextAsync(passwordFile, "file-secret\n");
+        await File.WriteAllTextAsync(passwordFile, "file-secret\n", TestContext.Current.CancellationToken);
         using var server = new PasswordCapturingServer();
         var options = Options(
             $"Host=127.0.0.1;Port={server.Port};Database=premiere;Username=app;Password=inline-secret;SSL Mode=Disable;GSS Encryption Mode=Disable;Timeout=5",
@@ -118,7 +118,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
         var initializer = new PostgresDatabaseInitializer(
             options, recovery, TimeProvider.System, NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
 
-        await Assert.ThrowsAsync<FileNotFoundException>(() => initializer.InitializeAsync());
+        await Assert.ThrowsAsync<FileNotFoundException>(() => initializer.InitializeAsync(TestContext.Current.CancellationToken));
 
         Assert.False(initializer.RetryPending);
         Assert.False(recovery.Snapshot.IsHealthy);
@@ -161,7 +161,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     public async Task APasswordFileThatDisappearsAfterStartupIsTransientWhenOpeningAConnection()
     {
         var passwordFile = Path.Combine(_root, "vanishing-password");
-        await File.WriteAllTextAsync(passwordFile, "secret");
+        await File.WriteAllTextAsync(passwordFile, "secret", TestContext.Current.CancellationToken);
         using var server = new PasswordCapturingServer();
         var options = Options(
             $"Host=127.0.0.1;Port={server.Port};Database=premiere;Username=app;SSL Mode=Disable;GSS Encryption Mode=Disable;Timeout=5",
@@ -171,7 +171,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
 
         // The password provider runs for every new physical connection, so a briefly unreadable secret must not
         // escape the workers' transient catch (which would fault the BackgroundService and stop the host).
-        var failure = await Assert.ThrowsAnyAsync<Exception>(() => connection.OpenAsync());
+        var failure = await Assert.ThrowsAnyAsync<Exception>(() => connection.OpenAsync(TestContext.Current.CancellationToken));
 
         Assert.True(DatabaseConnectionFactory.IsTransient(failure), failure.ToString());
         Assert.False(DatabaseConnectionFactory.IsPasswordFileCheckFailure(failure));
@@ -255,11 +255,11 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
         };
         try
         {
-            var creator = Task.Run(() => { using var connection = DatabaseConnectionFactory.Create(options); });
-            Assert.True(started.Wait(TimeSpan.FromSeconds(30)), "the build did not start");
+            var creator = Task.Run(() => { using var connection = DatabaseConnectionFactory.Create(options); }, TestContext.Current.CancellationToken);
+            Assert.True(started.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken), "the build did not start");
 
             // The key is cached while its value is still being built; disposing it must not skip the unfinished build.
-            var disposer = Task.Run(() => DatabaseConnectionFactory.Dispose(options));
+            var disposer = Task.Run(() => DatabaseConnectionFactory.Dispose(options), TestContext.Current.CancellationToken);
             release.Set();
             await Task.WhenAll(creator, disposer);
         }

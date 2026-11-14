@@ -66,7 +66,7 @@ public sealed class ArrIntegrationServiceTests
             TmdbId = 550,
             Title = "Fight Club",
             PremiereDate = new DateOnly(1999, 10, 15)
-        });
+        }, TestContext.Current.CancellationToken);
 
         Assert.True(result.Succeeded);
         Assert.False(result.AlreadyExists);
@@ -137,7 +137,7 @@ public sealed class ArrIntegrationServiceTests
             TvdbId = 81189,
             Title = "Breaking Bad",
             PremiereDate = new DateOnly(2008, 1, 20)
-        });
+        }, TestContext.Current.CancellationToken);
 
         Assert.True(result.Succeeded);
         Assert.NotNull(postedPayload);
@@ -198,7 +198,7 @@ public sealed class ArrIntegrationServiceTests
             TmdbId = 550,
             Title = "Fight Club",
             PremiereDate = new DateOnly(1999, 10, 15)
-        });
+        }, TestContext.Current.CancellationToken);
 
         Assert.True(result.Succeeded);
         Assert.NotNull(postedPayload);
@@ -232,7 +232,7 @@ public sealed class ArrIntegrationServiceTests
             TmdbId = 1,
             Title = "Series Without TVDB",
             PremiereDate = new DateOnly(2026, 5, 7)
-        });
+        }, TestContext.Current.CancellationToken);
 
         Assert.False(result.Succeeded);
         Assert.Equal(ArrIntegrationTarget.Sonarr, result.Target);

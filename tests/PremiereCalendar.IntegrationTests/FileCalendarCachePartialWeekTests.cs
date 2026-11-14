@@ -48,11 +48,11 @@ public sealed class FileCalendarCachePartialWeekTests : IDisposable
     {
         await WriteEnvelopeAsync([Item("movie:1", "Complete discovery")], CalendarCacheCompleteness.Complete,
             DateTimeOffset.UtcNow.AddHours(hoursAgo), schemaVersion);
-        var before = await File.ReadAllBytesAsync(CachePath);
+        var before = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
 
         await CreateCache().SetPartialWeekAsync(Start, End, "default", [Item("movie:2", "Failed refresh")], CancellationToken.None);
 
-        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath));
+        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
         Assert.Empty(Directory.GetFiles(CacheDirectory, "*.tmp"));
     }
 
@@ -125,12 +125,12 @@ public sealed class FileCalendarCachePartialWeekTests : IDisposable
             pending = CreateCache().SetPartialWeekAsync(Start, End, "default", [Item("movie:1", "Partial")], CancellationToken.None);
             Assert.False(pending.IsCompleted);
             await WriteEnvelopeAsync([Item("movie:2", "Concurrent complete")], CalendarCacheCompleteness.Complete, DateTimeOffset.UtcNow);
-            complete = await File.ReadAllBytesAsync(CachePath);
+            complete = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
         }
 
-        await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        await pending.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
-        Assert.Equal(complete, await File.ReadAllBytesAsync(CachePath));
+        Assert.Equal(complete, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -151,7 +151,7 @@ public sealed class FileCalendarCachePartialWeekTests : IDisposable
     {
         var cache = CreateCache();
         await cache.SetPartialWeekAsync(Start, End, "default", [Item("movie:1", "Existing")], CancellationToken.None);
-        var before = await File.ReadAllBytesAsync(CachePath);
+        var before = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         await using var heldLock = new FileStream(Path.Combine(CacheDirectory, ".publish.lock"),
             FileMode.Open, FileAccess.ReadWrite, FileShare.None);
@@ -161,7 +161,7 @@ public sealed class FileCalendarCachePartialWeekTests : IDisposable
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
 
-        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath));
+        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
         Assert.Empty(Directory.GetFiles(CacheDirectory, "*.tmp"));
     }
 
@@ -170,14 +170,14 @@ public sealed class FileCalendarCachePartialWeekTests : IDisposable
     {
         var cache = CreateCache();
         await cache.SetPartialWeekAsync(Start, End, "default", [Item("movie:1", "Existing")], CancellationToken.None);
-        var before = await File.ReadAllBytesAsync(CachePath);
+        var before = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         var items = new CancelOnEnumeration([Item("movie:2", "Canceled")], cancellation);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.SetPartialWeekAsync(
             Start, End, "default", items, cancellation.Token));
 
-        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath));
+        Assert.Equal(before, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
         Assert.Empty(Directory.GetFiles(CacheDirectory, "*.tmp"));
         Assert.Equal("Existing", Assert.Single((await cache.GetWeekAsync(
             Start, End, "default", CancellationToken.None, allowExpired: true))!).Title);

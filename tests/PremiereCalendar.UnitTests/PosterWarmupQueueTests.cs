@@ -18,7 +18,7 @@ public sealed class PosterWarmupQueueTests
         queue.Enqueue(["https://image.tmdb.org/a.jpg", "", "  ", "https://image.tmdb.org/b.jpg", "https://image.tmdb.org/a.jpg", "https://image.tmdb.org/c.jpg"]);
 
         await cache.WaitForCallsAsync(3);
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.Equal(
             ["https://image.tmdb.org/a.jpg", "https://image.tmdb.org/b.jpg", "https://image.tmdb.org/c.jpg"],
             cache.Calls.Select(call => call.Url));
@@ -44,7 +44,7 @@ public sealed class PosterWarmupQueueTests
         // The first poster is still in flight, yet the others are already being warmed by the second worker.
         await cache.WaitForCallsAsync(3);
         release.SetResult();
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.Equal(3, cache.Calls.Select(call => call.Url).Distinct().Count());
     }
 
@@ -56,7 +56,7 @@ public sealed class PosterWarmupQueueTests
         using var queue = CreateQueue(provider, enabled: false);
 
         queue.Enqueue(["https://image.tmdb.org/a.jpg"]);
-        await Task.Delay(150);
+        await Task.Delay(150, TestContext.Current.CancellationToken);
 
         Assert.Empty(cache.Calls);
     }
@@ -75,7 +75,7 @@ public sealed class PosterWarmupQueueTests
         gate.SetResult();
 
         await cache.WaitForCallsAsync(3);
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(
             ["https://image.tmdb.org/a1.jpg", "https://image.tmdb.org/b1.jpg", "https://image.tmdb.org/b2.jpg"],
             cache.Calls.Select(call => call.Url));
@@ -93,7 +93,7 @@ public sealed class PosterWarmupQueueTests
         queue.Enqueue(["https://image.tmdb.org/a.jpg", "https://image.tmdb.org/b.jpg", "https://image.tmdb.org/c.jpg"]);
 
         await cache.WaitForCallsAsync(3);
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(
             ["https://image.tmdb.org/a.jpg", "https://image.tmdb.org/b.jpg", "https://image.tmdb.org/c.jpg"],
             cache.Calls.Select(call => call.Url));
@@ -115,7 +115,7 @@ public sealed class PosterWarmupQueueTests
 
         queue.Enqueue(["https://image.tmdb.org/0.jpg", $"https://image.tmdb.org/{total - 1}.jpg"]);
         await cache.WaitForCallsAsync(total + 1);
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.Equal(total + 1, cache.Calls.Count);
         Assert.Equal("https://image.tmdb.org/0.jpg", cache.Calls[^1].Url);
@@ -132,7 +132,7 @@ public sealed class PosterWarmupQueueTests
         queue.Enqueue(["https://image.tmdb.org/a.jpg"]);
         await delays.WaitForCallsAsync(1);
         Assert.Equal(TimeSpan.FromMilliseconds(750), delays.Calls[0].Duration);
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.Empty(cache.Calls);
 
         queue.Enqueue(["https://image.tmdb.org/b.jpg"]);
@@ -142,7 +142,7 @@ public sealed class PosterWarmupQueueTests
 
         delays.Release(1);
         await cache.WaitForCallsAsync(1);
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.Equal(["https://image.tmdb.org/b.jpg"], cache.Calls.Select(call => call.Url));
     }
 
@@ -166,11 +166,11 @@ public sealed class PosterWarmupQueueTests
         await using var provider = CreateProvider(cache);
         using var queue = CreateQueue(provider, enabled: true, capacity: 2);
 
-        var enqueue = Task.Run(() => queue.Enqueue(Enumerable.Range(0, 50).Select(index => $"https://image.tmdb.org/{index}.jpg")));
-        await enqueue.WaitAsync(TimeSpan.FromSeconds(2));
+        var enqueue = Task.Run(() => queue.Enqueue(Enumerable.Range(0, 50).Select(index => $"https://image.tmdb.org/{index}.jpg")), TestContext.Current.CancellationToken);
+        await enqueue.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
 
         await cache.WaitForCallsAsync(2);
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(["https://image.tmdb.org/0.jpg", "https://image.tmdb.org/1.jpg"], cache.Calls.Select(call => call.Url));
     }
 
@@ -184,7 +184,7 @@ public sealed class PosterWarmupQueueTests
 
         queue.Enqueue(["https://image.tmdb.org/a.jpg"]);
         queue.Enqueue(null!);
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
 
         Assert.Empty(cache.Calls);
     }
@@ -200,7 +200,7 @@ public sealed class PosterWarmupQueueTests
         queue.Enqueue(["https://image.tmdb.org/a.jpg"]);
         await cache.WaitForCallsAsync(1);
         queue.Enqueue(["https://image.tmdb.org/a.jpg"]);
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Single(cache.Calls);
 
         time.Advance(PosterWarmupQueue.RecentlyWarmedLifetime + TimeSpan.FromSeconds(1));
@@ -226,7 +226,7 @@ public sealed class PosterWarmupQueueTests
         });
 
         queue.Enqueue(["https://image.tmdb.org/lost.jpg"]);
-        await Task.Delay(150);
+        await Task.Delay(150, TestContext.Current.CancellationToken);
         queue.Enqueue(["https://image.tmdb.org/b.jpg"]);
 
         await cache.WaitForCallsAsync(1);
@@ -245,7 +245,7 @@ public sealed class PosterWarmupQueueTests
         await cache.WaitForCallsAsync(1);
 
         queue.Dispose();
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.Single(cache.Calls);
     }

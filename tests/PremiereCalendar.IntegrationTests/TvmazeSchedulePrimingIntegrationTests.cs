@@ -172,19 +172,19 @@ public sealed class TvmazeSchedulePrimingIntegrationTests
             returnedLookupResponse.TrySetResult();
             return StubHttpMessageHandler.Json(JsonSerializer.Serialize(fresh));
         });
-        var schedule = Task.Run(() => Client(handler, cache).GetScheduleAsync(ScheduleDate, "US", false, CancellationToken.None));
-        Assert.True(cache.SeedCheckEntered.Wait(TimeSpan.FromSeconds(5)));
-        var lookup = Task.Run(() => Client(handler, cache).LookupShowAsync(81189, null, CancellationToken.None, force));
+        var schedule = Task.Run(() => Client(handler, cache).GetScheduleAsync(ScheduleDate, "US", false, CancellationToken.None), TestContext.Current.CancellationToken);
+        Assert.True(cache.SeedCheckEntered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        var lookup = Task.Run(() => Client(handler, cache).LookupShowAsync(81189, null, CancellationToken.None, force), TestContext.Current.CancellationToken);
         try
         {
-            await returnedLookupResponse.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await returnedLookupResponse.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             // Give the fresh response a chance to publish while the seed is paused
             // after observing the missing alias. Its write must share the seed gate.
-            await Task.WhenAny(lookup, Task.Delay(100));
+            await Task.WhenAny(lookup, Task.Delay(100, TestContext.Current.CancellationToken));
         }
         finally { cache.ReleaseSeedCheck.Set(); }
-        await schedule.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(fresh, await lookup.WaitAsync(TimeSpan.FromSeconds(5)));
+        await schedule.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(fresh, await lookup.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Equal(fresh, await Client(handler, cache).LookupShowAsync(81189, null, CancellationToken.None));
     }
 

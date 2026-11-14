@@ -22,7 +22,7 @@ public sealed partial class PremiereServiceTests
             SeriesFilters = { OriginalLanguages = ["en"], SeriesDateMode = SeriesDateMode.NewSeriesOnly }
         };
         var primed = await CreateService(Tmdb(prime: true), omdb: Omdb("7.1"), itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, forceRefresh: true, filters: filters);
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: filters);
         Assert.Equal(2, primed.Count);
         clock.Advance(TimeSpan.FromDays(metadataExpired ? 8 : 2));
         var retainedMedia = freshMovies ? PremiereMediaType.Movie : PremiereMediaType.Series;
@@ -38,7 +38,7 @@ public sealed partial class PremiereServiceTests
         var omdb = Omdb("8.2");
         var updates = new List<PremiereLoadProgress>();
         await foreach (var update in CreateService(tmdb, omdb: omdb, calendarCache: cache, itemEnrichmentCache: coordinator)
-            .StreamCoreAsync(date, date, filters: filters)) updates.Add(update);
+            .StreamCoreAsync(date, date, filters: filters, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
 
         var final = Assert.Single(updates, update => update.IsFinal);
         Assert.False(final.HasSourceErrors);

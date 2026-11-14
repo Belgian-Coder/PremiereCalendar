@@ -41,16 +41,16 @@ public sealed class BackgroundProducerStartupGateTests
                 Microsoft.Extensions.Options.Options.Create(new CalendarWarmupOptions()), new FastStartupClock(),
                 NullLogger<ItemEnrichmentCacheBackfillService>.Instance, new PremiereTelemetry(), recovery)
         };
-        await service.StartAsync(default);
-        await Assert.ThrowsAsync<TimeoutException>(() => probe.Touched.Task.WaitAsync(TimeSpan.FromMilliseconds(100)));
+        await service.StartAsync(TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<TimeoutException>(() => probe.Touched.Task.WaitAsync(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken));
         Assert.Equal(0, probe.Calls);
         Assert.False(service.ExecuteTask!.IsCompleted);
         if (recover)
         {
             recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "initialized", null));
-            await probe.Touched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await probe.Touched.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         }
-        await service.StopAsync(default).WaitAsync(TimeSpan.FromSeconds(2));
+        await service.StopAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         Assert.Equal(recover ? 1 : 0, probe.Calls);
     }
 

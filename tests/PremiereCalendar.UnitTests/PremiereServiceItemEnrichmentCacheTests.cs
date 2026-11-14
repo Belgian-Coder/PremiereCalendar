@@ -199,7 +199,7 @@ public sealed partial class PremiereServiceTests
         var omdb = ItemCacheOmdb("7.1");
         var updates = new List<PremiereLoadProgress>();
         await foreach (var update in CreateService(tmdb, omdb: omdb, watchmode: watchmode, calendarCache: cache, itemEnrichmentCache: coordinator)
-            .StreamCoreAsync(date, date, filters: new CalendarFilters { ShowSeries = false })) updates.Add(update);
+            .StreamCoreAsync(date, date, filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
 
         Assert.False(Assert.Single(updates, update => update.IsFinal).HasSourceErrors);
         Assert.Equal(112, Assert.Single(updates.Last().Items).RuntimeMinutes);
@@ -395,7 +395,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"), calendarCache: cache, itemEnrichmentCache: ItemCacheCoordinator(store, clock));
         PremiereLoadProgress? final = null;
         var invalidated = false;
-        await foreach (var update in service.StreamCoreAsync(date, date, filters: new CalendarFilters { ShowSeries = false }))
+        await foreach (var update in service.StreamCoreAsync(date, date, filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken))
         {
             if (!invalidated && !update.IsFinal && update.Items.Any(item => item.RuntimeMinutes == 112))
             {
@@ -832,7 +832,7 @@ public sealed partial class PremiereServiceTests
         {
             firstFullWrite.TrySetResult();
             releaseFirst.TrySetResult();
-            try { await loads.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
+            try { await loads.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken); } catch { }
             telemetry.FlushDiagnostics();
             diagnostics.Dispose();
             foreach (var file in Directory.GetFiles(Path.Combine(directory, "App_Data", "logs", "performance")))
@@ -968,7 +968,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"), calendarCache: cache,
             itemEnrichmentCache: ItemCacheCoordinator(store, clock));
 
-        await foreach (var update in service.StreamCoreAsync(date, date, filters: new CalendarFilters { ShowSeries = false })) updates.Add(update);
+        await foreach (var update in service.StreamCoreAsync(date, date, filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
 
         Assert.True(Assert.Single(updates, update => update.IsFinal).HasSourceErrors);
         Assert.Empty(cache.SetCalls);
@@ -1118,8 +1118,7 @@ public sealed partial class PremiereServiceTests
         PremiereItem? final = null;
         var changed = false;
 
-        await foreach (var update in service.StreamCoreAsync(date, date, forceRefresh: true,
-            filters: new CalendarFilters { ShowSeries = false }))
+        await foreach (var update in service.StreamCoreAsync(date, date, forceRefresh: true, filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken))
         {
             if (!changed && !update.IsFinal && update.Items.Any(item => item.RuntimeMinutes == 112 && item.ImdbId is not null))
             {

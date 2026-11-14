@@ -5,7 +5,6 @@ using Microsoft.Extensions.Caching.Memory;
 using PremiereCalendar.IntegrationTests.Support;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
-using Xunit.Abstractions;
 
 namespace PremiereCalendar.IntegrationTests;
 
@@ -39,9 +38,9 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         });
         var client = CreateClient(handler);
         var firstWarmup = client.GetRottenTomatoesIdAsync("Q9000001", CancellationToken.None);
-        await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var secondWarmup = client.GetRottenTomatoesIdAsync("Q9000002", CancellationToken.None);
-        await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         var started = Stopwatch.GetTimestamp();
         // Occupied HTTP slots let every lookup join the queue before a batch drains,
@@ -103,7 +102,7 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         using var cancelled = new CancellationTokenSource();
         var first = client.GetRottenTomatoesIdAsync("Q1", cancelled.Token);
         var second = client.GetRottenTomatoesIdAsync("Q2", CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
@@ -133,12 +132,12 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         using var cancellation = new CancellationTokenSource();
         var first = client.GetRottenTomatoesIdAsync("Q1", cancellation.Token);
         var second = client.GetRottenTomatoesIdAsync("Q2", cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
-        await aborted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await aborted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         Assert.Equal("m/Q1", await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None));
         Assert.Equal(2, handler.Requests.Count);
@@ -177,12 +176,12 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
             secondCancellationEntered.TrySetResult();
             releaseSecondCancellation.Wait(TimeSpan.FromSeconds(5));
         });
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
-        var cancelSecond = Task.Run(secondCancellation.Cancel);
-        await secondCancellationEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var cancelSecond = Task.Run(secondCancellation.Cancel, TestContext.Current.CancellationToken);
+        await secondCancellationEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         firstCancellation.Cancel();
-        await abandoning.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await abandoning.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         // The old batch has been closed, but its HTTP cancellation has deliberately not run yet.
         var fresh = batcher.GetAsync("Q2", 0, CancellationToken.None);
         releaseCancellation.Set();
@@ -191,7 +190,7 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         await cancelSecond;
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
-        Assert.Equal("m/Q2", (await fresh.WaitAsync(TimeSpan.FromSeconds(5))).Identifier.Value);
+        Assert.Equal("m/Q2", (await fresh.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).Identifier.Value);
         Assert.Equal(2, calls);
     }
 
@@ -253,10 +252,10 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         });
         var client = CreateClient(handler);
         var original = client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         Assert.Equal("m/Q1_new", await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None, forceRefresh: true)
-            .WaitAsync(TimeSpan.FromSeconds(5)));
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         release.TrySetResult();
         Assert.Equal("m/Q1_old", await original);
         Assert.Equal("m/Q1_new", await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None));
@@ -290,9 +289,9 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         try
         {
             var firstWarmup = client.GetRottenTomatoesIdAsync("Q9000001", cancellation.Token);
-            await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             var secondWarmup = client.GetRottenTomatoesIdAsync("Q9000002", cancellation.Token);
-            await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             // Both HTTP slots stay occupied until every forced generation is queued.
             // This tests queued coalescing without relying on the 10ms dispatch window.
@@ -335,7 +334,7 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
             first = client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None);
         using (ProviderExecutionContext.Push(() => ProviderWorkPriority.Maintenance))
             second = client.GetRottenTomatoesIdAsync("Q2", CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         promoted = true;
         inspect.TrySetResult();
 
@@ -361,7 +360,7 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         });
         var client = CreateClient(handler);
         var initial = Enumerable.Range(1, 100).Select(id => client.GetRottenTomatoesIdAsync($"Q{id}", CancellationToken.None)).ToArray();
-        await initialBatchesStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await initialBatchesStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var before = Enumerable.Range(101, 200).Select(id => client.GetRottenTomatoesIdAsync($"Q{id}", CancellationToken.None)).ToArray();
         Task<string?>[] background;
         using (ProviderExecutionContext.Push(() => ProviderWorkPriority.Maintenance))
@@ -447,7 +446,7 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
             Assert.False((await client.GetRottenTomatoesIdResultAsync("Q1", CancellationToken.None)).IsSuccess);
             using var cancellation = new CancellationTokenSource();
             var cancelled = client.GetRottenTomatoesIdResultAsync("Q2", cancellation.Token);
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
 
@@ -457,7 +456,7 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
                 telemetry.FlushDiagnostics();
                 events = ReadEvents(directory);
                 if (events.Count(entry => entry.GetProperty("event").GetString() == "provider.wikimedia.batch.completed") == 2) break;
-                await Task.Delay(10);
+                await Task.Delay(10, TestContext.Current.CancellationToken);
             }
             var lookups = events.Where(entry => entry.GetProperty("event").GetString() == "provider.wikimedia.lookup.completed").ToArray();
             Assert.Equal(new[] { "failed", "cancelled" }, lookups.Select(entry => entry.GetProperty("details").GetProperty("outcome").GetString()));

@@ -128,7 +128,7 @@ public sealed partial class PremiereServiceTests
         var start = new DateOnly(2026, 5, 4);
         var request = service.GetPremieresAsync(start, start, cancellation.Token,
             filters: new CalendarFilters { ShowSeries = false, ShowMovies = true });
-        await tomatoes.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await tomatoes.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
         Assert.True(tomatoes.ObservedCancellation);

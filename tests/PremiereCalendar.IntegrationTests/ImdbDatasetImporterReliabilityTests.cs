@@ -81,7 +81,7 @@ public sealed class ImdbDatasetImporterReliabilityTests : IDisposable
             var importer = CreateImporter(client, ratingsStore, time, root);
 
             var operation = importer.ImportRatingsAsync(CancellationToken.None);
-            await body.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5));
+            await body.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             time.Advance(TimeSpan.FromSeconds(120));
 
             var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
@@ -113,7 +113,7 @@ public sealed class ImdbDatasetImporterReliabilityTests : IDisposable
             using var cancellation = new CancellationTokenSource();
 
             var operation = importer.ImportRatingsAsync(cancellation.Token);
-            await body.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5));
+            await body.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             cancellation.Cancel();
 
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);

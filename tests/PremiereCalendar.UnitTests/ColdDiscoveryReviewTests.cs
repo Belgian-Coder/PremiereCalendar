@@ -68,7 +68,7 @@ public sealed partial class PremiereServiceTests
                     conflictInjected.TrySetResult();
                 };
             }
-        });
+        }, TestContext.Current.CancellationToken);
         try
         {
             await conflictInjected.Task.WaitAsync(budget.Token);
@@ -79,7 +79,7 @@ public sealed partial class PremiereServiceTests
         {
             tomatoes.Release.TrySetResult();
             if (!run.IsCompleted) await budget.CancelAsync();
-            try { await run.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
+            try { await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken); } catch { }
         }
         var final = Assert.Single(updates, update => update.IsFinal);
         Assert.True(final.HasSourceErrors);
@@ -275,8 +275,8 @@ public sealed partial class PremiereServiceTests
         var store = new MemoryItemEnrichmentStore(clock);
         var coordinator = ItemCacheCoordinator(store, clock);
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
-        await using var session = await coordinator.CreateSessionAsync(default);
-        await session.PrepareAsync([identity], null, default);
+        await using var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         var metadata = new ItemEnrichmentMetadata { Title = "Completed", ImdbId = "tt0000901", RuntimeMinutes = 90, AvailabilityComplete = true };
         var ratings = new ItemEnrichmentRatings(7.4, 740, null, null, null, ImdbId: metadata.ImdbId, Title: metadata.Title, Year: 2026);
         var providerCalls = 0;
@@ -285,14 +285,14 @@ public sealed partial class PremiereServiceTests
             providerCalls++;
             return Task.FromResult(new ItemEnrichmentRefresh(metadata, ratings));
         }
-        var completed = await session.GetAsync(identity, true, Provider, default);
+        var completed = await session.GetAsync(identity, true, Provider, TestContext.Current.CancellationToken);
         Assert.Equal(1, providerCalls);
         Assert.True(session.HasPendingWrites); // completed after the readiness flush; the store still has the older reserved row
-        var probe = await session.ReconcileAsync([], includeConsumed: true, default, readOnly: true);
+        var probe = await session.ReconcileAsync([], includeConsumed: true, TestContext.Current.CancellationToken, readOnly: true);
         Assert.Same(completed, session.Find(identity));
         Assert.True(session.HasPendingWrites);
         // A second occurrence of the same item still reuses the completed result.
-        Assert.Same(completed, await session.GetAsync(identity, false, Provider, default));
+        Assert.Same(completed, await session.GetAsync(identity, false, Provider, TestContext.Current.CancellationToken));
         Assert.Equal(1, providerCalls);
         Assert.Empty(probe.DirtyMedia);
     }

@@ -24,7 +24,7 @@ public sealed partial class PremiereServiceTests
         var watchmode = new FakeWatchmodeClient { Sources = [new() { Id = 19, Name = "Available", Kind = "flatrate" }] };
         var service = CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes, imdbRatingsStore: dataset,
             artworkProviders: [artwork], watchmode: watchmode, sourceRegions: ["US"], itemEnrichmentCache: coordinator);
-        await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowSeries = false });
+        await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false });
         var seededForcedDetailCalls = tmdb.MovieDetailCalls.Count(call => call.ForceRefresh);
         clock.Advance(TimeSpan.FromMinutes(1));
         omdb.ItemsByImdbId["tt0000901"] = omdb.ItemsByImdbId["tt0000901"] with { ImdbRating = "8.4", Plot = "Forced OMDb plot" };
@@ -32,8 +32,7 @@ public sealed partial class PremiereServiceTests
         dataset.Rating = new("tt0000901", 8.7, 2000, clock.GetUtcNow());
         artwork.Candidate = new("https://cover.example/fresh.jpg", ArtworkSources.Fanart);
 
-        var result = Assert.Single(await service.GetPremieresAsync(date, date, default, forceRefresh: true,
-            filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 90, OriginalLanguages = ["en"] } }));
+        var result = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 90, OriginalLanguages = ["en"] } }));
 
         Assert.Equal(2, tmdb.MovieDetailCalls.Count);
         Assert.Equal(seededForcedDetailCalls + 1, tmdb.MovieDetailCalls.Count(call => call.ForceRefresh));
@@ -64,7 +63,7 @@ public sealed partial class PremiereServiceTests
         var coordinator = ItemCacheCoordinator(store, clock);
         if (previouslyCached)
             await CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"), itemEnrichmentCache: coordinator)
-                .GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowSeries = false });
+                .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false });
         var before = store.Records.Values.SingleOrDefault();
         clock.Advance(TimeSpan.FromMinutes(1));
         var tmdb = ItemCacheMovie(date);
@@ -76,8 +75,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes, artworkProviders: [artwork],
             watchmode: watchmode, itemEnrichmentCache: coordinator);
         var result = await service
-            .GetPremieresAsync(date, date, default, forceRefresh: true,
-                filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 45 } });
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 45 } });
 
         Assert.Empty(result);
         Assert.True(Assert.Single(tmdb.MovieDetailCalls).ForceRefresh);
@@ -97,8 +95,7 @@ public sealed partial class PremiereServiceTests
         Assert.Equal(oldMetadata?.AvailabilityFetchedUtc, currentMetadata.AvailabilityFetchedUtc);
         Assert.Equal(oldMetadata?.PosterUrl, currentMetadata.PosterUrl);
 
-        var suitable = Assert.Single(await service.GetPremieresAsync(date, date, default,
-            filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } }));
+        var suitable = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } }));
         Assert.Equal(20, suitable.RuntimeMinutes);
         Assert.Single(tmdb.MovieDetailCalls);
         Assert.Equal(previouslyCached ? 0 : 1, omdb.Calls.Count);
@@ -115,13 +112,13 @@ public sealed partial class PremiereServiceTests
         var omdb = ItemCacheOmdb("7.1");
         omdb.ItemsByImdbId["tt0000901"] = omdb.ItemsByImdbId["tt0000901"] with { Plot = "Cached matching OMDb plot" };
         await CreateService(CoreCompleteMovie(date, true), omdb: omdb, sourceRegions: ["US"], itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowSeries = false });
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false });
         var before = Assert.Single(store.Records.Values);
         clock.Advance(TimeSpan.FromHours(1));
-        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), default);
+        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), TestContext.Current.CancellationToken);
         var current = CoreCompleteMovie(date, true);
         var result = Assert.Single(await CreateService(current, omdb: omdb, sourceRegions: ["US"], itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowSeries = false,
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false,
                 MovieFilters = { RuntimeMinMinutes = 90 } }));
 
         Assert.Equal("Cached matching OMDb plot", result.Overview);
@@ -178,25 +175,24 @@ public sealed partial class PremiereServiceTests
         PremiereService Service() => CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes,
             artworkProviders: [artwork], watchmode: watchmode, itemEnrichmentCache: coordinator);
         var rejectedFilters = new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 45 } };
-        var first = Service().GetPremieresAsync(date, date, default, forceRefresh: true, filters: rejectedFilters);
+        var first = Service().GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: rejectedFilters);
         Task<IReadOnlyList<PremiereItem>>? sameCriteria = null;
         Task<IReadOnlyList<PremiereItem>>? eligible = null;
         try
         {
-            await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            sameCriteria = Service().GetPremieresAsync(date, date, default, forceRefresh: true, filters: rejectedFilters);
-            eligible = Service().GetPremieresAsync(date, date, default, forceRefresh: true,
-                filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } });
-            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            sameCriteria = Service().GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: rejectedFilters);
+            eligible = Service().GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } });
+            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             release.SetResult();
-            Assert.Empty(await first.WaitAsync(TimeSpan.FromSeconds(5)));
-            Assert.Empty(await sameCriteria.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Empty(await first.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            Assert.Empty(await sameCriteria.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
             var preflight = Assert.Single(store.Records.Values);
             Assert.True(JsonSerializer.Deserialize<ItemEnrichmentMetadata>(preflight.MetadataJson!)!.CoreMetadataOnly);
             Assert.Null(preflight.RatingsJson);
             Assert.Equal(1, preflight.MetadataRevision);
             releaseEligible.SetResult();
-            var result = Assert.Single(await eligible.WaitAsync(TimeSpan.FromSeconds(5)));
+            var result = Assert.Single(await eligible.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
             Assert.Equal(20, result.RuntimeMinutes);
             Assert.Equal(94, result.RottenTomatoesScore);
             Assert.Equal(8.4, result.ImdbScore);
@@ -214,8 +210,7 @@ public sealed partial class PremiereServiceTests
             Assert.Equal(19, Assert.Single(persisted.Sources).Id);
             Assert.Equal("Eligible OMDb plot", persisted.OmdbPlot);
             Assert.Null(persisted.OmdbPosterUrl);
-            var following = Assert.Single(await Service().GetPremieresAsync(date, date, default,
-                filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } }));
+            var following = Assert.Single(await Service().GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } }));
             Assert.Equal(result.PosterUrl, following.PosterUrl);
             Assert.Equal(19, Assert.Single(following.Sources).Id);
             Assert.Equal(2, detailCalls);
@@ -228,9 +223,9 @@ public sealed partial class PremiereServiceTests
         {
             release.TrySetResult();
             releaseEligible.TrySetResult();
-            await first.WaitAsync(TimeSpan.FromSeconds(10));
-            if (sameCriteria is not null) await sameCriteria.WaitAsync(TimeSpan.FromSeconds(10));
-            if (eligible is not null) await eligible.WaitAsync(TimeSpan.FromSeconds(10));
+            await first.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            if (sameCriteria is not null) await sameCriteria.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            if (eligible is not null) await eligible.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         }
     }
 
@@ -248,18 +243,18 @@ public sealed partial class PremiereServiceTests
         var unavailable = new FakeWatchmodeClient { SourcesOutcomeSuccessful = false };
         var filters = new CalendarFilters { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 90 } };
         var service = CreateService(tmdb, omdb: omdb, watchmode: unavailable, itemEnrichmentCache: coordinator);
-        var first = Assert.Single(await service.GetPremieresAsync(date, date, default, filters: filters));
+        var first = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters));
         var before = Assert.Single(store.Records.Values);
         var metadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(before.MetadataJson!)!;
         Assert.Equal("Locally merged OMDb plot", first.Overview);
         Assert.False(metadata.CoreMetadataOnly);
         Assert.False(metadata.AvailabilityComplete);
         clock.Advance(TimeSpan.FromMinutes(1));
-        await using var session = await coordinator.CreateSessionAsync(default);
+        await using var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
-        await session.PrepareAsync([identity], null, default);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         Assert.False(session.MetadataRefreshNeeded(identity));
-        var retained = Assert.Single(await service.GetPremieresAsync(date, date, default, filters: filters));
+        var retained = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters));
         Assert.Equal(first.Overview, retained.Overview);
         Assert.Single(unavailable.SourceCalls);
         Assert.Single(omdb.Calls);
@@ -310,7 +305,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(tmdb, omdb: omdb, artworkProviders: [artwork], watchmode: watchmode,
             sourceRegions: ["US"], itemEnrichmentCache: coordinator);
 
-        var result = Assert.Single(await service.GetPremieresAsync(date, date, default, filters: filters));
+        var result = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters));
 
         Assert.Equal("Initial OMDb plot", result.Overview);
         Assert.EndsWith("/current-poster.jpg", result.PosterUrl!);
@@ -327,7 +322,7 @@ public sealed partial class PremiereServiceTests
 
         clock.Advance(TimeSpan.FromHours(25));
         omdb.ItemsByImdbId["tt0000901"] = omdb.ItemsByImdbId["tt0000901"] with { Plot = "Ratings-only plot", ImdbRating = "8.6" };
-        var ratingsOnly = Assert.Single(await service.GetPremieresAsync(date, date, default, filters: filters));
+        var ratingsOnly = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters));
         Assert.Equal(8.6, ratingsOnly.ImdbScore);
         Assert.Equal(result.Overview, ratingsOnly.Overview);
         var after = Assert.Single(store.Records.Values);
@@ -355,7 +350,7 @@ public sealed partial class PremiereServiceTests
             originalTmdb.MovieDetailsById[901] = originalTmdb.MovieDetailsById[901] with { PosterPath = "/old-poster.jpg" };
         var original = Assert.Single(await CreateService(originalTmdb, omdb: ItemCacheOmdb("7.1"),
             artworkProviders: [new OptionalOwnershipArtwork()], itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowSeries = false }));
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false }));
         var before = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(Assert.Single(store.Records.Values).MetadataJson!)!;
         clock.Advance(TimeSpan.FromDays(8));
         var coreClock = clock.GetUtcNow();
@@ -365,7 +360,7 @@ public sealed partial class PremiereServiceTests
         var provider = new OptionalOwnershipArtwork();
         var service = CreateService(current, omdb: omdb, artworkProviders: [provider], itemEnrichmentCache: coordinator);
 
-        Assert.Empty(await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters
+        Assert.Empty(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters
             { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } }));
         Assert.Single(current.MovieDetailCalls);
         Assert.Empty(omdb.Calls);
@@ -375,7 +370,7 @@ public sealed partial class PremiereServiceTests
         Assert.Equal(change == "poster" ? coreClock : before.ArtworkFetchedUtc, partial.ArtworkFetchedUtc);
         clock.Advance(TimeSpan.FromMinutes(1));
 
-        var completed = Assert.Single(await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters
+        var completed = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters
             { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 90 } }));
 
         Assert.Single(current.MovieDetailCalls);
@@ -414,17 +409,17 @@ public sealed partial class PremiereServiceTests
         omdb.ItemsByImdbId["tt0000901"] = omdb.ItemsByImdbId["tt0000901"] with
             { Poster = "https://omdb.example/cached.jpg", Plot = "Matched cached plot" };
         await CreateService(original, omdb: omdb, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowSeries = false });
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false });
         var before = Assert.Single(store.Records.Values);
         var oldMetadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(before.MetadataJson!)!;
         clock.Advance(TimeSpan.FromHours(1));
-        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), default);
+        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), TestContext.Current.CancellationToken);
         var current = OptionalOwnershipTmdb(date, false, null);
         var service = CreateService(current, omdb: omdb, itemEnrichmentCache: coordinator);
 
-        Assert.Empty(await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters
+        Assert.Empty(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters
             { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } }));
-        var result = Assert.Single(await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters
+        var result = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters
             { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 90 } }));
 
         Assert.Single(current.MovieDetailCalls);
@@ -450,12 +445,12 @@ public sealed partial class PremiereServiceTests
         var empty = new OptionalOwnershipArtwork();
         var service = CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"), artworkProviders: [failing, empty],
             itemEnrichmentCache: coordinator);
-        await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowSeries = false });
+        await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false });
         Assert.Equal(1, failing.Calls);
         Assert.Equal(1, empty.Calls);
 
         clock.Advance(TimeSpan.FromMinutes(1));
-        await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowSeries = false,
+        await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowSeries = false,
             MovieFilters = { OriginalLanguages = ["en"] } });
 
         Assert.Equal(1, failing.Calls);
@@ -472,24 +467,24 @@ public sealed partial class PremiereServiceTests
         var store = new MemoryItemEnrichmentStore(clock);
         var coordinator = ItemCacheCoordinator(store, clock);
         var old = ItemCacheLegacyItem(date, clock) with { PosterUrl = "https://omdb.example/retained.jpg", ImageSource = "OMDb poster" };
-        await coordinator.ImportAsync([old], default);
+        await coordinator.ImportAsync([old], TestContext.Current.CancellationToken);
         SetOptionalOwnershipMetadata(store, metadata => metadata with
         {
             ArtworkComplete = false, OptionalMetadataComplete = false, AvailabilityComplete = true,
             PosterOwnerVerifiedEmpty = ownerVerifiedAbsent, OmdbPosterUrl = old.PosterUrl
         });
         clock.Advance(TimeSpan.FromHours(1));
-        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), default);
+        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), TestContext.Current.CancellationToken);
         var omdb = ItemCacheOmdb("7.1");
         var fallback = new OptionalOwnershipArtwork { OwnedSource = ArtworkSources.Wikimedia };
         var service = CreateService(ItemCacheMovie(date), omdb: omdb, artworkProviders: [fallback], itemEnrichmentCache: coordinator);
-        Assert.Empty(await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters
+        Assert.Empty(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters
             { ShowSeries = false, MovieFilters = { RuntimeMaxMinutes = 60 } }));
         var core = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(Assert.Single(store.Records.Values).MetadataJson!)!;
         Assert.True(core.CoreMetadataOnly);
         Assert.False(core.CoreOmdbCoverReusable);
 
-        var result = Assert.Single(await service.GetPremieresAsync(date, date, default, filters: new CalendarFilters
+        var result = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters
             { ShowSeries = false, MovieFilters = { RuntimeMinMinutes = 90 } }));
 
         Assert.Empty(omdb.Calls);

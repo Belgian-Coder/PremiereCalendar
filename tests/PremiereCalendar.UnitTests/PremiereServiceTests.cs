@@ -315,7 +315,7 @@ public sealed partial class PremiereServiceTests
                 new DateOnly(2026, 5, 10),
                 filters: NewSeriesOnlyFilters(),
                 cancellationToken: CancellationToken.None)
-            .GetAsyncEnumerator();
+            .GetAsyncEnumerator(TestContext.Current.CancellationToken);
 
         PremiereLoadProgress? firstTmdbUpdate = null;
         while (await enumerator.MoveNextAsync())
@@ -419,7 +419,7 @@ public sealed partial class PremiereServiceTests
                 new DateOnly(2026, 5, 10),
                 filters: filters,
                 cancellationToken: CancellationToken.None)
-            .GetAsyncEnumerator();
+            .GetAsyncEnumerator(TestContext.Current.CancellationToken);
 
         PremiereLoadProgress? firstTmdbUpdate = null;
         while (await enumerator.MoveNextAsync())
@@ -1956,7 +1956,7 @@ public sealed partial class PremiereServiceTests
             filters: filters);
         var startedTask = await Task.WhenAny(
             externalProvider.Started.Task,
-            Task.Delay(TimeSpan.FromMilliseconds(500)));
+            Task.Delay(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken));
 
         await cancellation.CancelAsync();
         try

@@ -16,7 +16,7 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
     {
         var path = CreateTrace();
         var original = File.ReadAllText(path);
-        PerformanceTraceArchive.Archive(path, 1024 * 1024);
+        PerformanceTraceArchive.Archive(path, 1024 * 1024, cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(File.Exists(path));
         using var gzip = new GZipStream(File.OpenRead(path + ".gz"), CompressionMode.Decompress);
         using var reader = new StreamReader(gzip);
@@ -35,13 +35,12 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
     {
         var path = CreateTrace();
         var original = File.ReadAllText(path);
-        Assert.Throws<IOException>(() => PerformanceTraceArchive.Archive(path, 1024 * 1024,
-            beforePublishIndex: () => throw new IOException("simulated interruption")));
+        Assert.Throws<IOException>(() => PerformanceTraceArchive.Archive(path, 1024 * 1024, beforePublishIndex: () => throw new IOException("simulated interruption"), cancellationToken: TestContext.Current.CancellationToken));
         Assert.Equal(original, File.ReadAllText(path));
         Assert.True(File.Exists(path + ".gz"));
         Assert.False(File.Exists(path + ".gz.index.json"));
         Assert.Empty(Directory.GetFiles(_root, "*.pending"));
-        PerformanceTraceArchive.Archive(path, 1024 * 1024);
+        PerformanceTraceArchive.Archive(path, 1024 * 1024, cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(File.Exists(path));
         Assert.True(File.Exists(path + ".gz.index.json"));
     }
@@ -51,7 +50,7 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
     {
         var path = CreateTrace();
         File.AppendAllText(path, "{\"event\":");
-        PerformanceTraceArchive.Archive(path, 1024 * 1024);
+        PerformanceTraceArchive.Archive(path, 1024 * 1024, cancellationToken: TestContext.Current.CancellationToken);
         using var index = JsonDocument.Parse(File.ReadAllText(path + ".gz.index.json"));
         Assert.False(index.RootElement.GetProperty("complete").GetBoolean());
         Assert.Equal(1, index.RootElement.GetProperty("malformedRecords").GetInt64());
@@ -63,7 +62,7 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
         Directory.CreateDirectory(_root);
         var path = Path.Combine(_root, "performance-my-notes.ndjson");
         File.WriteAllText(path, "preserve");
-        PerformanceTraceArchive.Archive(path, 1024 * 1024);
+        PerformanceTraceArchive.Archive(path, 1024 * 1024, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("preserve", File.ReadAllText(path));
         Assert.Single(Directory.GetFiles(_root));
     }
@@ -76,10 +75,10 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
         for (var index = 0; index < 100; index++) telemetry.RecordDiagnostic("active.writer");
         store.Flush();
         var path = Assert.Single(Directory.GetFiles(Path.Combine(_root, "App_Data/logs/performance"), "*.ndjson"));
-        Assert.False(PerformanceTraceArchive.Archive(path, 1024 * 1024));
+        Assert.False(PerformanceTraceArchive.Archive(path, 1024 * 1024, cancellationToken: TestContext.Current.CancellationToken));
         Assert.True(File.Exists(path));
         store.Dispose();
-        PerformanceTraceArchive.Archive(path, 1024 * 1024);
+        PerformanceTraceArchive.Archive(path, 1024 * 1024, cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(File.Exists(path));
         Assert.True(File.Exists(path + ".gz"));
     }
@@ -100,7 +99,7 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
             Assert.False(File.Exists(large));
             Assert.True(File.Exists(large + ".gz"));
         }
-        finally { worker.RequestStop(); await worker.Completion.WaitAsync(TimeSpan.FromSeconds(3)); }
+        finally { worker.RequestStop(); await worker.Completion.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken); }
     }
 
     [Theory]
@@ -142,20 +141,20 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
         }, _root, beforeArchive: token => { entered.Set(); token.WaitHandle.WaitOne(); token.ThrowIfCancellationRequested(); });
         var telemetry = new PremiereTelemetry(store);
         telemetry.RecordDiagnostic("starts.archive.worker");
-        Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
         await Task.Run(() =>
         {
             for (var index = 0; index < 1000; index++) telemetry.RecordDiagnostic("during.slow.archive");
             store.Flush();
-        }).WaitAsync(TimeSpan.FromSeconds(3));
+        }, TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.Equal(0, store.Health.DroppedEvents);
         Assert.Equal(0, store.Health.WriterFailures);
         Assert.Equal(0, store.Health.FlushTimeouts);
         Assert.True(store.Health.ArchiveActive);
         Assert.InRange(store.Health.ArchivePending, 0, 1);
         Assert.False(store.Health.WriterStalled);
-        await store.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
-        await store.Completion.WaitAsync(TimeSpan.FromSeconds(3));
+        await store.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await store.Completion.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.False(store.Health.ArchiveWorkerRunning);
         Assert.False(store.Health.WriterRunning);
         Assert.Equal(0, store.Health.ArchiveFailures);
@@ -198,13 +197,13 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
         telemetry.RecordDiagnostic("starts.concurrent.archive");
         try
         {
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
             for (var index = 0; index < 200; index++) telemetry.RecordDiagnostic("retention.while.archiving");
             store.Flush();
             Assert.True(File.Exists(raw));
             release.Set();
             var timeout = Stopwatch.StartNew();
-            while (store.Health.ArchiveActive && timeout.Elapsed < TimeSpan.FromSeconds(3)) await Task.Delay(10);
+            while (store.Health.ArchiveActive && timeout.Elapsed < TimeSpan.FromSeconds(3)) await Task.Delay(10, TestContext.Current.CancellationToken);
             Assert.False(store.Health.ArchiveActive);
             for (var index = 0; index < 200; index++) telemetry.RecordDiagnostic("retention.after.publication");
             store.Flush();
@@ -215,7 +214,7 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
             Assert.Equal(0, store.Health.WriterFailures);
         }
         finally { release.Set(); }
-        await store.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+        await store.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.Empty(Directory.GetFiles(_root, "*.pending"));
         Assert.True(Directory.GetFiles(_root, "performance-*").Sum(path => new FileInfo(path).Length) <= 3 * 8192);
     }
@@ -250,9 +249,8 @@ public sealed class PerformanceTraceArchiveTests : IDisposable
         try
         {
             telemetry.RecordDiagnostic("blocked.storage");
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
-            await Task.Run(() => { for (var index = 0; index < 4096; index++) telemetry.RecordDiagnostic("bounded.snapshot"); })
-                .WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
+            await Task.Run(() => { for (var index = 0; index < 4096; index++) telemetry.RecordDiagnostic("bounded.snapshot"); }, TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             Assert.InRange(store.Health.QueuedBytes, 1, 1024 * 1024);
             Assert.InRange(store.Health.QueuedEvents, 1, 1024);
             Assert.True(store.Health.DroppedEvents > 0);

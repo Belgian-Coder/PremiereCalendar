@@ -18,10 +18,10 @@ public sealed partial class PremiereServiceTests
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ItemEnrichmentCacheCoordinator>.Instance, timeProvider: clock);
         var cache = new FakeCalendarCache();
         await CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"), calendarCache: cache,
-            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default, filters: SourceListFilters());
+            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: SourceListFilters());
         var tmdb = new FakeTmdbClient();
         var service = CreateService(tmdb, calendarCache: cache, itemEnrichmentCache: coordinator);
-        await using var stream = service.StreamPremieresAsync(date, date, filters: SourceListFilters()).GetAsyncEnumerator();
+        await using var stream = service.StreamPremieresAsync(date, date, filters: SourceListFilters(), cancellationToken: TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await stream.MoveNextAsync());
         Assert.True(stream.Current.IsCalendarReady);
         store.BeforeCurrentRead = () =>
@@ -56,7 +56,7 @@ public sealed partial class PremiereServiceTests
         filters.ScoreSource = ScoreSource.RottenTomatoes;
         filters.IncludeUnknownScores = true;
         await using var stream = service.StreamPremieresAsync(date, date, filters: filters,
-            cancellationToken: budget.Token).GetAsyncEnumerator();
+            cancellationToken: budget.Token).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await stream.MoveNextAsync());
         Assert.True(stream.Current.IsCalendarReady);
         Assert.True(stream.Current.IsEnriching);
@@ -107,7 +107,7 @@ public sealed partial class PremiereServiceTests
         filters.ScoreSource = ScoreSource.RottenTomatoes;
         filters.MinScore = 8;
         filters.IncludeUnknownScores = false;
-        await using var stream = service.StreamPremieresAsync(date, date, filters: filters).GetAsyncEnumerator();
+        await using var stream = service.StreamPremieresAsync(date, date, filters: filters, cancellationToken: TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await stream.MoveNextAsync());
         Assert.Equal(new[] { 3, 4, 5 }, stream.Current.Items.Select(item => item.TmdbId));
         Assert.True(await stream.MoveNextAsync());

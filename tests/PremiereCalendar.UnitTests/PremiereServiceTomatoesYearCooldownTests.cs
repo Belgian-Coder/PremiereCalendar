@@ -19,7 +19,7 @@ public sealed partial class PremiereServiceTests
         var filters = new CalendarFilters { ShowSeries = false };
         await CreateService(ItemCacheMovie(firstDate), omdb: ItemCacheOmdb("7.1"), itemEnrichmentCache: coordinator,
             rottenTomatoes: new YearCooldownTomatoesClient { Result = new(11, 12) })
-            .GetPremieresAsync(firstDate, firstDate, default, filters: filters);
+            .GetPremieresAsync(firstDate, firstDate, TestContext.Current.CancellationToken, filters: filters);
         clock.Advance(TimeSpan.FromHours(2));
         var pair = Assert.Single(store.Records);
         var seeded = JsonSerializer.Deserialize<ItemEnrichmentRatings>(pair.Value.RatingsJson!)!;
@@ -31,21 +31,21 @@ public sealed partial class PremiereServiceTests
         var omdb = new FakeOmdbClient { ThrowOnGet = true };
         var tomatoes = new HeldYearTomatoesClient();
         var first = CreateService(firstTmdb, omdb: omdb, rottenTomatoes: tomatoes, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(firstDate, firstDate, default, filters: filters);
+            .GetPremieresAsync(firstDate, firstDate, TestContext.Current.CancellationToken, filters: filters);
         Task<IReadOnlyList<PremiereItem>>? second = null;
         try
         {
-            await tomatoes.FirstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await tomatoes.FirstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             second = CreateService(secondTmdb, omdb: omdb, rottenTomatoes: tomatoes, itemEnrichmentCache: coordinator)
-                .GetPremieresAsync(secondDate, secondDate, default, filters: filters);
-            await tomatoes.SecondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                .GetPremieresAsync(secondDate, secondDate, TestContext.Current.CancellationToken, filters: filters);
+            await tomatoes.SecondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.False(first.IsCompleted);
             Assert.False(second.IsCompleted);
             Assert.Equal([2025, 2026], tomatoes.Years.Order());
             tomatoes.ReleaseFirst.SetResult();
-            var firstRow = Assert.Single(await first.WaitAsync(TimeSpan.FromSeconds(5)));
+            var firstRow = Assert.Single(await first.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
             tomatoes.ReleaseSecond.SetResult();
-            var secondRow = Assert.Single(await second.WaitAsync(TimeSpan.FromSeconds(5)));
+            var secondRow = Assert.Single(await second.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
 
             Assert.Equal(firstDate, firstRow.PremiereDate);
             Assert.Equal(83, firstRow.RottenTomatoesScore);
@@ -67,8 +67,8 @@ public sealed partial class PremiereServiceTests
         {
             tomatoes.ReleaseFirst.TrySetResult();
             tomatoes.ReleaseSecond.TrySetResult();
-            if (second is null) await first.WaitAsync(TimeSpan.FromSeconds(10));
-            else await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10));
+            if (second is null) await first.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            else await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         }
     }
 
@@ -86,7 +86,7 @@ public sealed partial class PremiereServiceTests
         var initialOmdb = ItemCacheOmdb("7.1");
         initialOmdb.ItemsByImdbId["tt0000901"] = initialOmdb.ItemsByImdbId["tt0000901"] with { Metascore = "74" };
         await CreateService(ItemCacheMovie(originalDate), omdb: initialOmdb, rottenTomatoes: tomatoes, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(originalDate, originalDate, default, filters: filters);
+            .GetPremieresAsync(originalDate, originalDate, TestContext.Current.CancellationToken, filters: filters);
         var originalRecord = Assert.Single(store.Records.Values);
         var originalRatings = JsonSerializer.Deserialize<ItemEnrichmentRatings>(originalRecord.RatingsJson!)!;
 
@@ -96,7 +96,7 @@ public sealed partial class PremiereServiceTests
         currentOmdb.ItemsByImdbId["tt0000901"] = currentOmdb.ItemsByImdbId["tt0000901"] with { Metascore = "74" };
         var retained = Assert.Single(await CreateService(ItemCacheMovie(originalDate), omdb: currentOmdb,
             rottenTomatoes: tomatoes, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(originalDate, originalDate, default, filters: filters));
+            .GetPremieresAsync(originalDate, originalDate, TestContext.Current.CancellationToken, filters: filters));
         var failedRecord = Assert.Single(store.Records.Values);
         var failedRatings = JsonSerializer.Deserialize<ItemEnrichmentRatings>(failedRecord.RatingsJson!)!;
         Assert.Equal(83, retained.RottenTomatoesScore);
@@ -108,8 +108,8 @@ public sealed partial class PremiereServiceTests
         // Block the other rating gates too, so the incoming year must participate
         // in the coordinator's decision to start a refresh, not only the provider call.
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
-        var session = await coordinator.CreateSessionAsync(default);
-        await session.PrepareAsync([identity], null, default);
+        var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         var deadline = clock.GetUtcNow().AddHours(3);
         session.RecordComponentOutcome(identity, "omdb", false, deadline);
         session.RecordComponentOutcome(identity, "imdb_dataset", false, deadline);
@@ -117,7 +117,7 @@ public sealed partial class PremiereServiceTests
         clock.Advance(TimeSpan.FromMinutes(1));
         var sameYear = Assert.Single(await CreateService(ItemCacheMovie(originalDate), omdb: currentOmdb,
             rottenTomatoes: tomatoes, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(originalDate, originalDate, default, filters: filters));
+            .GetPremieresAsync(originalDate, originalDate, TestContext.Current.CancellationToken, filters: filters));
         Assert.Equal(83, sameYear.RottenTomatoesScore);
         Assert.Equal([2025, 2025], tomatoes.Years);
 
@@ -125,7 +125,7 @@ public sealed partial class PremiereServiceTests
         tomatoes.Result = new(94, 96);
         var corrected = Assert.Single(await CreateService(ItemCacheMovie(correctedDate), omdb: currentOmdb,
             rottenTomatoes: tomatoes, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(correctedDate, correctedDate, default, filters: filters));
+            .GetPremieresAsync(correctedDate, correctedDate, TestContext.Current.CancellationToken, filters: filters));
 
         Assert.Equal([2025, 2025, 2026], tomatoes.Years);
         Assert.Equal(94, corrected.RottenTomatoesScore);
@@ -143,8 +143,8 @@ public sealed partial class PremiereServiceTests
         Assert.Equal(clock.GetUtcNow(), recoveredRatings.TomatoesFetchedUtc);
         Assert.Equal(2026, recoveredRatings.Year);
 
-        var recoveredSession = await coordinator.CreateSessionAsync(default);
-        await recoveredSession.PrepareAsync([identity], null, default);
+        var recoveredSession = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await recoveredSession.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         Assert.True(recoveredSession.ComponentRetryAllowed(identity, "rottentomatoes"));
         Assert.False(recoveredSession.ComponentRetryAllowed(identity, "rottentomatoes",
             ItemEnrichmentCacheCoordinator.ItemEnrichmentSession.ComponentIdentity("rottentomatoes",

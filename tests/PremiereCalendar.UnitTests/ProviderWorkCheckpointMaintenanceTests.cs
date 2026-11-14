@@ -24,7 +24,7 @@ public sealed class ProviderWorkCheckpointMaintenanceTests : IDisposable
         var before = await SnapshotAsync("ProviderWorkJobs");
         var leasesBefore = await SnapshotAsync("ProviderWorkLeases");
 
-        var result = await Maintenance().PrepareLegacyCheckpointsAsync();
+        var result = await Maintenance().PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken);
 
         Assert.True(result.Success);
         Assert.Equal(2, result.ConvertedCheckpoints);
@@ -34,7 +34,7 @@ public sealed class ProviderWorkCheckpointMaintenanceTests : IDisposable
         before[1]["CheckpointJson"] = legacy;
         Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await SnapshotAsync("ProviderWorkJobs")));
         Assert.Equal(JsonSerializer.Serialize(leasesBefore), JsonSerializer.Serialize(await SnapshotAsync("ProviderWorkLeases")));
-        Assert.Equal(0, (await Maintenance().PrepareLegacyCheckpointsAsync()).ConvertedCheckpoints);
+        Assert.Equal(0, (await Maintenance().PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken)).ConvertedCheckpoints);
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public sealed class ProviderWorkCheckpointMaintenanceTests : IDisposable
         await SeedLeaseAsync("active", _now.AddMinutes(5));
         var before = await SnapshotAsync("ProviderWorkJobs");
         var leases = await SnapshotAsync("ProviderWorkLeases");
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Maintenance().PrepareLegacyCheckpointsAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Maintenance().PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken));
         Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await SnapshotAsync("ProviderWorkJobs")));
         Assert.Equal(JsonSerializer.Serialize(leases), JsonSerializer.Serialize(await SnapshotAsync("ProviderWorkLeases")));
     }
@@ -58,7 +58,7 @@ public sealed class ProviderWorkCheckpointMaintenanceTests : IDisposable
         await SeedAsync("001-good", Compress(LegacyJson()));
         await SeedAsync("999-bad", malformed);
         var before = await SnapshotAsync("ProviderWorkJobs");
-        await Assert.ThrowsAnyAsync<Exception>(() => Maintenance().PrepareLegacyCheckpointsAsync());
+        await Assert.ThrowsAnyAsync<Exception>(() => Maintenance().PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken));
         Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await SnapshotAsync("ProviderWorkJobs")));
     }
 
@@ -71,7 +71,7 @@ public sealed class ProviderWorkCheckpointMaintenanceTests : IDisposable
         await SeedAsync("3", LegacyJson().Replace("\"Version\":3", "\"Version\":2", StringComparison.Ordinal));
         await SeedAsync("4", LegacyJson());
         var before = await SnapshotAsync("ProviderWorkJobs");
-        var result = await Maintenance().PrepareLegacyCheckpointsAsync();
+        var result = await Maintenance().PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken);
         Assert.Equal(new(true, 0, 0, 0), result);
         Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await SnapshotAsync("ProviderWorkJobs")));
     }

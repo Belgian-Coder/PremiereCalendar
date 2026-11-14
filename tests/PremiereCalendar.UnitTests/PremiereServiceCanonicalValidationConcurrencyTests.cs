@@ -80,7 +80,7 @@ public sealed partial class PremiereServiceTests
         using var firstCaller = new CancellationTokenSource();
 
         var first = InvokeCanonicalValidation(service, firstCaller.Token);
-        await handler.SeasonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await handler.SeasonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var second = InvokeCanonicalValidation(service, CancellationToken.None);
         firstCaller.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
@@ -156,7 +156,7 @@ public sealed partial class PremiereServiceTests
         var service = CanonicalHttpService(http, memory, coordinator);
         using var scope = CanonicalSessionScope(service, session);
         var validation = InvokeCanonicalValidation(service, CancellationToken.None);
-        await handler.SeasonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await handler.SeasonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         clock.Advance(TimeSpan.FromMinutes(1));
         await store.InvalidateTmdbAsync(PremiereMediaType.Series, [901], clock.GetUtcNow(), CancellationToken.None);
         await session.ReconcileAsync([], includeConsumed: true, CancellationToken.None);
@@ -182,7 +182,7 @@ public sealed partial class PremiereServiceTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var service = CanonicalHttpService(http, memory, coordinator, cache);
         var loading = CollectAsync();
-        await handler.SeasonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await handler.SeasonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         clock.Advance(TimeSpan.FromMinutes(1));
         Assert.Equal(1, await store.InvalidateTmdbAsync(PremiereMediaType.Series, [901], clock.GetUtcNow(), CancellationToken.None));
         handler.ReleaseSeason.TrySetResult();

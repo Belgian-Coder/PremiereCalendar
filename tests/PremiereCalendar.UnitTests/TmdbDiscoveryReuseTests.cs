@@ -31,20 +31,20 @@ public sealed class TmdbDiscoveryReuseTests
         });
         var client = Client(handler);
         using var firstCancellation = new CancellationTokenSource();
-        await using var first = client.StreamDiscoverMoviesAsync(Start, End, new(), firstCancellation.Token).GetAsyncEnumerator();
-        await using var second = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator();
+        await using var first = client.StreamDiscoverMoviesAsync(Start, End, new(), firstCancellation.Token).GetAsyncEnumerator(TestContext.Current.CancellationToken);
+        await using var second = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator(TestContext.Current.CancellationToken);
 
         Assert.True(await first.MoveNextAsync());
         Assert.True(await second.MoveNextAsync());
         Assert.Equal(1, Assert.Single(second.Current.Results).Id);
         var firstNext = first.MoveNextAsync().AsTask();
         var secondNext = second.MoveNextAsync().AsTask();
-        await secondPageStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await secondPageStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         await firstCancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstNext);
         Assert.False(secondNext.IsCompleted);
         releaseSecondPage.SetResult();
-        Assert.True(await secondNext.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(await secondNext.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
         Assert.Equal(2, Assert.Single(second.Current.Results).Id);
         Assert.False(await second.MoveNextAsync());
 
@@ -71,10 +71,10 @@ public sealed class TmdbDiscoveryReuseTests
         });
         var client = Client(handler);
         var normal = client.DiscoverMoviesAsync(Start, End, new(), CancellationToken.None);
-        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         var refreshed = await client.DiscoverMoviesAsync(Start, End, new(), CancellationToken.None, forceRefresh: true)
-            .WaitAsync(TimeSpan.FromSeconds(10));
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.Equal(2, Assert.Single(refreshed).Id);
         releaseNormal.SetResult();
         Assert.Equal(1, Assert.Single(await normal).Id);
@@ -99,9 +99,9 @@ public sealed class TmdbDiscoveryReuseTests
         });
         var client = Client(handler);
         var refresh = client.DiscoverMoviesAsync(Start, End, new(), CancellationToken.None, forceRefresh: true);
-        await refreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await refreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         var normal = client.DiscoverMoviesAsync(Start, End, new(), CancellationToken.None);
-        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         releaseRefresh.SetResult();
         Assert.Equal(1, Assert.Single(await refresh).Id);
         releaseNormal.SetResult();
@@ -179,8 +179,8 @@ public sealed class TmdbDiscoveryReuseTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var first = Client(handler, memory);
         var second = Client(handler, memory);
-        await using var firstStream = first.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator();
-        await using var secondStream = second.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator();
+        await using var firstStream = first.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator(TestContext.Current.CancellationToken);
+        await using var secondStream = second.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator(TestContext.Current.CancellationToken);
 
         Assert.True(await firstStream.MoveNextAsync());
         Assert.True(await secondStream.MoveNextAsync());
@@ -221,7 +221,7 @@ public sealed class TmdbDiscoveryReuseTests
         Task<IReadOnlyList<TmdbMovieDiscoverItem>> maintenance;
         using (ProviderExecutionContext.Push(() => producerPriority))
             maintenance = maintenanceClient.DiscoverMoviesAsync(Start, End, new(), CancellationToken.None);
-        await admission.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await admission.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderWorkPriority.Maintenance, admission.Priority!());
 
         using var cancellation = new CancellationTokenSource();
@@ -237,7 +237,7 @@ public sealed class TmdbDiscoveryReuseTests
         Assert.Equal(ProviderWorkPriority.ActiveWeek, admission.Priority());
         Assert.False(maintenance.IsCompleted);
         admission.Release.SetResult();
-        Assert.Equal(42, Assert.Single(await maintenance.WaitAsync(TimeSpan.FromSeconds(10))).Id);
+        Assert.Equal(42, Assert.Single(await maintenance.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Id);
         Assert.Single(handler.Requests);
     }
 
@@ -255,21 +255,21 @@ public sealed class TmdbDiscoveryReuseTests
             return Task.FromResult(Json($$"""{"page":{{page}},"total_pages":2,"results":[{"id":{{generation * 100 + int.Parse(page)}}}]}"""));
         });
         var client = Client(handler);
-        await using var older = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator();
-        await using var failed = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator();
+        await using var older = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator(TestContext.Current.CancellationToken);
+        await using var failed = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await older.MoveNextAsync());
         Assert.True(await failed.MoveNextAsync());
         await Assert.ThrowsAsync<ExternalApiException>(() => failed.MoveNextAsync().AsTask());
         Assert.Equal(1, firstPageCalls);
 
-        await using var replacement = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator();
+        await using var replacement = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await replacement.MoveNextAsync());
         Assert.Equal(201, Assert.Single(replacement.Current.Results).Id);
         Assert.Equal(2, firstPageCalls);
         await older.DisposeAsync();
 
         // Releasing the final old subscriber must leave the replacement registered.
-        await using var joinedReplacement = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator();
+        await using var joinedReplacement = client.StreamDiscoverMoviesAsync(Start, End, new(), CancellationToken.None).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await joinedReplacement.MoveNextAsync());
         Assert.Equal(201, Assert.Single(joinedReplacement.Current.Results).Id);
         Assert.Equal(2, firstPageCalls);

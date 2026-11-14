@@ -529,7 +529,7 @@ public sealed partial class PremiereServiceTests
             forcedEntered.SetResult();
             return Task.FromResult(new ItemEnrichmentRefresh(previous.Metadata, previous.Ratings));
         }, CancellationToken.None);
-        try { await forcedEntered.Task.WaitAsync(TimeSpan.FromSeconds(2)); }
+        try { await forcedEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken); }
         finally { release.TrySetResult(); }
         await Task.WhenAll(normalTask, forcedTask);
     }

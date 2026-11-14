@@ -43,14 +43,14 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         using var memory = Memory();
         var client = new OmdbClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") }, memory,
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "private-key" }));
-        var good = await client.GetByImdbIdWithStatusAsync("tt42", default);
-        var failed = await client.GetByImdbIdWithStatusAsync("tt42", default, true);
+        var good = await client.GetByImdbIdWithStatusAsync("tt42", TestContext.Current.CancellationToken);
+        var failed = await client.GetByImdbIdWithStatusAsync("tt42", TestContext.Current.CancellationToken, true);
         Assert.False(failed.Successful);
         Assert.Same(good.Value, failed.Value);
-        var cached = await client.GetByImdbIdWithStatusAsync("tt42", default);
+        var cached = await client.GetByImdbIdWithStatusAsync("tt42", TestContext.Current.CancellationToken);
         Assert.True(cached.Successful);
         Assert.Same(good.Value, cached.Value);
-        var retried = await client.GetByImdbIdWithStatusAsync("tt42", default, true);
+        var retried = await client.GetByImdbIdWithStatusAsync("tt42", TestContext.Current.CancellationToken, true);
         Assert.False(retried.Successful);
         Assert.Equal("invalid_response", retried.Failure?.Reason);
         Assert.Same(good.Value, retried.Value);
@@ -68,17 +68,17 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
             ? invalid : "{\"Response\":\"True\",\"imdbRating\":\"7.3\"}"));
         var client = new OmdbClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") }, memory,
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "private-key" }), cacheStore: store, timeProvider: _clock);
-        var bad = await client.GetByImdbIdWithStatusAsync("ttbad", default);
+        var bad = await client.GetByImdbIdWithStatusAsync("ttbad", TestContext.Current.CancellationToken);
         Assert.False(bad.Successful);
         Assert.Equal(reason, bad.Failure?.Reason);
-        Assert.Null((await store.GetProviderStateAsync(default)).RateLimitedUntilUtc);
-        var good = await client.GetByImdbIdWithStatusAsync("ttgood", default);
+        Assert.Null((await store.GetProviderStateAsync(TestContext.Current.CancellationToken)).RateLimitedUntilUtc);
+        var good = await client.GetByImdbIdWithStatusAsync("ttgood", TestContext.Current.CancellationToken);
         Assert.True(good.Successful);
         Assert.Equal("7.3", good.Value?.ImdbRating);
-        var deferred = await client.GetByImdbIdWithStatusAsync("ttbad", default);
+        var deferred = await client.GetByImdbIdWithStatusAsync("ttbad", TestContext.Current.CancellationToken);
         Assert.False(deferred.Successful);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
-        Assert.Null(await store.GetAsync("ttbad", default));
+        Assert.Null(await store.GetAsync("ttbad", TestContext.Current.CancellationToken));
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -99,17 +99,17 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         var client = new OmdbClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") }, memory,
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "private-key" }), cacheStore: store, timeProvider: _clock);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
-        Assert.False((await client.GetByImdbIdWithStatusAsync("ttsoft", default)).Successful);
-        Assert.Equal("local_backoff", (await client.GetByImdbIdWithStatusAsync("ttsoft", default)).Failure?.Reason);
-        var recovered = await client.GetByImdbIdWithStatusAsync("ttsoft", default, true);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("ttsoft", TestContext.Current.CancellationToken)).Successful);
+        Assert.Equal("local_backoff", (await client.GetByImdbIdWithStatusAsync("ttsoft", TestContext.Current.CancellationToken)).Failure?.Reason);
+        var recovered = await client.GetByImdbIdWithStatusAsync("ttsoft", TestContext.Current.CancellationToken, true);
         Assert.True(recovered.Successful);
         Assert.Equal("7.3", recovered.Value?.ImdbRating);
         Assert.Equal(2, calls);
-        var denied = await client.GetByImdbIdWithStatusAsync("ttquota", default, true);
+        var denied = await client.GetByImdbIdWithStatusAsync("ttquota", TestContext.Current.CancellationToken, true);
         Assert.False(denied.Successful);
         Assert.Equal(reason, denied.Failure?.Reason);
-        Assert.NotNull((await store.GetProviderStateAsync(default)).RateLimitedUntilUtc);
-        var deferred = await client.GetByImdbIdWithStatusAsync("ttdifferent", default, true);
+        Assert.NotNull((await store.GetProviderStateAsync(TestContext.Current.CancellationToken)).RateLimitedUntilUtc);
+        var deferred = await client.GetByImdbIdWithStatusAsync("ttdifferent", TestContext.Current.CancellationToken, true);
         Assert.False(deferred.Successful);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
         Assert.Equal(3, calls);
@@ -124,15 +124,15 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         var handler = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath.EndsWith("/42", StringComparison.Ordinal)
             ? StubHttpMessageHandler.Json(invalid) : Art("other-title"));
         var client = Fanart(handler, memory);
-        var bad = await client.GetMovieArtworkWithStatusAsync(42, default);
+        var bad = await client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         Assert.False(bad.Successful);
-        var good = await client.GetMovieArtworkWithStatusAsync(43, default);
+        var good = await client.GetMovieArtworkWithStatusAsync(43, TestContext.Current.CancellationToken);
         Assert.True(good.Successful);
         Assert.Equal("https://art.test/other-title.jpg", Poster(good));
-        var deferred = await client.GetMovieArtworkWithStatusAsync(42, default, true);
+        var deferred = await client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken, true);
         Assert.False(deferred.Successful);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
-        Assert.Single(await Store().GetByProviderAsync("responsecache-fanart", 10, default));
+        Assert.Single(await Store().GetByProviderAsync("responsecache-fanart", 10, TestContext.Current.CancellationToken));
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -144,12 +144,12 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         using var memory = Memory();
         var store = new OmdbCacheStore(_database.Options, _clock);
         var invalid = new OmdbItem { Response = "True", Ratings = [null!] };
-        if (persisted) await store.SetAsync("tt42", invalid, _clock.UtcNow, default);
+        if (persisted) await store.SetAsync("tt42", invalid, _clock.UtcNow, TestContext.Current.CancellationToken);
         else memory.Set("omdb:imdb:tt42", invalid);
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{\"Response\":\"True\",\"imdbRating\":\"7.3\"}"));
         var client = new OmdbClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") }, memory,
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "private-key" }), cacheStore: store, timeProvider: _clock);
-        var result = await client.GetByImdbIdWithStatusAsync("tt42", default);
+        var result = await client.GetByImdbIdWithStatusAsync("tt42", TestContext.Current.CancellationToken);
         Assert.True(result.Successful);
         Assert.Equal("7.3", result.Value?.ImdbRating);
         Assert.Single(handler.Requests);
@@ -162,18 +162,18 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     {
         var handler = new StubHttpMessageHandler(_ => absent ? StubHttpMessageHandler.Json("{}") : Art("initial"));
         using var memory = Memory();
-        var initial = await Fanart(handler, memory).GetMovieArtworkWithStatusAsync(42, default);
+        var initial = await Fanart(handler, memory).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         Assert.True(initial.Successful);
         Assert.Equal(absent, initial.Value is null);
         var savedAt = _clock.UtcNow;
         _clock.UtcNow = savedAt.AddDays(6);
         using var restartedMemory = Memory();
         var restarted = Fanart(handler, restartedMemory);
-        Assert.Equal(Poster(initial), Poster(await restarted.GetMovieArtworkWithStatusAsync(42, default)));
+        Assert.Equal(Poster(initial), Poster(await restarted.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken)));
         Assert.Single(handler.Requests);
-        Assert.Equal(savedAt, Assert.Single(await Store().GetByProviderAsync("responsecache-fanart", 10, default)).LastCheckedUtc);
+        Assert.Equal(savedAt, Assert.Single(await Store().GetByProviderAsync("responsecache-fanart", 10, TestContext.Current.CancellationToken)).LastCheckedUtc);
         _clock.UtcNow = savedAt.AddDays(7);
-        await restarted.GetMovieArtworkWithStatusAsync(42, default);
+        await restarted.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -183,10 +183,10 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{}"));
         using var memory = Memory();
         var client = Fanart(handler, memory, version: "v3.2");
-        Assert.False((await client.GetMovieArtworkWithStatusAsync(42, default)).Successful);
-        var deferred = await client.GetMovieArtworkWithStatusAsync(42, default, true);
+        Assert.False((await client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken)).Successful);
+        var deferred = await client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken, true);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
-        Assert.Empty(await Store().GetByProviderAsync("responsecache-fanart", 10, default));
+        Assert.Empty(await Store().GetByProviderAsync("responsecache-fanart", 10, TestContext.Current.CancellationToken));
         Assert.Single(handler.Requests);
     }
 
@@ -202,18 +202,18 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         });
         using var memory = Memory();
         var client = Fanart(handler, memory);
-        var good = await client.GetMovieArtworkWithStatusAsync(42, default);
+        var good = await client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         mode = "failed";
-        var failed = await client.GetMovieArtworkWithStatusAsync(42, default, true);
+        var failed = await client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken, true);
         Assert.False(failed.Successful);
         Assert.Equal(Poster(good), Poster(failed));
         using var restartMemory = Memory();
-        Assert.Equal(Poster(good), Poster(await Fanart(handler, restartMemory).GetMovieArtworkWithStatusAsync(42, default)));
+        Assert.Equal(Poster(good), Poster(await Fanart(handler, restartMemory).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken)));
         // Failure backoff is local; a restarted client can perform the explicit absence refresh.
         mode = "absent";
-        Assert.Null((await Fanart(handler, restartMemory).GetMovieArtworkWithStatusAsync(42, default, true)).Value);
+        Assert.Null((await Fanart(handler, restartMemory).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken, true)).Value);
         using var finalMemory = Memory();
-        var final = await Fanart(handler, finalMemory).GetMovieArtworkWithStatusAsync(42, default);
+        var final = await Fanart(handler, finalMemory).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         Assert.True(final.Successful);
         Assert.Null(final.Value);
         Assert.Equal(3, handler.Requests.Count);
@@ -238,16 +238,16 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         });
         using var memory = Memory();
         var client = Fanart(handler, memory);
-        var first = client.GetMovieArtworkWithStatusAsync(42, default, forceFirst);
-        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var second = client.GetMovieArtworkWithStatusAsync(42, default, !forceFirst);
-        await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var first = client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken, forceFirst);
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var second = client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken, !forceFirst);
+        await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         if (forceFirst) { releaseFirst.TrySetResult(); await first; releaseSecond.TrySetResult(); }
         else { releaseSecond.TrySetResult(); await second; releaseFirst.TrySetResult(); }
         await Task.WhenAll(first, second);
-        Assert.Equal("https://art.test/forced.jpg", Poster(await client.GetMovieArtworkWithStatusAsync(42, default)));
+        Assert.Equal("https://art.test/forced.jpg", Poster(await client.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken)));
         using var restartedMemory = Memory();
-        Assert.Equal("https://art.test/forced.jpg", Poster(await Fanart(handler, restartedMemory).GetMovieArtworkWithStatusAsync(42, default)));
+        Assert.Equal("https://art.test/forced.jpg", Poster(await Fanart(handler, restartedMemory).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken)));
         Assert.Equal(2, calls);
     }
 
@@ -267,12 +267,12 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         using var memory = Memory();
         using var cancellation = new CancellationTokenSource();
         var canceled = Fanart(handler, memory).GetMovieArtworkWithStatusAsync(42, cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var survivor = Fanart(handler, memory).GetMovieArtworkWithStatusAsync(42, default);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var survivor = Fanart(handler, memory).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceled);
         release.TrySetResult();
-        Assert.True((await survivor.WaitAsync(TimeSpan.FromSeconds(5))).Successful);
+        Assert.True((await survivor.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).Successful);
         Assert.Equal(1, calls);
     }
 
@@ -281,10 +281,10 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
     {
         var handler = new StubHttpMessageHandler(_ => Art("account"));
         using var memory = Memory();
-        await Fanart(handler, memory, "first-secret").GetMovieArtworkWithStatusAsync(42, default);
-        await Fanart(handler, memory, "second-secret").GetMovieArtworkWithStatusAsync(42, default);
+        await Fanart(handler, memory, "first-secret").GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
+        await Fanart(handler, memory, "second-secret").GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         Assert.Equal(2, handler.Requests.Count);
-        var rows = await Store().GetByProviderAsync("responsecache-fanart", 10, default);
+        var rows = await Store().GetByProviderAsync("responsecache-fanart", 10, TestContext.Current.CancellationToken);
         Assert.Equal(2, rows.Count);
         Assert.All(rows, row =>
         {
@@ -310,17 +310,17 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
             return StubHttpMessageHandler.Json("[{\"source_id\":1,\"name\":\"Fixture\",\"type\":\"sub\"}]");
         });
         using var memory = Memory();
-        await Watchmode(handler, memory).GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], default);
+        await Watchmode(handler, memory).GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], TestContext.Current.CancellationToken);
         _clock.UtcNow = _clock.UtcNow.AddHours(13);
         using var restartedMemory = Memory();
         var restarted = Watchmode(handler, restartedMemory);
-        Assert.Single((await restarted.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], default)).Value);
+        Assert.Single((await restarted.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], TestContext.Current.CancellationToken)).Value);
         Assert.Equal(1, searches);
         Assert.Equal(2, sources);
         absence = true;
-        Assert.Empty((await restarted.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], default, true)).Value);
+        Assert.Empty((await restarted.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], TestContext.Current.CancellationToken, true)).Value);
         using var finalMemory = Memory();
-        Assert.Empty((await Watchmode(handler, finalMemory).GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], default)).Value);
+        Assert.Empty((await Watchmode(handler, finalMemory).GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], TestContext.Current.CancellationToken)).Value);
         Assert.Equal(2, searches);
         Assert.Equal(2, sources);
     }
@@ -364,13 +364,13 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         var client = Wikimedia(handler, memory);
         if (imageFirst)
         {
-            Assert.NotNull(await client.GetReusableImageUrlAsync("Q1", default));
-            Assert.Equal("m/fixture", await client.GetRottenTomatoesIdAsync("Q1", default));
+            Assert.NotNull(await client.GetReusableImageUrlAsync("Q1", TestContext.Current.CancellationToken));
+            Assert.Equal("m/fixture", await client.GetRottenTomatoesIdAsync("Q1", TestContext.Current.CancellationToken));
         }
         else
         {
-            Assert.Equal("m/fixture", await client.GetRottenTomatoesIdAsync("Q1", default));
-            Assert.NotNull(await client.GetReusableImageUrlAsync("Q1", default));
+            Assert.Equal("m/fixture", await client.GetRottenTomatoesIdAsync("Q1", TestContext.Current.CancellationToken));
+            Assert.NotNull(await client.GetReusableImageUrlAsync("Q1", TestContext.Current.CancellationToken));
         }
         Assert.Equal(2, handler.Requests.Count);
         Assert.Single(handler.Requests, request => request.Uri.Host == "www.wikidata.org");
@@ -393,11 +393,11 @@ public sealed class ProviderOptionalCacheIntegrationTests : IDisposable
         });
         using var memory = Memory();
         var client = Wikimedia(handler, memory);
-        var first = client.GetReusableImageUrlAsync("Q1", default);
-        await commonsStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var second = client.GetReusableImageUrlAsync("Q2", default);
+        var first = client.GetReusableImageUrlAsync("Q1", TestContext.Current.CancellationToken);
+        await commonsStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var second = client.GetReusableImageUrlAsync("Q2", TestContext.Current.CancellationToken);
         // Wait for the second entity to reach its shared Commons operation.
-        await client.GetRottenTomatoesIdAsync("Q2", default);
+        await client.GetRottenTomatoesIdAsync("Q2", TestContext.Current.CancellationToken);
         release.TrySetResult();
         Assert.All(await Task.WhenAll(first, second), value => Assert.Equal("https://art.test/commons.jpg", value));
         Assert.Equal(1, commonsCalls);

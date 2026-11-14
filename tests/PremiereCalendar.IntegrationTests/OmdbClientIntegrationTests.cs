@@ -86,7 +86,7 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         var client = CreateOmdbClient(handler, enabled: true);
 
         var first = client.GetByImdbIdAsync("tt0000100", CancellationToken.None);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var second = client.GetByImdbIdAsync("tt0000100", CancellationToken.None);
 
         release.SetResult();
@@ -250,23 +250,23 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         var clock = new OmdbClock(DateTimeOffset.UtcNow);
         var store = CreateCacheStore();
         var originalClock = clock.GetUtcNow().AddDays(-91);
-        await store.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, originalClock, default);
+        await store.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, originalClock, TestContext.Current.CancellationToken);
         var calls = 0;
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls == 1
             ? System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })
             : """{"Response":"True","imdbRating":"8.1"}"""));
         var client = CreateOmdbClient(handler, true, store, timeProvider: clock);
 
-        var failure = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var failure = await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.False(failure.Successful);
         Assert.Equal(reason, failure.Failure?.Reason);
         Assert.Equal(clock.GetUtcNow().AddHours(retryHours), failure.Failure?.RetryAtUtc);
         Assert.Equal("7.4", failure.Value?.ImdbRating);
-        Assert.Equal(originalClock, (await store.GetAsync("tt49639968", default))!.CachedAtUtc);
-        Assert.Null((await store.GetProviderStateAsync(default)).RateLimitedUntilUtc);
+        Assert.Equal(originalClock, (await store.GetAsync("tt49639968", TestContext.Current.CancellationToken))!.CachedAtUtc);
+        Assert.Null((await store.GetProviderStateAsync(TestContext.Current.CancellationToken)).RateLimitedUntilUtc);
 
         clock.Advance(TimeSpan.FromHours(retryHours) - TimeSpan.FromSeconds(1));
-        var deferred = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var deferred = await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.False(deferred.Successful);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
         Assert.Equal(failure.Failure?.RetryAtUtc, deferred.Failure?.RetryAtUtc);
@@ -274,11 +274,11 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         Assert.Single(handler.Requests);
 
         clock.Advance(TimeSpan.FromSeconds(1));
-        var recovered = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var recovered = await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.True(recovered.Successful);
         Assert.Equal("8.1", recovered.Value?.ImdbRating);
         Assert.Equal(2, handler.Requests.Count);
-        Assert.Equal(clock.GetUtcNow(), (await store.GetAsync("tt49639968", default))!.CachedAtUtc);
+        Assert.Equal(clock.GetUtcNow(), (await store.GetAsync("tt49639968", TestContext.Current.CancellationToken))!.CachedAtUtc);
     }
 
     [Theory]
@@ -292,20 +292,20 @@ public sealed class OmdbClientIntegrationTests : IDisposable
                 ? System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })
                 : """{"Response":"True","imdbRating":"7.9"}"""));
         var client = CreateOmdbClient(handler, true);
-        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
 
-        var other = await client.GetByImdbIdWithStatusAsync("tt31091563", default);
+        var other = await client.GetByImdbIdWithStatusAsync("tt31091563", TestContext.Current.CancellationToken);
         Assert.True(other.Successful);
         Assert.Equal("7.9", other.Value?.ImdbRating);
-        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
         Assert.Equal(2, handler.Requests.Count);
 
         recover = true;
-        var forced = await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true);
+        var forced = await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true);
         Assert.True(forced.Successful);
         Assert.Equal("7.9", forced.Value?.ImdbRating);
-        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
-        Assert.True((await client.GetByImdbIdWithStatusAsync("tt31091563", default)).Successful);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt31091563", TestContext.Current.CancellationToken)).Successful);
         Assert.Equal(3, handler.Requests.Count);
     }
 
@@ -317,29 +317,29 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         var clock = new OmdbClock(DateTimeOffset.UtcNow);
         var store = CreateCacheStore();
         var originalClock = clock.GetUtcNow().AddDays(-91);
-        await store.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, originalClock, default);
+        await store.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, originalClock, TestContext.Current.CancellationToken);
         var handler = new StubHttpMessageHandler(request => StubHttpMessageHandler.Json(
             QueryString.Parse(request.RequestUri!)["i"] == "tt49639968"
                 ? System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })
                 : """{"Response":"True","imdbRating":"8.1"}"""));
         var first = CreateOmdbClient(handler, true, store, timeProvider: clock, responseCache: CreateResponseCache(clock));
-        var failure = await first.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var failure = await first.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
 
         var restarted = CreateOmdbClient(handler, true, CreateCacheStore(), timeProvider: clock, responseCache: CreateResponseCache(clock));
-        var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.False(deferred.Successful);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
         Assert.True(deferred.Failure?.IsLocal);
         Assert.Equal(clock.GetUtcNow().AddHours(hours), deferred.Failure?.RetryAtUtc);
         Assert.Equal(failure.Failure?.RetryAtUtc, deferred.Failure?.RetryAtUtc);
         Assert.Equal("7.4", deferred.Value?.ImdbRating);
-        Assert.Equal(originalClock, (await store.GetAsync("tt49639968", default))!.CachedAtUtc);
+        Assert.Equal(originalClock, (await store.GetAsync("tt49639968", TestContext.Current.CancellationToken))!.CachedAtUtc);
         Assert.Single(handler.Requests);
-        Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt31091563", default)).Successful);
+        Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt31091563", TestContext.Current.CancellationToken)).Successful);
         Assert.Equal(2, handler.Requests.Count);
 
         clock.Advance(TimeSpan.FromHours(hours));
-        Assert.False((await restarted.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.False((await restarted.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
         Assert.Equal(3, handler.Requests.Count);
     }
 
@@ -354,11 +354,11 @@ public sealed class OmdbClientIntegrationTests : IDisposable
             ? System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })
             : """{"Response":"True","imdbRating":"8.1"}"""));
         var client = CreateOmdbClient(handler, true, timeProvider: clock, responseCache: CreateResponseCache(clock));
-        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
-        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true)).Successful);
 
         var restarted = CreateOmdbClient(handler, true, timeProvider: clock, responseCache: CreateResponseCache(clock));
-        Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
         Assert.Equal(3, handler.Requests.Count);
     }
 
@@ -384,14 +384,14 @@ public sealed class OmdbClientIntegrationTests : IDisposable
                 return StubHttpMessageHandler.Json("""{"Response":"True","imdbRating":"8.1"}""");
             });
             var client = CreateOmdbClient(handler, true, timeProvider: clock, responseCache: CreateResponseCache(clock));
-            var old = client.GetByImdbIdWithStatusAsync("tt49639968", default);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+            var old = client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true)).Successful);
             release.SetResult();
             Assert.False((await old).Successful);
 
             var restarted = CreateOmdbClient(handler, true, timeProvider: clock, responseCache: CreateResponseCache(clock));
-            var result = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+            var result = await restarted.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
             Assert.True(result.Successful);
             Assert.Equal("8.1", result.Value?.ImdbRating);
             Assert.Equal(3, calls);
@@ -407,7 +407,7 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         var clock = new OmdbClock(DateTimeOffset.UtcNow);
         var bad = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"Response":"False","Error":"Incorrect IMDb ID."}"""));
         var first = CreateOmdbClient(bad, true, timeProvider: clock, responseCache: CreateResponseCache(clock));
-        Assert.False((await first.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.False((await first.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
 
         var good = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"Response":"True","imdbRating":"8.1"}"""));
         var restarted = new OmdbClient(new HttpClient(good)
@@ -416,11 +416,11 @@ public sealed class OmdbClientIntegrationTests : IDisposable
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions
                 { Enabled = true, ApiKey = changeCredential ? "replacement-key" : "test-key" }),
             timeProvider: clock, responseCache: CreateResponseCache(clock));
-        Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.True((await restarted.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
         Assert.Single(good.Requests);
 
         var stateStore = CreateOutcomeStore();
-        var rows = await stateStore.GetByProviderAsync("responsecache-omdb", 10, default);
+        var rows = await stateStore.GetByProviderAsync("responsecache-omdb", 10, TestContext.Current.CancellationToken);
         Assert.Equal(2, rows.Count);
         foreach (var row in rows)
         {
@@ -449,10 +449,10 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         var client = new OmdbClient(new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") }, memory,
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions { Enabled = true, ApiKey = "test-key", EmptyResponseCacheHours = 6 }),
             timeProvider: clock);
-        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
-        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true)).Successful);
         clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
-        var refreshed = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var refreshed = await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.True(refreshed.Successful);
         Assert.Equal("8.1", refreshed.Value?.ImdbRating);
         Assert.Equal(3, calls);
@@ -469,8 +469,8 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         var tiedClock = clock.GetUtcNow();
         var goodStore = CreateCacheStore();
         if (seedGood)
-            await goodStore.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, tiedClock.AddDays(-91), default);
-        var baseline = await goodStore.GetAsync("tt49639968", default);
+            await goodStore.SetAsync("tt49639968", new() { Response = "True", ImdbRating = "7.4" }, tiedClock.AddDays(-91), TestContext.Current.CancellationToken);
+        var baseline = await goodStore.GetAsync("tt49639968", TestContext.Current.CancellationToken);
         var outcomeStore = new FailingOmdbClearStore(CreateOutcomeStore());
         var calls = 0;
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(++calls switch
@@ -481,12 +481,12 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         }));
         var client = CreateOmdbClient(handler, true, goodStore, timeProvider: clock,
             responseCache: CreateResponseCache(clock, outcomeStore), emptyResponseCacheHours: 6);
-        var failed = await client.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var failed = await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.False(failed.Successful);
         Assert.Equal(tiedClock.AddHours(24), failed.Failure?.RetryAtUtc);
-        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true)).Successful);
         Assert.Equal(1, outcomeStore.FailedClears);
-        var newerGood = await goodStore.GetAsync("tt49639968", default);
+        var newerGood = await goodStore.GetAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.Equal(tiedClock, newerGood!.CachedAtUtc);
         Assert.NotNull(newerGood.SuccessObservationId);
         Assert.NotEqual(baseline?.SuccessObservationId, newerGood.SuccessObservationId);
@@ -494,7 +494,7 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
         var restarted = CreateOmdbClient(handler, true, CreateCacheStore(), timeProvider: clock,
             responseCache: CreateResponseCache(clock), emptyResponseCacheHours: 6);
-        var refreshed = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var refreshed = await restarted.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.True(refreshed.Successful);
         Assert.Equal("8.1", refreshed.Value?.ImdbRating);
         Assert.Equal(3, calls);
@@ -513,24 +513,24 @@ public sealed class OmdbClientIntegrationTests : IDisposable
             : """{"Response":"False","Error":"Incorrect IMDb ID."}"""));
         var client = CreateOmdbClient(handler, true, goodStore, timeProvider: clock,
             responseCache: CreateResponseCache(clock, outcomeStore), emptyResponseCacheHours: 6);
-        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
-        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+        Assert.False((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
+        Assert.True((await client.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true)).Successful);
         Assert.Equal(1, outcomeStore.FailedClears);
-        var good = await goodStore.GetAsync("tt49639968", default);
+        var good = await goodStore.GetAsync("tt49639968", TestContext.Current.CancellationToken);
 
         // New response-cache instance removes only the storage-I/O backoff;
         // all provider observations retain the exact same clock value.
         var later = CreateOmdbClient(handler, true, CreateCacheStore(), timeProvider: clock,
             responseCache: CreateResponseCache(clock), emptyResponseCacheHours: 6);
-        var failed = await later.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true);
+        var failed = await later.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true);
         Assert.False(failed.Successful);
         Assert.Equal(tiedClock.AddHours(24), failed.Failure?.RetryAtUtc);
-        Assert.Equal(good!.SuccessObservationId, (await goodStore.GetAsync("tt49639968", default))!.SuccessObservationId);
+        Assert.Equal(good!.SuccessObservationId, (await goodStore.GetAsync("tt49639968", TestContext.Current.CancellationToken))!.SuccessObservationId);
 
         clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
         var restarted = CreateOmdbClient(handler, true, CreateCacheStore(), timeProvider: clock,
             responseCache: CreateResponseCache(clock), emptyResponseCacheHours: 6);
-        var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.False(deferred.Successful);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
         Assert.Equal(tiedClock.AddHours(24), deferred.Failure?.RetryAtUtc);
@@ -548,7 +548,7 @@ public sealed class OmdbClientIntegrationTests : IDisposable
             """{"Response":"False","Error":"Incorrect IMDb ID."}"""));
         var first = CreateOmdbClient(failedHandler, true, goodStore, timeProvider: clock,
             responseCache: CreateResponseCache(clock), emptyResponseCacheHours: 6);
-        var failure = await first.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var failure = await first.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.False(failure.Successful);
 
         var goodHandler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"Response":"True"}"""));
@@ -558,16 +558,16 @@ public sealed class OmdbClientIntegrationTests : IDisposable
             Microsoft.Extensions.Options.Options.Create(new OmdbOptions
                 { Enabled = true, ApiKey = changeCredential ? "replacement-key" : "test-key", EmptyResponseCacheHours = 6 }),
             cacheStore: goodStore, timeProvider: clock, responseCache: CreateResponseCache(clock));
-        Assert.True((await other.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
-        Assert.NotNull((await goodStore.GetAsync("tt49639968", default))!.SuccessObservationId);
+        Assert.True((await other.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true)).Successful);
+        Assert.NotNull((await goodStore.GetAsync("tt49639968", TestContext.Current.CancellationToken))!.SuccessObservationId);
 
         clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
-        var liveDeferred = await first.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var liveDeferred = await first.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.False(liveDeferred.Successful);
         Assert.Equal(failure.Failure?.RetryAtUtc, liveDeferred.Failure?.RetryAtUtc);
         var restarted = CreateOmdbClient(failedHandler, true, CreateCacheStore(), timeProvider: clock,
             responseCache: CreateResponseCache(clock), emptyResponseCacheHours: 6);
-        var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var deferred = await restarted.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.False(deferred.Successful);
         Assert.Equal("local_backoff", deferred.Failure?.Reason);
         Assert.Equal(failure.Failure?.RetryAtUtc, deferred.Failure?.RetryAtUtc);
@@ -588,18 +588,18 @@ public sealed class OmdbClientIntegrationTests : IDisposable
             : """{"Response":"True","imdbRating":"8.1"}"""));
         var live = CreateOmdbClient(liveHandler, true, goodStore, timeProvider: clock,
             responseCache: CreateResponseCache(clock), emptyResponseCacheHours: 6);
-        Assert.False((await live.GetByImdbIdWithStatusAsync("tt49639968", default)).Successful);
+        Assert.False((await live.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken)).Successful);
 
         var clearStore = new FailingOmdbClearStore(CreateOutcomeStore());
         var goodHandler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("""{"Response":"True"}"""));
         var other = CreateOmdbClient(goodHandler, true, CreateCacheStore(), timeProvider: clock,
             responseCache: CreateResponseCache(clock, failClear ? clearStore : null), emptyResponseCacheHours: 6);
-        Assert.True((await other.GetByImdbIdWithStatusAsync("tt49639968", default, forceRefresh: true)).Successful);
+        Assert.True((await other.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken, forceRefresh: true)).Successful);
         Assert.Equal(failClear ? 1 : 0, clearStore.FailedClears);
 
         // Keep the original client and its independent memory cache alive.
         clock.Advance(TimeSpan.FromHours(6).Add(TimeSpan.FromSeconds(1)));
-        var refreshed = await live.GetByImdbIdWithStatusAsync("tt49639968", default);
+        var refreshed = await live.GetByImdbIdWithStatusAsync("tt49639968", TestContext.Current.CancellationToken);
         Assert.True(refreshed.Successful);
         Assert.Equal("8.1", refreshed.Value?.ImdbRating);
         Assert.Equal(2, calls);
@@ -626,18 +626,18 @@ public sealed class OmdbClientIntegrationTests : IDisposable
                 ? Fixture.Read("omdb/by-imdb-id-success.json")
                 : System.Text.Json.JsonSerializer.Serialize(new { Response = "False", Error = error })));
             var client = CreateOmdbClient(handler, true, store, telemetry);
-            var good = await client.GetByImdbIdWithStatusAsync("tt-private-id", default);
-            var saved = await store.GetAsync("tt-private-id", default);
+            var good = await client.GetByImdbIdWithStatusAsync("tt-private-id", TestContext.Current.CancellationToken);
+            var saved = await store.GetAsync("tt-private-id", TestContext.Current.CancellationToken);
 
-            var failed = await client.GetByImdbIdWithStatusAsync("tt-private-id", default, forceRefresh: true);
+            var failed = await client.GetByImdbIdWithStatusAsync("tt-private-id", TestContext.Current.CancellationToken, forceRefresh: true);
 
             Assert.False(failed.Successful);
             Assert.Equal(reason, failed.Failure?.Reason);
             Assert.NotNull(failed.Failure?.RetryAtUtc);
             Assert.Equal(good.Value!.ImdbRating, failed.Value!.ImdbRating);
-            Assert.Equal(saved!.CachedAtUtc, (await store.GetAsync("tt-private-id", default))!.CachedAtUtc);
-            Assert.Null((await store.GetProviderStateAsync(default)).RateLimitedUntilUtc);
-            Assert.True((await client.GetByImdbIdWithStatusAsync("tt-private-id", default)).Successful);
+            Assert.Equal(saved!.CachedAtUtc, (await store.GetAsync("tt-private-id", TestContext.Current.CancellationToken))!.CachedAtUtc);
+            Assert.Null((await store.GetProviderStateAsync(TestContext.Current.CancellationToken)).RateLimitedUntilUtc);
+            Assert.True((await client.GetByImdbIdWithStatusAsync("tt-private-id", TestContext.Current.CancellationToken)).Successful);
             Assert.Equal(2, handler.Requests.Count);
 
             telemetry.FlushDiagnostics();
@@ -725,14 +725,14 @@ public sealed class OmdbClientIntegrationTests : IDisposable
         var store = CreateCacheStore();
         var client = CreateOmdbClient(handler, true, store);
         using var refresh = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
-        var first = await client.GetByImdbIdWithStatusAsync("tt0000042", default);
+        var first = await client.GetByImdbIdWithStatusAsync("tt0000042", TestContext.Current.CancellationToken);
         Assert.True(first.Successful);
-        var original = await store.GetAsync("tt0000042", default);
+        var original = await store.GetAsync("tt0000042", TestContext.Current.CancellationToken);
         fail = true;
-        var result = await client.GetByImdbIdWithStatusAsync("tt0000042", default, forceRefresh: true);
+        var result = await client.GetByImdbIdWithStatusAsync("tt0000042", TestContext.Current.CancellationToken, forceRefresh: true);
         Assert.False(result.Successful);
         Assert.Equal("7.5", result.Value!.ImdbRating);
-        Assert.Equal(original!.CachedAtUtc, (await store.GetAsync("tt0000042", default))!.CachedAtUtc);
+        Assert.Equal(original!.CachedAtUtc, (await store.GetAsync("tt0000042", TestContext.Current.CancellationToken))!.CachedAtUtc);
     }
 
     private OmdbCacheStore CreateCacheStore() => new(Database.Options, TimeProvider.System);

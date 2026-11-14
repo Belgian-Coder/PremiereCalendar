@@ -42,7 +42,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
         });
         using var client = factory.CreateClient();
 
-        var html = await client.GetStringAsync("/");
+        var html = await client.GetStringAsync("/", TestContext.Current.CancellationToken);
 
         Assert.Contains("Premiere Calendar", html);
         Assert.Contains("Loading premieres", html);
@@ -51,7 +51,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
     [Fact]
     public async Task HealthEndpoint_ReturnsSuccess()
     {
-        var response = await _client.GetAsync("/health");
+        var response = await _client.GetAsync("/health", TestContext.Current.CancellationToken);
 
         response.EnsureSuccessStatusCode();
     }
@@ -59,8 +59,8 @@ public sealed class WebApplicationFactoryTests : IDisposable
     [Fact]
     public async Task ReadinessAndVersionEndpoints_ReturnOperationalEvidence()
     {
-        using var readiness = await _client.GetAsync("/health/ready");
-        var versionJson = await _client.GetStringAsync("/health/version");
+        using var readiness = await _client.GetAsync("/health/ready", TestContext.Current.CancellationToken);
+        var versionJson = await _client.GetStringAsync("/health/version", TestContext.Current.CancellationToken);
         Assert.True(readiness.IsSuccessStatusCode, versionJson);
         using var versionDocument = JsonDocument.Parse(versionJson);
 
@@ -90,7 +90,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
         var database = _databases[^1];
         using (var client = factory.CreateClient())
         {
-            (await client.GetAsync("/health/ready")).EnsureSuccessStatusCode();
+            (await client.GetAsync("/health/ready", TestContext.Current.CancellationToken)).EnsureSuccessStatusCode();
         }
         var built = DatabaseConnectionFactory.BuiltFor(database.AppOptions);
         Assert.True(built >= 1);
@@ -116,7 +116,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
         });
         using var client = factory.CreateClient();
 
-        var html = await client.GetStringAsync("/about");
+        var html = await client.GetStringAsync("/about", TestContext.Current.CancellationToken);
 
         Assert.Contains("Source status", html);
         Assert.Contains("TMDb", html);
@@ -138,7 +138,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
         using var request = new HttpRequestMessage(HttpMethod.Get, "/about");
         request.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue(encoding));
 
-        using var response = await _client.SendAsync(request);
+        using var response = await _client.SendAsync(request, TestContext.Current.CancellationToken);
 
         response.EnsureSuccessStatusCode();
         Assert.Contains(response.Content.Headers.ContentEncoding, value => value == encoding);
@@ -149,7 +149,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
     [Fact]
     public async Task CachedImageEndpoint_RejectsDisallowedHosts()
     {
-        var response = await _client.GetAsync("/cached-image?url=https%3A%2F%2Fexample.com%2Fposter.jpg");
+        var response = await _client.GetAsync("/cached-image?url=https%3A%2F%2Fexample.com%2Fposter.jpg", TestContext.Current.CancellationToken);
 
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -157,7 +157,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
     [Fact]
     public async Task CachedImageEndpoint_WhenDisabledStillRejectsDisallowedRedirectHosts()
     {
-        var response = await _imageCacheDisabledClient.GetAsync("/cached-image?url=https%3A%2F%2Fexample.com%2Fposter.jpg");
+        var response = await _imageCacheDisabledClient.GetAsync("/cached-image?url=https%3A%2F%2Fexample.com%2Fposter.jpg", TestContext.Current.CancellationToken);
 
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -165,7 +165,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
     [Fact]
     public async Task CachedImageEndpoint_WhenDisabledRedirectsAllowedImageHosts()
     {
-        var response = await _imageCacheDisabledClient.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg");
+        var response = await _imageCacheDisabledClient.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
 
         Assert.Equal(System.Net.HttpStatusCode.Redirect, response.StatusCode);
         Assert.Equal("https://image.tmdb.org/t/p/w342/poster.jpg", response.Headers.Location?.AbsoluteUri);

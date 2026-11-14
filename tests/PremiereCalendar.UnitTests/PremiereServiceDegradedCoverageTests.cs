@@ -592,7 +592,7 @@ public sealed partial class PremiereServiceTests
         PremiereLoadProgress? final = null;
         var invalidated = false;
 
-        await foreach (var update in service.StreamCoreAsync(date, date, filters: DegradedFilters()))
+        await foreach (var update in service.StreamCoreAsync(date, date, filters: DegradedFilters(), cancellationToken: TestContext.Current.CancellationToken))
         {
             if (!invalidated && !update.IsFinal && update.Items.Any(item => item.RuntimeMinutes == 112))
             {

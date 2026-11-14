@@ -29,8 +29,7 @@ public sealed partial class PremiereServiceTests
             discoveryProviders: [new PendingThenThrottledProvider(deadline)], sourceTimeoutSeconds: 1,
             calendarCache: new PartialSnapshotCache());
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6),
-            filters: new() { ShowSeries = false })) updates.Add(update);
+        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         Assert.True(updates[^1].HasSourceErrors);
         Assert.Equal(deadline, updates[^1].RetryAfterUtc);
         Assert.Empty(updates[^1].Items);
@@ -44,8 +43,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(new FakeTmdbClient(), discoveryProviders: [provider],
             calendarCache: cache, sourceTimeoutSeconds: 1);
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6),
-            filters: new() { ShowSeries = false })) updates.Add(update);
+        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         Assert.True(provider.CleanupObserved);
         Assert.True(updates[^1].HasSourceErrors);
         Assert.Contains("Simkl", updates[^1].FailedSourceNames);
@@ -60,8 +58,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(new FakeTmdbClient(),
             discoveryProviders: [new PartialThenFailedProvider()], calendarCache: cache);
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6),
-            filters: new() { ShowSeries = false })) updates.Add(update);
+        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         Assert.True(updates[^1].HasSourceErrors);
         Assert.Contains("Simkl", updates[^1].FailedSourceNames);
         Assert.Equal(31, updates[^1].Items.Count);
@@ -84,12 +81,12 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(tmdb, discoveryProviders: [failed], calendarCache: cache);
         var filters = new CalendarFilters { ShowSeries = false, ShowMovies = true };
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamPremieresAsync(start, start.AddDays(6), filters: filters)) updates.Add(update);
+        await foreach (var update in service.StreamPremieresAsync(start, start.AddDays(6), filters: filters, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         Assert.True(updates[^1].HasSourceErrors);
         Assert.True(cache.PartialWrites > 0);
         Assert.Equal("movie:31", Assert.Single(cache.Items!).CanonicalId);
         var requestsBefore = tmdb.MovieCalls.Count;
-        await using var next = service.StreamPremieresAsync(start, start.AddDays(6), filters: filters).GetAsyncEnumerator();
+        await using var next = service.StreamPremieresAsync(start, start.AddDays(6), filters: filters, cancellationToken: TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await next.MoveNextAsync());
         Assert.True(next.Current.FromCache);
         Assert.False(next.Current.IsFinal);
@@ -116,7 +113,7 @@ public sealed partial class PremiereServiceTests
                 calendarCache: new PartialSnapshotCache(), telemetry: telemetry);
             IAsyncEnumerable<PremiereLoadProgress> stream;
             using (telemetry.UseDiagnosticContext(pageContext))
-                stream = service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false });
+                stream = service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken);
             Assert.Null(telemetry.CaptureDiagnosticContext());
             await foreach (var _ in stream) Assert.Null(telemetry.CaptureDiagnosticContext());
             telemetry.FlushDiagnostics();

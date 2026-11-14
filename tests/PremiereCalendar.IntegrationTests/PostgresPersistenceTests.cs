@@ -40,7 +40,7 @@ public sealed partial class PostgresPersistenceTests : IDisposable
             NullLogger<PostgresDatabaseInitializer>.Instance,
             new PremiereTelemetry());
 
-        await initializer.InitializeAsync();
+        await initializer.InitializeAsync(TestContext.Current.CancellationToken);
         Assert.True(recovery.Snapshot.IsHealthy, recovery.Snapshot.Message);
         Assert.Equal(DatabaseSchema.CurrentVersion, recovery.Snapshot.CurrentVersion);
 
@@ -65,14 +65,14 @@ public sealed partial class PostgresPersistenceTests : IDisposable
         await enrichments.ReadManyAsync("import-config", [enrichmentKey], true, CancellationToken.None);
         await enrichments.WriteManyAsync("import-config", [new(enrichmentKey, 0, "{\"title\":\"preserved\"}", importedAt,
             "{\"score\":8}", importedAt)], CancellationToken.None);
-        await using (var connection = await database.OpenAsync())
+        await using (var connection = await database.OpenAsync(TestContext.Current.CancellationToken))
         {
             await using var generation = connection.CreateCommand();
             generation.CommandText = """
                 UPDATE ItemEnrichments SET Generation = 4294967296, MetadataRevision = 8589934592,
                     TvmazeFenceUtc = '2026-08-24T10:00:00.0000000+00:00', TmdbObservedUtc = '2026-08-24T10:00:00.0000000+00:00'
                 """;
-            await generation.ExecuteNonQueryAsync();
+            await generation.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
         var enrichment = Assert.Single(await new ItemEnrichmentStore(database.Options)
@@ -84,7 +84,7 @@ public sealed partial class PostgresPersistenceTests : IDisposable
         Assert.Equal(importedAt, enrichment.MetadataFetchedUtc);
         Assert.Equal(importedAt, enrichment.RatingsFetchedUtc);
 
-        var verification = await initializer.VerifyAsync();
+        var verification = await initializer.VerifyAsync(TestContext.Current.CancellationToken);
         Assert.True(verification.IsHealthy, verification.Message);
     }
 
@@ -125,7 +125,7 @@ public sealed partial class PostgresPersistenceTests : IDisposable
         Assert.True(await store.RenewLeaseAsync(replacement.JobId, replacement.LeaseOwner!, updatedAt, now.AddSeconds(62), CancellationToken.None));
         Assert.True(await store.UpdateProgressAsync(replacement.JobId, replacement.LeaseOwner!, "current", updatedAt, CancellationToken.None));
 
-        await using (var connection = await _database.OpenAsync())
+        await using (var connection = await _database.OpenAsync(TestContext.Current.CancellationToken))
         {
             await using var invariant = connection.CreateCommand();
             invariant.CommandText = """
@@ -134,7 +134,7 @@ public sealed partial class PostgresPersistenceTests : IDisposable
                 WHERE (job.State = 'Running' AND (lease.JobId IS NULL OR job.LeaseOwner <> lease.LeaseOwner OR job.LeaseExpiresUtc <> lease.LeaseExpiresUtc))
                     OR (job.State <> 'Running' AND lease.JobId IS NOT NULL)
                 """;
-            Assert.Equal(0L, await invariant.ExecuteScalarAsync());
+            Assert.Equal(0L, await invariant.ExecuteScalarAsync(TestContext.Current.CancellationToken));
         }
         Assert.True(await store.CompleteAsync(replacement.JobId, replacement.LeaseOwner!, updatedAt, CancellationToken.None));
         Assert.Equal("current", (await store.GetAsync(replacement.JobId, CancellationToken.None))!.CheckpointJson);
@@ -158,12 +158,12 @@ public sealed partial class PostgresPersistenceTests : IDisposable
             await release.Task.WaitAsync(token);
             await File.WriteAllTextAsync(cachePath, "original", token);
         }, CancellationToken.None);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         clock.UtcNow = now.AddSeconds(36);
         var recovery = store.RecoverExpiredLeasesAsync(clock.GetUtcNow(), CancellationToken.None);
         try
         {
-            await using var observer = await _database.OpenAsync();
+            await using var observer = await _database.OpenAsync(TestContext.Current.CancellationToken);
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             while (true)
             {
@@ -176,9 +176,9 @@ public sealed partial class PostgresPersistenceTests : IDisposable
             Assert.False(File.Exists(cachePath));
         }
         finally { release.TrySetResult(); }
-        Assert.True(await publication.WaitAsync(TimeSpan.FromSeconds(5)));
-        await recovery.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal("original", await File.ReadAllTextAsync(cachePath));
+        Assert.True(await publication.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        await recovery.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal("original", await File.ReadAllTextAsync(cachePath, TestContext.Current.CancellationToken));
         var replacement = (await store.ClaimNextAsync(false, "replacement", clock.GetUtcNow(), TimeSpan.FromSeconds(30), CancellationToken.None))!;
         Assert.NotEqual(owner.LeaseOwner, replacement.LeaseOwner);
         var staleCalled = false;
@@ -197,13 +197,13 @@ public sealed partial class PostgresPersistenceTests : IDisposable
                 await cancellation.CancelAsync();
                 token.ThrowIfCancellationRequested();
             }, cancellation.Token));
-        await using (var connection = await _database.OpenAsync())
+        await using (var connection = await _database.OpenAsync(TestContext.Current.CancellationToken))
         {
             await using var lease = connection.CreateCommand();
             lease.CommandText = "SELECT job.LeaseExpiresUtc = lease.LeaseExpiresUtc AND job.LeaseExpiresUtc = @expires FROM ProviderWorkJobs job JOIN ProviderWorkLeases lease ON lease.JobId = job.JobId WHERE job.JobId = @id";
             lease.Parameters.AddWithValue("expires", now.AddSeconds(66).ToString("O", System.Globalization.CultureInfo.InvariantCulture));
             lease.Parameters.AddWithValue("id", handle.JobId);
-            Assert.Equal(true, await lease.ExecuteScalarAsync());
+            Assert.Equal(true, await lease.ExecuteScalarAsync(TestContext.Current.CancellationToken));
         }
     }
 
@@ -232,13 +232,13 @@ public sealed partial class PostgresPersistenceTests : IDisposable
             await releaseFirst.Task.WaitAsync(token);
             await File.WriteAllTextAsync(cachePath, "original", token);
         }, CancellationToken.None);
-        await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Task<bool>? second = null;
         Exception? firstFailure = null;
         var secondPublished = false;
         try
         {
-            await using var observer = await _database.OpenAsync();
+            await using var observer = await _database.OpenAsync(TestContext.Current.CancellationToken);
             await using (var terminate = observer.CreateCommand())
             {
                 // The randomized test database contains exactly one idle
@@ -248,7 +248,7 @@ public sealed partial class PostgresPersistenceTests : IDisposable
                     WHERE datname = current_database() AND state = 'idle in transaction'
                         AND query LIKE '%UPDATE ProviderWorkLeases%'
                     """;
-                Assert.Equal(true, await terminate.ExecuteScalarAsync());
+                Assert.Equal(true, await terminate.ExecuteScalarAsync(TestContext.Current.CancellationToken));
             }
             clock.UtcNow = now.AddSeconds(31);
             await store.RecoverExpiredLeasesAsync(clock.GetUtcNow(), CancellationToken.None);
@@ -259,19 +259,19 @@ public sealed partial class PostgresPersistenceTests : IDisposable
                 secondEntered.TrySetResult();
                 await File.WriteAllTextAsync(cachePath, "replacement", token);
             }, CancellationToken.None);
-            Assert.NotSame(secondEntered.Task, await Task.WhenAny(secondEntered.Task, Task.Delay(150)));
+            Assert.NotSame(secondEntered.Task, await Task.WhenAny(secondEntered.Task, Task.Delay(150, TestContext.Current.CancellationToken)));
             Assert.False(File.Exists(cachePath));
         }
         finally
         {
             releaseFirst.TrySetResult();
             firstFailure = await Record.ExceptionAsync(async () => await first);
-            if (second is not null) secondPublished = await second.WaitAsync(TimeSpan.FromSeconds(5));
+            if (second is not null) secondPublished = await second.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         }
         Assert.NotNull(firstFailure);
         Assert.NotNull(second);
         Assert.True(secondPublished);
-        Assert.Equal("replacement", await File.ReadAllTextAsync(cachePath));
+        Assert.Equal("replacement", await File.ReadAllTextAsync(cachePath, TestContext.Current.CancellationToken));
     }
 
     private sealed class TestEnvironment(string root) : IWebHostEnvironment

@@ -55,7 +55,7 @@ public sealed class StaticJsonOptionsEquivalenceTests : IDisposable
         File.WriteAllText(path, text.ToString(), new UTF8Encoding(false));
         var rawBytes = File.ReadAllBytes(path);
 
-        Assert.True(PerformanceTraceArchive.Archive(path, 1024 * 1024));
+        Assert.True(PerformanceTraceArchive.Archive(path, 1024 * 1024, cancellationToken: TestContext.Current.CancellationToken));
 
         var archiveBytes = File.ReadAllBytes(path + ".gz");
         var indexBytes = File.ReadAllBytes(path + ".gz.index.json");

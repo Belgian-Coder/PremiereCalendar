@@ -60,7 +60,7 @@ public sealed partial class PremiereServiceTests
         using var cancellation = new CancellationTokenSource();
         var load = service.GetPremieresAsync(date, date.AddDays(20), cancellation.Token,
             filters: new CalendarFilters { ShowSeries = false, ScoreSource = ScoreSource.RottenTomatoes });
-        await tomatoes.TwoStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await tomatoes.TwoStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         await cancellation.CancelAsync();
 
@@ -207,8 +207,7 @@ public sealed partial class PremiereServiceTests
             missingExternalIdRepair: new MissingExternalIdRepairService(tmdb, NullLogger<MissingExternalIdRepairService>.Instance));
         PremiereItem? final = null;
 
-        await foreach (var update in service.StreamCoreAsync(date, date, forceRefresh: true,
-            filters: new CalendarFilters { ShowSeries = false }))
+        await foreach (var update in service.StreamCoreAsync(date, date, forceRefresh: true, filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken))
         {
             if (update.IsFinal) final = Assert.Single(update.Items);
             else if (update.Items.Count > 0)

@@ -235,19 +235,19 @@ public sealed partial class PremiereServiceTests
         var store = new MemoryItemEnrichmentStore(clock);
         var coordinator = ItemCacheCoordinator(store, clock);
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
-        await using var session = await coordinator.CreateSessionAsync(default);
-        await session.PrepareAsync([identity], null, default);
+        await using var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         var failRead = true;
         store.BeforeCurrentRead = _ => { if (failRead) throw new IOException("Transient validation failure."); };
 
-        var failed = await session.ReconcileAsync([], includeConsumed: true, default, readOnly: true);
+        var failed = await session.ReconcileAsync([], includeConsumed: true, TestContext.Current.CancellationToken, readOnly: true);
 
         // The placeholder dirt withholds readiness but is not evidence the caller may record as durable dirt.
         Assert.False(failed.Validated);
         Assert.NotEmpty(failed.DirtyMedia);
 
         failRead = false;
-        var validated = await session.ReconcileAsync([], includeConsumed: true, default, readOnly: true);
+        var validated = await session.ReconcileAsync([], includeConsumed: true, TestContext.Current.CancellationToken, readOnly: true);
         Assert.True(validated.Validated);
         Assert.Empty(validated.DirtyMedia);
     }

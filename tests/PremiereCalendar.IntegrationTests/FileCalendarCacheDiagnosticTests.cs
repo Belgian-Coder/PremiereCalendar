@@ -38,9 +38,9 @@ public sealed class FileCalendarCacheDiagnosticTests : IDisposable
             await cache.SetWeekAsync(Start, End, "default", [Item()], CancellationToken.None);
             Assert.True((await cache.GetWeekSnapshotAsync(Start, End, "default", CancellationToken.None))!.IsComplete);
             await cache.GetWeekMetadataAsync(Start, End, "default", CancellationToken.None);
-            var complete = await File.ReadAllBytesAsync(CachePath);
+            var complete = await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken);
             await cache.SetPartialWeekAsync(Start, End, "default", [], CancellationToken.None);
-            Assert.Equal(complete, await File.ReadAllBytesAsync(CachePath));
+            Assert.Equal(complete, await File.ReadAllBytesAsync(CachePath, TestContext.Current.CancellationToken));
         }
 
         var events = ReadEvents();
@@ -81,11 +81,11 @@ public sealed class FileCalendarCacheDiagnosticTests : IDisposable
         await cache.SetPartialWeekAsync(Start, End, "default", [Item()], CancellationToken.None);
 
         const string malformed = "{\"private_title\":\"private-movie-title\",\"credential\":\"super-secret-token\"";
-        await File.WriteAllTextAsync(CachePath, malformed);
+        await File.WriteAllTextAsync(CachePath, malformed, TestContext.Current.CancellationToken);
         Assert.Null(await cache.GetWeekSnapshotAsync(Start, End, "default", CancellationToken.None));
         Assert.Null(await cache.GetWeekMetadataAsync(Start, End, "default", CancellationToken.None));
         await cache.SetPartialWeekAsync(Start, End, "default", [Item()], CancellationToken.None);
-        Assert.Equal(malformed, await File.ReadAllTextAsync(CachePath));
+        Assert.Equal(malformed, await File.ReadAllTextAsync(CachePath, TestContext.Current.CancellationToken));
 
         await WriteEnvelopeAsync(schemaVersion: 8, (CalendarCacheCompleteness)99);
         Assert.Null(await cache.GetWeekSnapshotAsync(Start, End, "default", CancellationToken.None));

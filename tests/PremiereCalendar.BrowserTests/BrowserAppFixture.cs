@@ -12,7 +12,7 @@ public sealed class BrowserAppFixture : IAsyncLifetime
     private readonly List<string> _output = [];
     public string BaseUrl { get; private set; } = "";
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         try { await StartAsync(); }
         catch
@@ -83,7 +83,7 @@ public sealed class BrowserAppFixture : IAsyncLifetime
         throw new TimeoutException($"PremiereCalendar did not become ready for browser tests.{Environment.NewLine}{diagnostics}");
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_process is { HasExited: false })
         {

@@ -25,7 +25,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         var path = Path.Combine(_root, "stale.bin");
         Directory.CreateDirectory(_root);
         var bytes = new byte[] { 4, 3, 2, 1 };
-        await File.WriteAllBytesAsync(path, bytes);
+        await File.WriteAllBytesAsync(path, bytes, TestContext.Current.CancellationToken);
         var hash = new string('a', 64);
         var cache = new StubImageCache((_, _, _, _, _) => Task.FromResult(new CachedImage(
             path,
@@ -38,12 +38,12 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(cache);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg");
+        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal($"\"{hash}\"", response.Headers.ETag?.Tag);
         Assert.Contains("max-age=60", response.Headers.CacheControl?.ToString());
-        Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
     }
 
     [Theory]
@@ -58,7 +58,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(cache);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg");
+        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
@@ -71,7 +71,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(cache);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg");
+        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -102,8 +102,8 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(cache);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg");
-        var body = await response.Content.ReadAsByteArrayAsync();
+        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
+        var body = await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken);
         var contentHash = Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant();
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -130,7 +130,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest);
+        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("image/jpeg", response.Content.Headers.ContentType?.MediaType);
@@ -149,10 +149,10 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest);
+        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
-        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
     }
 
     [Theory]
@@ -167,7 +167,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest);
+        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(contentType, response.Content.Headers.ContentType?.MediaType);
@@ -188,10 +188,10 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromException<CachedImage>(failure)));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest);
+        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
 
         Assert.Equal(expected, response.StatusCode);
-        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -201,10 +201,10 @@ public sealed class CachedImageEndpointTests : IDisposable
             Task.FromException<CachedImage>(new InvalidOperationException("boom"))));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest);
+        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
-        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
         Assert.Equal("default-src 'none'; sandbox", Assert.Single(response.Headers.GetValues("Content-Security-Policy")));
         Assert.Equal("nosniff", Assert.Single(response.Headers.GetValues("X-Content-Type-Options")));
         Assert.True(response.Headers.CacheControl?.NoStore);
@@ -222,7 +222,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         }));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync($"{ImageRequest}&refresh=true");
+        using var response = await client.GetAsync($"{ImageRequest}&refresh=true", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal([false], forceRefreshValues);
@@ -248,7 +248,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         }));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest + query);
+        using var response = await client.GetAsync(ImageRequest + query, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(expectedWidth, seenWidth);

@@ -868,7 +868,7 @@ public sealed partial class CalendarPageTests : BunitContext
         Assert.Single(service.Calls);
         Assert.False(service.FirstStreamFinished.Task.IsCompleted);
         service.Release.TrySetResult();
-        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             var cards = component.FindAll("[data-testid='premiere-card']");
@@ -901,7 +901,7 @@ public sealed partial class CalendarPageTests : BunitContext
         component.WaitForAssertion(() => Assert.Contains("Next week movie",
             Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent));
         service.Release.TrySetResult();
-        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             Assert.Contains("Next week movie", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent);
@@ -922,7 +922,7 @@ public sealed partial class CalendarPageTests : BunitContext
         await component.InvokeAsync(component.Instance.Dispose);
         Assert.True(service.FirstCancellation.IsCancellationRequested);
         service.Release.TrySetResult();
-        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
         Assert.Single(service.Calls);
         Assert.Empty(_prefetcher.WeekStarts);
     }
@@ -938,7 +938,7 @@ public sealed partial class CalendarPageTests : BunitContext
         WaitForForegroundRelease(component);
 
         service.Release.TrySetResult();
-        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count);
@@ -960,7 +960,7 @@ public sealed partial class CalendarPageTests : BunitContext
         WaitForForegroundRelease(component);
 
         service.Release.TrySetResult();
-        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             Assert.Equal(10, component.FindAll("[data-testid='premiere-card']").Count);
@@ -985,15 +985,15 @@ public sealed partial class CalendarPageTests : BunitContext
         ExpandQueryProgress(component);
 
         service.Release.TrySetResult();
-        await service.NonFinalProgressYielded.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await service.NonFinalProgressYielded.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             Assert.Contains("Resolving background candidates", component.Markup);
             Assert.Single(component.FindAll("[data-testid='query-progress-bar']"));
         });
 
-        await service.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await service.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
+        await service.FirstStreamFinished.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             var progress = component.Find("[data-testid='query-progress']");
@@ -1037,7 +1037,7 @@ public sealed partial class CalendarPageTests : BunitContext
         Services.AddSingleton<IPremiereService>(service);
         Services.GetRequiredService<NavigationManager>().NavigateTo("/movies?week=2026-05-04");
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
-        await usageStore.RecordStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await usageStore.RecordStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
         ExpandQueryProgress(component);
 
         component.WaitForAssertion(() =>
@@ -1052,12 +1052,12 @@ public sealed partial class CalendarPageTests : BunitContext
         }, TimeSpan.FromSeconds(3));
         Assert.False(usageStore.RecordRelease.Task.IsCompleted);
         // Keep metadata blocked beyond the would-be one-second background-watch timeout.
-        await Task.Delay(TimeSpan.FromMilliseconds(1200));
+        await Task.Delay(TimeSpan.FromMilliseconds(1200), Xunit.TestContext.Current.CancellationToken);
         Assert.False(usageStore.RecordCancellation.IsCancellationRequested);
         Assert.Empty(_prefetcher.WeekStarts);
 
         usageStore.RecordRelease.TrySetResult();
-        await _prefetcher.Prefetched.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await _prefetcher.Prefetched.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             Assert.Single(_prefetcher.WeekStarts);
@@ -1107,7 +1107,7 @@ public sealed partial class CalendarPageTests : BunitContext
         });
 
         navigation.NavigateTo("/movies?week=2026-05-04");
-        await service.MovieRequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.MovieRequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             Assert.Empty(component.FindAll("[data-testid='premiere-card']"));
@@ -1115,7 +1115,7 @@ public sealed partial class CalendarPageTests : BunitContext
             Assert.Empty(component.FindAll("[data-testid='data-freshness-card']"));
         });
         service.ReleaseMoviePartial();
-        await service.MoviePartialYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.MoviePartialYielded.Task.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
 
         component.WaitForAssertion(() =>
         {
@@ -1144,7 +1144,7 @@ public sealed partial class CalendarPageTests : BunitContext
         });
 
         navigation.NavigateTo("/movies?week=2026-05-11");
-        await service.NextWeekRequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.NextWeekRequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() =>
         {
             Assert.Empty(component.FindAll("[data-testid='premiere-card']"));
@@ -1302,7 +1302,7 @@ public sealed partial class CalendarPageTests : BunitContext
             Assert.Contains("Zulu", cards[1].TextContent);
             Assert.Contains("sort=title", navigation.Uri);
         });
-        await Task.Delay(200);
+        await Task.Delay(200, Xunit.TestContext.Current.CancellationToken);
         Assert.Single(service.Calls);
     }
 
@@ -1809,7 +1809,7 @@ public sealed partial class CalendarPageTests : BunitContext
         Assert.Equal("180", roundTrip["movieRuntimeMax"].ToString());
         Assert.Equal("south", roundTrip["movieKeywords"].ToString());
         Assert.Equal("south", roundTrip["movieQ"].ToString());
-        await Task.Delay(200);
+        await Task.Delay(200, Xunit.TestContext.Current.CancellationToken);
         Assert.Single(service.Calls);
     }
 
@@ -2082,7 +2082,7 @@ public sealed partial class CalendarPageTests : BunitContext
         Assert.DoesNotContain("origin=", navigation.Uri);
         Assert.DoesNotContain("runtimeMin=", navigation.Uri);
         Assert.DoesNotContain("runtimeMax=", navigation.Uri);
-        await Task.Delay(200);
+        await Task.Delay(200, Xunit.TestContext.Current.CancellationToken);
         Assert.Single(service.Calls);
     }
 

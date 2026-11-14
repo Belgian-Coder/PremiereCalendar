@@ -298,7 +298,7 @@ public sealed class AdjacentWeekPrefetcherTests
                 Enabled = true, AdjacentWeekPrefetchEnabled = true, FuturePrefetchWeeks = 1, PastPrefetchWeeks = 0
             }), NullLogger<AdjacentWeekPrefetcher>.Instance, workScheduler: scheduler);
         prefetcher.PrefetchAdjacentWeeks(new(2026, 5, 4));
-        await cache.Read.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await cache.Read.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         await prefetcher.StopAsync(CancellationToken.None);
         Assert.Empty(scheduler.Requests);
         Assert.Equal(new DateOnly(2026, 5, 11), cache.Start);
@@ -318,13 +318,13 @@ public sealed class AdjacentWeekPrefetcherTests
             NullLogger<AdjacentWeekPrefetcher>.Instance, workScheduler: scheduler);
         var filters = new CalendarFilters { ShowSeries = false };
         prefetcher.PrefetchAdjacentWeeks(new(2026, 5, 4), filters);
-        await cache.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await cache.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         // May11 remains wanted after navigation, but its in-flight dedupe key
         // prevents the newer generation from queuing a replacement request.
         prefetcher.PrefetchAdjacentWeeks(new(2026, 4, 27), filters);
         cache.Release.TrySetResult();
         await WaitForAsync(() => scheduler.Requests.Count == 2);
-        await prefetcher.StopAsync(default);
+        await prefetcher.StopAsync(TestContext.Current.CancellationToken);
         var payloads = scheduler.Requests.Select(request => System.Text.Json.JsonSerializer.Deserialize<CalendarProviderWorkPayload>(request.PayloadJson)!).ToArray();
         Assert.Equal([new DateOnly(2026, 5, 4), new DateOnly(2026, 5, 11)], payloads.Select(payload => payload.Start).Order().ToArray());
         Assert.DoesNotContain(payloads, payload => payload.Start == new DateOnly(2026, 5, 18));
@@ -411,15 +411,15 @@ public sealed class AdjacentWeekPrefetcherTests
                 { Enabled = true, AdjacentWeekPrefetchEnabled = true, FuturePrefetchWeeks = 1, PastPrefetchWeeks = 0 }),
             NullLogger<AdjacentWeekPrefetcher>.Instance, workScheduler: scheduler, databaseState: recovery);
         prefetcher.PrefetchAdjacentWeeks(new(2026, 5, 4));
-        await Assert.ThrowsAsync<TimeoutException>(() => scheduler.Attempted.Task.WaitAsync(TimeSpan.FromMilliseconds(100)));
+        await Assert.ThrowsAsync<TimeoutException>(() => scheduler.Attempted.Task.WaitAsync(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken));
         Assert.Empty(scheduler.Requests);
         Assert.False(lifetime.ApplicationStopping.IsCancellationRequested);
         if (recover)
         {
             recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "initialized", null));
-            await scheduler.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await scheduler.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         }
-        await prefetcher.StopAsync(default).WaitAsync(TimeSpan.FromSeconds(2));
+        await prefetcher.StopAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         Assert.Equal(recover ? 1 : 0, scheduler.Requests.Count);
         Assert.False(lifetime.ApplicationStopping.IsCancellationRequested);
     }
@@ -435,8 +435,8 @@ public sealed class AdjacentWeekPrefetcherTests
                 { Enabled = true, AdjacentWeekPrefetchEnabled = true, FuturePrefetchWeeks = 1, PastPrefetchWeeks = 0 }),
             NullLogger<AdjacentWeekPrefetcher>.Instance, workScheduler: scheduler);
         prefetcher.PrefetchAdjacentWeeks(new(2026, 5, 4));
-        await scheduler.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await prefetcher.StopAsync(default).WaitAsync(TimeSpan.FromSeconds(2));
+        await scheduler.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        await prefetcher.StopAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         Assert.False(lifetime.ApplicationStopping.IsCancellationRequested);
     }
 

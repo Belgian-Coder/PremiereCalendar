@@ -275,7 +275,7 @@ public sealed partial class PremiereServiceTests
         await store.InvalidateTmdbAsync(PremiereMediaType.Series, [901], clock.GetUtcNow(), CancellationToken.None);
         var updates = new List<PremiereLoadProgress>();
         await foreach (var update in CreateService(Tmdb(), calendarCache: cache, itemEnrichmentCache: coordinator)
-            .StreamCoreAsync(date, date, filters: filters)) updates.Add(update);
+            .StreamCoreAsync(date, date, filters: filters, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
 
         var final = Assert.Single(updates, update => update.IsFinal);
         Assert.False(final.HasSourceErrors);
