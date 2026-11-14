@@ -60,8 +60,6 @@ internal static class ProviderWorkCheckpointCodec
             Stopwatch.GetElapsedTime(started, serialized).TotalMilliseconds,
             Stopwatch.GetElapsedTime(serialized).TotalMilliseconds);
 
-    // Produces {"Version":4,"Encoding":"br-base64","UncompressedBytes":n,"Payload":"..."} exactly as
-    // JsonSerializer.Serialize of the former CompressedCheckpoint record did, including default-encoder escaping of '+'.
     internal static byte[] RentBuffer(int minimumLength) => minimumLength > PooledBufferLimit
         ? GC.AllocateUninitializedArray<byte>(minimumLength)
         : ArrayPool<byte>.Shared.Rent(minimumLength);
@@ -72,6 +70,8 @@ internal static class ProviderWorkCheckpointCodec
         if (buffer is { Length: > 0 and <= PooledBufferLimit }) ArrayPool<byte>.Shared.Return(buffer);
     }
 
+    // Produces {"Version":4,"Encoding":"br-base64","UncompressedBytes":n,"Payload":"..."} exactly as
+    // JsonSerializer.Serialize of the former CompressedCheckpoint record did, including default-encoder escaping of '+'.
     private static bool TryEncodeEnvelope(ReadOnlySpan<byte> raw, out PooledBufferWriter envelope)
     {
         envelope = null!;
