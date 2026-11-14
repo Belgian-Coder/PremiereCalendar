@@ -43,7 +43,8 @@ worktree is refused by the lock instead of waiting.
 Results: every suite writes <Suite>.trx and <Suite>.ctrf.json (CTRF = Common Test Report Format, JSON) plus the console
 log <Suite>.log to <checkout>\artifacts\test-results\<yyyyMMdd-HHmmss>\ (artifacts\ is git-ignored). The console shows
 the xUnit.net summary and the wall time of each suite and ends with a "Results:" line; the script exits non-zero when a
-suite fails. All requested suites run even when an earlier one fails.
+suite fails or when no test ran (a filter that matches nothing). All requested suites run even when an earlier one
+fails.
 
 Incremental builds: the build output lives in this checkout's artifacts\build\linux (artifacts\build\linux-no-runtime-async
 with -NoRuntimeAsync), so worktrees never mix and runtime-async modes never share objects. Linux NuGet packages are
@@ -245,6 +246,8 @@ for suite in @@SUITES@@; do
   # The exit code travels through a file because busybox sh has no PIPESTATUS.
   { "$exe" -noLogo -result-trx "/src/@@RESULTS@@/$suite.trx" -result-ctrf "/src/@@RESULTS@@/$suite.ctrf.json" @@RUNNERWORDS@@ 2>&1; echo $? > /tmp/pc-suite-rc; } | tee "/src/@@RESULTS@@/$suite.log"
   rc=$(cat /tmp/pc-suite-rc)
+  # A filter that matches nothing makes the xUnit.net runner exit 0 with "Total: 0"; that must not count as a pass.
+  if [ "$rc" = 0 ] && grep -Eq 'Total: 0($|[^0-9])' "/src/@@RESULTS@@/$suite.log"; then echo "NO TESTS RAN in $name: the filter matched nothing"; rc=9; fi
   elapsed=$(( $(date +%s) - t0 ))
   [ "$rc" = 0 ] || status=1
   summary="$summary\n$name: exit $rc, ${elapsed} s"

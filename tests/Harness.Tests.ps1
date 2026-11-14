@@ -86,6 +86,7 @@ try {
     $inner = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
     Assert-Harness ($inner.Contains((ConvertTo-BashLiteral $runnerFilter))) 'Shell filter quoting changed.'
     Assert-Harness ($inner.Contains('exe="/build/bin/$name/release/$name"') -and $inner.Contains('for suite in Component; do') -and $inner.Contains('-result-ctrf')) 'Test executables are not run directly with TRX/CTRF results.'
+    Assert-Harness ($inner.Contains('NO TESTS RAN')) 'A filter that matches no test is reported as a pass.'
     Assert-Harness ($testScript -match 'artifacts/build/linux' -and $testScript -match 'ArtifactsPath=/build') 'Container build state is not this checkout''s artifacts/build/linux.'
     $bash = Join-Path $env:ProgramFiles 'Git/bin/bash.exe'
     if (Test-Path -LiteralPath $bash) {
