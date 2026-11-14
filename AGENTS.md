@@ -8,6 +8,8 @@
 
 # Local agent workflow
 
+- `AGENTS.md` is canonical. Root `CLAUDE.md` imports it for Claude Code;
+  follow applicable nested instructions without changing persistent model routing.
 - Keep worktrees under `.worktrees/` in this project. Preserve unrelated changes;
   use a dedicated branch/worktree when another task owns the primary checkout.
 - Read `docs/Testing.md` and `docs/DockerAndPostgres.md` before running checks.
@@ -33,6 +35,32 @@
   browser timing, vulnerability, SBOM and exact-image runtime gates documented
   in `docs/Testing.md` and `docs/DockerAndPostgres.md`. Never publish or deploy
   merely to validate a harness change. Record unrun checks and blockers plainly.
-- Use `Workspace-Maintenance.ps1 -Mode Check` for hygiene. Cleaning requires
-  explicit permission for the exact data being deleted; inspect `-WhatIf` first.
-  Never clean another worktree or sibling directory, or remove credentials.
+- Use `Workspace-Maintenance.ps1 -Mode Check` for hygiene. Its separate `Clean`
+  mode resets build/test output and is not the routine cleanup checkpoint:
+  it requires explicit permission for those exact deletions; inspect `-WhatIf`
+  first. Never clean a sibling directory or remove credentials.
+
+# Cleanup checkpoint
+
+After **every commit and every release**, complete a bounded cleanup checkpoint
+before continuing or reporting completion; repeat it after pushing. The owner
+authorizes removal only of proven task-owned disposable temporary files/fixtures
+and finished, clean, pushed worktrees inside this project.
+
+- Identify exact owned paths and their provenance. Inspect tracked, untracked
+  and ignored contents; resolve every removal target inside this project and
+  reject links or paths that can escape it. If ownership is unclear, retain the
+  material and report the exact cleanup limit.
+- Preserve user WIP, unknown/untracked user data, authentication material,
+  audit/release/rollback evidence and warm reusable dependency/incremental caches.
+  Age, an ignored path or an apparently successful release does not prove that
+  data is disposable. Never run broad `git clean`, `git worktree prune`, recursive
+  sweeps or unconditional `bin`/`obj`/Docker/BuildKit cache pruning.
+- Keep active or unpushed worktrees. Remove a completed worktree from the primary
+  checkout only after verifying its HEAD is included in fetched remote `main`,
+  its index/working tree are clean, and it contains no retained data or caches.
+  Use `git worktree remove <verified-path>` without force. If protected material
+  remains, retain the worktree and report why.
+- A checkpoint can correctly remove nothing. Report the exact removed and
+  retained paths; cleanup never authorizes deployment, service administration,
+  production data deletion or a change to the release gates above.

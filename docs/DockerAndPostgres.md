@@ -40,6 +40,12 @@ run every acceptance gate on that immutable image ID, and publish that same imag
 Rebuilding after acceptance requires revalidating the replacement. Scoped checks,
 cached restore results and a green health endpoint do not replace complete
 regression, browser, scan, SBOM, database, boot-asset and hardened-runtime checks.
+After every release, complete the [bounded cleanup checkpoint](../AGENTS.md#cleanup-checkpoint)
+before reporting completion, as after every commit and again after pushing.
+Retain release/rollback/audit evidence and warm build/dependency caches; remove
+only verified task-owned disposable files and eligible completed worktrees.
+`Workspace-Maintenance.ps1 -Mode Clean` is a separate, explicitly authorized
+reset, not an automatic release step. No release script currently calls it.
 Deploy by digest. The runtime:
 
 - runs as the image's non-root application user;
