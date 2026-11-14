@@ -14,6 +14,8 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
+// ImageMagick's resource limits are process-wide: the tests of this class run one after the other (xUnit.net 4 runs every test case in parallel by default).
+[Collection("ImageMagick: CachedImageEndpointTests")]
 public sealed class CachedImageEndpointTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-cached-image-endpoint-{Guid.NewGuid():N}");
