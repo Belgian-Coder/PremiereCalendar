@@ -1,3 +1,17 @@
+<#
+.SYNOPSIS
+Checks, or removes, generated files so they stay out of the source checkout.
+
+.DESCRIPTION
+Works from any folder (paths come from the script location). The shared build output directory
+(PremiereCalendar.Build) and the Development data directory (PremiereCalendar.LocalData) are siblings of the
+checkout; for a git worktree under .worktrees they sit inside .worktrees. Mode Check fails when generated files
+are present inside the checkout or the external directories exceed their limits; Mode Clean removes them
+(supports -WhatIf). Development data is only removed with -RemoveDevelopmentData.
+
+.EXAMPLE
+pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Check
+#>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [ValidateSet('Check', 'Clean')]
@@ -52,15 +66,18 @@ foreach ($relativePath in $fixedRelativePaths) {
     if (Test-Path -LiteralPath $candidate) { $null = $targets.Add($candidate) }
 }
 
-$gitPrefix = (Join-Path $projectRoot '.git') + [IO.Path]::DirectorySeparatorChar
-$secretsPrefix = (Join-Path $projectRoot '.secrets') + [IO.Path]::DirectorySeparatorChar
-Get-ChildItem -LiteralPath $projectRoot -Directory -Force -Recurse -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.Name -in @('bin', 'obj', 'TestResults') -and
-        -not $_.FullName.StartsWith($gitPrefix, [StringComparison]::OrdinalIgnoreCase) -and
-        -not $_.FullName.StartsWith($secretsPrefix, [StringComparison]::OrdinalIgnoreCase)
-    } |
-    ForEach-Object { $null = $targets.Add((Assert-ProjectPath $_.FullName)) }
+# Never descend into Git metadata, the development secrets, or the git-ignored scratch areas: worktrees, benchmark
+# harnesses and agent scratch folders belong inside the checkout but are not generated build output.
+$prunedNames = @('.git', '.secrets', '.worktrees', '.scratch', '.bench', 'node_modules')
+$pending = [Collections.Generic.Stack[string]]::new()
+$pending.Push($projectRoot)
+while ($pending.Count -gt 0) {
+    foreach ($child in Get-ChildItem -LiteralPath $pending.Pop() -Directory -Force -ErrorAction SilentlyContinue) {
+        if ($child.Name -in $prunedNames) { continue }
+        if ($child.Name -in @('bin', 'obj', 'TestResults')) { $null = $targets.Add((Assert-ProjectPath $child.FullName)); continue }
+        $pending.Push($child.FullName)
+    }
+}
 
 Get-ChildItem -LiteralPath $projectRoot -File -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like '*.png' -or $_.Name -like '*-snapshot.md' } |

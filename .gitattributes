@@ -5,6 +5,11 @@
 
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+
+# Scripts and SQL that run inside Linux containers or WSL must stay LF (a CR breaks `sh`, psql meta-commands and shebangs).
+*.sh text eol=lf
+*.py text eol=lf
+*.sql text eol=lf
 *.png binary
 *.jpg binary
 *.jpeg binary
