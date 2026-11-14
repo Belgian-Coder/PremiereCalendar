@@ -23,6 +23,11 @@ output/**
 tests/**
 !tests/*/*.csproj
 *.png
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite
+**/*.sqlite3
 .worktrees
 .worktrees/**
 .scratch
