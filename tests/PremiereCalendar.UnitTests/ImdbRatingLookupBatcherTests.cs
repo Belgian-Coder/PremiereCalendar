@@ -3,6 +3,8 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
+// Batching windows of a few hundred milliseconds: the tests of this class keep running one after the other (the xUnit.net 2 behaviour).
+[Collection(nameof(ImdbRatingLookupBatcherTests))]
 public sealed class ImdbRatingLookupBatcherTests
 {
     [Fact]

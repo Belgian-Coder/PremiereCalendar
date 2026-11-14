@@ -76,7 +76,8 @@ public sealed class FileImageCacheTests : IDisposable
             cancellation.Token));
     }
 
-    [Fact]
+    // Lowers ImageMagick's process-wide memory limit for a moment: no other test may decode an image meanwhile.
+    [Fact(DisableParallelization = true)]
     public async Task GetOrAddAsync_MapsNativeResourceLimitFailureToIOException()
     {
         var sample = SamplePngBytes();

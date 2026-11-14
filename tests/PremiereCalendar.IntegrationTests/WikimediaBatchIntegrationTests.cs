@@ -8,6 +8,8 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
+// Batch windows of a few hundred milliseconds: the tests of this class keep running one after the other (the xUnit.net 2 behaviour).
+[Collection(nameof(WikimediaBatchIntegrationTests))]
 public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
 {
     [Theory]
