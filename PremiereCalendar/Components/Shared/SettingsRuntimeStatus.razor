@@ -18,7 +18,7 @@
                 <small>@Status.Database.Message</small>
                 @if (!Status.Database.IsHealthy)
                 {
-                    <small>Stop the Windows Service, run <code>database verify</code>, then restore only from a verified absolute backup path.</small>
+                    <small>@DatabaseRecoveryState.OperatorGuidance</small>
                 }
             </div>
             <div class="cache-inspector-row">

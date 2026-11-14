@@ -131,7 +131,7 @@ app.MapGet("/health/version", (DatabaseRecoveryState databaseState, PremiereTele
         healthy = databaseState.Snapshot.IsHealthy,
         integrity = databaseState.Snapshot.Message,
         lastMigration = databaseState.Snapshot.LastMigration,
-        recovery = "Run 'dotnet PremiereCalendar.dll database verify'. Restore only a checksum-verified pg_dump into an isolated PostgreSQL instance before production recovery."
+        recovery = DatabaseRecoveryState.OperatorGuidance
     }
 }));
 app.MapGet(

@@ -228,6 +228,10 @@ internal sealed record DatabaseMigration(
 
 public sealed class DatabaseRecoveryState
 {
+    /// <summary>What an operator does when the database is unhealthy; shown by /health/version and the Settings page.</summary>
+    public const string OperatorGuidance =
+        "Run 'dotnet PremiereCalendar.dll database verify'. Restore only a checksum-verified pg_dump into an isolated PostgreSQL instance before production recovery.";
+
     private readonly Lock _gate = new();
     private TaskCompletionSource _healthy = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DatabaseStatusSnapshot _snapshot = new(0, DatabaseSchema.CurrentVersion, false, "Database has not been initialized.", null);
