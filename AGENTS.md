@@ -8,8 +8,12 @@
 
 # Local agent workflow
 
-- `AGENTS.md` is canonical. Root `CLAUDE.md` imports it for Claude Code;
-  follow applicable nested instructions without changing persistent model routing.
+- `AGENTS.md` is the sole project instruction format for Codex and Claude Code.
+  Claude Code 2.1.277 or newer loads it natively when this project and its
+  ancestors contain neither `CLAUDE.md` nor `CLAUDE.local.md`; do not recreate
+  those files or redundant hooks that print `AGENTS.md`. A global user
+  `~/.claude/CLAUDE.md` does not disable native loading. Follow applicable nested
+  instructions without changing persistent model routing.
 - Keep worktrees under `.worktrees/` in this project. Preserve unrelated changes;
   use a dedicated branch/worktree when another task owns the primary checkout.
 - Read `docs/Testing.md` and `docs/DockerAndPostgres.md` before running checks.
