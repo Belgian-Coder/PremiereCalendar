@@ -90,6 +90,8 @@ public sealed class HostingHardeningTests
         Assert.Contains("AppDatabase:Path", exception.Message, StringComparison.Ordinal);
         Assert.Contains("SQLite was removed", exception.Message, StringComparison.Ordinal);
         Assert.Contains("AppDatabase:ConnectionString", exception.Message, StringComparison.Ordinal);
+        // Names the release that can still import the data instead of the vague "last release that supports it".
+        Assert.Contains("v1.2.19", exception.Message, StringComparison.Ordinal);
     }
 
     [Theory]

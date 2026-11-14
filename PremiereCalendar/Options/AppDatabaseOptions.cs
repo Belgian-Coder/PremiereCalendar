@@ -36,7 +36,7 @@ public sealed class AppDatabaseOptionsValidator(IConfiguration configuration) : 
         if (!string.IsNullOrWhiteSpace(configuration["AppDatabase:Path"]))
         {
             return "AppDatabase:Path configured a SQLite file, which is no longer supported: SQLite was removed and PostgreSQL is the only database. "
-                + "Remove AppDatabase:Path and configure AppDatabase:ConnectionString. Migrate any old SQLite data with the last release that supports it before upgrading.";
+                + "Remove AppDatabase:Path and configure AppDatabase:ConnectionString. Migrate any old SQLite data with v1.2.19, the last release that supports it (database migrate-postgres), before upgrading.";
         }
 
         if (string.IsNullOrWhiteSpace(options.ConnectionString))

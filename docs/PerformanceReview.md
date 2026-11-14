@@ -89,7 +89,7 @@ Image optimization status:
 - Format is part of the cache key and `/cached-image` returns `Vary: Accept`, so WebP and fallback representations cannot collide.
 - Browser responses include cache headers, ETags, Last-Modified, range support and immediate stale fallback with a one-minute browser lifetime while a bounded refresh is queued.
 - Resized image fetches now use a bounded temporary source file instead of a `MemoryStream`, reducing managed byte-array pressure for large remote posters.
-- Deployment updates should use `deploy/Publish-PremiereCalendar.ps1` so the hosted `App_Data` folder is preserved. The local calendar and image caches are runtime data, not publish artifacts.
+- Deployment updates replace the digest-pinned container image and keep the `app-data` volume (`/app/App_Data`) and the PostgreSQL volume, as described in [Docker and PostgreSQL](DockerAndPostgres.md). The local calendar and image caches are runtime data, not image contents.
 
 Resizing still requires decoded image memory. The app limits source bytes before decode with `ImageCache:MaxBytes`, checks the total decoded frame pixels, and shares the decode limiter across cache instances. Magick.NET replaces ImageSharp and retains JPEG, WebP, animation, and TIFF conversion without a license key.
 

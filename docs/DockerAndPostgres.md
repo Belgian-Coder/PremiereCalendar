@@ -1,6 +1,6 @@
 # Docker and PostgreSQL
 
-PremiereCalendar is PostgreSQL-only and ships only as a Docker container. SQLite, the Windows service and the signed self-updater were removed; `AppDatabase:Provider=Sqlite` and `AppDatabase:Path` now stop startup with a clear error instead of silently starting against an empty database. The configuration is described in [Configuration](Configuration.md#database).
+PremiereCalendar is PostgreSQL-only and ships only as a Docker container. SQLite, the Windows service and the signed self-updater were removed; `AppDatabase:Provider=Sqlite` and `AppDatabase:Path` now stop startup with a clear error instead of silently starting against an empty database. The configuration is described in [Configuration](Configuration.md#application-database).
 
 ## Local development
 
@@ -53,7 +53,7 @@ docker compose run --rm --no-deps app database prepare-legacy-checkpoints
 
 Against a running app container, `docker compose exec app dotnet PremiereCalendar.dll database verify` does the same inside it (`exec` bypasses the entrypoint, so it needs the full command). Never write `docker compose run --rm app dotnet PremiereCalendar.dll ...`: the entrypoint would receive those words as arguments and start a second full application instance. Run `prepare-legacy-checkpoints` only while the app container is stopped.
 
-`verify` checks connectivity, migration history checksums and the schema shape of an initialized database. `prepare-legacy-checkpoints` converts provider-work checkpoints for an offline downgrade to an older release. The earlier SQLite snapshot, restore and `migrate-postgres` commands were removed together with SQLite; installations that still hold a SQLite database must migrate it with the last release that contained the importer before upgrading.
+`verify` checks connectivity, migration history checksums and the schema shape of an initialized database. `prepare-legacy-checkpoints` converts provider-work checkpoints for an offline downgrade to an older release. The earlier SQLite snapshot, restore and `migrate-postgres` commands were removed together with SQLite; installations that still hold a SQLite database must migrate it with v1.2.19, the last release that contained the importer (`dotnet PremiereCalendar.dll database migrate-postgres --source /absolute/source.db`, then `database verify`), before upgrading.
 
 ## Backup and recovery boundary
 
