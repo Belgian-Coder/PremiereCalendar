@@ -67,3 +67,7 @@ secrets.json
 .scratch/
 .worktrees/
 .bench/
+
+# Python bytecode
+__pycache__/
+*.pyc
