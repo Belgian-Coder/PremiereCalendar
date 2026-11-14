@@ -85,6 +85,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
     [Fact]
     public async Task StoppingTheHostDisposesItsDatabaseDataSources()
     {
+        DatabaseConnectionFactory.EnableBuildCounting();
         var factory = CreateFactory();
         var database = _databases[^1];
         using (var client = factory.CreateClient())

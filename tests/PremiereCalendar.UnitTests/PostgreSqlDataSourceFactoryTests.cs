@@ -193,6 +193,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     [Fact]
     public async Task ConcurrentFirstCallsBuildExactlyOneDataSource()
     {
+        DatabaseConnectionFactory.EnableBuildCounting();
         var options = Options($"Host=127.0.0.1;Port=1;Database=concurrent_{Guid.NewGuid():N};Username=app");
         var before = DatabaseConnectionFactory.BuiltFor(options);
         using var gate = new ManualResetEventSlim();
@@ -212,6 +213,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     [Fact]
     public void DisposingOneConfigurationRemovesOnlyItsDataSources()
     {
+        DatabaseConnectionFactory.EnableBuildCounting();
         var disposed = Options($"Host=127.0.0.1;Port=1;Database=dispose_{Guid.NewGuid():N};Username=app");
         var kept = Options($"Host=127.0.0.1;Port=1;Database=keep_{Guid.NewGuid():N};Username=app");
         using (DatabaseConnectionFactory.Create(disposed)) { }
@@ -234,6 +236,44 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
         DatabaseConnectionFactory.Dispose(kept);
         // Disposing something that is not cached is a no-op, and so is disposing twice.
         DatabaseConnectionFactory.Dispose(kept);
+    }
+
+    [Fact]
+    public async Task DisposingWhileADataSourceIsStillBeingBuiltDisposesItOnceTheBuildCompletes()
+    {
+        DatabaseConnectionFactory.EnableBuildCounting();
+        var marker = $"building_{Guid.NewGuid():N}";
+        var options = Options($"Host=127.0.0.1;Port=1;Database={marker};Username=app");
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        // Only builds for this test's database wait, so tests running in parallel are unaffected.
+        DatabaseConnectionFactory.BuildInterceptor = connectionString =>
+        {
+            if (!connectionString.Contains(marker, StringComparison.Ordinal)) return;
+            started.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+        };
+        try
+        {
+            var creator = Task.Run(() => { using var connection = DatabaseConnectionFactory.Create(options); });
+            Assert.True(started.Wait(TimeSpan.FromSeconds(30)), "the build did not start");
+
+            // The key is cached while its value is still being built; disposing it must not skip the unfinished build.
+            var disposer = Task.Run(() => DatabaseConnectionFactory.Dispose(options));
+            release.Set();
+            await Task.WhenAll(creator, disposer);
+        }
+        finally
+        {
+            DatabaseConnectionFactory.BuildInterceptor = null;
+            release.Set();
+        }
+
+        // A caller that raced the disposal either still got a connection from the first data source or transparently
+        // rebuilt one. Either way, every data source that was built has been (or now is) disposed: none is orphaned.
+        DatabaseConnectionFactory.Dispose(options);
+        Assert.True(DatabaseConnectionFactory.BuiltFor(options) >= 1);
+        Assert.Equal(DatabaseConnectionFactory.BuiltFor(options), DatabaseConnectionFactory.DisposedFor(options));
     }
 
     private static async Task ExpectAuthenticationFailureAsync(AppDatabaseOptions options)

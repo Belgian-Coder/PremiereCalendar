@@ -17,7 +17,16 @@ internal static class DatabaseConnectionFactory
     public static NpgsqlConnection Create(AppDatabaseOptions options, int? commandTimeoutSeconds = null)
     {
         var key = KeyFor(options, commandTimeoutSeconds);
-        return GetDataSource(key).CreateConnection();
+        try
+        {
+            return GetDataSource(key).CreateConnection();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Dispose(options) removed and disposed the data source between GetDataSource and CreateConnection.
+            // Use after disposal rebuilds the data source, exactly as a call made just after Dispose would.
+            return GetDataSource(key).CreateConnection();
+        }
     }
 
     /// <summary>
@@ -48,21 +57,50 @@ internal static class DatabaseConnectionFactory
     private static void DisposeKey(PostgreSqlDataSourceKey key)
     {
         // TryRemove hands each lazy to exactly one disposer, so host shutdown and process exit cannot dispose twice.
-        if (!PostgreSqlDataSources.TryRemove(key, out var lazy) || !lazy.IsValueCreated) return;
-        try { lazy.Value.Dispose(); }
+        if (!PostgreSqlDataSources.TryRemove(key, out var lazy)) return;
+        // Reading Value waits for a build that is still running on another thread, so a data source that finishes
+        // building after its key was removed is disposed here instead of being orphaned (checking IsValueCreated
+        // would skip it). Every entry is read by the caller that added it right away, so no build is started just
+        // to be disposed, and a failed build rethrows here and is swallowed.
+        try
+        {
+            lazy.Value.Dispose();
+            if (CounterFor(key.ConnectionString, key.PasswordFile) is { } counter) Interlocked.Increment(ref counter.Disposed);
+        }
         catch (Exception) { /* Shutdown must not fail because a pool could not close cleanly. */ }
     }
 
     private static readonly ConcurrentDictionary<PostgreSqlDataSourceKey, Lazy<NpgsqlDataSource>> PostgreSqlDataSources = new();
     private static int _shutdownHookRegistered;
-    private static readonly ConcurrentDictionary<(string ConnectionString, string? PasswordFile), int> BuildCounts = new();
+
+    // Test instrumentation only. Null (never allocated, never updated) until a test calls EnableBuildCounting, so the
+    // application never accumulates an entry per configuration it has seen.
+    private static ConcurrentDictionary<(string ConnectionString, string? PasswordFile), BuildCounter>? _buildCounters;
+
+    private sealed class BuildCounter
+    {
+        public int Built;
+        public int Disposed;
+    }
+
+    /// <summary>Test-only. Starts counting data source builds and disposals per configuration; idempotent.</summary>
+    internal static void EnableBuildCounting() => Interlocked.CompareExchange(ref _buildCounters, new(), null);
 
     /// <summary>
-    /// Number of data sources built so far for one configuration (all command-timeout variants). Lets tests prove that
-    /// concurrent callers do not build duplicates and that disposal removes the cached instance.
+    /// Test-only. Number of data sources built for one configuration (all command-timeout variants) since
+    /// <see cref="EnableBuildCounting"/>. Lets tests prove that concurrent callers do not build duplicates and that
+    /// disposal removes the cached instance.
     /// </summary>
-    internal static int BuiltFor(AppDatabaseOptions options)
-        => BuildCounts.GetValueOrDefault((options.ConnectionString.Trim(), PasswordFileOf(options)));
+    internal static int BuiltFor(AppDatabaseOptions options) => CounterFor(options.ConnectionString.Trim(), PasswordFileOf(options))?.Built ?? 0;
+
+    /// <summary>Test-only. Number of data sources disposed for one configuration since <see cref="EnableBuildCounting"/>.</summary>
+    internal static int DisposedFor(AppDatabaseOptions options) => CounterFor(options.ConnectionString.Trim(), PasswordFileOf(options))?.Disposed ?? 0;
+
+    /// <summary>Test-only. Invoked with the connection string at the start of every data source build.</summary>
+    internal static Action<string>? BuildInterceptor { get; set; }
+
+    private static BuildCounter? CounterFor(string connectionString, string? passwordFile)
+        => _buildCounters?.GetOrAdd((connectionString, passwordFile), static _ => new BuildCounter());
 
     private readonly record struct PostgreSqlDataSourceKey(string ConnectionString, string? PasswordFile, int? CommandTimeoutSeconds);
 
@@ -95,6 +133,7 @@ internal static class DatabaseConnectionFactory
 
     private static NpgsqlDataSource BuildPostgreSqlDataSource(PostgreSqlDataSourceKey key)
     {
+        BuildInterceptor?.Invoke(key.ConnectionString);
         var builder = new NpgsqlConnectionStringBuilder(key.ConnectionString)
         {
             Pooling = true,
@@ -125,7 +164,7 @@ internal static class DatabaseConnectionFactory
                 async (_, cancellationToken) => (await File.ReadAllTextAsync(passwordFile, cancellationToken)).TrimEnd('\r', '\n'));
         }
         var dataSource = dataSourceBuilder.Build();
-        BuildCounts.AddOrUpdate((key.ConnectionString, key.PasswordFile), 1, static (_, count) => count + 1);
+        if (CounterFor(key.ConnectionString, key.PasswordFile) is { } counter) Interlocked.Increment(ref counter.Built);
         if (Interlocked.Exchange(ref _shutdownHookRegistered, 1) == 0)
         {
             // Explicit data sources are not tracked by Npgsql's own process-exit pool cleanup. Hosts dispose their own
