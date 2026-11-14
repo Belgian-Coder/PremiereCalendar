@@ -29,7 +29,7 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
 
     [Theory]
     [MemberData(nameof(CompressedProviderClients))]
-    public void ProviderClientsUsePooledCompressingSocketsHandlerWithStableHandlerLifetime(string clientName)
+    public void ProviderClientsUseCompressingSocketsHandlerWithTheDefaultHandlerLifetimeAndCookies(string clientName)
     {
         using var factory = CreateFactory();
 
@@ -37,11 +37,13 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
 
         var sockets = Assert.IsType<SocketsHttpHandler>(primary);
         Assert.Equal(DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli, sockets.AutomaticDecompression);
-        Assert.Equal(TimeSpan.FromMinutes(5), sockets.PooledConnectionLifetime);
-        // Cookies keep the SocketsHttpHandler default instead of being disabled.
+        // The same two minutes as the factory's handler lifetime, exactly like the default primary handler.
+        Assert.Equal(TimeSpan.FromMinutes(2), sockets.PooledConnectionLifetime);
+        // Cookies keep the SocketsHttpHandler default instead of being disabled, and the factory recycles the handler
+        // (and its cookie container) at its default lifetime instead of keeping one container for the whole process.
         Assert.True(sockets.UseCookies);
         Assert.Equal(
-            Timeout.InfiniteTimeSpan,
+            TimeSpan.FromMinutes(2),
             factory.Services.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>().Get(clientName).HandlerLifetime);
     }
 

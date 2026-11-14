@@ -128,14 +128,19 @@ public static class ProviderClientServiceExtensions
         return services;
     }
 
-    /// <summary>Lifetime of a pooled provider connection; bounds how long a stale DNS answer can be reused.</summary>
-    internal static readonly TimeSpan ProviderPooledConnectionLifetime = TimeSpan.FromMinutes(5);
+    /// <summary>
+    /// IHttpClientFactory's default handler lifetime, which the provider clients keep as before the transport was
+    /// introduced. The factory recycles the whole handler chain this often, so a cookie container (cookies stay at the
+    /// SocketsHttpHandler default, enabled) and its connection pool never outlive it.
+    /// </summary>
+    internal static readonly TimeSpan ProviderHandlerLifetime = TimeSpan.FromMinutes(2);
 
     /// <summary>
     /// Shared transport for the JSON/HTML provider clients: negotiates gzip, deflate or Brotli (never zstd, whose
-    /// multi-frame decoding is not trusted yet) and keeps connections pooled across factory handler rotation.
-    /// Decompression strips Content-Length/Content-Encoding from the response seen by the adaptive handler, so body
-    /// completion for those responses relies on end-of-stream rather than a declared length.
+    /// multi-frame decoding is not trusted yet). Handler lifetime and cookies are the factory defaults, exactly as for
+    /// the default primary handler before this transport existed. Decompression strips Content-Length/Content-Encoding
+    /// from the response seen by the adaptive handler, so body completion for those responses relies on end-of-stream
+    /// rather than a declared length.
     /// </summary>
     internal static IHttpClientBuilder ConfigureProviderTransport(
         this IHttpClientBuilder builder, long maxResponseBytes = ProviderResponseLimits.DefaultMaxBytes) => builder
@@ -143,15 +148,15 @@ public static class ProviderClientServiceExtensions
         // accounting by the handler below, which learns the limit from the request options.
         .ConfigureHttpClient(client => client.MaxResponseContentBufferSize = maxResponseBytes)
         .AddHttpMessageHandler(() => new ProviderResponseLimitHandler(maxResponseBytes))
-        .ConfigurePrimaryHttpMessageHandler(CreateProviderPrimaryHandler)
-        // Connection rotation is owned by PooledConnectionLifetime; recycling the whole handler chain every two
-        // minutes would only discard warm connections and TLS sessions.
-        .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
+        // No SetHandlerLifetime: the default two minutes applies, so the handler (and with it the cookie container)
+        // is recycled periodically. An infinite lifetime would keep one cookie container for the whole process.
+        .ConfigurePrimaryHttpMessageHandler(CreateProviderPrimaryHandler);
 
     internal static SocketsHttpHandler CreateProviderPrimaryHandler() => new()
     {
         AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
-        PooledConnectionLifetime = ProviderPooledConnectionLifetime
+        // The factory's own default primary handler pools connections for as long as it keeps the handler.
+        PooledConnectionLifetime = ProviderHandlerLifetime
         // Cookies keep SocketsHttpHandler's default (enabled), as the clients behaved before this transport was introduced.
     };
 

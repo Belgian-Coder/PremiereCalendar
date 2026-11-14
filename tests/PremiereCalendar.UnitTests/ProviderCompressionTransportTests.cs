@@ -32,7 +32,9 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         using var handler = ProviderClientServiceExtensions.CreateProviderPrimaryHandler();
 
         Assert.Equal(DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli, handler.AutomaticDecompression);
-        Assert.Equal(TimeSpan.FromMinutes(5), handler.PooledConnectionLifetime);
+        // As the factory's default primary handler: connections live as long as the (two minute) handler.
+        Assert.Equal(TimeSpan.FromMinutes(2), ProviderClientServiceExtensions.ProviderHandlerLifetime);
+        Assert.Equal(ProviderClientServiceExtensions.ProviderHandlerLifetime, handler.PooledConnectionLifetime);
         // Cookies keep the SocketsHttpHandler default instead of being silently disabled.
         Assert.True(handler.UseCookies);
         Assert.True(handler.AllowAutoRedirect);
@@ -90,17 +92,41 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ProviderTransportKeepsCookiesBetweenRequestsLikeTheDefaultHandler()
+    public async Task ProviderTransportKeepsCookiesOnlyWithinOneHandlerAndTheFactoryRecyclesItLikeTheDefault()
     {
         await using var server = new LoopbackServer("identity", Encoding.UTF8.GetBytes("{}"), "session=abc123; Path=/");
-        using var client = new HttpClient(ProviderClientServiceExtensions.CreateProviderPrimaryHandler());
+        using (var client = new HttpClient(ProviderClientServiceExtensions.CreateProviderPrimaryHandler()))
+        {
+            using (await client.GetAsync(server.Url)) { }
+            using (await client.GetAsync(server.Url)) { }
+        }
 
-        using (await client.GetAsync(server.Url)) { }
-        using (await client.GetAsync(server.Url)) { }
+        // The factory replaces the handler every ProviderHandlerLifetime, which discards its cookie container.
+        using (var recycled = new HttpClient(ProviderClientServiceExtensions.CreateProviderPrimaryHandler()))
+        {
+            using (await recycled.GetAsync(server.Url)) { }
+        }
 
-        Assert.Equal(2, server.AllRequestHeaders.Count);
+        Assert.Equal(3, server.AllRequestHeaders.Count);
         Assert.DoesNotContain("Cookie:", server.AllRequestHeaders[0], StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Cookie: session=abc123", server.AllRequestHeaders[1], StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Cookie:", server.AllRequestHeaders[2], StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ProviderClientsKeepTheFactoryDefaultHandlerLifetimeSoACookieContainerCannotOutliveItsHandler()
+    {
+        var services = new ServiceCollection();
+        services.AddHttpClient("plain");
+        services.AddHttpClient("provider").ConfigureProviderTransport();
+        using var provider = services.BuildServiceProvider();
+        var options = provider.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<Microsoft.Extensions.Http.HttpClientFactoryOptions>>();
+
+        var baseline = options.Get("plain").HandlerLifetime;
+
+        Assert.Equal(TimeSpan.FromMinutes(2), baseline);
+        Assert.Equal(baseline, options.Get("provider").HandlerLifetime);
+        Assert.NotEqual(Timeout.InfiniteTimeSpan, options.Get("provider").HandlerLifetime);
     }
 
     [Fact]
