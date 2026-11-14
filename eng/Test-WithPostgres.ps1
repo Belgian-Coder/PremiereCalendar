@@ -64,9 +64,10 @@ $postgresImage = $Matches[1]
 
 $wsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
 function Invoke-Wsl([string] $Script) {
-    # The script travels base64-encoded so no quoting layer can alter it.
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Script -replace "`r`n", "`n")))
-    & $wsl -d Ubuntu-24.04 -- bash -c "echo $encoded | base64 -d | bash -s" | Out-Host
+    # The script travels over stdin: no quoting layer can alter it, and (unlike a command-line argument) it is not
+    # visible in any process list. It may contain the throwaway password.
+    # PowerShell terminates piped text with CRLF; a trailing comment line absorbs that stray carriage return.
+    ((($Script -replace "`r`n", "`n").TrimEnd()) + "`n# end of script") | & $wsl -d Ubuntu-24.04 -- bash -s | Out-Host
     return [int] $LASTEXITCODE
 }
 
@@ -78,6 +79,11 @@ $network = "pcpg-net-$runId"
 $server = "pcpg-db-$runId"
 $password = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLowerInvariant()
 $subnetOctet = Get-Random -Minimum 1 -Maximum 250
+# The password reaches the containers through owner-only env-files inside the WSL distribution, never through a
+# `-e NAME=secret` argument (those are visible in process lists). Each container gets only the variables it needs.
+# Both files are always deleted below.
+$dbEnvFile = "/tmp/pcpg-env-$runId-db"
+$testEnvFile = "/tmp/pcpg-env-$runId-test"
 
 $projectList = ($Project | ForEach-Object { "tests/PremiereCalendar.$_/PremiereCalendar.$_.csproj" }) -join ' '
 $testArguments = @('-c', $Configuration, '--nologo') + $ExtraTestArguments
@@ -99,6 +105,9 @@ $innerEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($inner
 
 $startScript = @"
 set -u
+umask 077
+printf 'POSTGRES_PASSWORD=%s\nPGPASSWORD=%s\n' '$password' '$password' > '$dbEnvFile'
+printf 'PC_TEST_PASSWORD=%s\n' '$password' > '$testEnvFile'
 docker image inspect '$DevImage' >/dev/null 2>&1 || { echo "Image $DevImage not found. Build it first: pwsh -File $root\eng\wsl-docker.ps1 -Action build" >&2; exit 20; }
 docker volume inspect '$NugetVolume' >/dev/null 2>&1 || { echo "Docker volume $NugetVolume not found (run eng\wsl-docker.ps1 -Action build once)." >&2; exit 21; }
 created=0
@@ -108,7 +117,7 @@ for attempt in 0 1 2 3 4 5; do
 done
 [ "`$created" = 1 ] || { echo 'Could not create a Docker network with an explicit 10.141.x.0/24 subnet.' >&2; exit 22; }
 docker run -d --name '$server' --network '$network' --cpus=2 --tmpfs /var/lib/postgresql \
-  -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=postgres -e POSTGRES_PASSWORD='$password' \
+  --env-file '$dbEnvFile' -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=postgres \
   '$postgresImage' -c max_connections=300 >/dev/null || exit 23
 ready=0
 for i in `$(seq 1 90); do
@@ -118,18 +127,19 @@ done
 [ "`$ready" = 1 ] || { echo 'The throwaway PostgreSQL server did not become ready.' >&2; docker logs --tail 40 '$server' >&2; exit 24; }
 # pg_isready can pass during the image's init-time restart; wait until a TCP login works on the final server.
 for i in `$(seq 1 30); do
-  docker exec -e PGPASSWORD='$password' '$server' psql -h 127.0.0.1 -U premierecalendar -d postgres -Atc 'select 1' >/dev/null 2>&1 && break
+  docker exec --env-file '$dbEnvFile' '$server' psql -h 127.0.0.1 -U premierecalendar -d postgres -Atc 'select 1' >/dev/null 2>&1 && break
   sleep 1
 done
 docker run --rm --network '$network' --cpus=$Cpus -v '$wslRoot':/src -v '$NugetVolume':/root/.nuget/packages $buildMount -w /src \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
   -e PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE=/tmp/pc-test-postgres-password \
-  -e PC_TEST_PASSWORD='$password' -e PC_INNER_SCRIPT='$innerEncoded' '$DevImage' sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s'
+  --env-file '$testEnvFile' -e PC_INNER_SCRIPT='$innerEncoded' '$DevImage' sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s' </dev/null
 "@
 
 $stopScript = @"
 docker rm -f '$server' >/dev/null 2>&1
 docker network rm '$network' >/dev/null 2>&1
+rm -f '$dbEnvFile' '$testEnvFile'
 exit 0
 "@
 
