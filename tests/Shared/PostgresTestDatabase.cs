@@ -107,7 +107,18 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
         const string? template = null;
 #endif
         await CreateDatabaseAsync(server, name, template);
-        return new PostgresTestDatabase(name, application, server.PasswordFile, server.Password);
+        var database = new PostgresTestDatabase(name, application, server.PasswordFile, server.Password);
+#if POSTGRES_TEST_INPROCESS
+        if (template is not null)
+        {
+            // Replaying the migrations used to leave an open, authenticated connection in the application's pool, so the
+            // first query of a test never paid for establishing one. Keep that: several tests give their first database
+            // read a few hundred milliseconds.
+            try { await using var warm = await database.OpenAsync(); }
+            catch { await database.DisposeAsync(); throw; }
+        }
+#endif
+        return database;
     }
 
     /// <summary>Wraps an existing database of the configured server (used for the template; nothing is created or dropped here).</summary>
