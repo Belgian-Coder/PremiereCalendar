@@ -116,6 +116,8 @@ docker() {
             $calls = Get-Content (Join-Path $sandbox 'docker-calls.txt')
             Assert-Harness (@($calls | Where-Object { $_ -eq 'rm -f' }).Count -eq 2) 'Runner/database cleanup did not execute on exit.'
             Assert-Harness ($calls[-1] -eq 'network rm') 'Network cleanup did not execute on exit.'
+            # The sandbox is this test's own: remove it so repeated runs leave nothing behind.
+            if ($sandbox.StartsWith((Join-Path $root 'artifacts/harness-tests') + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $sandbox -Recurse -Force }
         }
     } else { Write-Warning 'Git Bash is absent: generated bash syntax validation was not performed.' }
 } finally {
