@@ -4,7 +4,7 @@ Reads the application's detailed performance traces (NDJSON, plain or gzip) and 
 
 .DESCRIPTION
 Works from any folder. The default -LogDirectory is where a local Development launch writes its traces (the
-PremiereCalendar.LocalData directory next to the checkout). For the installed container pass the NAS share, for
+.local-data directory inside this checkout). For the installed container pass the NAS share, for
 example \\NAS\Docker\PremiereCalendar\app-data\logs\performance (read-only use).
 
 .EXAMPLE
@@ -12,7 +12,7 @@ pwsh -File D:\Projects\PremiereCalendar\eng\Read-CalendarPerformance.ps1 -Summar
 #>
 [CmdletBinding()]
 param(
-    [string] $LogDirectory = ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\PremiereCalendar.LocalData\logs\performance'))),
+    [string] $LogDirectory = ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\.local-data\logs\performance'))),
     [guid] $LoadId = [guid]::Empty,
     [guid] $JobId = [guid]::Empty,
     [guid] $InstanceId = [guid]::Empty,
