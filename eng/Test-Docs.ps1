@@ -132,7 +132,8 @@ foreach ($file in $markdown) {
         foreach ($m in [regex]::Matches($line, '`([^`\r\n]+)`')) {
             $span = $m.Groups[1].Value.Trim()
             if ($span -notmatch '^[A-Za-z0-9_.\-/\\]+\.(ps1|py|sh|md|yaml|yml|json|csproj|cs|razor|sql|props|slnx)$') { continue }
-            if ($span -match '^(App_Data|\.secrets|appsettings|launchSettings|release-config|source-|build-metadata)' -or $span -match '^[A-Za-z]:' -or $span.StartsWith('/')) { continue }
+            # Runtime or evidence locations (UNC shares, other drives, release-bundle files, container paths) are not repository paths.
+            if ($span -match '^(App_Data|\.secrets|appsettings|launchSettings|release-config|source-|build-metadata|installed[\\/]|operations[\\/]|nas-docs[\\/])' -or $span -match '^[A-Za-z]:' -or $span.StartsWith('/') -or $span.StartsWith('\\')) { continue }
             if ($span -notmatch '[/\\]') {
                 # A bare file name is only checked when it names a top-level repository file.
                 if ($span -match '^(README\.md|AGENTS\.md|compose[A-Za-z.]*\.yaml|global\.json|Directory\.Build\.props|PremiereCalendar\.slnx)$' -and
