@@ -14,28 +14,23 @@ works inside a git worktree). It reports an error for:
   * a backticked repository path (for example `eng/Foo.ps1`) that does not exist, in the maintained documents;
   * a script reference of the form PSScriptRoot-relative file name that does not exist, in eng/**;
   * stale statements in the maintained documents: SQLite or the Windows service/installer/updater described as
-    usable, GitHub Actions presented as the release path, `dotnet test` outside a <!-- TEST-COMMANDS --> block.
+    usable, GitHub Actions presented as the release path, `dotnet test` run on the Windows host (it is allowed only when the line says it runs in the container).
 
 Historical evidence (docs/releases/**, dated documents such as *-20261107.md, and the validation records listed in
 $EvidenceDocuments) is only checked for broken links and absolute D:\Projects\PremiereCalendar paths; the
 statements in them describe the past.
 
-.PARAMETER ListMarkers
-Also lists every <!-- TEST-COMMANDS --> marker (file and line) so the owner can find the places that need the
-new test commands.
-
 .EXAMPLE
-pwsh -File D:\Projects\PremiereCalendar\eng\Test-Docs.ps1 -ListMarkers
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-Docs.ps1
 #>
 [CmdletBinding()]
-param([switch] $ListMarkers)
+param()
 
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $rootPrefix = $root.TrimEnd('\') + '\'
 # Git-ignored evidence (artifacts/**, sibling build folders) lives only in the primary checkout, not in a worktree.
 $mainRoot = if ($root -match '^(.*)\\\.worktrees\\[^\\]+$') { $Matches[1] } else { $root }
-$markerText = 'TEST-COMMANDS'
 
 # Undated documents that record past validation runs or designs; they are checked for links only.
 $EvidenceDocuments = @(
@@ -73,18 +68,15 @@ $markdown = @(Get-Item -LiteralPath (Join-Path $root 'README.md'), (Join-Path $r
 $markdown += @(Get-ChildItem -LiteralPath (Join-Path $root 'docs') -Filter '*.md' -File -Recurse)
 $markdown += @(Get-ChildItem -LiteralPath (Join-Path $root 'eng') -Filter '*.md' -File -Recurse -ErrorAction SilentlyContinue)
 
-$markers = [Collections.Generic.List[string]]::new()
 foreach ($file in $markdown) {
     $relative = Get-RelativePath $file.FullName
     $isEvidence = $relative -like 'docs/releases/*' -or $file.Name -match '-\d{8}' -or ($relative -like 'docs/*' -and $EvidenceDocuments -contains $file.Name)
     $lines = [IO.File]::ReadAllLines($file.FullName)
     $directory = Split-Path -Parent $file.FullName
     $inFence = $false
-    $lastMarker = -100
     for ($i = 0; $i -lt $lines.Length; $i++) {
         $line = $lines[$i]
         $number = $i + 1
-        if ($line -match $markerText) { $lastMarker = $number; $markers.Add("${relative}:${number}") }
         if ($line -match '^\s*(```|~~~)') { $inFence = -not $inFence }
 
         # Links and images: [text](target) and ![alt](target); skip external, mail and in-page links handled below.
@@ -156,7 +148,7 @@ foreach ($file in $markdown) {
         if ($line -match '(?i)sqlite' -and $line -notmatch "(?i)$allowed") { Add-Problem $file.FullName $number 'SQLite is mentioned without saying it was removed' }
         if ($line -match '(?i)windows service|self-?updat|installer|update manifest' -and $line -notmatch "(?i)$allowed") { Add-Problem $file.FullName $number 'removed Windows-service/installer/updater material is described as usable' }
         if ($line -match '(?i)github actions|workflow_dispatch|\.github/workflows' -and $line -notmatch "(?i)$allowed|do not use|not be used|without running") { Add-Problem $file.FullName $number 'GitHub Actions presented as part of the build or release path' }
-        if ($line -match 'dotnet test' -and ($number - $lastMarker) -gt 8 -and -not ($relative -eq 'docs/Releasing.md')) { Add-Problem $file.FullName $number "'dotnet test' without a $markerText marker nearby" }
+        if ($line -match 'dotnet test' -and $line -notmatch '(?i)container|global\.json|Microsoft\.Testing|--filter-class|never|inside|not' -and $relative -ne 'docs/Releasing.md') { Add-Problem $file.FullName $number "'dotnet test' without saying it runs in the container" }
     }
 }
 
@@ -176,10 +168,6 @@ foreach ($script in $scripts) {
     }
 }
 
-if ($ListMarkers) {
-    Write-Host "$markerText markers ($($markers.Count)):"
-    $markers | ForEach-Object { Write-Host "  $_" }
-}
 if ($errors.Count -gt 0) {
     $errors | ForEach-Object { Write-Host $_ -ForegroundColor Red }
     throw "$($errors.Count) documentation problem(s) found."

@@ -146,12 +146,11 @@ Scans the exported archive (the exact bytes that will be deployed) with Trivy (v
 
 ## Step 6: tests
 
-<!-- TEST-COMMANDS -->
 ```powershell
 pwsh -File "$rel\Invoke-ReleaseTests.ps1" -Bundle $bundle -ExpectedRevision $commit
 ```
 
-Requires the same clean commit, freezes fingerprints of the tracked source (it fails when a `*.cs` file contains CR characters), runs `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` with its defaults (unit, component and integration projects against a throwaway PostgreSQL), verifies the fingerprints again and writes `test-summary.json` per suite. The runner call and the parsing of its summary lines are isolated in two functions marked TEST-COMMANDS inside the script; if the runner output format changes, adapt them or pass the counts yourself with `-SummaryJson` (a JSON array of `{suite, passed, failed, skipped}`). A focused or partial run cannot satisfy the gates. Tests may run any time before step 8, also before the build.
+Requires the same clean commit, freezes fingerprints of the tracked source (it fails when a `*.cs` file contains CR characters), runs `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` with its defaults (xUnit.net 4 on Microsoft.Testing.Platform: the unit, component and integration suites against a throwaway PostgreSQL), verifies the fingerprints again and writes `test-summary.json` per suite. The counts come from the CTRF JSON files the script writes to `<repo>\TestResults\<timestamp>\` (the TRX files are the fallback, `-SummaryJson` an override); the console log, the CTRF and TRX files are copied into the bundle as `test-run.log` and `tests\*`. A focused or partial run cannot satisfy the gates. Tests may run any time before step 8, also before the build.
 
 ## Step 7: smoke test and restored-backup compatibility
 

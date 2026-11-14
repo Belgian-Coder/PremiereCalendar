@@ -16,7 +16,7 @@ The script starts Docker in the distribution when needed, and the first `up` cre
 
 The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and for running the app outside the container (`dotnet run` or the `launchSettings.json` profiles use `appsettings.Development.json`, which points at that port and reads the password from `.secrets/dev-postgres-password`). The development password lives in the ignored `.secrets` directory. `reset` is destructive only to the named PremiereCalendar development volumes.
 
-Run the automated tests with `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` (or `wsl-docker.ps1 test`), which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)). <!-- TEST-COMMANDS -->
+Run the automated tests with `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` (or `wsl-docker.ps1 test`), which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)).
 
 ## Production container
 

@@ -189,13 +189,12 @@ skipped when it is missing. The script starts a throwaway PostgreSQL container, 
 unit, component and integration tests in the development image, and removes everything
 afterwards (build the development image once with `wsl-docker.ps1 build`):
 
-<!-- TEST-COMMANDS -->
 ```powershell
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 ```
 
-Pass `-Project IntegrationTests` or `-Filter "FullyQualifiedName~ViewSync"` to narrow
-the run. See [Testing](docs/Testing.md) for the environment variables and details.
+Pass `-Suite Unit` (or `Component`, `Integration`, a comma list) or `-Filter ViewSync` to narrow
+the run; results land in the git-ignored `TestResults\<timestamp>` folder. See [Testing](docs/Testing.md) for the environment variables and details.
 Tests use fake providers. They must not call live external services.
 
 Local builds write to the sibling `PremiereCalendar.Build` directory and a

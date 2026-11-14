@@ -73,6 +73,6 @@ $commands = @{
 if ($LASTEXITCODE -ne 0) { throw "WSL Docker action '$Action' failed." }
 
 if ($Action -eq 'test') {
-    # TEST-COMMANDS: the test invocation lives in Test-WithPostgres.ps1; this action only prepares the image and delegates.
+    # The test invocation lives in Test-WithPostgres.ps1; this action only prepares the image and delegates.
     & (Join-Path $PSScriptRoot 'Test-WithPostgres.ps1')
 }

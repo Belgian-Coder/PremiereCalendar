@@ -274,7 +274,6 @@ Automated tests never call live external providers. TMDb, OMDb, TVmaze, Fanart.t
 
 Run all tests with (the tests need PostgreSQL and run in the WSL development image; the Windows host has no matching .NET SDK):
 
-<!-- TEST-COMMANDS -->
 ```powershell
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 ```

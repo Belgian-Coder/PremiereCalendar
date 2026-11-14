@@ -21,7 +21,6 @@ output/**
 **/TestResults
 **/TestResults/**
 tests/**
-!tests/*/*.csproj
 *.png
 # SQLite was removed, but files left by old installations can still sit in working folders. They contain secrets
 # and must never reach a build context or an image.

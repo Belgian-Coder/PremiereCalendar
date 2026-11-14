@@ -7,8 +7,7 @@
     <!-- .NET 11 runtime async: the compiler emits runtime-implemented async
          methods instead of state machines. Opt out with UseRuntimeAsync=false. -->
     <Features Condition="'$(UseRuntimeAsync)' != 'false'">$(Features);runtime-async=on</Features>
-    <!-- Keep routine local build output out of the source checkout. Hosted CI
-         keeps its conventional layout for existing artifact collection. -->
+    <!-- Keep routine local build output out of the source checkout. -->
     <UseArtifactsOutput Condition="'$(UseArtifactsOutput)' == '' and '$(CI)' != 'true'">true</UseArtifactsOutput>
     <ArtifactsPath Condition="'$(ArtifactsPath)' == '' and '$(CI)' != 'true'">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../PremiereCalendar.Build'))</ArtifactsPath>
   </PropertyGroup>

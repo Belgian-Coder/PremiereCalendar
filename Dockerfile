@@ -3,10 +3,6 @@ FROM mcr.microsoft.com/dotnet/sdk:11.0.100-alpine3.24@sha256:52556c0fb9d0f609ae9
 WORKDIR /src
 COPY global.json Directory.Build.props PremiereCalendar.slnx ./
 COPY PremiereCalendar/PremiereCalendar.csproj PremiereCalendar/
-COPY tests/PremiereCalendar.UnitTests/PremiereCalendar.UnitTests.csproj tests/PremiereCalendar.UnitTests/
-COPY tests/PremiereCalendar.ComponentTests/PremiereCalendar.ComponentTests.csproj tests/PremiereCalendar.ComponentTests/
-COPY tests/PremiereCalendar.IntegrationTests/PremiereCalendar.IntegrationTests.csproj tests/PremiereCalendar.IntegrationTests/
-COPY tests/PremiereCalendar.BrowserTests/PremiereCalendar.BrowserTests.csproj tests/PremiereCalendar.BrowserTests/
 RUN dotnet restore PremiereCalendar/PremiereCalendar.csproj --nologo
 COPY PremiereCalendar/ PremiereCalendar/
 ARG VERSION=0.0.0-container
