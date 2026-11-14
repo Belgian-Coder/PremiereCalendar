@@ -23,6 +23,9 @@ public static class HostingExtensions
         });
         services.AddSingleton<IValidateOptions<AppDatabaseOptions>>(new AppDatabaseOptionsValidator(configuration));
         services.AddOptions<AppDatabaseOptions>().Bind(configuration.GetSection("AppDatabase"))
+            // Relative password file paths (appsettings.Development.json) resolve against the content root.
+            .PostConfigure<IServiceProvider>((options, serviceProvider) => options.PasswordFile =
+                AppDatabasePaths.ResolvePasswordFile(options.PasswordFile, serviceProvider.GetService<IHostEnvironment>()?.ContentRootPath))
             .ValidateOnStart();
         services.AddOptions<ImageCacheOptions>().Bind(configuration.GetSection("ImageCache"))
             .Validate(o => !o.Enabled || (o.MaxBytes > 0 && o.MaxConcurrentDownloads > 0 && o.MaxConcurrentDecodes > 0 && o.AllowedHosts.Length > 0 && o.AllowedHosts.All(host => !string.IsNullOrWhiteSpace(host))),

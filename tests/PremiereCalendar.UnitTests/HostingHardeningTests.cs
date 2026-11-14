@@ -164,6 +164,37 @@ public sealed class HostingHardeningTests
         Assert.Throws<OptionsValidationException>(() => AssertStartupValidationSucceeds(provider));
     }
 
+    [Fact]
+    public void A_relative_password_file_resolves_against_the_content_root_not_the_working_directory()
+    {
+        var contentRoot = Path.Combine(Path.GetTempPath(), "premiere-content-root", Guid.NewGuid().ToString("N"), "PremiereCalendar");
+        const string relative = "../.secrets/dev-postgres-password";
+        var services = new ServiceCollection();
+        services.AddSingleton<Microsoft.Extensions.Hosting.IHostEnvironment>(
+            new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { ContentRootPath = contentRoot });
+        services.AddHostingHardening(Configure(new Dictionary<string, string?> { ["AppDatabase:PasswordFile"] = relative }));
+        using var provider = services.BuildServiceProvider();
+
+        var passwordFile = provider.GetRequiredService<IOptions<AppDatabaseOptions>>().Value.PasswordFile;
+
+        Assert.Equal(Path.GetFullPath(Path.Combine(contentRoot, "..", ".secrets", "dev-postgres-password")), passwordFile);
+        Assert.NotEqual(Path.GetFullPath(relative), passwordFile);
+        AssertStartupValidationSucceeds(provider);
+    }
+
+    [Fact]
+    public void An_absolute_or_blank_password_file_is_not_changed_by_the_content_root()
+    {
+        var contentRoot = Path.Combine(Path.GetTempPath(), "premiere-content-root", Guid.NewGuid().ToString("N"));
+        var absolute = Path.Combine(Path.GetTempPath(), "secrets", "postgres_password");
+
+        Assert.Equal(absolute, AppDatabasePaths.ResolvePasswordFile(absolute, contentRoot));
+        Assert.Equal("", AppDatabasePaths.ResolvePasswordFile("", contentRoot));
+        Assert.Equal("", AppDatabasePaths.ResolvePasswordFile("  ", contentRoot));
+        // Without a content root (a bare options object) the value is only trimmed.
+        Assert.Equal("relative/password", AppDatabasePaths.ResolvePasswordFile(" relative/password ", null));
+    }
+
     private const string ValidConnectionString = "Host=localhost;Database=premierecalendar;Username=premierecalendar";
 
     // Every configuration carries a valid PostgreSQL connection string so that a rejection can only come from the

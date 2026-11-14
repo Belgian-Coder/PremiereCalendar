@@ -13,7 +13,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 if (DatabaseCommandLine.IsDatabaseCommand(args))
 {
-    Environment.ExitCode = await DatabaseCommandLine.RunAsync(args, builder.Configuration);
+    Environment.ExitCode = await DatabaseCommandLine.RunAsync(args, builder.Configuration, contentRootPath: builder.Environment.ContentRootPath);
     return;
 }
 

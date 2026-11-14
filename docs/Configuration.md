@@ -135,7 +135,7 @@ PostgreSQL is the only supported database. Configure a password-free Npgsql conn
 }
 ```
 
-`PasswordFile` overrides any password in the connection string and is read whenever a new physical connection is opened, so a rotated secret is picked up without a restart. A missing or unreadable password file stops startup instead of retrying. Never put the database password in committed configuration. See [Docker and PostgreSQL](DockerAndPostgres.md).
+`PasswordFile` overrides any password in the connection string and is read whenever a new physical connection is opened, so a rotated secret is picked up without a restart. A missing or unreadable password file stops startup instead of retrying; once the application is running, a briefly unreadable file is treated like any other transient database failure and retried. A relative `PasswordFile` is resolved against the application's content root (the folder that contains `PremiereCalendar.dll`, or the project folder when run from source), not the working directory. Never put the database password in committed configuration. See [Docker and PostgreSQL](DockerAndPostgres.md).
 
 SQLite was removed; v1.2.19 is the last release that can still import an old SQLite database (`database migrate-postgres --source <absolute-path>`), so migrate before upgrading. `AppDatabase:Provider` is no longer needed (`PostgreSql` is still accepted so existing container configuration keeps working), but any other provider value, such as `Sqlite`, and any `AppDatabase:Path` value fail startup with an explicit error, so a container that still carries SQLite configuration cannot silently start against an empty database. `AppDatabase:MigrationBackupDirectory` and `MigrationBackupRetentionCount` are ignored.
 

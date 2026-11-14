@@ -13,7 +13,8 @@ public static class DatabaseCommandLine
     public static async Task<int> RunAsync(
         string[] args,
         IConfiguration configuration,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? contentRootPath = null)
     {
         using var loggerFactory = LoggerFactory.Create(logging => logging.AddSimpleConsole(options =>
         {
@@ -22,6 +23,7 @@ public static class DatabaseCommandLine
             options.UseUtcTimestamp = true;
         }));
         var databaseOptions = configuration.GetSection("AppDatabase").Get<AppDatabaseOptions>() ?? new AppDatabaseOptions();
+        databaseOptions.PasswordFile = AppDatabasePaths.ResolvePasswordFile(databaseOptions.PasswordFile, contentRootPath);
         var configurationError = AppDatabaseOptionsValidator.Validate(configuration, databaseOptions);
         if (configurationError is not null)
         {

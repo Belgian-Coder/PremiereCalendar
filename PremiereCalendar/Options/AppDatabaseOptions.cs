@@ -6,10 +6,32 @@ namespace PremiereCalendar.Options;
 public sealed class AppDatabaseOptions
 {
     public string ConnectionString { get; set; } = "";
+    /// <summary>
+    /// File that holds the PostgreSQL password. A relative path is resolved against the application's content root (see
+    /// <see cref="AppDatabasePaths.ResolvePasswordFile"/>), never against the working directory.
+    /// </summary>
     public string PasswordFile { get; set; } = "";
     public int RecoveryRetrySeconds { get; set; } = 5;
     public int RecoveryMaximumRetrySeconds { get; set; } = 60;
     public int RecoveryAttemptTimeoutSeconds { get; set; } = 60;
+}
+
+/// <summary>Resolution of the password file path shared by the host and the database command line.</summary>
+internal static class AppDatabasePaths
+{
+    /// <summary>
+    /// A relative password file (for example the development default <c>../.secrets/dev-postgres-password</c>) resolves
+    /// against the content root, like the other relative paths in the configuration, so it does not depend on the folder
+    /// the process was started from. Absolute paths are kept; a blank value means no password file.
+    /// </summary>
+    public static string ResolvePasswordFile(string? passwordFile, string? contentRootPath)
+    {
+        if (string.IsNullOrWhiteSpace(passwordFile)) return "";
+        var trimmed = passwordFile.Trim();
+        return string.IsNullOrWhiteSpace(contentRootPath)
+            ? trimmed
+            : Path.GetFullPath(trimmed, Path.GetFullPath(contentRootPath));
+    }
 }
 
 /// <summary>
