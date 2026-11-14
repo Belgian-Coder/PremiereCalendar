@@ -13,6 +13,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
 {
     private AdaptiveProviderPolicy _policy = null!;
     private PostgresTestDatabase _database = null!;
+    private readonly CapturingLogger _logger = new();
 
     public async Task InitializeAsync()
     {
@@ -21,7 +22,8 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
             new ProviderAdaptiveStateStore(_database.Options),
             TimeProvider.System,
             new PremiereTelemetry(),
-            Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions()));
+            Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions()),
+            logger: _logger);
     }
 
     [Fact]
@@ -177,6 +179,90 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         Assert.Equal(1, snapshot.ConsecutiveFailures);
     }
 
+    [Theory]
+    [InlineData("gzip")]
+    [InlineData("br")]
+    public async Task ADecodedBodyBeyondTheCapIsRecordedAsOversizeAndLogsAWarningWithoutTheQueryString(string encoding)
+    {
+        const long cap = 64 * 1024;
+        await using var server = new LoopbackServer(encoding, CompressZeros(512 * 1024, encoding));
+        using var client = CreateClient("oversize-decoded-" + encoding, cap);
+
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url + "titles/42?apikey=top-secret"));
+
+        AssertOversizeWarning("oversize-decoded-" + encoding, "/titles/42", cap);
+        var snapshot = Assert.Single(_policy.GetSnapshots());
+        Assert.Equal(0, snapshot.ActiveRequests);
+        Assert.Equal(1, snapshot.ConsecutiveFailures);
+    }
+
+    [Fact]
+    public async Task AnUncompressedBodyWhoseContentLengthExceedsTheCapIsRecordedAsOversizeWhenBuffered()
+    {
+        const long cap = 64 * 1024;
+        await using var server = new LoopbackServer("identity", new byte[256 * 1024]);
+        using var client = CreateClient("oversize-declared-buffered", cap);
+
+        // HttpClient used to reject this body itself, which disposed the content and recorded a cancelled "disposed"
+        // request instead of the oversize failure that a decoded body gets.
+        var failure = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url + "library?token=top-secret"));
+
+        Assert.IsType<ProviderResponseTooLargeException>(failure);
+        AssertOversizeWarning("oversize-declared-buffered", "/library", cap);
+        var snapshot = Assert.Single(_policy.GetSnapshots());
+        Assert.Equal(0, snapshot.ActiveRequests);
+        Assert.Equal(1, snapshot.ConsecutiveFailures);
+    }
+
+    [Fact]
+    public async Task AnUncompressedBodyWhoseContentLengthExceedsTheCapIsRecordedAsOversizeWhenStreamed()
+    {
+        const long cap = 64 * 1024;
+        await using var server = new LoopbackServer("identity", new byte[256 * 1024]);
+        using var client = CreateClient("oversize-declared-streamed", cap);
+        using var response = await client.GetAsync(server.Url + "library", HttpCompletionOption.ResponseHeadersRead);
+        // The oversized declared length is not exposed, so HttpClient cannot reject the body before the wrapper does.
+        Assert.Null(response.Content.Headers.ContentLength);
+
+        await Assert.ThrowsAsync<ProviderResponseTooLargeException>(() => response.Content.ReadAsStreamAsync());
+
+        AssertOversizeWarning("oversize-declared-streamed", "/library", cap);
+        var snapshot = Assert.Single(_policy.GetSnapshots());
+        Assert.Equal(0, snapshot.ActiveRequests);
+        Assert.Equal(1, snapshot.ConsecutiveFailures);
+    }
+
+    [Theory]
+    [InlineData("gzip")]
+    [InlineData("identity")]
+    public async Task ARequestCanRaiseItsOwnLimitAboveTheClientDefault(string encoding)
+    {
+        const long clientCap = 64 * 1024;
+        var body = encoding == "identity" ? new byte[256 * 1024] : CompressZeros(256 * 1024, encoding);
+        await using var server = new LoopbackServer(encoding, body);
+        using var client = CreateClient("raised-" + encoding, clientCap);
+        using var request = new HttpRequestMessage(HttpMethod.Get, server.Url);
+        // The outer limit handler only supplies the default; a request-specific limit (SIMKL library pulls) wins.
+        request.Options.Set(ProviderRequestOptions.MaxResponseBytes, 1024 * 1024L);
+
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        await response.Content.CopyToAsync(Stream.Null);
+
+        Assert.Equal(0, Assert.Single(_policy.GetSnapshots()).ActiveRequests);
+        Assert.Equal(1, Assert.Single(_policy.GetSnapshots()).ConsecutiveSuccesses);
+        Assert.Empty(_logger.Warnings);
+    }
+
+    private void AssertOversizeWarning(string provider, string path, long limit)
+    {
+        var warning = Assert.Single(_logger.Warnings);
+        Assert.Contains(provider, warning, StringComparison.Ordinal);
+        Assert.Contains(path, warning, StringComparison.Ordinal);
+        Assert.Contains(limit.ToString(System.Globalization.CultureInfo.InvariantCulture), warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("top-secret", warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("apikey", warning, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task ABodyWithinTheCapIsUnaffected()
     {
@@ -246,6 +332,28 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
     public async Task DisposeAsync()
     {
         if (_database is not null) await _database.DisposeAsync();
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger<AdaptiveProviderPolicy>
+    {
+        private readonly List<string> _warnings = [];
+
+        public IReadOnlyList<string> Warnings
+        {
+            get { lock (_warnings) return [.. _warnings]; }
+        }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel != Microsoft.Extensions.Logging.LogLevel.Warning) return;
+            lock (_warnings) _warnings.Add(formatter(state, exception));
+        }
     }
 
     /// <summary>Single-purpose HTTP/1.1 peer that answers every request with a fixed pre-encoded body.</summary>

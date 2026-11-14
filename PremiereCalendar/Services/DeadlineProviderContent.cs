@@ -45,7 +45,13 @@ internal sealed class DeadlineProviderContent : HttpContent
         _lease = lease;
         _onCompleted = onCompleted;
         _contentLength = inner.Headers.ContentLength;
-        foreach (var header in inner.Headers) Headers.TryAddWithoutValidation(header.Key, header.Value);
+        foreach (var header in inner.Headers)
+        {
+            // HttpClient compares Headers.ContentLength with its buffer limit, so a declared length above the cap is not
+            // copied: the body then fails in this wrapper with the oversize outcome instead (see TryComputeLength).
+            if (DeclaredTooLarge && header.Key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) continue;
+            Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
     }
 
     internal static TaskCanceledException TimeoutException(
@@ -58,7 +64,18 @@ internal sealed class DeadlineProviderContent : HttpContent
     protected override bool TryComputeLength(out long length)
     {
         length = _inner.Headers.ContentLength ?? 0;
-        return _inner.Headers.ContentLength.HasValue;
+        // A declared length above the cap is reported as unknown (and its header is not copied) so that HttpClient does
+        // not reject the body itself, which would dispose this content and record an abandoned "disposed" request.
+        // Reading it then fails here with the same oversize outcome as a decoded body that outgrows the cap.
+        return _inner.Headers.ContentLength.HasValue && !DeclaredTooLarge;
+    }
+
+    private bool DeclaredTooLarge => _maxDecodedBytes != ProviderResponseLimits.Unlimited
+        && _contentLength is { } length && length > _maxDecodedBytes;
+
+    private void ThrowIfDeclaredTooLarge()
+    {
+        if (DeclaredTooLarge) throw new ProviderResponseTooLargeException(_provider, _maxDecodedBytes);
     }
 
     protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
@@ -70,6 +87,7 @@ internal sealed class DeadlineProviderContent : HttpContent
         try
         {
             linked.Token.ThrowIfCancellationRequested();
+            ThrowIfDeclaredTooLarge();
             // The decoded size is capped even when the caller's stream has no limit of its own.
             await using var limited = new LimitedWriteStream(stream, this);
             await _inner.CopyToAsync(_maxDecodedBytes == ProviderResponseLimits.Unlimited ? stream : limited, context, linked.Token).ConfigureAwait(false);
@@ -96,6 +114,7 @@ internal sealed class DeadlineProviderContent : HttpContent
         try
         {
             linked.Token.ThrowIfCancellationRequested();
+            ThrowIfDeclaredTooLarge();
             var stream = await _inner.ReadAsStreamAsync(linked.Token).ConfigureAwait(false);
             linked.Token.ThrowIfCancellationRequested();
             return new DeadlineReadStream(stream, this, cancellationToken);

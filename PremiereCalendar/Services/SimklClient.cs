@@ -215,8 +215,7 @@ public sealed class SimklClient : ISimklClient
         }
 
         var deltaPath = $"sync/all-items/?date_from={Uri.EscapeDataString(state.LastActivitiesAllUtc)}";
-        var delta = await SendTextWithRetryAsync(HttpMethod.Get, deltaPath, settings, cancellationToken);
-        if (delta is null)
+        if (!await PullLibraryAsync(deltaPath, settings, cancellationToken))
         {
             await _stateStore.SaveAsync(state with { LastCheckedUtc = nowUtc }, cancellationToken);
             return new SimklSyncResult(SimklSyncStatus.Failed, state.LastActivitiesAllUtc, "Simkl delta sync failed.");
@@ -350,8 +349,7 @@ public sealed class SimklClient : ISimklClient
     {
         foreach (var path in new[] { "sync/shows", "sync/movies", "sync/anime" })
         {
-            var body = await SendTextWithRetryAsync(HttpMethod.Get, path, settings, cancellationToken);
-            if (body is null)
+            if (!await PullLibraryAsync(path, settings, cancellationToken))
             {
                 return false;
             }
@@ -810,16 +808,43 @@ public sealed class SimklClient : ISimklClient
         catch (HttpRequestException) { return null; }
     }
 
+    /// <summary>
+    /// Pulls a whole library (<c>sync/shows|movies|anime</c> or the all-items delta). Only success matters, so the body is
+    /// drained instead of buffered as a string, and the request raises the decoded size limit because a large library
+    /// can legitimately exceed the 16 MiB default.
+    /// </summary>
+    private async Task<bool> PullLibraryAsync(string path, SimklSourceSettings settings, CancellationToken cancellationToken)
+    {
+        using var request = CreateAuthenticatedRequest(HttpMethod.Get, path, settings);
+        request.Options.Set(ProviderRequestOptions.MaxResponseBytes, ProviderResponseLimits.LibraryPullMaxBytes);
+        try
+        {
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!response.IsSuccessStatusCode) return false;
+            await response.Content.CopyToAsync(Stream.Null, cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
+        catch (OperationCanceledException) { throw; }
+        catch (HttpRequestException) { return false; }
+    }
+
+    private static HttpRequestMessage CreateAuthenticatedRequest(HttpMethod method, string path, SimklSourceSettings settings)
+    {
+        var request = new HttpRequestMessage(method, path);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.AccessToken.Trim());
+        request.Headers.Add("simkl-api-key", settings.ClientId.Trim());
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        return request;
+    }
+
     private async Task<string?> SendTextWithRetryAsync(
         HttpMethod method,
         string path,
         SimklSourceSettings settings,
         CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(method, path);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.AccessToken.Trim());
-        request.Headers.Add("simkl-api-key", settings.ClientId.Trim());
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        using var request = CreateAuthenticatedRequest(method, path, settings);
         try
         {
             using var response = await _httpClient.SendAsync(request, cancellationToken);

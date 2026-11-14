@@ -15,18 +15,32 @@ internal static class ProviderResponseLimits
     /// </summary>
     public const long DefaultMaxBytes = 16L * 1024 * 1024;
 
+    /// <summary>
+    /// Higher decoded cap for the few requests that legitimately return a whole user library. SIMKL's full library
+    /// pulls (<c>sync/shows</c>, <c>sync/movies</c>, <c>sync/anime</c>) carry every watched season and episode of every
+    /// title, which can pass 16 MiB for a large library, so those requests raise their own limit through
+    /// <see cref="ProviderRequestOptions.MaxResponseBytes"/>.
+    /// </summary>
+    public const long LibraryPullMaxBytes = 64L * 1024 * 1024;
+
     public const long Unlimited = long.MaxValue;
 }
 
 internal sealed class ProviderResponseTooLargeException(string provider, long limit)
     : HttpRequestException($"The {provider} response exceeded the decoded size limit of {limit} bytes.");
 
-/// <summary>Tells the adaptive provider handler which decoded size limit applies to a request.</summary>
+/// <summary>
+/// Tells the adaptive provider handler which decoded size limit applies to a request: the client default, unless the
+/// request already carries its own limit (see <see cref="ProviderResponseLimits.LibraryPullMaxBytes"/>).
+/// </summary>
 internal sealed class ProviderResponseLimitHandler(long maxBytes) : DelegatingHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        request.Options.Set(ProviderRequestOptions.MaxResponseBytes, maxBytes);
+        if (!request.Options.TryGetValue(ProviderRequestOptions.MaxResponseBytes, out _))
+        {
+            request.Options.Set(ProviderRequestOptions.MaxResponseBytes, maxBytes);
+        }
         return base.SendAsync(request, cancellationToken);
     }
 }

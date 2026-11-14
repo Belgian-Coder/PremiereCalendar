@@ -14,11 +14,21 @@ public sealed class AdaptiveProviderPolicy(
     TimeProvider timeProvider,
     PremiereTelemetry telemetry,
     IOptions<ProviderSchedulerOptions>? schedulerOptions = null,
-    IOptions<TvmazeOptions>? tvmazeOptions = null)
+    IOptions<TvmazeOptions>? tvmazeOptions = null,
+    ILogger<AdaptiveProviderPolicy>? logger = null)
 {
     private readonly ConcurrentDictionary<string, ProviderRuntimeState> _states = new(StringComparer.OrdinalIgnoreCase);
     private readonly ProviderSchedulerOptions _schedulerOptions = schedulerOptions?.Value ?? new ProviderSchedulerOptions();
     private readonly ProviderPacingLimiter _tvmazePacing = new(timeProvider, tvmazeOptions?.Value.MinimumRequestIntervalMilliseconds ?? 510);
+
+    /// <summary>
+    /// An oversized response surfaces to callers as a generic <see cref="HttpRequestException"/>, so the cap being hit
+    /// is logged here: provider, URL path (never the query string, which can carry credentials) and the limit.
+    /// </summary>
+    internal void LogResponseTooLarge(string provider, string path, long limitBytes)
+        => logger?.LogWarning(
+            "The {Provider} response for {Path} exceeded the decoded size limit of {LimitBytes} bytes and was rejected.",
+            provider, path, limitBytes);
 
     internal Task PaceAsync(string provider, CancellationToken cancellationToken)
         => provider.Equals("tvmaze", StringComparison.OrdinalIgnoreCase) ? _tvmazePacing.WaitAsync(cancellationToken) : Task.CompletedTask;
@@ -654,12 +664,19 @@ public sealed class AdaptiveProviderHandler(
                         }
                         else
                         {
+                            var responseLimit = request.Options.TryGetValue(ProviderRequestOptions.MaxResponseBytes, out var maxResponseBytes)
+                                ? maxResponseBytes : ProviderResponseLimits.Unlimited;
+                            // Captured now: the request may be disposed by the caller before the body finishes.
+                            var requestPath = PathWithoutQuery(request.RequestUri);
                             response.Content = new DeadlineProviderContent(
                                 response.Content, provider, requestTimeout, timeoutSource, timeoutLink,
                                 cancellationToken, result == ProviderExecutionResult.Success ? lease : null,
-                                (bodyResult, reason) => attemptDiagnostics.BodyCompleted(bodyResult, reason, result),
-                                request.Options.TryGetValue(ProviderRequestOptions.MaxResponseBytes, out var maxResponseBytes)
-                                    ? maxResponseBytes : ProviderResponseLimits.Unlimited);
+                                (bodyResult, reason) =>
+                                {
+                                    attemptDiagnostics.BodyCompleted(bodyResult, reason, result);
+                                    if (reason == "oversize") policy.LogResponseTooLarge(provider, requestPath, responseLimit);
+                                },
+                                responseLimit);
                             responseOwnsDeadline = true;
                             responseOwnsLease = result == ProviderExecutionResult.Success;
                         }
@@ -714,6 +731,9 @@ public sealed class AdaptiveProviderHandler(
             }
         }
     }
+
+    private static string PathWithoutQuery(Uri? uri)
+        => uri is null ? "" : uri.IsAbsoluteUri ? uri.AbsolutePath : uri.OriginalString.Split('?', '#')[0];
 
     private static TimeSpan? RetryAfter(HttpResponseMessage response, DateTimeOffset now)
     {

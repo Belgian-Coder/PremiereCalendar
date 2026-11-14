@@ -128,6 +128,35 @@ public sealed class SimklClientIntegrationTests
     }
 
     [Fact]
+    public async Task SyncLibraryAsync_FullLibraryPullsRaiseTheDecodedResponseLimitButActivitiesKeepTheDefault()
+    {
+        var limits = new Dictionary<string, long?>();
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            limits[request.RequestUri!.AbsolutePath] = request.Options.TryGetValue(ProviderRequestOptions.MaxResponseBytes, out var limit)
+                ? limit : null;
+            return request.RequestUri.AbsolutePath == "/sync/activities"
+                ? StubHttpMessageHandler.Json("""{ "all": "2023-10-12T09:03:45Z" }""")
+                : StubHttpMessageHandler.Json("[]");
+        });
+        var stateStore = new FakeSimklSyncStateStore();
+        var client = CreateClient(handler, stateStore);
+
+        await client.SyncLibraryAsync(CancellationToken.None);
+        // The next check finds changed activities and pulls the all-items delta, which can be just as large.
+        stateStore.State = stateStore.State with { LastActivitiesAllUtc = "2023-10-11T09:03:45Z" };
+        await client.SyncLibraryAsync(CancellationToken.None, forceRefresh: true);
+
+        // A large library's shows and episodes can pass the 16 MiB default, so those pulls carry a 64 MiB limit.
+        Assert.Equal(64L * 1024 * 1024, ProviderResponseLimits.LibraryPullMaxBytes);
+        foreach (var path in new[] { "/sync/shows", "/sync/movies", "/sync/anime", "/sync/all-items/" })
+        {
+            Assert.Equal(ProviderResponseLimits.LibraryPullMaxBytes, limits[path]);
+        }
+        Assert.Null(limits["/sync/activities"]);
+    }
+
+    [Fact]
     public async Task SyncLibraryAsync_SubsequentSyncSkipsWhenActivitiesAreUnchanged()
     {
         var stateStore = new FakeSimklSyncStateStore
