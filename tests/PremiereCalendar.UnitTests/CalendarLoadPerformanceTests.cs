@@ -16,7 +16,9 @@ public sealed partial class PremiereServiceTests
     private readonly ITestOutputHelper _evidence;
     public PremiereServiceTests(ITestOutputHelper evidence) => _evidence = evidence;
 
-    [Theory]
+    // A measured benchmark with a time budget ("fresh" must produce its first result within one second): it runs alone,
+    // never beside another test, so the budget measures the code and not the host's current load.
+    [Theory(DisableParallelization = true)]
     [InlineData("fresh")]
     [InlineData("stale")]
     [InlineData("cold")]
