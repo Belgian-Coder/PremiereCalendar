@@ -102,7 +102,8 @@ pwsh -NoProfile -File .\tests\Harness.Tests.ps1
 
 | Change | Feedback | Acceptance before release |
 | --- | --- | --- |
-| Documentation or harness | `Harness.Tests.ps1`, relevant command `-Plan`, diff review | Exercise changed execution paths in a prepared local environment; disclose anything unrun |
+| Instructions/documentation only | Text/reference review and `git diff --check`; no WSL, Docker or unrelated tests | No application qualification needed for prose alone |
+| Executable harness changes | Affected `Harness.Tests.ps1` cases and relevant command `-Plan` | Exercise changed execution paths in a prepared local environment; disclose anything unrun |
 | Pure logic/provider/cache | Relevant unit/integration project plus a focused filter | Complete unit, component and integration suites |
 | Razor/CSS/JavaScript/navigation | App build and relevant component tests; affected browser cases | Complete suites and serial browser performance/accessibility checks |
 | Database, dependency, container or cross-cutting change | Affected integration/project build first | Complete regression, database and exact-image release gates |
