@@ -1,0 +1,114 @@
+{
+  "version": "__PENDING_VERSION__",
+  "bundleName": "__PENDING_BUNDLE_NAME__",
+  "status": "candidate",
+  "releaseDate": "__PENDING_RELEASE_DATE__",
+  "documentationRecordedDate": "__PENDING_RECORDING_DATE__",
+  "previousVersion": "__PENDING_PREVIOUS_VERSION__",
+  "previousBundleName": "__PENDING_PREVIOUS_BUNDLE__",
+  "previousSourceCommit": "__PENDING_PREVIOUS_SOURCE__",
+  "previousImageDigest": "__PENDING_PREVIOUS_IMAGE_DIGEST__",
+  "previousStackRevision": null,
+  "previousInstalledUtc": "__PENDING_PREVIOUS_INSTALL_TIME__",
+  "stackId": 20,
+  "stackRevision": null,
+  "composePath": "/share/Docker/PortainerCE/data/compose/20/v__PENDING_REVISION__/docker-compose.yml",
+  "schemaChanged": null,
+  "sourceCommit": "__PENDING_FINAL_SOURCE_COMMIT__",
+  "imageConfigurationDigest": "__PENDING_EXACT_IMAGE_DIGEST__",
+  "archiveFileName": "__PENDING_ARCHIVE_NAME__",
+  "archiveSha256": "__PENDING_ARCHIVE_SHA256__",
+  "archiveBytes": null,
+  "testCounts": {
+    "unitPassed": null,
+    "componentPassed": null,
+    "integrationPassed": null,
+    "skipped": null
+  },
+  "reviewNote": "__PENDING_STATE_ANY_REVIEW_DEVIATION_OR_REMOVE__",
+  "gates": {
+    "tests": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_RESULT__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__",
+      "sourceCommit": "__PENDING_FINAL_SOURCE_COMMIT__"
+    },
+    "review": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_RESULT__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__",
+      "sourceCommit": "__PENDING_FINAL_SOURCE_COMMIT__"
+    },
+    "security": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_RESULT__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__"
+    },
+    "sbom": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_RESULT__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__"
+    },
+    "exactImage": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_RESULT__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__",
+      "sourceCommit": "__PENDING_FINAL_SOURCE_COMMIT__",
+      "imageConfigurationDigest": "__PENDING_EXACT_IMAGE_DIGEST__"
+    },
+    "backupRestore": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_RESULT__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__"
+    },
+    "backupCompatibility": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_RESULT__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__",
+      "sourceCommit": "__PENDING_FINAL_SOURCE_COMMIT__",
+      "imageConfigurationDigest": "__PENDING_EXACT_IMAGE_DIGEST__"
+    },
+    "persistedSetting": {
+      "status": "not_applicable",
+      "summary": "not applicable",
+      "evidence": "n/a"
+    }
+  },
+  "backup": {
+    "dumpFileName": "__PENDING_DUMP_BASENAME__",
+    "dumpSha256": "__PENDING_DUMP_SHA256__",
+    "dumpBytes": null,
+    "publicReference": "__PENDING_SANITIZED_BACKUP_RECEIPT_REFERENCE__"
+  },
+  "installed": {
+    "activationUtc": "__PENDING_ACTIVATION_UTC__",
+    "stackRevision": null,
+    "appContainerId": "__PENDING_APP_ID__",
+    "composePath": "__PENDING_ACTIVE_COMPOSE_PATH__",
+    "sourceCommit": "__PENDING_INSTALLED_SOURCE__",
+    "imageConfigurationDigest": "__PENDING_INSTALLED_IMAGE__",
+    "schemaVersion": null,
+    "runtime": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_OBSERVATION__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__"
+    },
+    "preservation": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_OBSERVATION__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__"
+    },
+    "browser": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_OBSERVATION__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__"
+    },
+    "nightly": {
+      "status": "pending",
+      "summary": "__PENDING_ACTUAL_OBSERVATION__",
+      "evidence": "__PENDING_SANITIZED_REFERENCE__"
+    }
+  },
+  "publicEvidenceLocation": "__PENDING_CHECKSUMMED_RELEASE_EVIDENCE__",
+  "releaseBehavior": "__PENDING_FINAL_SOURCE_BOUND_BEHAVIOR_NO_UNMEASURED_CLAIMS__"
+}
