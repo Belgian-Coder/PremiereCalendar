@@ -29,18 +29,6 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
     internal static readonly Lazy<ServerConfiguration> Server = new(ReadServerConfiguration);
     private int _disposed;
 
-    /// <summary>
-    /// Many tests create their database synchronously from a constructor (xUnit has no async constructors). Those
-    /// blocked threads must not starve the pool the same databases need to complete their I/O, nor delay the timers
-    /// of unrelated timing-sensitive tests, so the pool starts with generous minimum thread counts.
-    /// </summary>
-    [System.Runtime.CompilerServices.ModuleInitializer]
-    internal static void ConfigureThreadPool()
-    {
-        ThreadPool.GetMinThreads(out var worker, out var io);
-        ThreadPool.SetMinThreads(Math.Max(worker, 64), Math.Max(io, 64));
-    }
-
     private PostgresTestDatabase(string name, NpgsqlConnectionStringBuilder application, string? passwordFile, string? password)
     {
         Name = name;
