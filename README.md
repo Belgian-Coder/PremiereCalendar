@@ -34,13 +34,22 @@ Reusable item metadata and scores are stored in the application database for thr
 
 ## Deploy With Docker
 
-The only supported runtime is the Docker/PostgreSQL stack (there is no Windows service or
-self-updating installer, and no SQLite mode). Pin
-`PREMIERECALENDAR_IMAGE` to an accepted immutable GHCR digest, provide the
+The only supported runtime is the Docker/PostgreSQL stack. There is no Windows service,
+installer or self-updater, and no SQLite mode. A database that still lives in an old
+SQLite installation must first be migrated with v1.2.19, the last release that can
+import it (see [Docker and PostgreSQL](docs/DockerAndPostgres.md#database-commands)).
+
+Pin `PREMIERECALENDAR_IMAGE` to an accepted immutable image digest (the image ID of the
+archive produced by the local release process, or a registry digest), provide the
 PostgreSQL password through the configured Docker secret file, and start
 `compose.yaml` with Docker Compose. The app binds to loopback port `18084`
 by default; publish it to the trusted private network through the documented
 reverse proxy.
+
+The household installation is a Portainer stack on the NAS (stack 20, endpoint 2)
+with automatic PostgreSQL backups. Updating it means deploying a new digest-pinned
+image through the local release process in [Releasing](docs/Releasing.md); the
+PostgreSQL volume, application data and backups are always preserved.
 
 If TMDb settings are missing, the calendar automatically opens Settings and shows a setup notice until the required token is saved.
 
@@ -76,10 +85,10 @@ Premiere Calendar has no built-in user login. Keep the service on a trusted LAN 
 Local development is container-only: Docker Engine runs inside Ubuntu 24.04 on WSL, and Compose supplies both the app SDK and a dedicated PostgreSQL database. No host .NET or PostgreSQL installation is required for the development workflow.
 
 ```powershell
-.\eng\wsl-docker.ps1 up
+pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 up
 ```
 
-Open `http://localhost:5299`. Use `test`, `logs`, `down`, or `reset` as the action when needed. `reset` removes only the PremiereCalendar development containers and named development volumes. The development database listens on `127.0.0.1:55432`, so a locally started app (Development environment, `launchSettings.json` profiles) connects to it with the password in `.secrets/dev-postgres-password`; see [Configuration](docs/Configuration.md#application-database).
+Open `http://localhost:5299`. The first `up` creates the ignored development password file `.secrets/dev-postgres-password`. Use `build`, `test`, `logs`, `down`, or `reset` as the action when needed. `reset` removes only the PremiereCalendar development containers and named development volumes. The development database listens on `127.0.0.1:55432`, so a locally started app (Development environment, `launchSettings.json` profiles) connects to it with the password in `.secrets/dev-postgres-password`; see [Configuration](docs/Configuration.md#application-database).
 
 See [Docker and PostgreSQL](docs/DockerAndPostgres.md) for production Compose, migration, health, security, backup, and recovery details. The Docker/PostgreSQL stack is the only deployment.
 
@@ -155,7 +164,7 @@ The database retains item metadata and scores for three calendar months since la
 
 Use Update when you want to reuse fresh local cache where possible. Use Refresh sources when you want the visible week checked against providers again. Refresh sources keeps useful existing data where possible and fills in changes or missing details. TMDb, TVmaze, and SIMKL have change/activity endpoints; the app records those checks so later cache decisions have dates to compare against. IMDb scores come from the daily IMDb dataset, not a per-item change API.
 
-Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, settings backup/restore box, score backfill, and missing-ID repair. Updating means deploying a new digest-pinned container image. Builds, tests, scans and releases run locally. GitHub Actions must not be used, including manual dispatches; both hosted workflows are disabled. GitHub may host source and published artifacts without running CI.
+Settings includes a Local status center with a cache inspector, background job timeline, source health drilldown, settings backup/restore box, score backfill, and missing-ID repair. Updating means deploying a new digest-pinned container image (see [Releasing](docs/Releasing.md)).
 
 ## Common Problems
 
@@ -174,10 +183,13 @@ More help: [Troubleshooting](docs/Troubleshooting.md).
 
 ## Test It
 
-Every test runs against PostgreSQL; none are skipped when it is missing. The script
-starts a throwaway PostgreSQL container, runs the unit, component and integration
-tests in the development image, and removes everything afterwards:
+The Windows host has no .NET SDK that matches `global.json` (11.0.100), so build and test
+always run inside Linux containers in WSL. Every test runs against PostgreSQL; none are
+skipped when it is missing. The script starts a throwaway PostgreSQL container, runs the
+unit, component and integration tests in the development image, and removes everything
+afterwards (build the development image once with `wsl-docker.ps1 build`):
 
+<!-- TEST-COMMANDS -->
 ```powershell
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 ```
@@ -190,19 +202,39 @@ Local builds write to the sibling `PremiereCalendar.Build` directory and a
 Development launch writes its caches and logs to the sibling
 `PremiereCalendar.LocalData` directory (its database is the Compose development
 PostgreSQL). This keeps generated and mutable files out of the checkout. Production
-containers keep their explicitly configured storage layouts.
+containers keep their explicitly configured storage layouts. Scratch worktrees and
+benchmark folders belong inside the checkout under the ignored `.worktrees`,
+`.scratch` and `.bench` directories.
 
 Check workspace hygiene after local work, or remove all known generated files
 and the shared local build output:
 
 ```powershell
-.\eng\Workspace-Maintenance.ps1 -Mode Check
-.\eng\Workspace-Maintenance.ps1 -Mode Clean
+pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Check
+pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Clean
 ```
 
 The check fails if generated files return inside the checkout, the shared build
 directory exceeds 1.5 GB, or Development data exceeds 512 MB. A deliberate
 local-data reset is available with `-Mode Clean -RemoveDevelopmentData`.
+
+Before committing documentation or script changes, check that every relative link and
+referenced script path exists and that every PowerShell and Python script parses:
+
+```powershell
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-Docs.ps1
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-ScriptSyntax.ps1
+```
+
+## Build And Release
+
+Builds, tests, vulnerability scans, SBOM generation and container publication run
+locally. GitHub Actions and hosted CI must not be used, including manual
+dispatches; both hosted workflows stay disabled. GitHub may host source and published
+artifacts without running CI. The scripted end-to-end release (fresh NAS backup,
+isolated restore check, build, NuGet audit, scan and SBOM, tests, smoke test, image
+load, deployment by digest through Portainer, verification, closure) is in
+`eng/release` and described in [Releasing](docs/Releasing.md).
 
 ## More Documentation
 
@@ -218,3 +250,4 @@ Technical references:
 - [Installed selective-cache validation and service totals](docs/CacheRefreshLiveValidation-20261103.md)
 - [Testing](docs/Testing.md)
 - [Docker and PostgreSQL](docs/DockerAndPostgres.md)
+- [Releasing](docs/Releasing.md)

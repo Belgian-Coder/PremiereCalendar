@@ -272,10 +272,11 @@ GET /health
 
 Automated tests never call live external providers. TMDb, OMDb, TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, Wikimedia, Sonarr, and Radarr behavior uses fake HTTP handlers, test doubles, and fixture JSON.
 
-Run all tests with:
+Run all tests with (the tests need PostgreSQL and run in the WSL development image; the Windows host has no matching .NET SDK):
 
+<!-- TEST-COMMANDS -->
 ```powershell
-dotnet test
+pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 ```
 
 The test layers are:

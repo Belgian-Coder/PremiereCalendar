@@ -36,7 +36,7 @@ See [speed and reliability validation](SpeedReliabilityValidation.md) for the co
 
 ## .NET 11 Notes
 
-The app targets `net11.0` and `global.json` pins .NET SDK `11.0.100-rc.3.26522.148`. November 5 validation uses the pinned SDK in the existing local WSL Docker build container; build outputs stay in the sibling build volume and ignored local artifacts. The historical Windows compatibility build is self-contained.
+The app targets `net11.0` and `global.json` pins .NET SDK `11.0.100` (the GA release, rolling forward only to later feature bands). The compiler's runtime-async feature is on through `Directory.Build.props` (`-p:UseRuntimeAsync=false` opts out). Builds and tests run in the pinned SDK image inside the local WSL Docker engine because the Windows host has no matching SDK; build outputs stay in the sibling build directory and ignored local artifacts. November 5 validation used the then-current release-candidate SDK. The historical Windows compatibility build was self-contained and no longer exists.
 
 The .NET 11 release notes drove the current dense-list change:
 

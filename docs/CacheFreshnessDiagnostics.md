@@ -4,10 +4,10 @@ Detailed performance logging runs automatically. The application records item de
 
 ## Read a recent session
 
-Run from the repository in PowerShell. Choose an explicit UTC cutoff and, when available, the process instance ID from a performance-log filename:
+Run in PowerShell 7 (the full path works from any folder). Choose an explicit UTC cutoff and, when available, the process instance ID from a performance-log filename:
 
 ```powershell
-./eng/Read-CalendarPerformance.ps1 `
+& D:\Projects\PremiereCalendar\eng\Read-CalendarPerformance.ps1 `
   -LogDirectory '\\NAS\Docker\PremiereCalendar\app-data\logs\performance' `
   -SinceUtc '2026-11-03T17:15:00Z' `
   -InstanceId '<instance GUID>' -CacheAudit |
@@ -57,7 +57,7 @@ Availability provenance is separate from clock tracking: an unrelated refresh ca
 The standalone analyzer regression can be run with:
 
 ```powershell
-./tests/PerformanceLogAudit.Tests.ps1
+pwsh -NoProfile -File D:\Projects\PremiereCalendar\tests\PerformanceLogAudit.Tests.ps1
 ```
 
 Its fixture checks load/job correlation, status-coded response counting, explicit retry deadlines, component clearing/reconciliation/rejection evidence, hidden files, malformed tails, truncation and an empty window. It leaves its temporary fixture directory for inspection.

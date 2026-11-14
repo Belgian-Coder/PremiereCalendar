@@ -2,7 +2,7 @@
 
 Normal automated tests must not call live external providers. TMDb, OMDb, TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, Wikimedia, Sonarr, and Radarr behavior must be covered with fake HTTP handlers, test doubles, and JSON fixtures.
 
-Use `dotnet test PremiereCalendar.slnx -c Release -m:1` (with the PostgreSQL variables below set) for acceptance that includes browser timing budgets. Running the memory/CPU-intensive service fixtures concurrently with Playwright can distort those timings. Keep all existing assertions unchanged. See [speed and reliability validation](SpeedReliabilityValidation.md) for the measured workload, PostgreSQL and container evidence, and review results.
+The Windows host has no .NET SDK that matches `global.json`, so `dotnet test` never runs on the host: tests run in the development image inside Ubuntu 24.04 on WSL, through the script described under [Run](#run). For acceptance that includes browser timing budgets, run the projects one at a time; running the memory/CPU-intensive service fixtures concurrently with Playwright can distort those timings. Keep all existing assertions unchanged. See [speed and reliability validation](SpeedReliabilityValidation.md) for the measured workload, PostgreSQL and container evidence, and review results. <!-- TEST-COMMANDS -->
 
 ## Layers
 
@@ -80,17 +80,20 @@ Component tests cover Blazor rendering:
 
 ## Run
 
+<!-- TEST-COMMANDS -->
 ```powershell
+pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 build
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 ```
 
-Every test runs against PostgreSQL (SQLite no longer exists). The script starts a throwaway `postgres` container (the digest-pinned image from `compose.yaml`, data on tmpfs, `max_connections=300`) on a private Docker network with an explicit `10.141.x.0/24` subnet, runs `dotnet test` for the unit, component and integration projects inside `premierecalendar-dev-app:latest` (build it once with `eng\wsl-docker.ps1 build`) and always removes the server and the network. It works from any folder. Useful switches: `-Project IntegrationTests`, `-Filter "FullyQualifiedName~ViewSync"`, `-NoRuntimeAsync`, `-BuildVolume <docker volume>` for incremental builds.
+Every test runs against PostgreSQL (SQLite no longer exists). The script starts a throwaway `postgres` container (the digest-pinned image from `compose.yaml`, data on tmpfs, `max_connections=300`) on a private Docker network with an explicit `10.141.x.0/24` subnet, runs `dotnet test` for the unit, component and integration projects inside `premierecalendar-dev-app:latest` (build it once with `wsl-docker.ps1 build`) and always removes the server and the network. It works from any folder. Useful switches: `-Project IntegrationTests`, `-Filter "FullyQualifiedName~ViewSync"`, `-NoRuntimeAsync`, `-BuildVolume <docker volume>` for incremental builds. `wsl-docker.ps1 test` is a shortcut that builds the development image and then runs this script with its defaults. The release process runs the same script and records the outcome (see [Releasing](Releasing.md)).
 
-To run against your own server instead, set `PREMIERECALENDAR_TEST_POSTGRES` to an Npgsql connection string (its database is only used for `CREATE DATABASE`/`DROP DATABASE`) and, when the server needs a password, `PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE` to a file containing it. The development Compose app container already sets both for `docker compose -f compose.dev.yaml run --rm app dotnet test ...`. Use a dedicated test server with `max_connections` of at least 300: tests run in parallel and each test or test class gets its own randomly named database (`tests/Shared/PostgresTestDatabase.cs` creates it and drops it with `DROP DATABASE ... WITH (FORCE)`).
+<!-- TEST-COMMANDS -->
+To run against your own server instead, set `PREMIERECALENDAR_TEST_POSTGRES` to an Npgsql connection string (its database is only used for `CREATE DATABASE`/`DROP DATABASE`) and, when the server needs a password, `PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE` to a file containing it. The development Compose app container already sets both variables for the development database. Use a dedicated test server with `max_connections` of at least 300: tests run in parallel and each test or test class gets its own randomly named database (`tests/Shared/PostgresTestDatabase.cs` creates it and drops it with `DROP DATABASE ... WITH (FORCE)`).
 
 There are no skipped PostgreSQL tests: when `PREMIERECALENDAR_TEST_POSTGRES` is missing, every database-backed test fails with a message that names the variable. One test is skipped on Linux because it depends on Windows file-lock semantics.
 
-`ProviderWorkSchedulerDurabilityTests` covers checkpoint accumulation, failure exclusion, deferred work, independent lease renewal, stale-owner fencing, watcher priority, and bounded progress replay. `CalendarLoadPerformanceTests` uses the real scheduler with both workers occupied for 300 ms and 2,000 deterministic rows split across seven days. It covers cold, fresh, and stale caches. Its `PERFORMANCE` output is retained in TRX results or shown with `--logger 'console;verbosity=detailed'`.
+`ProviderWorkSchedulerDurabilityTests` covers checkpoint accumulation, failure exclusion, deferred work, independent lease renewal, stale-owner fencing, watcher priority, and bounded progress replay. `CalendarLoadPerformanceTests` uses the real scheduler with both workers occupied for 300 ms and 2,000 deterministic rows split across seven days. It covers cold, fresh, and stale caches. Its `PERFORMANCE` output is retained in the test result files or shown with detailed console output (the exact options depend on the test runner invocation). <!-- TEST-COMMANDS -->
 
 The browser fixture deliberately replaces live providers and disables background scheduling. Its desktop/mobile rendering checks complement scheduler-enabled service tests; they do not establish PostgreSQL or live-provider acceptance. See [speed and reliability validation](SpeedReliabilityValidation.md).
 
@@ -118,7 +121,7 @@ After configuring real secrets, run the app and verify:
 - Card provenance explains the date source and missing score or ID reasons.
 - Settings source health lists provider cache state, OMDb state, IMDb state, and recent background jobs.
 - Settings backfill and repair actions complete without changing unrelated weeks.
-- Release acceptance deploys the new digest-pinned image and checks `/health/ready` and `/health/version` (container, database schema and version).
+- Release acceptance deploys the new digest-pinned image and checks `/health/ready` and `/health/version` (container, database schema and version) on both the direct URL and the private HTTPS URL; see [Releasing](Releasing.md).
 
 ## Browser Performance Checks
 
@@ -152,18 +155,18 @@ Additional deployed Playwright validation on 2026-05-19 after filter URL and vie
 - Desktop `/series?week=2026-05-11&day=2026-05-17&seriesScope=new&seriesLang=en,nl` rendered badge `2`, no horizontal overflow, no console errors, and preserved the two-card desktop grid.
 - Desktop `/movies?week=2026-05-11&movieScope=new&movieLang=en` rendered badge `1`, proving unsupported `movieScope` no longer inflates the count.
 - Mobile `390x844` `/series?week=2026-05-11&day=2026-05-17&seriesScope=new&seriesLang=en,nl` rendered badge `2`, no horizontal overflow, and no console errors.
-- Post-deploy health check returned `200 Healthy`; the Windows Service was `Running` with `Automatic` start type.
+- Post-deploy health check returned `200 Healthy`; the then-current Windows service deployment was `Running` with `Automatic` start type (that deployment has since been removed).
 - Regression tests now cover view-sync overview failures so optional sync storage issues do not break Calendar or Settings rendering.
 
-Current automated validation on 2026-05-31 after data-trust diagnostics:
+Historical automated validation on 2026-05-31 after data-trust diagnostics (run directly on the Windows host, which is no longer possible; see [Run](#run) for the current way):
 
-- `dotnet test PremiereCalendar.slnx --no-restore` passed 518 tests.
+- A full solution test run passed 518 tests.
 - New tests cover date semantics, source merge attribution, anomaly detection, score backfill, missing external-ID repair, source health, update evidence, rollback script behavior, provenance rendering, Settings diagnostics, and mobile filter review.
 - Deployed Playwright validation covered desktop `1440x1000` All, Series, Movies, card provenance, Settings diagnostics, command palette, and filter drawer, plus iPhone `390x844` Series, Movies, card provenance, Settings diagnostics, source health, and filter drawer.
 - Browser validation reported no console warnings or errors, no horizontal overflow, no visible command clipping, filter panes within the viewport, and two-column desktop card grids.
 
 
-## Cold discovery and OMDb retry validation â€” 7 November 2026
+## Cold discovery and OMDb retry validation — 7 November 2026
 
 1,905 tests pass: 1,118 unit, 195 component and 592 integration, with one expected
 Linux file-lock skip. PostgreSQL coverage executes in isolated databases.

@@ -11,13 +11,14 @@ Use this page when something looks wrong. Start at the top.
 5. Go back to the calendar.
 6. Click Refresh sources.
 
-If the app is installed as a service, also open:
+On the Docker host, also open the readiness and version pages (port `18084` is the default published loopback port; use the private HTTPS hostname from another computer):
 
 ```text
-http://localhost:5298/health
+http://localhost:18084/health/ready
+http://localhost:18084/health/version
 ```
 
-You should see a healthy response.
+Ready should say Healthy, and the version page should report the database as healthy. A Development launch listens on `http://localhost:5298` (profiles) or `http://localhost:5299` (Compose development stack) instead. To see container logs, use `docker compose logs app database` in the folder with `compose.yaml` (or Portainer on the NAS).
 
 ## Shortcuts
 
@@ -85,19 +86,15 @@ If the cache looks wrong, delete only the affected week under:
 App_Data/cache/calendar
 ```
 
-Installed service data is usually under:
-
-```text
-C:\ProgramData\PremiereCalendar
-```
+In the container the same path is `/app/App_Data/cache/calendar`, which lives on the `app-data` volume (a NAS share on the household stack). Stop the app or delete only the affected week files; never remove the PostgreSQL volume to clear a cache.
 
 ## Settings
 
-The app stores Settings-page values in a local database, not in the browser.
+The app stores Settings-page values in its PostgreSQL database, not in the browser.
 
 ```mermaid
 flowchart LR
-    Settings["Settings page"] --> Db["Local settings database"]
+    Settings["Settings page"] --> Db["PostgreSQL settings tables"]
     Fallback["First-run fallback settings"] --> App["Running app"]
     Db --> App
 ```

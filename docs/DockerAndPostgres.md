@@ -7,25 +7,21 @@ PremiereCalendar is PostgreSQL-only and ships only as a Docker container. SQLite
 Use Ubuntu 24.04 on WSL with Docker Engine and the Compose plugin installed inside the distribution:
 
 ```powershell
-.\eng\wsl-docker.ps1 up
-.\eng\wsl-docker.ps1 test
-.\eng\wsl-docker.ps1 logs
-.\eng\wsl-docker.ps1 down
+pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 up
+pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 logs
+pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 down
 ```
+
+The script starts Docker in the distribution when needed, and the first `up` creates the ignored development password file `.secrets/dev-postgres-password` (it is never overwritten and never printed). Other actions are `build` (rebuild the development image, which the test script needs), `test` and `reset`.
 
 The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and for running the app outside the container (`dotnet run` or the `launchSettings.json` profiles use `appsettings.Development.json`, which points at that port and reads the password from `.secrets/dev-postgres-password`). The development password lives in the ignored `.secrets` directory. `reset` is destructive only to the named PremiereCalendar development volumes.
 
-Run the automated tests with `eng\Test-WithPostgres.ps1`, which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)).
+Run the automated tests with `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` (or `wsl-docker.ps1 test`), which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)). <!-- TEST-COMMANDS -->
 
 ## Production container
 
-Do not use GitHub Actions, including manual workflow dispatches. The CI and
-Container workflows are disabled. Build and publish locally: build the runtime
-image once, launch that exact image to prove readiness, non-root identity,
-root HTML and the Blazor boot asset, reject fixable HIGH or CRITICAL
-vulnerability findings, retain a CycloneDX SBOM and scan report, then publish
-the scanned image to GitHub Container Registry. Registry hosting does not
-require hosted CI.
+The household installation is a Portainer stack on the NAS (stack 20, endpoint 2) made of the application, PostgreSQL and a backup service. Builds, tests, vulnerability scans, SBOM generation and container publication run locally; do not use GitHub Actions, including manual workflow dispatches (the CI and Container workflows are disabled). The scripted release process in [Releasing](Releasing.md) builds the runtime image once from the committed source archive, launches that exact image to prove readiness, non-root identity, root HTML and the Blazor boot asset, rejects any vulnerability, secret or misconfiguration finding, retains a CycloneDX SBOM and scan report, exports the scanned image as a Docker archive, loads that archive onto the NAS engine and activates it by pinning the image configuration digest in the stack (pulling and pruning stay disabled). Publishing the same scanned image to a registry is optional and is also done locally; it does not require hosted CI.
+
 Deploy by digest. The runtime:
 
 - runs as the image's non-root application user;
@@ -57,7 +53,7 @@ Against a running app container, `docker compose exec app dotnet PremiereCalenda
 
 ## Backup and recovery boundary
 
-Production PostgreSQL requires scheduled `pg_dump` output with SHA-256 and completion manifests, retention, an isolated restore test, and off-host backup coverage. The canonical NAS deployment and operational instructions live under `\\NAS\Data\Backups\Infrastructure\NAS\services\premierecalendar`.
+Production PostgreSQL requires scheduled `pg_dump` output with SHA-256 and completion manifests, retention, an isolated restore test, and off-host backup coverage. The canonical NAS deployment and operational instructions live under `\\NAS\Data\Backups\Infrastructure\NAS\services\premierecalendar`. Every release starts with a fresh backup and an isolated restore check before anything is built or deployed (see [Releasing](Releasing.md)); the restore target is a throwaway, internal-network PostgreSQL container, never the production database.
 
 Roll back by deploying a previously accepted digest-pinned container image while
 preserving the PostgreSQL volume. Recover data only from a checksum-verified

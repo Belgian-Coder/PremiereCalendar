@@ -66,7 +66,7 @@ inclusive and `UntilUtc` is exclusive; its default is captured once at invocatio
 Archive indexes can skip files entirely before or after that interval.
 
 ```powershell
-./eng/Read-CalendarPerformance.ps1 -LogDirectory ./traces -CacheAudit `
+& D:\Projects\PremiereCalendar\eng\Read-CalendarPerformance.ps1 -LogDirectory 'D:\path\to\traces' -CacheAudit `
     -SinceUtc '2026-11-01T00:00:00Z' -UntilUtc '2026-12-01T00:00:00Z'
 ```
 

@@ -43,11 +43,11 @@ Render completion means **server render commit**, not a browser paint or image-l
 
 ## Investigating a later load
 
-On the installed container the default directory is `/app/App_Data/logs/performance`, backed by NAS app data. For Windows or a mounted NAS share:
+On the installed container the default directory is `/app/App_Data/logs/performance`, backed by NAS app data. From the Windows host, read it through the NAS share (the full script path works from any folder):
 
 ```powershell
-./eng/Read-CalendarPerformance.ps1 -LogDirectory '<performance directory>' -WeekStart '2026-08-31' -Summary
-./eng/Read-CalendarPerformance.ps1 -LogDirectory '<performance directory>' -LoadId '<load GUID>'
+& D:\Projects\PremiereCalendar\eng\Read-CalendarPerformance.ps1 -LogDirectory '<performance directory>' -WeekStart '2026-08-31' -Summary
+& D:\Projects\PremiereCalendar\eng\Read-CalendarPerformance.ps1 -LogDirectory '<performance directory>' -LoadId '<load GUID>'
 ```
 
 The reader follows load-to-job links and shares active files safely with the writer/retention process. It keeps at most 100,000 matching events by default; `-MaximumEvents` can increase this to 500,000. Truncation emits a warning. Summary percentiles describe retained matching events, not all production traffic or a complete retention period.

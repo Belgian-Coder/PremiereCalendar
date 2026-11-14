@@ -32,10 +32,10 @@ Additional stages include:
 
 The asynchronous writer keeps application work independent of disk I/O. Default detailed-log retention increases to 64 files of 25 MiB, approximately 1.56 GiB; it remains bounded and configurable. The writer's loss, failure and flush-health counters remain visible at `/health/version`. Rotation eventually replaces old files; export the correlated evidence before that boundary when investigating an incident.
 
-`eng/Read-CalendarPerformance.ps1` now retains up to 100,000 matching records by default and supports `-InstanceId` to avoid scanning unrelated process files. For large series jobs, `-MaximumEvents` can increase the bound to 500,000; truncation always warns. Example:
+`D:\Projects\PremiereCalendar\eng\Read-CalendarPerformance.ps1` now retains up to 100,000 matching records by default and supports `-InstanceId` to avoid scanning unrelated process files. For large series jobs, `-MaximumEvents` can increase the bound to 500,000; truncation always warns. Example:
 
 ```powershell
-./eng/Read-CalendarPerformance.ps1 -LogDirectory '\\NAS\Docker\PremiereCalendar\app-data\logs\performance' `
+& D:\Projects\PremiereCalendar\eng\Read-CalendarPerformance.ps1 -LogDirectory '\\NAS\Docker\PremiereCalendar\app-data\logs\performance' `
   -InstanceId '<process GUID>' -LoadId '<load GUID>' -Summary
 ```
 
