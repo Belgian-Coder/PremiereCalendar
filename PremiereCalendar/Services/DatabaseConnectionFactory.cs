@@ -111,9 +111,15 @@ internal static class DatabaseConnectionFactory
         var dataSourceBuilder = new NpgsqlDataSourceBuilder(builder.ConnectionString);
         if (key.PasswordFile is { } passwordFile)
         {
-            // Fail fast with the raw IO exception (never wrapped in a retryable NpgsqlException) when the secret
-            // is missing or unreadable.
-            _ = ReadPassword(passwordFile);
+            // Startup pre-check: fail fast with the raw IO exception (never wrapped in a retryable NpgsqlException) when
+            // the secret is missing or unreadable. The exception is tagged so the database initializer can treat it as
+            // a configuration error; at runtime IsTransient still classifies it as transient.
+            try { _ = ReadPassword(passwordFile); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                exception.Data[PasswordFileCheckKey] = true;
+                throw;
+            }
             dataSourceBuilder.UsePasswordProvider(
                 _ => ReadPassword(passwordFile),
                 async (_, cancellationToken) => (await File.ReadAllTextAsync(passwordFile, cancellationToken)).TrimEnd('\r', '\n'));
@@ -132,14 +138,29 @@ internal static class DatabaseConnectionFactory
     private static string ReadPassword(string passwordFile)
         => File.ReadAllText(passwordFile).TrimEnd('\r', '\n');
 
+    private const string PasswordFileCheckKey = "PremiereCalendar.PasswordFileCheck";
+
+    /// <summary>
+    /// True for the raw IO exception that the startup pre-check throws when the password file is missing or unreadable.
+    /// Only <see cref="PostgresDatabaseInitializer"/> turns it into a fail-fast configuration error.
+    /// </summary>
+    internal static bool IsPasswordFileCheckFailure(Exception exception) => exception.Data.Contains(PasswordFileCheckKey);
+
+    /// <summary>
+    /// Whether a database failure is worth retrying. The password provider runs for every new physical connection, so
+    /// a password file that is briefly unreadable at runtime (a secret remount, a rotation) surfaces as an
+    /// NpgsqlException with an IO inner exception and is transient: workers must keep retrying instead of faulting the
+    /// host. Failing fast on a missing secret is the startup pre-check's job (see
+    /// <see cref="IsPasswordFileCheckFailure"/>), not a property of the classification.
+    /// </summary>
     public static bool IsTransient(Exception exception) => exception switch
     {
         PostgresException { SqlState: "40001" or "40P01" or "55P03" } => true,
-        // A missing or unreadable password file is a configuration error: Npgsql wraps it in an NpgsqlException whose
-        // IsTransient is true for IO errors, which would retry forever instead of failing fast.
-        NpgsqlException { InnerException: FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException } => false,
         NpgsqlException { IsTransient: true } => true,
-        _ => false
+        // NpgsqlException.IsTransient covers IOException (missing file or directory) but not a permission error.
+        NpgsqlException { InnerException: UnauthorizedAccessException } => true,
+        // A fresh data source for another command-timeout variant runs the pre-check again while the host is running.
+        _ => IsPasswordFileCheckFailure(exception)
     };
 }
 

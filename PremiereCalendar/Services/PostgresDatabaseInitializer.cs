@@ -99,7 +99,8 @@ public sealed class PostgresDatabaseInitializer(
         {
             throw;
         }
-        catch (Exception exception) when (DatabaseConnectionFactory.IsTransient(exception))
+        catch (Exception exception) when (DatabaseConnectionFactory.IsTransient(exception)
+            && !DatabaseConnectionFactory.IsPasswordFileCheckFailure(exception))
         {
             RetryPending = true;
             logger.LogWarning(exception, "PostgreSQL is temporarily unavailable; initialization will retry.");

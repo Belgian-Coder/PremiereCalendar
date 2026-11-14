@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
@@ -102,8 +103,40 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
         var failure = Assert.ThrowsAny<IOException>(() => DatabaseConnectionFactory.Create(options));
 
         Assert.IsType<FileNotFoundException>(failure);
-        // The initializer retries transient errors forever; a missing secret must stop the host instead.
-        Assert.False(DatabaseConnectionFactory.IsTransient(failure));
+        // The startup pre-check is tagged so the initializer can stop the host instead of retrying forever, while the
+        // runtime classification stays transient (a data source for another command-timeout variant is built lazily).
+        Assert.True(DatabaseConnectionFactory.IsPasswordFileCheckFailure(failure));
+        Assert.True(DatabaseConnectionFactory.IsTransient(failure));
+    }
+
+    [Fact]
+    public async Task TheInitializerFailsFastWithoutRetryWhenThePasswordFileIsMissing()
+    {
+        var options = Microsoft.Extensions.Options.Options.Create(Options(
+            "Host=127.0.0.1;Port=1;Database=premiere;Username=app;Timeout=2", Path.Combine(_root, "absent-initializer-password")));
+        var recovery = new DatabaseRecoveryState();
+        var initializer = new PostgresDatabaseInitializer(
+            options, recovery, TimeProvider.System, NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() => initializer.InitializeAsync());
+
+        Assert.False(initializer.RetryPending);
+        Assert.False(recovery.Snapshot.IsHealthy);
+        Assert.Contains("operator intervention", recovery.Snapshot.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TheHostedInitializerStopsStartupWhenThePasswordFileIsMissing()
+    {
+        var options = Microsoft.Extensions.Options.Options.Create(Options(
+            "Host=127.0.0.1;Port=1;Database=premiere;Username=app;Timeout=2", Path.Combine(_root, "absent-hosted-password")));
+        var initializer = new PostgresDatabaseInitializer(
+            options, new DatabaseRecoveryState(), TimeProvider.System, NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
+        using var service = new DatabaseInitializerHostedService(options, initializer);
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() => service.StartAsync(CancellationToken.None));
+
+        Assert.False(initializer.RetryPending);
     }
 
     [Fact]
@@ -115,7 +148,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
 
         var failure = Assert.ThrowsAny<IOException>(() => DatabaseConnectionFactory.Create(options));
         Assert.IsType<DirectoryNotFoundException>(failure);
-        Assert.False(DatabaseConnectionFactory.IsTransient(failure));
+        Assert.True(DatabaseConnectionFactory.IsPasswordFileCheckFailure(failure));
 
         // Mounting the secret later recovers without restarting the process.
         Directory.CreateDirectory(directory);
@@ -125,7 +158,7 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
     }
 
     [Fact]
-    public async Task APasswordFileThatDisappearsAfterStartupIsPermanentNotTransientWhenOpeningAConnection()
+    public async Task APasswordFileThatDisappearsAfterStartupIsTransientWhenOpeningAConnection()
     {
         var passwordFile = Path.Combine(_root, "vanishing-password");
         await File.WriteAllTextAsync(passwordFile, "secret");
@@ -136,19 +169,25 @@ public sealed class PostgreSqlDataSourceFactoryTests : IDisposable
         await using var connection = DatabaseConnectionFactory.Create(options);
         File.Delete(passwordFile);
 
+        // The password provider runs for every new physical connection, so a briefly unreadable secret must not
+        // escape the workers' transient catch (which would fault the BackgroundService and stop the host).
         var failure = await Assert.ThrowsAnyAsync<Exception>(() => connection.OpenAsync());
 
-        Assert.False(DatabaseConnectionFactory.IsTransient(failure), failure.ToString());
+        Assert.True(DatabaseConnectionFactory.IsTransient(failure), failure.ToString());
+        Assert.False(DatabaseConnectionFactory.IsPasswordFileCheckFailure(failure));
     }
 
     [Fact]
-    public void OnlyRealPasswordFileProblemsAreExcludedFromTransientClassification()
+    public void RuntimePasswordFileProblemsStayTransient()
     {
-        Assert.False(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new FileNotFoundException())));
-        Assert.False(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new DirectoryNotFoundException())));
-        Assert.False(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new UnauthorizedAccessException())));
+        Assert.True(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new FileNotFoundException())));
+        Assert.True(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new DirectoryNotFoundException())));
+        Assert.True(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new UnauthorizedAccessException())));
         Assert.True(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new IOException("connection reset"))));
         Assert.True(DatabaseConnectionFactory.IsTransient(new NpgsqlException("x", new System.Net.Sockets.SocketException())));
+        // Unrelated IO or configuration errors that did not come from the pre-check are not retried.
+        Assert.False(DatabaseConnectionFactory.IsTransient(new FileNotFoundException()));
+        Assert.False(DatabaseConnectionFactory.IsTransient(new InvalidOperationException()));
     }
 
     [Fact]
