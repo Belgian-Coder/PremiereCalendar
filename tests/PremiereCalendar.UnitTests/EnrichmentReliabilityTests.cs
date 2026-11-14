@@ -288,7 +288,7 @@ public sealed class EnrichmentReliabilityTests
         var service = CreateScoreBackfillService(null, omdb, rottenTomatoes: null, maxConcurrency: 1);
         using var cancellation = new CancellationTokenSource();
         var operation = service.BackfillItemsAsync([NewItem("cancel", 1, "tt1000001")], cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
@@ -310,7 +310,7 @@ public sealed class EnrichmentReliabilityTests
         var service = CreateRepairService(tmdb, maxConcurrency: 1);
         using var cancellation = new CancellationTokenSource();
         var operation = service.RepairItemsAsync([NewItem("cancel", 1, null, PremiereMediaType.Series)], cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);

@@ -18,7 +18,7 @@ public sealed class PostgresProviderWorkCheckpointMaintenanceTests : IDisposable
     public async Task OfflineRewritePreservesAllColumnsAndRefusesLiveLeasesOrPartialMalformedConversion()
     {
         var store = new ProviderWorkStore(_database.Options, _environment);
-        var handle = await store.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "checkpoint-maintenance", ProviderWorkPriority.Foreground, "{\"saved\":true}"), DateTimeOffset.UtcNow, default);
+        var handle = await store.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "checkpoint-maintenance", ProviderWorkPriority.Foreground, "{\"saved\":true}"), DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
         var checkpoint = new ProviderWorkCheckpoint(new string('x', 6000), 2, 3, new("saved", 0, 0, []),
             new Dictionary<string, IReadOnlyList<PremiereCalendar.Models.PremiereItem>>());
         var encoded = ProviderWorkCheckpointCodec.Encode(checkpoint);
@@ -27,33 +27,33 @@ public sealed class PostgresProviderWorkCheckpointMaintenanceTests : IDisposable
         await ExecuteAsync("UPDATE ProviderWorkJobs SET State='Completed', AttemptCount=4, LastError='saved error', ProgressJson='{\"saved\":true}', CheckpointJson=@value WHERE JobId=@id", handle.JobId, encoded.Json);
         var before = await SnapshotAsync();
         var maintenance = new ProviderWorkCheckpointMaintenance(_database.Options, TimeProvider.System);
-        Assert.Equal(1, (await maintenance.PrepareLegacyCheckpointsAsync()).ConvertedCheckpoints);
+        Assert.Equal(1, (await maintenance.PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken)).ConvertedCheckpoints);
         before[0]["checkpointjson"] = legacy;
         Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await SnapshotAsync()));
-        Assert.Equal(0, (await maintenance.PrepareLegacyCheckpointsAsync()).ConvertedCheckpoints);
+        Assert.Equal(0, (await maintenance.PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken)).ConvertedCheckpoints);
 
         // The first sorted row is rewritten before the malformed final row is
         // encountered; the entire transaction must roll back.
         await ExecuteAsync("UPDATE ProviderWorkJobs SET CheckpointJson=@value WHERE JobId=@id", handle.JobId, encoded.Json);
         await ExecuteAsync("INSERT INTO ProviderWorkJobs (JobId,Kind,DedupeKey,Priority,PayloadJson,CheckpointJson,State,AttemptCount,EnqueuedUtc) VALUES (@id,'CalendarForeground',@id,0,'{}',@value,'Completed',0,'2026-01-01T00:00:00Z')", "zz-malformed", "{\"Version\":4,\"Encoding\":\"invalid\"}");
         var malformedBefore = await SnapshotAsync();
-        await Assert.ThrowsAnyAsync<Exception>(() => maintenance.PrepareLegacyCheckpointsAsync());
+        await Assert.ThrowsAnyAsync<Exception>(() => maintenance.PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken));
         Assert.Equal(JsonSerializer.Serialize(malformedBefore), JsonSerializer.Serialize(await SnapshotAsync()));
         await ExecuteAsync("DELETE FROM ProviderWorkJobs WHERE JobId=@id", "zz-malformed", null);
 
-        await store.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "active-maintenance-refusal", ProviderWorkPriority.Foreground, "{}"), DateTimeOffset.UtcNow, default);
-        var active = (await store.ClaimNextAsync(false, "live-worker", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5), default))!;
+        await store.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "active-maintenance-refusal", ProviderWorkPriority.Foreground, "{}"), DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
+        var active = (await store.ClaimNextAsync(false, "live-worker", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5), TestContext.Current.CancellationToken))!;
         var activeBefore = await SnapshotAsync();
-        await Assert.ThrowsAsync<InvalidOperationException>(() => maintenance.PrepareLegacyCheckpointsAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => maintenance.PrepareLegacyCheckpointsAsync(TestContext.Current.CancellationToken));
         Assert.Equal(JsonSerializer.Serialize(activeBefore), JsonSerializer.Serialize(await SnapshotAsync()));
-        Assert.Equal(active.LeaseOwner, (await store.GetAsync(active.JobId, default))!.LeaseOwner);
+        Assert.Equal(active.LeaseOwner, (await store.GetAsync(active.JobId, TestContext.Current.CancellationToken))!.LeaseOwner);
     }
 
     [Fact]
     public async Task TableLocksBlockNewClaimsForTheEntireOfflineRewrite()
     {
         var store = new ProviderWorkStore(_database.Options, _environment);
-        var handle = await store.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "claim-lock", ProviderWorkPriority.Foreground, "{}"), DateTimeOffset.UtcNow, default);
+        var handle = await store.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "claim-lock", ProviderWorkPriority.Foreground, "{}"), DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
         var encoded = ProviderWorkCheckpointCodec.Encode(new(new string('x', 6000), null, null, null,
             new Dictionary<string, IReadOnlyList<PremiereCalendar.Models.PremiereItem>>()));
         await ExecuteAsync("UPDATE ProviderWorkJobs SET CheckpointJson=@value WHERE JobId=@id", handle.JobId, encoded.Json);
@@ -62,9 +62,9 @@ public sealed class PostgresProviderWorkCheckpointMaintenanceTests : IDisposable
         Task<ProviderWorkSnapshot?>? claim = null;
         try
         {
-            await clock.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            claim = store.ClaimNextAsync(false, "concurrent-worker", DateTimeOffset.UtcNow, TimeSpan.FromSeconds(30), default);
-            await using var observer = await _database.OpenAsync();
+            await clock.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            claim = store.ClaimNextAsync(false, "concurrent-worker", DateTimeOffset.UtcNow, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await using var observer = await _database.OpenAsync(TestContext.Current.CancellationToken);
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             while (true)
             {
@@ -75,8 +75,8 @@ public sealed class PostgresProviderWorkCheckpointMaintenanceTests : IDisposable
             Assert.False(claim.IsCompleted);
         }
         finally { clock.Release.TrySetResult(); }
-        Assert.Equal(1, (await maintenance.WaitAsync(TimeSpan.FromSeconds(5))).ConvertedCheckpoints);
-        var claimed = (await claim!.WaitAsync(TimeSpan.FromSeconds(5)))!;
+        Assert.Equal(1, (await maintenance.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).ConvertedCheckpoints);
+        var claimed = (await claim!.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))!;
         Assert.Equal(handle.JobId, claimed.JobId);
         Assert.Equal(3, JsonDocument.Parse(claimed.CheckpointJson!).RootElement.GetProperty("Version").GetInt32());
     }

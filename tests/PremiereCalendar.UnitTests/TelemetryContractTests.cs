@@ -17,7 +17,8 @@ public sealed class TelemetryContractTests
         Assert.Equal(14, options.RetainedFileCount);
     }
 
-    [Fact]
+    // The listener is process-wide: it would also observe the telemetry of every test that runs at the same time.
+    [Fact(DisableParallelization = true)]
     public void MetricsEmitStableLowCardinalitySignals()
     {
         var observed = new List<string>();
@@ -47,7 +48,8 @@ public sealed class TelemetryContractTests
         Assert.Contains("premierecalendar.version.validation.outcomes", observed);
     }
 
-    [Fact]
+    // The listener is process-wide and keeps the last stopped span of any test that runs at the same time.
+    [Fact(DisableParallelization = true)]
     public async Task ProviderSpanNeverIncludesRawUrlQueryOrCredential()
     {
         Activity? captured = null;

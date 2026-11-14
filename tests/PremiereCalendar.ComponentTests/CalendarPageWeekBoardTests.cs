@@ -141,7 +141,7 @@ public sealed partial class CalendarPageTests
 
         const string explicitUrl = "http://localhost/series?week=2026-05-11&day=2026-05-13&seriesLang=en,nl&seriesRuntimeMin=0&seriesRuntimeMax=360";
         component.WaitForAssertion(() => Assert.Equal(explicitUrl, navigation.Uri));
-        await Task.Delay(300);
+        await Task.Delay(300, Xunit.TestContext.Current.CancellationToken);
 
         Assert.Single(service.Calls);
         Assert.Equal(explicitUrl, navigation.Uri);
@@ -159,7 +159,7 @@ public sealed partial class CalendarPageTests
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() => Assert.Single(service.Calls));
-        await Task.Delay(200);
+        await Task.Delay(200, Xunit.TestContext.Current.CancellationToken);
         Assert.Equal("http://localhost/series", navigation.Uri);
         Assert.Empty(_viewSyncService.PublishedUrls);
         Assert.Single(service.Calls);
@@ -214,7 +214,7 @@ public sealed partial class CalendarPageTests
         navigation.NavigateTo(canonical);
         var second = Render<PremiereCalendar.Components.Pages.Calendar>();
         second.WaitForAssertion(() => Assert.Equal(2, service.Calls.Count));
-        await Task.Delay(200);
+        await Task.Delay(200, Xunit.TestContext.Current.CancellationToken);
         var secondFilters = service.FilterSnapshots[1]!;
 
         Assert.Equal(canonical, navigation.Uri);
@@ -296,7 +296,7 @@ public sealed partial class CalendarPageTests
 
         component.WaitForAssertion(() => Assert.Equal(2, queue.Batches.Count));
         Assert.Equal(expected, queue.Batches[1]);
-        await Task.Delay(100);
+        await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
         Assert.Equal(2, queue.Batches.Count);
         Assert.Single(_prefetcher.WeekStarts);
     }
@@ -334,7 +334,7 @@ public sealed partial class CalendarPageTests
             Assert.Contains("week=2026-05-18", navigation.Uri);
             Assert.Equal(new DateOnly(2026, 5, 18), Assert.Single(service.Calls).Start);
         });
-        await Task.Delay(200);
+        await Task.Delay(200, Xunit.TestContext.Current.CancellationToken);
         Assert.Single(service.Calls);
         Assert.Empty(_viewSyncService.PublishedUrls);
     }
@@ -353,7 +353,7 @@ public sealed partial class CalendarPageTests
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() => Assert.Equal(new DateOnly(2026, 5, 11), Assert.Single(service.Calls).Start));
-        await Task.Delay(200);
+        await Task.Delay(200, Xunit.TestContext.Current.CancellationToken);
         Assert.Equal("http://localhost" + CanonicalSeriesUrl, navigation.Uri);
         Assert.Single(service.Calls);
         Assert.Empty(_viewSyncService.PublishedUrls);
@@ -371,7 +371,7 @@ public sealed partial class CalendarPageTests
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() => Assert.Equal([CanonicalSeriesUrl], _viewSyncService.PublishedUrls));
-        await Task.Delay(100);
+        await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
         Assert.Equal(new DateOnly(2026, 5, 11), Assert.Single(service.Calls).Start);
         Assert.Equal("http://localhost" + CanonicalSeriesUrl, navigation.Uri);
         var remembered = Assert.Single(JSInterop.Invocations["premiereViewSync.setLastSeen"]);
@@ -396,7 +396,7 @@ public sealed partial class CalendarPageTests
         var component = Render<PremiereCalendar.Components.Pages.Calendar>();
 
         component.WaitForAssertion(() => Assert.Equal([CanonicalSeriesUrl], _viewSyncService.PublishedUrls));
-        await Task.Delay(100);
+        await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
         Assert.Equal(new DateOnly(2026, 5, 11), Assert.Single(service.Calls).Start);
         Assert.Equal("http://localhost" + CanonicalSeriesUrl, navigation.Uri);
     }

@@ -5,6 +5,9 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
+// ImageMagick's native resource limits (memory, list length) are process-wide: concurrent decodes in other tests make
+// "cache resources exhausted" fail. All image tests share one collection, so they run one after the other.
+[Collection(ImageMagickCollection.Name)]
 public sealed class FileImageCacheHttpClientTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-image-client-{Guid.NewGuid():N}");

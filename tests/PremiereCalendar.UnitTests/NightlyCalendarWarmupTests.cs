@@ -91,7 +91,7 @@ public sealed class NightlyCalendarWarmupTests
     public async Task RestartKeepsEveryLeafAndReportsFailedAndUnfinishedCoverageWithoutResubmission()
     {
         var fixture = new Fixture();
-        var initial = (await fixture.Planner().RunOnceAsync(default))!;
+        var initial = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.Equal(initial.Total, fixture.Scheduler.Requests.Count);
         Assert.Equal(initial.Total, initial.Pending);
         Assert.False(initial.Complete);
@@ -106,7 +106,7 @@ public sealed class NightlyCalendarWarmupTests
         fixture.Scheduler.States["job-2"] = ProviderWorkState.Failed;
         fixture.Scheduler.States["job-3"] = ProviderWorkState.Completed; // No corresponding complete envelope.
         fixture.Scheduler.States["job-4"] = ProviderWorkState.RetryWaiting;
-        var restarted = (await fixture.Planner().RunOnceAsync(default))!;
+        var restarted = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.Equal(1, restarted.Fresh);
         Assert.Equal(2, restarted.Failed);
         Assert.Equal(initial.Total - 3, restarted.Pending);
@@ -120,9 +120,9 @@ public sealed class NightlyCalendarWarmupTests
     {
         var fixture = new Fixture();
         fixture.Store.FailFirstHandleWrite = true;
-        await Assert.ThrowsAsync<IOException>(() => fixture.Planner().RunOnceAsync(default));
+        await Assert.ThrowsAsync<IOException>(() => fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken));
         Assert.Single(fixture.Scheduler.Requests);
-        var restarted = (await fixture.Planner().RunOnceAsync(default))!;
+        var restarted = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.Equal(restarted.Total, restarted.Pending);
         Assert.Equal(restarted.Total, fixture.Scheduler.Requests.Count);
         Assert.Contains("job-1", fixture.Store.Values[NightlyCalendarWarmupPlanner.StateKey]);
@@ -137,13 +137,13 @@ public sealed class NightlyCalendarWarmupTests
             fixture.Cache.Entries[window.DedupeKey] = new(window.RefreshNotBeforeUtc, 0, 3, CalendarCacheCompleteness.Complete);
             fixture.Store.Values[window.ReceiptKey] = window.ReceiptValue;
         }
-        var first = (await fixture.Planner().RunOnceAsync(default))!;
-        var restarted = (await fixture.Planner().RunOnceAsync(default))!;
+        var first = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
+        var restarted = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.True(first.Complete);
         Assert.True(restarted.Complete);
         Assert.Empty(fixture.Scheduler.Requests);
         fixture.Clock.Now = fixture.Clock.Now.AddDays(1);
-        var tomorrow = (await fixture.Planner().RunOnceAsync(default))!;
+        var tomorrow = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.False(tomorrow.Complete);
         Assert.Equal(tomorrow.Total, fixture.Scheduler.Requests.Count);
     }
@@ -156,7 +156,7 @@ public sealed class NightlyCalendarWarmupTests
         var fixture = new Fixture();
         foreach (var window in fixture.Windows)
             fixture.Cache.Entries[window.DedupeKey] = new(window.RefreshNotBeforeUtc.AddSeconds(offsetSeconds), 20, 3, completeness);
-        var result = (await fixture.Planner().RunOnceAsync(default))!;
+        var result = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.Equal(0, result.Fresh);
         Assert.Equal(result.Total, result.Pending);
     }
@@ -184,11 +184,11 @@ public sealed class NightlyCalendarWarmupTests
         {
             PublishCacheAsync = async (publish, token) => { publications++; await publish(token); }
         };
-        await runner.RunAsync(payload, "leaf-job", resume, progress => { updates.Add(progress); return Task.CompletedTask; }, default);
+        await runner.RunAsync(payload, "leaf-job", resume, progress => { updates.Add(progress); return Task.CompletedTask; }, TestContext.Current.CancellationToken);
         Assert.False(pipeline.ForceRefresh);
         Assert.Equal(1, publications);
         Assert.True(Assert.Single(updates).IsFinal);
-        await runner.RunAsync(payload, "duplicate-leaf", resume, _ => Task.CompletedTask, default);
+        await runner.RunAsync(payload, "duplicate-leaf", resume, _ => Task.CompletedTask, TestContext.Current.CancellationToken);
         Assert.Equal(1, pipeline.Calls);
     }
 
@@ -200,8 +200,7 @@ public sealed class NightlyCalendarWarmupTests
         {
             Final = new PremiereLoadProgress("Partial", 0, 0, [], IsFinal: true) { HasSourceErrors = true }
         };
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Runner(pipeline).RunAsync(fixture.Windows[0], "partial",
-            new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(), null), _ => Task.CompletedTask, default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Runner(pipeline).RunAsync(fixture.Windows[0], "partial", new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(), null), _ => Task.CompletedTask, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -218,13 +217,12 @@ public sealed class NightlyCalendarWarmupTests
                 RetryAfterUtc = fixture.Clock.Now.AddMinutes(15)
             }
         };
-        var result = await fixture.Runner(pipeline, logger).RunAsync(payload, "degraded-leaf",
-            new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(), null), _ => Task.CompletedTask, default);
+        var result = await fixture.Runner(pipeline, logger).RunAsync(payload, "degraded-leaf", new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(), null), _ => Task.CompletedTask, TestContext.Current.CancellationToken);
         Assert.Equal(NightlyCalendarWarmupOutcome.Deferred, result);
         Assert.Contains("degraded", logger.Outcomes);
         Assert.DoesNotContain("provider_deferred", logger.Outcomes);
         Assert.DoesNotContain(payload.ReceiptKey, fixture.Store.Values.Keys);
-        Assert.Equal(0, (await fixture.Planner().RunOnceAsync(default))!.Fresh);
+        Assert.Equal(0, (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!.Fresh);
     }
 
     [Fact]
@@ -233,7 +231,7 @@ public sealed class NightlyCalendarWarmupTests
         var fixture = new Fixture();
         foreach (var window in fixture.Windows)
             fixture.Cache.Entries[window.DedupeKey] = new(fixture.Clock.Now, 0, 3, CalendarCacheCompleteness.Complete);
-        var result = (await fixture.Planner().RunOnceAsync(default))!;
+        var result = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.Equal(0, result.Fresh);
         Assert.Equal(result.Total, result.Pending);
     }
@@ -243,10 +241,10 @@ public sealed class NightlyCalendarWarmupTests
     {
         var fixture = new Fixture();
         var oldWindows = fixture.Windows;
-        var first = (await fixture.Planner().RunOnceAsync(default))!;
+        var first = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         fixture.Options.NightlyLocalTime = new TimeOnly(3, 0);
         var newWindows = fixture.Windows;
-        var replacement = (await fixture.Planner().RunOnceAsync(default))!;
+        var replacement = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.Equal(first.NightDate, replacement.NightDate);
         Assert.Equal(first.Total + replacement.Total, fixture.Scheduler.Requests.Count);
         Assert.NotEqual(oldWindows[0].DedupeKey, newWindows[0].DedupeKey);
@@ -260,12 +258,11 @@ public sealed class NightlyCalendarWarmupTests
         var oldWindow = fixture.Windows[0];
         fixture.Clock.Now = fixture.Clock.Now.AddDays(1);
         var pipeline = new RecordingPipeline(_ => Task.CompletedTask);
-        var result = await fixture.Runner(pipeline).RunAsync(oldWindow, "old-checkpoint",
-            new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>> { ["old-source"] = [] }, null), _ => Task.CompletedTask, default);
+        var result = await fixture.Runner(pipeline).RunAsync(oldWindow, "old-checkpoint", new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>> { ["old-source"] = [] }, null), _ => Task.CompletedTask, TestContext.Current.CancellationToken);
         Assert.Equal(NightlyCalendarWarmupOutcome.Superseded, result);
         Assert.Equal(0, pipeline.Calls);
         Assert.DoesNotContain(oldWindow.ReceiptKey, fixture.Store.Values.Keys);
-        var next = (await fixture.Planner().RunOnceAsync(default))!;
+        var next = (await fixture.Planner().RunOnceAsync(TestContext.Current.CancellationToken))!;
         Assert.Equal(0, next.Fresh);
         Assert.Equal(next.Total, next.Pending);
     }
@@ -289,7 +286,7 @@ public sealed class NightlyCalendarWarmupTests
                 await publish(token);
             }
         };
-        var result = await fixture.Runner(pipeline).RunAsync(payload, "crossing-cutoff", resume, _ => Task.CompletedTask, default);
+        var result = await fixture.Runner(pipeline).RunAsync(payload, "crossing-cutoff", resume, _ => Task.CompletedTask, TestContext.Current.CancellationToken);
         Assert.Equal(NightlyCalendarWarmupOutcome.Superseded, result);
         Assert.False(wrote);
         Assert.Empty(fixture.Store.Values);
@@ -308,7 +305,7 @@ public sealed class NightlyCalendarWarmupTests
         });
         var resume = new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(), null)
         { PublishCacheAsync = (publish, token) => publish(token) };
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Runner(pipeline).RunAsync(payload, "failed-write", resume, _ => Task.CompletedTask, default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Runner(pipeline).RunAsync(payload, "failed-write", resume, _ => Task.CompletedTask, TestContext.Current.CancellationToken));
         Assert.DoesNotContain(payload.ReceiptKey, fixture.Store.Values.Keys);
     }
 
@@ -322,14 +319,14 @@ public sealed class NightlyCalendarWarmupTests
         using var service = new CurrentWeekCalendarWarmupService(services.GetRequiredService<IServiceScopeFactory>(), settings,
             new ValueMonitor<CacheMaintenanceOptions>(new CacheMaintenanceOptions { Enabled = false }),
             new FastWakeTimeProvider(), NullLogger<CurrentWeekCalendarWarmupService>.Instance, workScheduler: scheduler);
-        await service.StartAsync(default);
+        await service.StartAsync(TestContext.Current.CancellationToken);
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             while (scheduler.EnqueueCalls < 2) await Task.Delay(10, timeout.Token);
             Assert.False(service.ExecuteTask!.IsCompleted);
         }
-        finally { await service.StopAsync(default); }
+        finally { await service.StopAsync(TestContext.Current.CancellationToken); }
     }
 
     private sealed class Fixture

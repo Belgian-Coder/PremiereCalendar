@@ -21,8 +21,8 @@ public sealed partial class PremiereServiceTests
             Microsoft.Extensions.Options.Options.Create(new TmdbOptions()),
             NullLogger<ItemEnrichmentCacheCoordinator>.Instance, timeProvider: clock);
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 4242);
-        await using var session = await coordinator.CreateSessionAsync(default);
-        await session.PrepareAsync([identity], null, default);
+        await using var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         var metadata = new ItemEnrichmentMetadata
         {
             Title = "Café <Golden> + more", ImdbId = "tt0004242", RuntimeMinutes = 47, AvailabilityComplete = true,
@@ -31,20 +31,20 @@ public sealed partial class PremiereServiceTests
         var ratings = new ItemEnrichmentRatings(7.4, 740, 91, 88, 70, ImdbId: metadata.ImdbId, Title: metadata.Title, Year: 2026);
 
         // 1. Fresh refresh: metadata and ratings are both new.
-        var first = await session.GetAsync(identity, true, (_, _, _, _) => Task.FromResult(new ItemEnrichmentRefresh(metadata, ratings)), default);
-        await session.FlushAsync(default);
+        var first = await session.GetAsync(identity, true, (_, _, _, _) => Task.FromResult(new ItemEnrichmentRefresh(metadata, ratings)), TestContext.Current.CancellationToken);
+        await session.FlushAsync(TestContext.Current.CancellationToken);
         var record = Assert.Single(memory.Records.Values);
         Assert.Equal(JsonSerializer.Serialize(first.Metadata), record.MetadataJson);
         Assert.Equal(JsonSerializer.Serialize(first.Ratings), record.RatingsJson);
 
         // 2. Later refresh in a new session with equal content in new instances, and with changed content.
         clock.Advance(TimeSpan.FromDays(8));
-        await using (var second = await coordinator.CreateSessionAsync(default))
+        await using (var second = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken))
         {
-            await second.PrepareAsync([identity], null, default);
+            await second.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
             var equal = await second.GetAsync(identity, true, (_, _, _, _) => Task.FromResult(
-                new ItemEnrichmentRefresh(metadata with { }, ratings with { })), default);
-            await second.FlushAsync(default);
+                new ItemEnrichmentRefresh(metadata with { }, ratings with { })), TestContext.Current.CancellationToken);
+            await second.FlushAsync(TestContext.Current.CancellationToken);
             record = Assert.Single(memory.Records.Values);
             Assert.Equal(JsonSerializer.Serialize(equal.Metadata), record.MetadataJson);
             Assert.Equal(JsonSerializer.Serialize(equal.Ratings), record.RatingsJson);
@@ -52,12 +52,12 @@ public sealed partial class PremiereServiceTests
             Assert.Equal(JsonSerializer.Serialize(ratings), record.RatingsJson);
         }
         clock.Advance(TimeSpan.FromDays(8));
-        await using (var third = await coordinator.CreateSessionAsync(default))
+        await using (var third = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken))
         {
-            await third.PrepareAsync([identity], null, default);
+            await third.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
             var changed = await third.GetAsync(identity, true, (_, _, _, _) => Task.FromResult(
-                new ItemEnrichmentRefresh(metadata with { RuntimeMinutes = 50 }, ratings with { ImdbScore = 7.5, MetacriticScore = 72 })), default);
-            await third.FlushAsync(default);
+                new ItemEnrichmentRefresh(metadata with { RuntimeMinutes = 50 }, ratings with { ImdbScore = 7.5, MetacriticScore = 72 })), TestContext.Current.CancellationToken);
+            await third.FlushAsync(TestContext.Current.CancellationToken);
             record = Assert.Single(memory.Records.Values);
             Assert.Equal(JsonSerializer.Serialize(changed.Metadata), record.MetadataJson);
             Assert.Equal(JsonSerializer.Serialize(changed.Ratings), record.RatingsJson);

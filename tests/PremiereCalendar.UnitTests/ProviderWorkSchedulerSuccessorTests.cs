@@ -15,13 +15,13 @@ public sealed partial class ProviderWorkSchedulerTests
         _scheduler = NewScheduler(clock, cacheHours: 1);
         var request = SuccessorRequest();
         var previous = await PublishPartialTerminalAsync(request);
-        var completedUtc = ProviderWorkScheduler.TryReadCheckpoint((await _scheduler.GetAsync(previous.JobId))!.CheckpointJson)!
+        var completedUtc = ProviderWorkScheduler.TryReadCheckpoint((await _scheduler.GetAsync(previous.JobId, TestContext.Current.CancellationToken))!.CheckpointJson)!
             .SourceCompletedUtc["healthy"];
         clock.Advance(TimeSpan.FromMinutes(elapsedMinutes));
-        var next = await _scheduler.EnqueueAsync(request);
+        var next = await _scheduler.EnqueueAsync(request, TestContext.Current.CancellationToken);
         Assert.True(next.Created);
         Assert.NotEqual(previous.JobId, next.JobId);
-        var checkpoint = ProviderWorkScheduler.TryReadCheckpoint((await _scheduler.GetAsync(next.JobId))!.CheckpointJson);
+        var checkpoint = ProviderWorkScheduler.TryReadCheckpoint((await _scheduler.GetAsync(next.JobId, TestContext.Current.CancellationToken))!.CheckpointJson);
         if (!reusable) { Assert.Null(checkpoint); return; }
         Assert.NotNull(checkpoint);
         Assert.Equal("healthy", Assert.Single(checkpoint.CompletedSources).Key);
@@ -29,7 +29,7 @@ public sealed partial class ProviderWorkSchedulerTests
         Assert.False(checkpoint.CalendarProgress!.IsFinal);
         Assert.True(checkpoint.CalendarProgress.IsStaleCache);
         Assert.All(checkpoint.SourceSummaries.Values, summary => Assert.False(summary.CalendarProgress!.HasSourceErrors));
-        await using var watcher = _scheduler.WatchAsync(next).GetAsyncEnumerator();
+        await using var watcher = _scheduler.WatchAsync(next, TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await watcher.MoveNextAsync());
         Assert.False(watcher.Current.CalendarProgress?.IsFinal ?? false);
     }
@@ -44,8 +44,8 @@ public sealed partial class ProviderWorkSchedulerTests
         var payload = JsonSerializer.Deserialize<CalendarProviderWorkPayload>(request.PayloadJson)!;
         payload = force ? payload with { ForceRefresh = true }
             : payload with { Filters = new CalendarFilters { ShowMovies = false } };
-        var next = await _scheduler.EnqueueAsync(request with { PayloadJson = JsonSerializer.Serialize(payload) });
-        Assert.Null((await _scheduler.GetAsync(next.JobId))!.CheckpointJson);
+        var next = await _scheduler.EnqueueAsync(request with { PayloadJson = JsonSerializer.Serialize(payload) }, TestContext.Current.CancellationToken);
+        Assert.Null((await _scheduler.GetAsync(next.JobId, TestContext.Current.CancellationToken))!.CheckpointJson);
     }
 
     [Fact]
@@ -53,27 +53,27 @@ public sealed partial class ProviderWorkSchedulerTests
     {
         var request = SuccessorRequest();
         await PublishPartialTerminalAsync(request);
-        var full = await _scheduler.EnqueueAsync(request);
-        var claimed = (await _scheduler.ClaimNextAsync(false, "full", default))!;
+        var full = await _scheduler.EnqueueAsync(request, TestContext.Current.CancellationToken);
+        var claimed = (await _scheduler.ClaimNextAsync(false, "full", TestContext.Current.CancellationToken))!;
         await _scheduler.PublishAsync(claimed, Progress(claimed, "complete",
-            new PremiereLoadProgress("Complete", 1, 1, [Item(1)], IsFinal: true)), default);
-        await _scheduler.CompleteAsync(claimed, default);
-        Assert.Equal(ProviderWorkState.Completed, (await _scheduler.GetAsync(full.JobId))!.State);
-        var next = await _scheduler.EnqueueAsync(request);
-        Assert.Null((await _scheduler.GetAsync(next.JobId))!.CheckpointJson);
+            new PremiereLoadProgress("Complete", 1, 1, [Item(1)], IsFinal: true)), TestContext.Current.CancellationToken);
+        await _scheduler.CompleteAsync(claimed, TestContext.Current.CancellationToken);
+        Assert.Equal(ProviderWorkState.Completed, (await _scheduler.GetAsync(full.JobId, TestContext.Current.CancellationToken))!.State);
+        var next = await _scheduler.EnqueueAsync(request, TestContext.Current.CancellationToken);
+        Assert.Null((await _scheduler.GetAsync(next.JobId, TestContext.Current.CancellationToken))!.CheckpointJson);
     }
 
     [Fact]
     public async Task DeferredOldestWindowRejoinsBehindAlreadyQueuedPeerAtSamePriority()
     {
         var now = DateTimeOffset.UtcNow;
-        var old = await _store.EnqueueAsync(new(ProviderWorkKind.AdjacentWeekPrefetch, "old-window", ProviderWorkPriority.Adjacent, "{}"), now, default);
-        var claimed = (await _store.ClaimNextAsync(false, "old", now, TimeSpan.FromMinutes(1), default))!;
-        var peer = await _store.EnqueueAsync(new(ProviderWorkKind.AdjacentWeekPrefetch, "pending-window", ProviderWorkPriority.Adjacent, "{}"), now.AddSeconds(1), default);
-        await _store.RequeueAsync(old.JobId, claimed.LeaseOwner!, now.AddSeconds(2), now.AddSeconds(2), false, null, default, retryWaiting: true);
-        var next = await _store.ClaimNextAsync(false, "fair", now.AddSeconds(3), TimeSpan.FromMinutes(1), default);
+        var old = await _store.EnqueueAsync(new(ProviderWorkKind.AdjacentWeekPrefetch, "old-window", ProviderWorkPriority.Adjacent, "{}"), now, TestContext.Current.CancellationToken);
+        var claimed = (await _store.ClaimNextAsync(false, "old", now, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken))!;
+        var peer = await _store.EnqueueAsync(new(ProviderWorkKind.AdjacentWeekPrefetch, "pending-window", ProviderWorkPriority.Adjacent, "{}"), now.AddSeconds(1), TestContext.Current.CancellationToken);
+        await _store.RequeueAsync(old.JobId, claimed.LeaseOwner!, now.AddSeconds(2), now.AddSeconds(2), false, null, TestContext.Current.CancellationToken, retryWaiting: true);
+        var next = await _store.ClaimNextAsync(false, "fair", now.AddSeconds(3), TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
         Assert.Equal(peer.JobId, next!.JobId);
-        Assert.Equal(old.JobId, (await _store.ClaimNextAsync(false, "next", now.AddSeconds(3), TimeSpan.FromMinutes(1), default))!.JobId);
+        Assert.Equal(old.JobId, (await _store.ClaimNextAsync(false, "next", now.AddSeconds(3), TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken))!.JobId);
     }
 
     private static ProviderWorkRequest SuccessorRequest() => new(ProviderWorkKind.CalendarForeground, "exact-calendar-successor",

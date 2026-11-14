@@ -28,8 +28,8 @@ public sealed partial class PremiereServiceTests
             Microsoft.Extensions.Options.Options.Create(new TmdbOptions()),
             NullLogger<ItemEnrichmentCacheCoordinator>.Instance, timeProvider: clock);
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Movie, 901);
-        await using var session = await coordinator.CreateSessionAsync(default);
-        await session.PrepareAsync([identity], null, default);
+        await using var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         var original = new ItemEnrichmentMetadata { Title = "Original provider result", ImdbId = "tt0000901", RuntimeMinutes = 47, AvailabilityComplete = true };
         var ratings = new ItemEnrichmentRatings(7.4, 740, null, null, null, ImdbId: original.ImdbId, Title: original.Title, Year: 2026);
         var providerCalls = 0;
@@ -37,12 +37,12 @@ public sealed partial class PremiereServiceTests
         {
             providerCalls++;
             return Task.FromResult(new ItemEnrichmentRefresh(original, ratings));
-        }, default);
+        }, TestContext.Current.CancellationToken);
         Assert.True(session.HasPendingWrites);
-        var failedFlush = session.FlushAsync(default);
+        var failedFlush = session.FlushAsync(TestContext.Current.CancellationToken);
         try
         {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             Assert.False(session.HasPendingWrites); // The first batch has already drained.
             if (concurrentNewerProposal)
             {
@@ -54,17 +54,17 @@ public sealed partial class PremiereServiceTests
                     providerCalls++;
                     return Task.FromResult(new ItemEnrichmentRefresh(original with { Title = "Newer concurrent result", RuntimeMinutes = 99 },
                         null, RefreshRatingsClock: false));
-                }, default, metadataOnly: true);
+                }, TestContext.Current.CancellationToken, metadataOnly: true);
                 Assert.True(session.HasPendingWrites);
             }
         }
         finally { release.TrySetResult(); }
-        await failedFlush.WaitAsync(TimeSpan.FromSeconds(3));
+        await failedFlush.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.True(session.HasPendingWrites);
         Assert.Null(Assert.Single(memory.Records.Values).MetadataJson);
 
         var callsBeforeRetry = providerCalls;
-        await session.FlushAsync(default);
+        await session.FlushAsync(TestContext.Current.CancellationToken);
         Assert.Equal(callsBeforeRetry, providerCalls);
         Assert.False(session.HasPendingWrites);
         var accepted = Assert.Single(memory.Records.Values);

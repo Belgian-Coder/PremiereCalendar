@@ -69,7 +69,7 @@ public sealed class SingleFlightCoordinatorTests
         }
 
         var first = coordinator.RunAsync("same-key", Factory, CancellationToken.None);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var second = coordinator.RunAsync("same-key", Factory, CancellationToken.None);
 
         release.SetResult();
@@ -118,7 +118,7 @@ public sealed class SingleFlightCoordinatorTests
         }
 
         var first = coordinator.RunAsync("same-key", Factory, firstCancellation.Token);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var second = coordinator.RunAsync("same-key", Factory, CancellationToken.None);
 
         firstCancellation.Cancel();
@@ -157,7 +157,7 @@ public sealed class SingleFlightCoordinatorTests
         }
 
         var first = coordinator.RunAsync("same-key", Factory, firstCancellation.Token);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var second = coordinator.RunAsync("same-key", Factory, secondCancellation.Token);
 
         firstCancellation.Cancel();
@@ -165,7 +165,7 @@ public sealed class SingleFlightCoordinatorTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
-        await factoryCanceled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await factoryCanceled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(1, calls);
     }
 
@@ -203,14 +203,14 @@ public sealed class SingleFlightCoordinatorTests
         }
 
         var first = coordinator.RunAsync("same-key", Factory, firstCancellation.Token);
-        await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         firstCancellation.Cancel();
-        await firstFactoryCanceled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await firstFactoryCanceled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         var second = coordinator.RunAsync("same-key", Factory, CancellationToken.None);
         try
         {
-            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         }
         finally
         {

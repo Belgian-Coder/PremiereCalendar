@@ -21,8 +21,8 @@ public sealed class OptionalProviderStorageOutageTests
         var clock = new Clock();
         var store = new StateStore();
         var durable = Durable(store, clock);
-        await durable.SaveAsync(provider, "prepare", "healthy", default);
-        Assert.Equal(ProviderResponseCacheReadStatus.Hit, (await durable.ReadAsync<string>(provider, "prepare", TimeSpan.FromDays(1), default)).Status);
+        await durable.SaveAsync(provider, "prepare", "healthy", TestContext.Current.CancellationToken);
+        Assert.Equal(ProviderResponseCacheReadStatus.Hit, (await durable.ReadAsync<string>(provider, "prepare", TimeSpan.FromDays(1), TestContext.Current.CancellationToken)).Status);
         using var memory = new MemoryCache(new MemoryCacheOptions());
         using var handler = new ProviderHandler();
         var readsBefore = store.Reads;
@@ -66,13 +66,13 @@ public sealed class OptionalProviderStorageOutageTests
         // A generous explicit budget keeps this independent of host load; the point is that a read
         // slower than the old 500 ms budget is a hit and does not start a backoff.
         var durable = Durable(store, clock, TimeSpan.FromSeconds(20));
-        await durable.SaveAsync("tmdb", "slow", "value", default);
+        await durable.SaveAsync("tmdb", "slow", "value", TestContext.Current.CancellationToken);
 
-        var read = await durable.ReadAsync<string>("tmdb", "slow", TimeSpan.FromDays(1), default);
+        var read = await durable.ReadAsync<string>("tmdb", "slow", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(ProviderResponseCacheReadStatus.Hit, read.Status);
         Assert.Null(read.RetryAtUtc);
-        Assert.Equal(ProviderResponseCacheReadStatus.Hit, (await durable.ReadAsync<string>("tmdb", "slow", TimeSpan.FromDays(1), default)).Status);
+        Assert.Equal(ProviderResponseCacheReadStatus.Hit, (await durable.ReadAsync<string>("tmdb", "slow", TimeSpan.FromDays(1), TestContext.Current.CancellationToken)).Status);
         Assert.Equal(2, store.Reads);
     }
 
@@ -85,20 +85,20 @@ public sealed class OptionalProviderStorageOutageTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         using var handler = new ProviderHandler();
         var fanart = Fanart(memory, handler, durable, clock);
-        Assert.NotNull((await fanart.GetMovieArtworkWithStatusAsync(42, default)).Value);
+        Assert.NotNull((await fanart.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken)).Value);
         var tvmaze = Tvmaze(memory, handler, durable, clock);
-        Assert.Single((await tvmaze.GetShowImagesWithStatusAsync(42, default)).Value);
+        Assert.Single((await tvmaze.GetShowImagesWithStatusAsync(42, TestContext.Current.CancellationToken)).Value);
         var watchmode = Watchmode(memory, handler, durable, clock);
-        Assert.Single((await watchmode.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], default)).Value);
+        Assert.Single((await watchmode.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["BE"], TestContext.Current.CancellationToken)).Value);
         var before = handler.Requests;
         store.Unavailable = true;
-        var forced = await fanart.GetMovieArtworkWithStatusAsync(42, default, true);
+        var forced = await fanart.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken, true);
         Assert.True(forced.Successful);
         Assert.NotNull(forced.Value);
-        var coldImages = await tvmaze.GetShowImagesWithStatusAsync(99, default);
+        var coldImages = await tvmaze.GetShowImagesWithStatusAsync(99, TestContext.Current.CancellationToken);
         Assert.True(coldImages.Successful);
         Assert.Single(coldImages.Value);
-        var coldSources = await watchmode.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["NL"], default);
+        var coldSources = await watchmode.GetTitleSourcesWithStatusAsync(PremiereMediaType.Movie, 42, null, ["NL"], TestContext.Current.CancellationToken);
         Assert.True(coldSources.Successful);
         Assert.NotEmpty(coldSources.Value);
         Assert.True(handler.Requests > before);
@@ -114,12 +114,12 @@ public sealed class OptionalProviderStorageOutageTests
         var responses = new OptionalProviderResponseCache(memory, durable, clock);
         var calls = 0;
         Task<ProviderRefreshResult<string?>> Fetch(CancellationToken _) { calls++; return Task.FromResult(new ProviderRefreshResult<string?>("retained", true)); }
-        Assert.True((await responses.GetAsync("fanart", "stale", false, TimeSpan.FromDays(1), Fetch, default)).Successful);
+        Assert.True((await responses.GetAsync("fanart", "stale", false, TimeSpan.FromDays(1), Fetch, TestContext.Current.CancellationToken)).Successful);
         // Advancing the provider clock leaves this otherwise retained memory object
         // outside its provider freshness window without waiting for real wall time.
         clock.Advance(TimeSpan.FromDays(2));
         store.Unavailable = true;
-        var result = await responses.GetAsync("fanart", "stale", false, TimeSpan.FromDays(1), Fetch, default);
+        var result = await responses.GetAsync("fanart", "stale", false, TimeSpan.FromDays(1), Fetch, TestContext.Current.CancellationToken);
         // An unavailable durable cache is only a cache miss: the provider is called again.
         Assert.True(result.Successful);
         Assert.Equal("retained", result.Value);
@@ -135,18 +135,18 @@ public sealed class OptionalProviderStorageOutageTests
         var durable = Durable(store, clock, TimeSpan.FromMilliseconds(100));
         using var memory = new MemoryCache(new MemoryCacheOptions());
         using var handler = new ProviderHandler();
-        var response = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, default).WaitAsync(TimeSpan.FromSeconds(3));
+        var response = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.True(response.Successful);
         Assert.Equal(1, handler.Requests);
-        var second = await durable.ReadAsync<string>("fanart", "another-key", TimeSpan.FromDays(1), default);
+        var second = await durable.ReadAsync<string>("fanart", "another-key", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderResponseCacheReadStatus.StorageUnavailable, second.Status);
         // Below the threshold there is no retry time at all (never a deadline in the past).
         Assert.Null(second.RetryAtUtc);
         // Third failure inside the 10 s window opens the 5 s backoff.
-        var third = await durable.ReadAsync<string>("fanart", "third-key", TimeSpan.FromDays(1), default);
+        var third = await durable.ReadAsync<string>("fanart", "third-key", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
         Assert.Equal(clock.GetUtcNow().AddSeconds(5), third.RetryAtUtc);
         var reads = store.Reads;
-        var skipped = await durable.ReadAsync<string>("fanart", "skipped-key", TimeSpan.FromDays(1), default);
+        var skipped = await durable.ReadAsync<string>("fanart", "skipped-key", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderResponseCacheReadStatus.StorageUnavailable, skipped.Status);
         Assert.Equal(reads, store.Reads);
     }
@@ -159,11 +159,11 @@ public sealed class OptionalProviderStorageOutageTests
         var durable = Durable(store, clock);
         using var canceled = new CancellationTokenSource();
         var read = durable.ReadAsync<string>("fanart", "cancel", TimeSpan.FromDays(1), canceled.Token);
-        await store.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await store.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         canceled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read);
         store.BlockReads = false;
-        var next = await durable.ReadAsync<string>("fanart", "after-cancel", TimeSpan.FromDays(1), default);
+        var next = await durable.ReadAsync<string>("fanart", "after-cancel", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderResponseCacheReadStatus.Miss, next.Status);
         Assert.Null(next.RetryAtUtc);
         Assert.Equal(2, store.Reads);
@@ -184,7 +184,7 @@ public sealed class OptionalProviderStorageOutageTests
         var helper = new OptionalProviderResponseCache(memory, durable, clock);
         if (defect != "missing")
         {
-            await durable.SaveAsync("fanart", "repair", new OptionalProviderValue<string?>("old"), default);
+            await durable.SaveAsync("fanart", "repair", new OptionalProviderValue<string?>("old"), TestContext.Current.CancellationToken);
             var pair = Assert.Single(store.Values);
             var wrongType = JsonNode.Parse(pair.Value.MetadataJson!)!;
             wrongType["type"] = "Wrong.Payload.Type";
@@ -200,11 +200,11 @@ public sealed class OptionalProviderStorageOutageTests
         }
         var calls = 0;
         var result = await helper.GetAsync<string?>("fanart", "repair", false, TimeSpan.FromDays(1), _ =>
-        { calls++; return Task.FromResult(new ProviderRefreshResult<string?>("repaired", true)); }, default);
+        { calls++; return Task.FromResult(new ProviderRefreshResult<string?>("repaired", true)); }, TestContext.Current.CancellationToken);
         Assert.True(result.Successful);
         Assert.Equal("repaired", result.Value);
         Assert.Equal(1, calls);
-        var read = await durable.ReadAsync<OptionalProviderValue<string?>>("fanart", "repair", TimeSpan.FromDays(1), default);
+        var read = await durable.ReadAsync<OptionalProviderValue<string?>>("fanart", "repair", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderResponseCacheReadStatus.Hit, read.Status);
         Assert.Equal("repaired", read.Response?.Value.Value);
         Assert.Null(read.RetryAtUtc);
@@ -219,13 +219,13 @@ public sealed class OptionalProviderStorageOutageTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         using var handler = new ProviderHandler();
         var firstClient = Fanart(memory, handler, durable, clock);
-        var first = await firstClient.GetMovieArtworkWithStatusAsync(42, default);
+        var first = await firstClient.GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         Assert.True(first.Successful);
         Assert.NotNull(first.Value);
-        var cached = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, default);
+        var cached = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken);
         Assert.True(cached.Successful);
         Assert.Same(first.Value, cached.Value);
-        var second = await firstClient.GetMovieArtworkWithStatusAsync(43, default);
+        var second = await firstClient.GetMovieArtworkWithStatusAsync(43, TestContext.Current.CancellationToken);
         Assert.True(second.Successful);
         Assert.Equal(2, handler.Requests);
         Assert.Equal(2, store.Reads);

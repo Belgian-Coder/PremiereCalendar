@@ -20,7 +20,7 @@ public sealed partial class CalendarPageTests
             component.WaitForAssertion(() => Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count),
                 TimeSpan.FromSeconds(3));
             service.ReleaseFinal.TrySetResult();
-            await service.Finished.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await service.Finished.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
             component.WaitForAssertion(() =>
             {
                 var card = Assert.Single(component.FindAll("[data-testid='premiere-card']"));

@@ -88,7 +88,7 @@ public sealed class CalendarPageDiagnosticsTests
         fixture.Metadata.FirstReadRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         fixture.Navigation.NavigateTo("/movies?week=2026-05-04");
         var component = fixture.Context.Render<PremiereCalendar.Components.Pages.Calendar>();
-        await fixture.Metadata.FirstReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await fixture.Metadata.FirstReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
         var oldId = fixture.Service.Contexts.Single()!.LoadId;
 
         fixture.Navigation.NavigateTo("/movies?week=2026-05-11");
@@ -144,7 +144,7 @@ public sealed class CalendarPageDiagnosticsTests
         fixture.Service.ReleaseFirst.TrySetResult();
         fixture.Navigation.NavigateTo("/movies?week=2026-05-04");
         fixture.Context.Render<PremiereCalendar.Components.Pages.Calendar>();
-        await fixture.Settings.FirstGetStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await fixture.Settings.FirstGetStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
         fixture.Navigation.NavigateTo("/movies?week=2026-05-11");
         await fixture.WaitForEventAsync("calendar.page.finished", entry => Detail(entry, "weekStart") == "2026-05-11");
         fixture.Settings.FirstGetRelease.TrySetResult();

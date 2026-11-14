@@ -29,7 +29,7 @@ public sealed partial class PostgresPersistenceTests
         await SeedLineageUserDataAsync();
         foreach (var lineage in new[] { "lf", "crlf", "mixed" })
         {
-            await using (var connection = await _database.OpenAsync())
+            await using (var connection = await _database.OpenAsync(TestContext.Current.CancellationToken))
             {
                 for (var version = 1; version <= 4; version++)
                 {
@@ -38,17 +38,17 @@ public sealed partial class PostgresPersistenceTests
                     await using var update = new NpgsqlCommand("UPDATE SchemaMigrations SET Checksum=@checksum WHERE Version=@version", connection);
                     update.Parameters.AddWithValue("checksum", hashes[version - 1]);
                     update.Parameters.AddWithValue("version", version);
-                    Assert.Equal(1, await update.ExecuteNonQueryAsync());
+                    Assert.Equal(1, await update.ExecuteNonQueryAsync(TestContext.Current.CancellationToken));
                 }
             }
             var before = await ReadMigrationLineageSnapshotAsync();
             var recovery = new DatabaseRecoveryState();
             var initializer = new PostgresDatabaseInitializer(_database.Options, recovery, TimeProvider.System,
                 NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-            await initializer.InitializeAsync();
+            await initializer.InitializeAsync(TestContext.Current.CancellationToken);
             Assert.True(recovery.Snapshot.IsHealthy, recovery.Snapshot.Message);
             Assert.False(initializer.RetryPending);
-            Assert.True((await initializer.VerifyAsync()).IsHealthy);
+            Assert.True((await initializer.VerifyAsync(TestContext.Current.CancellationToken)).IsHealthy);
             Assert.Equal(before, await ReadMigrationLineageSnapshotAsync());
         }
     }
@@ -62,21 +62,21 @@ public sealed partial class PostgresPersistenceTests
             $"{migration.Version}\n{migration.Name}\n{migration.Sql}\nSELECT 1;"))).ToLowerInvariant();
         foreach (var changeName in new[] { true, false })
         {
-            await using (var connection = await _database.OpenAsync())
+            await using (var connection = await _database.OpenAsync(TestContext.Current.CancellationToken))
             {
                 await using var corrupt = new NpgsqlCommand("UPDATE SchemaMigrations SET Name=@name,Checksum=@checksum WHERE Version=1", connection);
                 corrupt.Parameters.AddWithValue("name", changeName ? "different-migration-name" : migration.Name);
                 corrupt.Parameters.AddWithValue("checksum", changeName ? HistoricalLfChecksums[0] : alteredChecksum);
-                await corrupt.ExecuteNonQueryAsync();
+                await corrupt.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
             }
             var before = await ReadMigrationLineageSnapshotAsync();
             var recovery = new DatabaseRecoveryState();
             var initializer = new PostgresDatabaseInitializer(_database.Options, recovery, TimeProvider.System,
                 NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-            await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync());
+            await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync(TestContext.Current.CancellationToken));
             Assert.False(recovery.Snapshot.IsHealthy);
             Assert.False(initializer.RetryPending);
-            await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.VerifyAsync());
+            await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.VerifyAsync(TestContext.Current.CancellationToken));
             Assert.Equal(before, await ReadMigrationLineageSnapshotAsync());
         }
     }
@@ -84,37 +84,37 @@ public sealed partial class PostgresPersistenceTests
     [Fact]
     public async Task PostgreSqlHistoricalChecksumAllowanceDoesNotBypassActualSchemaValidation()
     {
-        await using var connection = await _database.OpenAsync();
+        await using var connection = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await using var corrupt = new NpgsqlCommand("UPDATE SchemaMigrations SET Checksum=@checksum WHERE Version=1; ALTER TABLE ProviderWorkJobs DROP COLUMN ProgressJson;", connection);
         corrupt.Parameters.AddWithValue("checksum", HistoricalCrlfChecksums[0]);
-        await corrupt.ExecuteNonQueryAsync();
+        await corrupt.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         var initializer = new PostgresDatabaseInitializer(_database.Options, new DatabaseRecoveryState(), TimeProvider.System,
             NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-        var failure = await Assert.ThrowsAsync<PostgresException>(() => initializer.InitializeAsync());
+        var failure = await Assert.ThrowsAsync<PostgresException>(() => initializer.InitializeAsync(TestContext.Current.CancellationToken));
         Assert.Equal("42703", failure.SqlState);
         Assert.False(initializer.RetryPending);
-        await Assert.ThrowsAsync<PostgresException>(() => initializer.VerifyAsync());
+        await Assert.ThrowsAsync<PostgresException>(() => initializer.VerifyAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public async Task PostgreSqlMissingHistoricalMigrationRemainsRejected()
     {
-        await using var connection = await _database.OpenAsync();
+        await using var connection = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await using var corrupt = new NpgsqlCommand("DELETE FROM SchemaMigrations WHERE Version=2", connection);
-        await corrupt.ExecuteNonQueryAsync();
+        await corrupt.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         var before = await ReadMigrationLineageSnapshotAsync();
         var initializer = new PostgresDatabaseInitializer(_database.Options, new DatabaseRecoveryState(), TimeProvider.System,
             NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync(TestContext.Current.CancellationToken));
         Assert.False(initializer.RetryPending);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.VerifyAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.VerifyAsync(TestContext.Current.CancellationToken));
         Assert.Equal(before, await ReadMigrationLineageSnapshotAsync());
     }
 
     [Fact]
     public async Task PostgreSqlUpgradesSchemaTwoToCurrentAndBackfillsDurableLeasesFromRunningJobs()
     {
-        await using (var connection = await _database.OpenAsync())
+        await using (var connection = await _database.OpenAsync(TestContext.Current.CancellationToken))
         {
             await using var downgrade = connection.CreateCommand();
             downgrade.CommandText = """
@@ -128,30 +128,30 @@ public sealed partial class PostgresPersistenceTests
                     ('queued-job', 'CalendarForeground', 'dedupe-queued', 100, '{}', 'Queued', 0,
                     '2026-05-01T09:00:00Z', NULL, NULL, NULL);
                 """;
-            await downgrade.ExecuteNonQueryAsync();
+            await downgrade.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
         var recovery = new DatabaseRecoveryState();
         var initializer = new PostgresDatabaseInitializer(_database.Options, recovery, TimeProvider.System,
             NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-        await initializer.InitializeAsync();
+        await initializer.InitializeAsync(TestContext.Current.CancellationToken);
 
         Assert.True(recovery.Snapshot.IsHealthy, recovery.Snapshot.Message);
         Assert.Equal(DatabaseSchema.CurrentVersion, recovery.Snapshot.CurrentVersion);
         Assert.Equal("normalized-item-enrichment-cache", recovery.Snapshot.LastMigration);
-        Assert.True((await initializer.VerifyAsync()).IsHealthy);
+        Assert.True((await initializer.VerifyAsync(TestContext.Current.CancellationToken)).IsHealthy);
         // Migration 3 is stored with SQLite's INSERT OR REPLACE and translated to an upsert for PostgreSQL;
         // only Running jobs with a lease are copied into the lease table.
-        await using var verify = await _database.OpenAsync();
+        await using var verify = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await using var leases = new NpgsqlCommand(
             "SELECT JobId, LeaseOwner, LeaseExpiresUtc, UpdatedUtc FROM ProviderWorkLeases ORDER BY JobId", verify);
-        await using var reader = await leases.ExecuteReaderAsync();
-        Assert.True(await reader.ReadAsync());
+        await using var reader = await leases.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
         Assert.Equal("running-job", reader.GetString(0));
         Assert.Equal("worker-a", reader.GetString(1));
         Assert.Equal("2026-05-01T09:35:00Z", reader.GetString(2));
         Assert.Equal("2026-05-01T09:05:00Z", reader.GetString(3));
-        Assert.False(await reader.ReadAsync());
+        Assert.False(await reader.ReadAsync(TestContext.Current.CancellationToken));
     }
 
     private async Task SeedLineageUserDataAsync()

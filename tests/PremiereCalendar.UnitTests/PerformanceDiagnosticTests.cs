@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Text.Json;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
-using Xunit.Abstractions;
 
 namespace PremiereCalendar.UnitTests;
 
@@ -63,7 +62,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         }), telemetry);
         using var first = await limiter.AcquireAsync(CancellationToken.None);
         first.Dispose();
-        using var second = await limiter.AcquireAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        using var second = await limiter.AcquireAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         telemetry.FlushDiagnostics();
         var events = ReadEvents(directory.Path);
         var admissions = events.Where(item => item.GetProperty("event").GetString() == "provider.local_admission.completed").ToArray();
@@ -321,7 +320,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         var producer = telemetry.CreateDiagnosticContext();
         using (telemetry.UseDiagnosticContext(consumer))
         {
-            await foreach (var value in telemetry.WithDiagnosticContext(Produce(), producer))
+            await foreach (var value in telemetry.WithDiagnosticContext(Produce(TestContext.Current.CancellationToken), producer, TestContext.Current.CancellationToken))
             {
                 Assert.Equal(1, value);
                 Assert.Equal(consumer, telemetry.CaptureDiagnosticContext());
@@ -406,12 +405,12 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         try
         {
             telemetry.RecordDiagnostic("writer.blocked");
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
             var health = await Task.Run(() =>
             {
                 for (var index = 0; index < 1000; index++) telemetry.RecordDiagnostic("provider.event");
                 return store.Health;
-            }).WaitAsync(TimeSpan.FromSeconds(2));
+            }).WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             Assert.Equal(2, health.QueuedEvents);
             Assert.Equal(998, health.DroppedEvents);
             Assert.True(health.QueueFull);
@@ -425,7 +424,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         store.Flush();
         for (var attempt = 0; attempt < 20 && !store.Health.Healthy; attempt++)
         {
-            await Task.Delay(25);
+            await Task.Delay(25, TestContext.Current.CancellationToken);
             store.Flush();
         }
         Assert.True(store.Health.Healthy);
@@ -448,7 +447,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         try
         {
             telemetry.RecordDiagnostic("writer.blocked");
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
             telemetry.RecordDiagnostic("queued.before.shutdown");
             var started = Stopwatch.GetTimestamp();
             store.Dispose();
@@ -457,7 +456,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
             Assert.False(store.Health.Healthy);
         }
         finally { release.Set(); }
-        await store.Completion.WaitAsync(TimeSpan.FromSeconds(3));
+        await store.Completion.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.False(store.Health.WriterRunning);
         Assert.Equal(0, store.Health.QueuedEvents);
         Assert.Equal(1, store.Health.DroppedEvents);
@@ -479,9 +478,9 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         try
         {
             telemetry.RecordDiagnostic("writer.only.inflight.event");
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
-            await Task.Delay(250);
-            var health = await Task.Run(() => store.Health).WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
+            await Task.Delay(250, TestContext.Current.CancellationToken);
+            var health = await Task.Run(() => store.Health).WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
             Assert.Equal(0, health.QueuedEvents);
             Assert.Equal(0, health.DroppedEvents);
             Assert.False(health.QueueFull);
@@ -495,7 +494,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         // queued durability barrier can complete asynchronously under load.
         var recovery = Stopwatch.StartNew();
         while (!store.Health.Healthy && recovery.Elapsed < TimeSpan.FromSeconds(5))
-            await Task.Delay(10);
+            await Task.Delay(10, TestContext.Current.CancellationToken);
         Assert.True(store.Health.Healthy);
         Assert.False(store.Health.WriterStalled);
         Assert.Equal(0, store.Health.ActiveIoMs);
@@ -509,7 +508,7 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         using var directory = new TestDirectory();
         using var store = new PerformanceDiagnosticStore(new() { PerformanceFlushIntervalSeconds = 1 }, directory.Path);
         var telemetry = new PremiereTelemetry(store);
-        await Task.Delay(1100);
+        await Task.Delay(1100, TestContext.Current.CancellationToken);
         telemetry.RecordDiagnostic("after.first.idle.tick");
         await WaitForEvents(1);
         telemetry.RecordDiagnostic("after.second.idle.tick");
@@ -668,14 +667,14 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         telemetry.RecordDiagnostic("dirty.first");
         store.Flush();
         Assert.Equal(1, Volatile.Read(ref flushes));
-        await Task.Delay(2200);
+        await Task.Delay(2200, TestContext.Current.CancellationToken);
         Assert.Equal(1, Volatile.Read(ref flushes));
         store.Flush();
         Assert.Equal(1, Volatile.Read(ref flushes));
         telemetry.RecordDiagnostic("dirty.second");
         store.Flush();
         Assert.Equal(2, Volatile.Read(ref flushes));
-        await Task.Delay(1100);
+        await Task.Delay(1100, TestContext.Current.CancellationToken);
         store.Dispose();
         Assert.Equal(2, Volatile.Read(ref flushes));
         Assert.Equal(2, ReadEvents(directory.Path).Count);
@@ -702,9 +701,9 @@ public sealed class PerformanceDiagnosticTests(ITestOutputHelper output)
         Interlocked.Exchange(ref delayNextBarrier, 1);
         try
         {
-            var delayedFlush = Task.Run(store.Flush);
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
-            await delayedFlush.WaitAsync(TimeSpan.FromSeconds(2));
+            var delayedFlush = Task.Run(store.Flush, TestContext.Current.CancellationToken);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
+            await delayedFlush.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             Assert.Equal(previousTimeouts + 1, store.Health.FlushTimeouts);
             Assert.False(store.Health.Healthy);
             Assert.Equal(0, store.Health.ActiveIoMs);

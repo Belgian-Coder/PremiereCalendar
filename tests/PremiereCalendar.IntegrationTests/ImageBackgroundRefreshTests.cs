@@ -10,6 +10,9 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
+// ImageMagick's native resource limits (memory, list length) are process-wide: concurrent decodes in other tests make
+// "cache resources exhausted" fail. All image tests share one collection, so they run one after the other.
+[Collection(ImageMagickCollection.Name)]
 public sealed class ImageBackgroundRefreshTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "premiere-image-background-" + Guid.NewGuid().ToString("N"));
@@ -34,25 +37,25 @@ public sealed class ImageBackgroundRefreshTests : IDisposable
         Expire(original);
         try
         {
-            var stale = await cache.GetOrAddAsync(Url, false, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1));
+            var stale = await cache.GetOrAddAsync(Url, false, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
             Assert.True(stale.IsStale);
             Assert.Equal(original.FilePath, stale.FilePath);
             Assert.Equal(TimeSpan.FromMinutes(1), stale.BrowserMaxAge);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             var forced = cache.GetOrAddAsync(Url, true, CancellationToken.None);
             for (var index = 0; index < 20; index++)
-                Assert.True((await cache.GetOrAddAsync(Url, false, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1))).IsStale);
+                Assert.True((await cache.GetOrAddAsync(Url, false, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken)).IsStale);
             Assert.Equal(2, Volatile.Read(ref requests));
             Assert.False(forced.IsCompleted);
             release.TrySetResult();
-            var forcedResult = await forced.WaitAsync(TimeSpan.FromSeconds(3));
+            var forcedResult = await forced.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             await queue.StopAsync(CancellationToken.None);
             var final = await cache.GetOrAddAsync(Url, false, CancellationToken.None);
             Assert.Equal(3, requests);
             Assert.False(final.IsStale);
             Assert.Equal(forcedResult.FilePath, final.FilePath);
-            Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 1 }, await File.ReadAllBytesAsync(original.FilePath));
-            Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 3 }, await File.ReadAllBytesAsync(final.FilePath));
+            Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 1 }, await File.ReadAllBytesAsync(original.FilePath, TestContext.Current.CancellationToken));
+            Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 3 }, await File.ReadAllBytesAsync(final.FilePath, TestContext.Current.CancellationToken));
         }
         finally { release.TrySetResult(); }
     }
@@ -77,9 +80,9 @@ public sealed class ImageBackgroundRefreshTests : IDisposable
         var original = await cache.GetOrAddAsync(Url, false, CancellationToken.None);
         Expire(original);
         await cache.GetOrAddAsync(Url, false, CancellationToken.None);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        await queue.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
-        var stale = await cache.GetOrAddAsync(Url, false, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await queue.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        var stale = await cache.GetOrAddAsync(Url, false, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
         Assert.True(stale.IsStale);
         Assert.Equal(original.FilePath, stale.FilePath);
         Assert.Equal(2, requests);
@@ -100,12 +103,12 @@ public sealed class ImageBackgroundRefreshTests : IDisposable
             await Task.Delay(Timeout.InfiniteTimeSpan, token);
         }
         Assert.True(queue.TryEnqueue("running", Work));
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.False(queue.TryEnqueue("running", Work));
         Assert.True(queue.TryEnqueue("queued1", Work));
         Assert.True(queue.TryEnqueue("queued2", Work));
         Assert.False(queue.TryEnqueue("overflow", Work));
-        await queue.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+        await queue.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         Assert.Equal(1, started);
         Assert.False(queue.TryEnqueue("after.shutdown", Work));
     }

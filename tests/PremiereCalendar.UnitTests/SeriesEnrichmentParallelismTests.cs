@@ -51,7 +51,7 @@ public sealed partial class PremiereServiceTests
             }));
 
         var operation = SeriesOperation(service, CancellationToken.None);
-        await Task.WhenAll(ratingsStarted.Task, mazeStarted.Task, tomatoesStarted.Task).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(ratingsStarted.Task, mazeStarted.Task, tomatoesStarted.Task).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(operation.IsCompleted);
         Assert.False(artworkStarted.Task.IsCompleted);
         releaseRatings.SetResult(new OmdbItem
@@ -64,14 +64,14 @@ public sealed partial class PremiereServiceTests
             Name = "Parallel series", AverageRuntime = 42, Rating = new TvmazeRating { Average = 8.2 },
             OfficialSite = "https://series.example/", Url = "https://www.tvmaze.com/shows/9501"
         });
-        await Task.WhenAll(artworkStarted.Task, sourcesStarted.Task).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(artworkStarted.Task, sourcesStarted.Task).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(releaseTomatoes.Task.IsCompleted);
         releaseArtwork.SetResult(true);
         Assert.False(operation.IsCompleted);
         releaseSources.SetResult(true);
         releaseTomatoes.SetResult(true);
 
-        var item = Assert.Single(await operation.WaitAsync(TimeSpan.FromSeconds(5)));
+        var item = Assert.Single(await operation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Equal(PremiereIdentity.CanonicalId(PremiereMediaType.Series, 9501), item.CanonicalId);
         Assert.Equal("Parallel series", item.Title);
         Assert.Equal("Parallel original title", item.OriginalTitle);
@@ -107,16 +107,16 @@ public sealed partial class PremiereServiceTests
             new ImmediateWatchmodeClient([]));
         using var cancellation = new CancellationTokenSource();
         var operation = SeriesOperation(service, cancellation.Token);
-        await Task.WhenAll(ratings.Started.Task, maze.Started.Task, tomatoes.Started.Task).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(ratings.Started.Task, maze.Started.Task, tomatoes.Started.Task).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await cancellation.CancelAsync();
         await Task.WhenAll(ratings.CancellationObserved.Task, maze.CancellationObserved.Task, tomatoes.CancellationObserved.Task)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(operation.IsCompleted);
         ratings.Release.SetResult(true);
         maze.Release.SetResult(true);
         Assert.False(operation.IsCompleted);
         tomatoes.Release.SetResult(true);
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.True(ratings.Completed.Task.IsCompletedSuccessfully);
         Assert.True(maze.Completed.Task.IsCompletedSuccessfully);
         Assert.True(tomatoes.Completed.Task.IsCompletedSuccessfully);
@@ -136,16 +136,16 @@ public sealed partial class PremiereServiceTests
             new ImmediateWatchmodeClient([], sources));
         using var cancellation = new CancellationTokenSource();
         var operation = SeriesOperation(service, cancellation.Token);
-        await Task.WhenAll(tomatoes.Started.Task, artwork.Started.Task, sources.Started.Task).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(tomatoes.Started.Task, artwork.Started.Task, sources.Started.Task).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await cancellation.CancelAsync();
         await Task.WhenAll(tomatoes.CancellationObserved.Task, artwork.CancellationObserved.Task, sources.CancellationObserved.Task)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(operation.IsCompleted);
         artwork.Release.SetResult(true);
         sources.Release.SetResult(true);
         Assert.False(operation.IsCompleted);
         tomatoes.Release.SetResult(true);
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.True(tomatoes.Completed.Task.IsCompletedSuccessfully);
         Assert.True(artwork.Completed.Task.IsCompletedSuccessfully);
         Assert.True(sources.Completed.Task.IsCompletedSuccessfully);

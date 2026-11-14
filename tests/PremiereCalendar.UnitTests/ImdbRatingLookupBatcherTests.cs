@@ -3,6 +3,8 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
 
+// Batching windows of a few hundred milliseconds: the tests of this class keep running one after the other (the xUnit.net 2 behaviour).
+[Collection(nameof(ImdbRatingLookupBatcherTests))]
 public sealed class ImdbRatingLookupBatcherTests
 {
     [Fact]
@@ -20,14 +22,14 @@ public sealed class ImdbRatingLookupBatcherTests
             return Ratings(ids);
         });
         var first = ImdbRatingLookupBatcher.GetAsync(store, "tt-first", CancellationToken.None);
-        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         var ids = Enumerable.Range(0, 40).Select(index => $"tt{index:0000000}").ToArray();
         var lookups = ids.Select(id => ImdbRatingLookupBatcher.GetAsync(store, id, CancellationToken.None)).ToArray();
         var duplicate = ImdbRatingLookupBatcher.GetAsync(store, "TT-FIRST", CancellationToken.None);
-        await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         release.SetResult();
 
-        var results = await Task.WhenAll(lookups).WaitAsync(TimeSpan.FromSeconds(10));
+        var results = await Task.WhenAll(lookups).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.Equal(ids, results.Select(result => result!.ImdbId));
         Assert.Equal(await first, await duplicate);
         Assert.Equal(2, store.Batches.Count);
@@ -51,7 +53,7 @@ public sealed class ImdbRatingLookupBatcherTests
         });
         using var cancellation = new CancellationTokenSource();
         var cancelled = ImdbRatingLookupBatcher.GetAsync(store, "tt1", cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         var surviving = ImdbRatingLookupBatcher.GetAsync(store, "tt1", CancellationToken.None);
 
         await cancellation.CancelAsync();
@@ -81,13 +83,13 @@ public sealed class ImdbRatingLookupBatcherTests
         });
         using var cancellation = new CancellationTokenSource();
         var abandoned = ImdbRatingLookupBatcher.GetAsync(store, "tt1", cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         await cancellation.CancelAsync();
-        await cleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await cleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.False(abandoned.IsCompleted);
 
         Assert.Equal("tt1", (await ImdbRatingLookupBatcher.GetAsync(store, "tt1", CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(10)))!.ImdbId);
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken))!.ImdbId);
         releaseCleanup.SetResult();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => abandoned);
         Assert.Equal(0, store.Active);
@@ -121,15 +123,15 @@ public sealed class ImdbRatingLookupBatcherTests
         using var cancellation = new CancellationTokenSource();
         var pending = Enumerable.Range(0, 700).Select(index =>
             ImdbRatingLookupBatcher.GetAsync(store, $"tt{index:0000000}", cancellation.Token)).ToArray();
-        await twoStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await twoStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.Equal(2, store.MaximumActive);
         await cancellation.CancelAsync();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(10)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
         Assert.Equal(0, store.Active);
         Assert.All(store.Batches, batch => Assert.InRange(batch.Length, 1, 64));
         block = false;
         Assert.NotNull(await ImdbRatingLookupBatcher.GetAsync(store, "tt-restarted", CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(10)));
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
     }
 
     [Fact]

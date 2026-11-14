@@ -15,6 +15,9 @@ using ImageMagick;
 
 namespace PremiereCalendar.IntegrationTests;
 
+// ImageMagick's native resource limits (memory, list length) are process-wide: concurrent decodes in other tests make
+// "cache resources exhausted" fail. All image tests share one collection, so they run one after the other.
+[Collection(ImageMagickCollection.Name)]
 public sealed class FileImageCacheTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-image-cache-{Guid.NewGuid():N}");
@@ -73,7 +76,8 @@ public sealed class FileImageCacheTests : IDisposable
             cancellation.Token));
     }
 
-    [Fact]
+    // Lowers ImageMagick's process-wide memory limit for a moment: no other test may decode an image meanwhile.
+    [Fact(DisableParallelization = true)]
     public async Task GetOrAddAsync_MapsNativeResourceLimitFailureToIOException()
     {
         var sample = SamplePngBytes();
@@ -139,9 +143,9 @@ public sealed class FileImageCacheTests : IDisposable
             CancellationToken.None);
 
         Assert.Single(handler.Requests);
-        Assert.Equal(await File.ReadAllBytesAsync(first.FilePath), await File.ReadAllBytesAsync(second.FilePath));
+        Assert.Equal(await File.ReadAllBytesAsync(first.FilePath, TestContext.Current.CancellationToken), await File.ReadAllBytesAsync(second.FilePath, TestContext.Current.CancellationToken));
         Assert.Equal("image/jpeg", first.ContentType);
-        Assert.Equal(Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(first.FilePath))).ToLowerInvariant(), first.ContentHash);
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(first.FilePath, TestContext.Current.CancellationToken))).ToLowerInvariant(), first.ContentHash);
         Assert.True(Directory.Exists(Path.Combine(_root, "cache", "images")));
     }
 
@@ -157,13 +161,13 @@ public sealed class FileImageCacheTests : IDisposable
             imageUrl,
             forceRefresh: false,
             CancellationToken.None);
-        await handler.RequestStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        await handler.RequestStarted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         var second = secondCache.GetOrAddAsync(
             imageUrl,
             forceRefresh: false,
             CancellationToken.None);
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.Equal(1, handler.RequestCount);
 
@@ -172,7 +176,7 @@ public sealed class FileImageCacheTests : IDisposable
 
         Assert.Equal(1, handler.RequestCount);
         Assert.Equal(images[0].FilePath, images[1].FilePath);
-        Assert.Equal(await File.ReadAllBytesAsync(images[0].FilePath), await File.ReadAllBytesAsync(images[1].FilePath));
+        Assert.Equal(await File.ReadAllBytesAsync(images[0].FilePath, TestContext.Current.CancellationToken), await File.ReadAllBytesAsync(images[1].FilePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -186,12 +190,12 @@ public sealed class FileImageCacheTests : IDisposable
             "https://image.tmdb.org/t/p/w342/poster.jpg",
             forceRefresh: false,
             CancellationToken.None);
-        var firstBytes = await File.ReadAllBytesAsync(first.FilePath);
+        var firstBytes = await File.ReadAllBytesAsync(first.FilePath, TestContext.Current.CancellationToken);
         var second = await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/poster.jpg",
             forceRefresh: true,
             CancellationToken.None);
-        var secondBytes = await File.ReadAllBytesAsync(second.FilePath);
+        var secondBytes = await File.ReadAllBytesAsync(second.FilePath, TestContext.Current.CancellationToken);
 
         Assert.Equal(2, handler.Requests.Count);
         Assert.Equal(1, firstBytes[3]);
@@ -217,9 +221,9 @@ public sealed class FileImageCacheTests : IDisposable
             CancellationToken.None);
 
         using var oldSnapshot = new MemoryStream();
-        await oldReader.CopyToAsync(oldSnapshot);
+        await oldReader.CopyToAsync(oldSnapshot, TestContext.Current.CancellationToken);
         Assert.Equal(Marker(1, 2, 3), oldSnapshot.ToArray());
-        Assert.Equal(Marker(1, 2, 3), await File.ReadAllBytesAsync(first.FilePath));
+        Assert.Equal(Marker(1, 2, 3), await File.ReadAllBytesAsync(first.FilePath, TestContext.Current.CancellationToken));
         Assert.NotEqual(first.FilePath, (await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/atomic.jpg",
             forceRefresh: false,
@@ -235,8 +239,8 @@ public sealed class FileImageCacheTests : IDisposable
         const string imageUrl = "https://image.tmdb.org/t/p/w342/metadata-failure.jpg";
         var first = await cache.GetOrAddAsync(imageUrl, false, CancellationToken.None);
         var metadataPath = MetadataPath(first);
-        var oldMetadata = await File.ReadAllBytesAsync(metadataPath);
-        var oldBytes = await File.ReadAllBytesAsync(first.FilePath);
+        var oldMetadata = await File.ReadAllBytesAsync(metadataPath, TestContext.Current.CancellationToken);
+        var oldBytes = await File.ReadAllBytesAsync(first.FilePath, TestContext.Current.CancellationToken);
 
         File.SetAttributes(metadataPath, File.GetAttributes(metadataPath) | FileAttributes.ReadOnly);
         CachedImage refreshed;
@@ -254,22 +258,22 @@ public sealed class FileImageCacheTests : IDisposable
         {
             // Windows rejects this replacement. The failed commit must retain the old pair.
             Assert.True(refreshed.IsStale);
-            Assert.Equal(oldMetadata, await File.ReadAllBytesAsync(metadataPath));
+            Assert.Equal(oldMetadata, await File.ReadAllBytesAsync(metadataPath, TestContext.Current.CancellationToken));
             Assert.Equal(first.ContentHash, current.ContentHash);
         }
         else
         {
             // Unix directory permissions allow replacing an owned read-only file atomically.
             Assert.False(refreshed.IsStale);
-            Assert.NotEqual(oldMetadata, await File.ReadAllBytesAsync(metadataPath));
+            Assert.NotEqual(oldMetadata, await File.ReadAllBytesAsync(metadataPath, TestContext.Current.CancellationToken));
             Assert.NotEqual(first.ContentHash, current.ContentHash);
             Assert.Equal(refreshed.ContentHash, current.ContentHash);
-            Assert.Equal(Marker(2, 4, 5), await File.ReadAllBytesAsync(current.FilePath));
+            Assert.Equal(Marker(2, 4, 5), await File.ReadAllBytesAsync(current.FilePath, TestContext.Current.CancellationToken));
         }
 
         Assert.Equal(2, handler.Requests.Count);
-        Assert.Equal(oldBytes, await File.ReadAllBytesAsync(first.FilePath));
-        Assert.Equal(Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(current.FilePath))).ToLowerInvariant(), current.ContentHash);
+        Assert.Equal(oldBytes, await File.ReadAllBytesAsync(first.FilePath, TestContext.Current.CancellationToken));
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(current.FilePath, TestContext.Current.CancellationToken))).ToLowerInvariant(), current.ContentHash);
     }
 
     [Fact]
@@ -292,11 +296,9 @@ public sealed class FileImageCacheTests : IDisposable
             CancellationToken.None);
         var metadataPath = MetadataPath(cached);
         File.Copy(cached.FilePath, Path.Combine(Path.GetDirectoryName(cached.FilePath)!, $"{cached.CacheKey}.bin"));
-        await File.WriteAllTextAsync(
-            metadataPath,
-            """
+        await File.WriteAllTextAsync(metadataPath, """
             {"sourceUrl":"https://image.tmdb.org/t/p/w342/stale.jpg","contentType":"image/jpeg","fetchedUtc":"2026-02-01T00:00:00+00:00"}
-            """);
+            """, TestContext.Current.CancellationToken);
         timeout = true;
 
         var stale = await cache.GetOrAddAsync(
@@ -307,7 +309,7 @@ public sealed class FileImageCacheTests : IDisposable
         Assert.Equal(cached.FilePath, stale.FilePath);
         Assert.True(stale.IsStale);
         Assert.Equal(TimeSpan.FromMinutes(1), stale.BrowserMaxAge);
-        Assert.Equal(Marker(7, 7, 7), await File.ReadAllBytesAsync(stale.FilePath));
+        Assert.Equal(Marker(7, 7, 7), await File.ReadAllBytesAsync(stale.FilePath, TestContext.Current.CancellationToken));
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -331,11 +333,11 @@ public sealed class FileImageCacheTests : IDisposable
         var cached = await cache.GetOrAddAsync(imageUrl, false, CancellationToken.None);
 
         var stale = await cache.GetOrAddAsync(imageUrl, true, CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         Assert.True(stale.IsStale);
         Assert.Equal(cached.ContentHash, stale.ContentHash);
-        Assert.Equal(Marker(6, 5, 4), await File.ReadAllBytesAsync(stale.FilePath));
+        Assert.Equal(Marker(6, 5, 4), await File.ReadAllBytesAsync(stale.FilePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -351,16 +353,16 @@ public sealed class FileImageCacheTests : IDisposable
         var legacyBodyPath = Path.Combine(Path.GetDirectoryName(first.FilePath)!, $"{first.CacheKey}.bin");
         File.Copy(first.FilePath, legacyBodyPath);
         File.Delete(first.FilePath);
-        var metadata = JsonNode.Parse(await File.ReadAllTextAsync(metadataPath))!;
+        var metadata = JsonNode.Parse(await File.ReadAllTextAsync(metadataPath, TestContext.Current.CancellationToken))!;
         metadata.AsObject().Remove("contentHash");
         metadata.AsObject().Remove("bodyGenerationVersion");
-        await File.WriteAllTextAsync(metadataPath, metadata.ToJsonString());
+        await File.WriteAllTextAsync(metadataPath, metadata.ToJsonString(), TestContext.Current.CancellationToken);
 
         var reused = await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/legacy-hash.jpg",
             forceRefresh: false,
             CancellationToken.None);
-        var updatedMetadata = JsonNode.Parse(await File.ReadAllTextAsync(metadataPath))!;
+        var updatedMetadata = JsonNode.Parse(await File.ReadAllTextAsync(metadataPath, TestContext.Current.CancellationToken))!;
 
         Assert.Single(handler.Requests);
         Assert.Equal(first.ContentHash, reused.ContentHash);
@@ -380,7 +382,7 @@ public sealed class FileImageCacheTests : IDisposable
             forceRefresh: false,
             CancellationToken.None);
         var metadataPath = MetadataPath(first);
-        await File.WriteAllTextAsync(metadataPath, "{invalid json");
+        await File.WriteAllTextAsync(metadataPath, "{invalid json", TestContext.Current.CancellationToken);
 
         var repaired = await cache.GetOrAddAsync(
             "https://image.tmdb.org/t/p/w342/corrupt-metadata.jpg",
@@ -388,8 +390,8 @@ public sealed class FileImageCacheTests : IDisposable
             CancellationToken.None);
 
         Assert.Equal(2, handler.Requests.Count);
-        Assert.Equal(Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(repaired.FilePath))).ToLowerInvariant(), repaired.ContentHash);
-        Assert.NotNull(JsonNode.Parse(await File.ReadAllTextAsync(metadataPath)));
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(repaired.FilePath, TestContext.Current.CancellationToken))).ToLowerInvariant(), repaired.ContentHash);
+        Assert.NotNull(JsonNode.Parse(await File.ReadAllTextAsync(metadataPath, TestContext.Current.CancellationToken)));
     }
 
     [Fact]
@@ -492,7 +494,7 @@ public sealed class FileImageCacheTests : IDisposable
             format: format);
 
         Assert.Equal("image/png", cached.ContentType);
-        Assert.Equal(animatedBytes, await File.ReadAllBytesAsync(cached.FilePath));
+        Assert.Equal(animatedBytes, await File.ReadAllBytesAsync(cached.FilePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -618,7 +620,7 @@ public sealed class FileImageCacheTests : IDisposable
             CancellationToken.None,
             width: 80);
 
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.Empty(handler.Requests);
 
         firstStageSlot.Dispose();
@@ -637,7 +639,7 @@ public sealed class FileImageCacheTests : IDisposable
             forceRefresh: false,
             CancellationToken.None,
             width: 80);
-        var bytes = await File.ReadAllBytesAsync(resized.FilePath);
+        var bytes = await File.ReadAllBytesAsync(resized.FilePath, TestContext.Current.CancellationToken);
 
         Assert.Single(handler.Requests);
         Assert.Equal("image/jpeg", resized.ContentType);
@@ -701,7 +703,7 @@ public sealed class FileImageCacheTests : IDisposable
             CancellationToken.None,
             width: 80,
             format: ImageCacheFormat.Webp);
-        var bytes = await File.ReadAllBytesAsync(webp.FilePath);
+        var bytes = await File.ReadAllBytesAsync(webp.FilePath, TestContext.Current.CancellationToken);
 
         Assert.Equal(2, handler.Requests.Count);
         Assert.NotEqual(jpeg.CacheKey, webp.CacheKey);
@@ -722,7 +724,7 @@ public sealed class FileImageCacheTests : IDisposable
             forceRefresh: false,
             CancellationToken.None,
             width: 185);
-        var bytes = await File.ReadAllBytesAsync(cached.FilePath);
+        var bytes = await File.ReadAllBytesAsync(cached.FilePath, TestContext.Current.CancellationToken);
 
         Assert.Single(handler.Requests);
         Assert.Equal(originalBytes, bytes);
@@ -740,7 +742,7 @@ public sealed class FileImageCacheTests : IDisposable
             forceRefresh: false,
             CancellationToken.None,
             width: 185);
-        var bytes = await File.ReadAllBytesAsync(resized.FilePath);
+        var bytes = await File.ReadAllBytesAsync(resized.FilePath, TestContext.Current.CancellationToken);
 
         // The w342 variant is wider than the card, but the delivered image is only 100px: nothing to shrink,
         // so the original is served as-is with its real type instead of being re-encoded.
@@ -831,7 +833,7 @@ public sealed class FileImageCacheTests : IDisposable
         var cached = await cache.GetOrAddAsync("https://static.tvmaze.com/uploads/images/original_untouched/a.avif", false, CancellationToken.None);
 
         Assert.Equal("image/avif", cached.ContentType);
-        Assert.Equal(avif, await File.ReadAllBytesAsync(cached.FilePath));
+        Assert.Equal(avif, await File.ReadAllBytesAsync(cached.FilePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -938,7 +940,7 @@ public sealed class FileImageCacheTests : IDisposable
             "https://static.tvmaze.com/uploads/images/original_untouched/liar.jpg", false, CancellationToken.None);
 
         Assert.Equal("image/png", cached.ContentType);
-        Assert.Equal(SamplePngBytes(), await File.ReadAllBytesAsync(cached.FilePath));
+        Assert.Equal(SamplePngBytes(), await File.ReadAllBytesAsync(cached.FilePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -1012,7 +1014,7 @@ public sealed class FileImageCacheTests : IDisposable
             false, CancellationToken.None, width: 200, format: ImageCacheFormat.Webp);
 
         Assert.Equal("image/png", cached.ContentType);
-        Assert.Equal(png, await File.ReadAllBytesAsync(cached.FilePath));
+        Assert.Equal(png, await File.ReadAllBytesAsync(cached.FilePath, TestContext.Current.CancellationToken));
         // A second request is served from the cache with the same type and bytes.
         var again = await cache.GetOrAddAsync(
             "https://static.tvmaze.com/uploads/images/original_untouched/small-enough.png",
@@ -1083,11 +1085,9 @@ public sealed class FileImageCacheTests : IDisposable
             CancellationToken.None);
         var oldMetadataPath = MetadataPath(oldImage);
         var oldTimestamp = new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc);
-        await File.WriteAllTextAsync(
-            oldMetadataPath,
-            """
+        await File.WriteAllTextAsync(oldMetadataPath, """
             {"sourceUrl":"https://image.tmdb.org/t/p/w342/old.jpg","contentType":"image/jpeg","fetchedUtc":"2026-02-01T00:00:00+00:00"}
-            """);
+            """, TestContext.Current.CancellationToken);
         File.SetLastWriteTimeUtc(oldImage.FilePath, oldTimestamp);
         File.SetLastWriteTimeUtc(oldMetadataPath, oldTimestamp);
 
@@ -1116,8 +1116,8 @@ public sealed class FileImageCacheTests : IDisposable
         await cache.CleanupAsync(DateTimeOffset.UtcNow, TimeSpan.FromDays(60), CancellationToken.None);
 
         Assert.True(File.Exists(old.FilePath));
-        Assert.Equal(Marker(1), await File.ReadAllBytesAsync(old.FilePath));
-        Assert.Equal(Marker(2), await File.ReadAllBytesAsync(current.FilePath));
+        Assert.Equal(Marker(1), await File.ReadAllBytesAsync(old.FilePath, TestContext.Current.CancellationToken));
+        Assert.Equal(Marker(2), await File.ReadAllBytesAsync(current.FilePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -1153,7 +1153,7 @@ public sealed class FileImageCacheTests : IDisposable
             CancellationToken.None);
         var metadataPath = MetadataPath(oldImage);
         var oldTimestamp = new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc);
-        await File.WriteAllTextAsync(metadataPath, "{not valid json");
+        await File.WriteAllTextAsync(metadataPath, "{not valid json", TestContext.Current.CancellationToken);
         File.SetLastWriteTimeUtc(oldImage.FilePath, oldTimestamp);
         File.SetLastWriteTimeUtc(metadataPath, oldTimestamp);
 

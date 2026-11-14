@@ -25,7 +25,7 @@ public sealed partial class ProviderWorkSchedulerTests
             await PublishRetryingFinalAsync(job, requested);
             await _scheduler.CompleteAsync(job, CancellationToken.None);
 
-            var saved = (await _scheduler.GetAsync(job.JobId))!;
+            var saved = (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!;
             Assert.Equal(ProviderWorkState.RetryWaiting, saved.State);
             Assert.Equal(0, saved.AttemptCount);
             // The requested deadline is always honoured; repeated deferrals wait at least 2x and 4x the requested delay.
@@ -39,7 +39,7 @@ public sealed partial class ProviderWorkSchedulerTests
         await PublishRetryingFinalAsync(job, clock.GetUtcNow().Add(synthetic));
         await _scheduler.CompleteAsync(job, CancellationToken.None);
 
-        var final = (await _scheduler.GetAsync(job.JobId))!;
+        var final = (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!;
         Assert.Equal(ProviderWorkState.Completed, final.State);
         clock.Advance(TimeSpan.FromHours(1));
         Assert.Null(await _scheduler.ClaimNextAsync(false, "no-fifth-run", CancellationToken.None));
@@ -54,7 +54,7 @@ public sealed partial class ProviderWorkSchedulerTests
         for (var deferral = 1; deferral <= ProviderWorkScheduler.MaximumConsecutiveDeferrals; deferral++)
         {
             await _scheduler.FailAsync(job, new ProviderRetryAfterException("tmdb", clock.GetUtcNow().AddSeconds(60)), CancellationToken.None);
-            Assert.Equal(0, (await _scheduler.GetAsync(job.JobId))!.AttemptCount);
+            Assert.Equal(0, (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!.AttemptCount);
             clock.Advance(TimeSpan.FromHours(1));
             job = (await _scheduler.ClaimNextAsync(false, $"failure-owner-{deferral}", CancellationToken.None))!;
         }
@@ -62,7 +62,7 @@ public sealed partial class ProviderWorkSchedulerTests
         await _scheduler.FailAsync(job, new ProviderRetryAfterException("tmdb", clock.GetUtcNow().AddSeconds(60)), CancellationToken.None);
 
         // The fourth deferral is refused: the failure now spends a normal retry attempt instead.
-        Assert.Equal(1, (await _scheduler.GetAsync(job.JobId))!.AttemptCount);
+        Assert.Equal(1, (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!.AttemptCount);
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public sealed partial class ProviderWorkSchedulerTests
         await _scheduler.PublishAsync(job, Progress(job, "ok", new PremiereLoadProgress("Complete", 1, 1, [Item(1)], IsFinal: true)), CancellationToken.None);
         await _scheduler.CompleteAsync(job, CancellationToken.None);
 
-        Assert.Equal(ProviderWorkState.Completed, (await _scheduler.GetAsync(job.JobId))!.State);
+        Assert.Equal(ProviderWorkState.Completed, (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!.State);
         Assert.Empty(counters);
     }
 }

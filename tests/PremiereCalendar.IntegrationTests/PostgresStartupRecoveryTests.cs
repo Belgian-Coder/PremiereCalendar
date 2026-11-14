@@ -23,30 +23,30 @@ public sealed partial class PostgresPersistenceTests
         var postgres = new PostgresDatabaseInitializer(options, recovery, TimeProvider.System,
             NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
         using var hosted = new DatabaseInitializerHostedService(options, postgres);
-        await hosted.StartAsync(default);
+        await hosted.StartAsync(TestContext.Current.CancellationToken);
         try
         {
             Assert.False(recovery.Snapshot.IsHealthy);
             Assert.True(postgres.RetryPending);
             options.Value.ConnectionString = reachableConnectionString;
-            await recovery.WaitUntilHealthyAsync(default).WaitAsync(TimeSpan.FromSeconds(10));
+            await recovery.WaitUntilHealthyAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Assert.False(postgres.RetryPending);
             Assert.Equal(DatabaseSchema.CurrentVersion, recovery.Snapshot.CurrentVersion);
         }
-        finally { await hosted.StopAsync(default).WaitAsync(TimeSpan.FromSeconds(3)); }
+        finally { await hosted.StopAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken); }
     }
 
     [Fact]
     public async Task PostgreSqlUnsupportedSchemaFailsWithoutBeingClassifiedAsTransient()
     {
-        await using var connection = await _database.OpenAsync();
+        await using var connection = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await using var newer = new NpgsqlCommand("INSERT INTO SchemaMigrations (Version,Name,Checksum,AppliedUtc) VALUES (@version,'unsupported','unsupported','2026-11-05T00:00:00Z')", connection);
         newer.Parameters.AddWithValue("version", DatabaseSchema.CurrentVersion + 1);
-        await newer.ExecuteNonQueryAsync();
+        await newer.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         var recovery = new DatabaseRecoveryState();
         var postgres = new PostgresDatabaseInitializer(_database.Options, recovery, TimeProvider.System,
             NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => postgres.InitializeAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => postgres.InitializeAsync(TestContext.Current.CancellationToken));
         Assert.False(postgres.RetryPending);
         Assert.False(recovery.Snapshot.IsHealthy);
     }
@@ -54,24 +54,24 @@ public sealed partial class PostgresPersistenceTests
     [Fact]
     public async Task PostgreSqlCorruptMigrationHistoryFailsWithoutRetry()
     {
-        await using var connection = await _database.OpenAsync();
+        await using var connection = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await using var corrupt = new NpgsqlCommand("UPDATE SchemaMigrations SET Checksum='invalid' WHERE Version=1", connection);
-        await corrupt.ExecuteNonQueryAsync();
+        await corrupt.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         var postgres = new PostgresDatabaseInitializer(_database.Options, new DatabaseRecoveryState(), TimeProvider.System,
             NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => postgres.InitializeAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => postgres.InitializeAsync(TestContext.Current.CancellationToken));
         Assert.False(postgres.RetryPending);
     }
 
     [Fact]
     public async Task PostgreSqlMissingRequiredColumnFailsWithoutRetry()
     {
-        await using var connection = await _database.OpenAsync();
+        await using var connection = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await using var corrupt = new NpgsqlCommand("ALTER TABLE ProviderWorkJobs DROP COLUMN ProgressJson", connection);
-        await corrupt.ExecuteNonQueryAsync();
+        await corrupt.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         var postgres = new PostgresDatabaseInitializer(_database.Options, new DatabaseRecoveryState(), TimeProvider.System,
             NullLogger<PostgresDatabaseInitializer>.Instance, new PremiereTelemetry());
-        var error = await Assert.ThrowsAsync<PostgresException>(() => postgres.InitializeAsync());
+        var error = await Assert.ThrowsAsync<PostgresException>(() => postgres.InitializeAsync(TestContext.Current.CancellationToken));
         Assert.Equal("42703", error.SqlState);
         Assert.False(postgres.RetryPending);
     }

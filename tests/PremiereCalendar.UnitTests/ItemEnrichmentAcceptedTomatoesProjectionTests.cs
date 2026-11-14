@@ -32,53 +32,49 @@ public sealed partial class PremiereServiceTests
                 entered.SetResult();
                 await release.Task.WaitAsync(token);
                 return fixture.Refresh(previous, fixture.First, new( RottenTomatoesScore: 83, RottenTomatoesAudienceScore: 91));
-            }, default, ratingsOnly: true, ratingsInputs: fixture.First);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }, TestContext.Current.CancellationToken, ratingsOnly: true, ratingsInputs: fixture.First);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             var joined = joinedSession.GetAsync(fixture.Identity, true, (previous, _, _, _) =>
             {
                 providerCalls++;
                 return Task.FromResult(fixture.Refresh(previous, fixture.First, new(RottenTomatoesScore: 1)));
-            }, default, ratingsOnly: true, ratingsInputs: fixture.First);
+            }, TestContext.Current.CancellationToken, ratingsOnly: true, ratingsInputs: fixture.First);
             release.SetResult();
             await first;
             firstItem = (await joined).Apply(fixture.First);
-            await firstSession.FlushAsync(default);
-            await joinedSession.FlushAsync(default);
+            await firstSession.FlushAsync(TestContext.Current.CancellationToken);
+            await joinedSession.FlushAsync(TestContext.Current.CancellationToken);
             projectionSession = joinedSession;
         }
         else if (mode != "cached")
         {
             providerCalls++;
-            var outcome = await firstSession.GetAsync(fixture.Identity, true,
-                (previous, _, _, _) => Task.FromResult(fixture.Refresh(previous, fixture.First,
-                    new(RottenTomatoesScore: 83, RottenTomatoesAudienceScore: 91))),
-                default, ratingsOnly: true, ratingsInputs: fixture.First);
+            var outcome = await firstSession.GetAsync(fixture.Identity, true, (previous, _, _, _) => Task.FromResult(fixture.Refresh(previous, fixture.First,
+                    new(RottenTomatoesScore: 83, RottenTomatoesAudienceScore: 91))), TestContext.Current.CancellationToken, ratingsOnly: true, ratingsInputs: fixture.First);
             firstItem = outcome.Apply(fixture.First);
-            if (mode != "unaccepted-proposal") await firstSession.FlushAsync(default);
+            if (mode != "unaccepted-proposal") await firstSession.FlushAsync(TestContext.Current.CancellationToken);
         }
         Assert.Equal(mode == "cached" ? 0 : 1, providerCalls);
         Assert.Equal(mode is "cached" or "unaccepted-proposal" ? 0 : mode == "same-flight-joiner" ? 2 : 1, fixture.Store.Writes);
 
         fixture.Store.PauseNextRead();
-        var firstReconciliation = projectionSession.ReconcileAsync([firstItem], false, default);
+        var firstReconciliation = projectionSession.ReconcileAsync([firstItem], false, TestContext.Current.CancellationToken);
         try
         {
-            await fixture.Store.ReadPaused.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await fixture.Store.ReadPaused.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             fixture.Clock.Advance(TimeSpan.FromMinutes(1));
             await using var secondSession = await fixture.NewSessionAsync();
             var external = new ItemEnrichmentRatingValues(ImdbScore: 8.8, ImdbVoteCount: 4000,
                 RottenTomatoesScore: newerOmdbOwnsTomatoes ? 99 : null,
                 RottenTomatoesAudienceScore: newerOmdbOwnsTomatoes ? 98 : null, MetacriticScore: 82);
-            var second = await secondSession.GetAsync(fixture.Identity, true,
-                (previous, _, _, _) => Task.FromResult(fixture.Refresh(previous, fixture.Second,
-                    new(RottenTomatoesScore: 94, RottenTomatoesAudienceScore: 96), external)),
-                default, ratingsOnly: true, ratingsInputs: fixture.Second);
-            await secondSession.FlushAsync(default);
-            var secondRow = Assert.Single((await secondSession.ReconcileAsync([second.Apply(fixture.Second)], false, default)).Items);
+            var second = await secondSession.GetAsync(fixture.Identity, true, (previous, _, _, _) => Task.FromResult(fixture.Refresh(previous, fixture.Second,
+                    new(RottenTomatoesScore: 94, RottenTomatoesAudienceScore: 96), external)), TestContext.Current.CancellationToken, ratingsOnly: true, ratingsInputs: fixture.Second);
+            await secondSession.FlushAsync(TestContext.Current.CancellationToken);
+            var secondRow = Assert.Single((await secondSession.ReconcileAsync([second.Apply(fixture.Second)], false, TestContext.Current.CancellationToken)).Items);
             var winner = Assert.Single(fixture.Memory.Records.Values);
             var writes = fixture.Store.Writes;
             fixture.Store.ResumeRead.TrySetResult();
-            var reconciliation = await firstReconciliation.WaitAsync(TimeSpan.FromSeconds(5));
+            var reconciliation = await firstReconciliation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             var firstRow = Assert.Single(reconciliation.Items);
 
             Assert.Empty(reconciliation.DirtyMedia);
@@ -108,7 +104,7 @@ public sealed partial class PremiereServiceTests
         finally
         {
             fixture.Store.ResumeRead.TrySetResult();
-            await firstReconciliation.WaitAsync(TimeSpan.FromSeconds(5));
+            await firstReconciliation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             if (joinedSession is not null) await joinedSession.DisposeAsync();
         }
     }
@@ -133,19 +129,15 @@ public sealed partial class PremiereServiceTests
         var item = first.Find(fixture.Identity)!.Apply(fixture.First);
         if (change != "already-invalid")
         {
-            item = (await first.GetAsync(fixture.Identity, true,
-                (previous, _, _, _) => Task.FromResult(fixture.Refresh(previous, fixture.First,
-                    new(RottenTomatoesScore: 83, RottenTomatoesAudienceScore: 91))),
-                default, ratingsOnly: true, ratingsInputs: fixture.First)).Apply(fixture.First);
-            await first.FlushAsync(default);
+            item = (await first.GetAsync(fixture.Identity, true, (previous, _, _, _) => Task.FromResult(fixture.Refresh(previous, fixture.First,
+                    new(RottenTomatoesScore: 83, RottenTomatoesAudienceScore: 91))), TestContext.Current.CancellationToken, ratingsOnly: true, ratingsInputs: fixture.First)).Apply(fixture.First);
+            await first.FlushAsync(TestContext.Current.CancellationToken);
         }
         fixture.Clock.Advance(TimeSpan.FromMinutes(1));
         await using var second = await fixture.NewSessionAsync();
-        await second.GetAsync(fixture.Identity, true,
-            (previous, _, _, _) => Task.FromResult(fixture.Refresh(previous, fixture.Second,
-                new(RottenTomatoesScore: 94, RottenTomatoesAudienceScore: 96))),
-            default, ratingsOnly: true, ratingsInputs: fixture.Second);
-        await second.FlushAsync(default);
+        await second.GetAsync(fixture.Identity, true, (previous, _, _, _) => Task.FromResult(fixture.Refresh(previous, fixture.Second,
+                new(RottenTomatoesScore: 94, RottenTomatoesAudienceScore: 96))), TestContext.Current.CancellationToken, ratingsOnly: true, ratingsInputs: fixture.Second);
+        await second.FlushAsync(TestContext.Current.CancellationToken);
         var current = Assert.Single(fixture.Memory.Records);
         var ratings = JsonSerializer.Deserialize<ItemEnrichmentRatings>(current.Value.RatingsJson!)!;
         var changed = change switch
@@ -161,7 +153,7 @@ public sealed partial class PremiereServiceTests
         fixture.Memory.Records[current.Key] = changed;
         var writes = fixture.Store.Writes;
 
-        var result = Assert.Single((await first.ReconcileAsync([item], false, default)).Items);
+        var result = Assert.Single((await first.ReconcileAsync([item], false, TestContext.Current.CancellationToken)).Items);
 
         Assert.Equal(change == "manual-same" ? 97 : (int?)null, result.RottenTomatoesScore);
         Assert.Equal(change == "manual-same" ? 98 : (int?)null, result.RottenTomatoesAudienceScore);

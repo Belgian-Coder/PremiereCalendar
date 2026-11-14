@@ -56,8 +56,7 @@ public sealed partial class PremiereServiceTests
             sourceTimeoutSeconds: 1, maxEnrichmentConcurrency: 1, enrichmentProgressBatchSize: 25);
         PremiereLoadProgress? final = null;
         var timer = Stopwatch.StartNew();
-        await foreach (var update in service.StreamPremieresAsync(start, start,
-            filters: new() { ShowSeries = false })) if (update.IsFinal) final = update;
+        await foreach (var update in service.StreamPremieresAsync(start, start, filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) if (update.IsFinal) final = update;
         Assert.True(timer.Elapsed > TimeSpan.FromSeconds(1));
         Assert.NotNull(final);
         Assert.False(final.HasSourceErrors);
@@ -72,8 +71,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(new FakeTmdbClient(), discoveryProviders: [provider],
             calendarCache: cache, sourceTimeoutSeconds: 1);
         PremiereLoadProgress? final = null;
-        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6),
-            filters: new() { ShowSeries = false })) if (update.IsFinal) final = update;
+        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) if (update.IsFinal) final = update;
         Assert.NotNull(final);
         Assert.True(final.HasSourceErrors);
         Assert.Single(final.Items);
@@ -88,13 +86,12 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(new FakeTmdbClient(), discoveryProviders: [provider], sourceTimeoutSeconds: 1);
         var delayed = false;
         PremiereLoadProgress? final = null;
-        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6),
-            filters: new() { ShowSeries = false }))
+        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken))
         {
             if (!delayed && update.Items.Count > 0 && !update.IsFinal)
             {
                 delayed = true;
-                await Task.Delay(1250);
+                await Task.Delay(1250, TestContext.Current.CancellationToken);
             }
             if (update.IsFinal) final = update;
         }
@@ -113,8 +110,7 @@ public sealed partial class PremiereServiceTests
             calendarCache: cache, sourceTimeoutSeconds: 1);
         var updates = new List<PremiereLoadProgress>();
         var timer = Stopwatch.StartNew();
-        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6),
-            filters: new() { ShowSeries = false })) updates.Add(update);
+        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         Assert.True(timer.Elapsed > TimeSpan.FromSeconds(1));
         Assert.True(updates[^1].IsFinal);
         Assert.False(updates[^1].HasSourceErrors);
@@ -132,8 +128,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(new FakeTmdbClient(), discoveryProviders: [provider], sourceTimeoutSeconds: 1);
         var updates = new List<PremiereLoadProgress>();
         var timer = Stopwatch.StartNew();
-        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6),
-            filters: new() { ShowSeries = false })) updates.Add(update);
+        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         Assert.True(timer.Elapsed < TimeSpan.FromSeconds(4));
         Assert.True(updates[^1].HasSourceErrors);
         Assert.Single(updates[^1].Items);

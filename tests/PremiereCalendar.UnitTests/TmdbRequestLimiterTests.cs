@@ -29,23 +29,23 @@ public sealed class TmdbRequestLimiterTests
     {
         using var limiter = CreateLimiter();
         using var active = await limiter.AcquireAsync(CancellationToken.None);
-        var backgroundFirst = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Warmup);
-        var backgroundSecond = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Maintenance);
-        var foregroundFirst = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground);
-        var foregroundSecond = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground);
+        var backgroundFirst = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Warmup, TestContext.Current.CancellationToken);
+        var backgroundSecond = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Maintenance, TestContext.Current.CancellationToken);
+        var foregroundFirst = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground, TestContext.Current.CancellationToken);
+        var foregroundSecond = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground, TestContext.Current.CancellationToken);
 
         active.Dispose();
-        using var first = await foregroundFirst.WaitAsync(TimeSpan.FromSeconds(5));
+        using var first = await foregroundFirst.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(foregroundSecond.IsCompleted);
         Assert.False(backgroundFirst.IsCompleted);
         first.Dispose();
-        using var second = await foregroundSecond.WaitAsync(TimeSpan.FromSeconds(5));
+        using var second = await foregroundSecond.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(backgroundFirst.IsCompleted);
         second.Dispose();
-        using var third = await backgroundFirst.WaitAsync(TimeSpan.FromSeconds(5));
+        using var third = await backgroundFirst.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(backgroundSecond.IsCompleted);
         third.Dispose();
-        using var fourth = await backgroundSecond.WaitAsync(TimeSpan.FromSeconds(5));
+        using var fourth = await backgroundSecond.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(fourth.IsAcquired);
     }
 
@@ -54,16 +54,16 @@ public sealed class TmdbRequestLimiterTests
     {
         using var limiter = CreateLimiter();
         using var active = await limiter.AcquireAsync(CancellationToken.None);
-        var background = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Warmup);
+        var background = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Warmup, TestContext.Current.CancellationToken);
         var priority = ProviderWorkPriority.Maintenance;
-        var promoted = AcquireWithPriorityAsync(limiter, () => priority);
+        var promoted = AcquireWithPriorityAsync(limiter, () => priority, TestContext.Current.CancellationToken);
         priority = ProviderWorkPriority.Foreground;
 
         active.Dispose();
-        using var first = await promoted.WaitAsync(TimeSpan.FromSeconds(5));
+        using var first = await promoted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(background.IsCompleted);
         first.Dispose();
-        using var second = await background.WaitAsync(TimeSpan.FromSeconds(5));
+        using var second = await background.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(second.IsAcquired);
     }
 
@@ -74,7 +74,7 @@ public sealed class TmdbRequestLimiterTests
         using var active = await limiter.AcquireAsync(CancellationToken.None);
         using var cancellation = new CancellationTokenSource();
         var cancelled = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground, cancellation.Token);
-        var background = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Maintenance);
+        var background = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Maintenance, TestContext.Current.CancellationToken);
         var foreground = Enumerable.Range(0, 9)
             .Select(_ => AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground)).ToArray();
         cancellation.Cancel();
@@ -83,14 +83,14 @@ public sealed class TmdbRequestLimiterTests
         active.Dispose();
         for (var index = 0; index < 8; index++)
         {
-            using var lease = await foreground[index].WaitAsync(TimeSpan.FromSeconds(5));
+            using var lease = await foreground[index].WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.False(background.IsCompleted);
             lease.Dispose();
         }
-        using var backgroundLease = await background.WaitAsync(TimeSpan.FromSeconds(5));
+        using var backgroundLease = await background.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(foreground[8].IsCompleted);
         backgroundLease.Dispose();
-        using var last = await foreground[8].WaitAsync(TimeSpan.FromSeconds(5));
+        using var last = await foreground[8].WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(last.IsAcquired);
     }
 
@@ -99,14 +99,14 @@ public sealed class TmdbRequestLimiterTests
     {
         using var limiter = CreateLimiter(concurrency: 4, requestsPerSecond: 1);
         using var active = await limiter.AcquireAsync(CancellationToken.None);
-        var background = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Warmup);
-        var foreground = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground);
+        var background = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Warmup, TestContext.Current.CancellationToken);
+        var foreground = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground, TestContext.Current.CancellationToken);
         Assert.False(background.IsCompleted);
         Assert.False(foreground.IsCompleted);
 
-        using var next = await foreground.WaitAsync(TimeSpan.FromSeconds(5));
+        using var next = await foreground.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(background.IsCompleted);
-        using var last = await background.WaitAsync(TimeSpan.FromSeconds(5));
+        using var last = await background.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(last.IsAcquired);
     }
 
@@ -120,8 +120,8 @@ public sealed class TmdbRequestLimiterTests
         var cancelled = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground, cancellation.Token);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
-        var next = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground);
-        using var lease = await next.WaitAsync(TimeSpan.FromSeconds(5));
+        var next = AcquireWithPriorityAsync(limiter, () => ProviderWorkPriority.Foreground, TestContext.Current.CancellationToken);
+        using var lease = await next.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(lease.IsAcquired);
     }
 
@@ -155,7 +155,7 @@ public sealed class TmdbRequestLimiterTests
         Assert.False(secondAcquire.IsCompleted);
 
         firstLease.Dispose();
-        using var secondLease = await secondAcquire.WaitAsync(TimeSpan.FromSeconds(5));
+        using var secondLease = await secondAcquire.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         Assert.True(secondLease.IsAcquired);
     }

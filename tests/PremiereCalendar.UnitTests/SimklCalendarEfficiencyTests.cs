@@ -64,10 +64,10 @@ public sealed class SimklCalendarEfficiencyTests
         var second = secondClient.GetCalendarAsync(Start, End, CancellationToken.None, forceRefresh: true);
 
         // The free slot starts an archive feed while the first feed is still pending.
-        await laterFeed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await laterFeed.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.False(first.IsCompleted);
         firstFeed.SetResult();
-        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10));
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.Equal(2, handler.MaximumActive);
         Assert.Equal(12, handler.Paths.Count);
@@ -146,7 +146,7 @@ public sealed class SimklCalendarEfficiencyTests
 
         var error = await Record.ExceptionAsync(async () =>
         {
-            await foreach (var batch in provider.StreamCandidatesAsync(Start, End, true, true)) candidates.AddRange(batch);
+            await foreach (var batch in provider.StreamCandidatesAsync(Start, End, true, true, cancellationToken: TestContext.Current.CancellationToken)) candidates.AddRange(batch);
         });
 
         if (invalidJson) Assert.IsType<InvalidDataException>(error);
@@ -172,7 +172,7 @@ public sealed class SimklCalendarEfficiencyTests
         var error = await Record.ExceptionAsync(async () =>
         {
             if (streaming)
-                await foreach (var _ in client.StreamCalendarAsync(Start, End, true, true)) { }
+                await foreach (var _ in client.StreamCalendarAsync(Start, End, true, true, cancellationToken: TestContext.Current.CancellationToken)) { }
             else
                 await client.GetCalendarAsync(Start, End, CancellationToken.None);
         });
@@ -203,7 +203,7 @@ public sealed class SimklCalendarEfficiencyTests
         var error = await Assert.ThrowsAsync<AggregateException>(async () =>
         {
             if (streaming)
-                await foreach (var batch in client.StreamCalendarAsync(Start, End, true, true)) streamed.AddRange(batch);
+                await foreach (var batch in client.StreamCalendarAsync(Start, End, true, true, cancellationToken: TestContext.Current.CancellationToken)) streamed.AddRange(batch);
             else
                 await client.GetCalendarAsync(Start, End, CancellationToken.None);
         });
@@ -227,12 +227,12 @@ public sealed class SimklCalendarEfficiencyTests
             return Json("[]");
         });
         var client = CreateClient(handler);
-        var enumerator = client.StreamCalendarAsync(Start, End, true, true).GetAsyncEnumerator();
+        var enumerator = client.StreamCalendarAsync(Start, End, true, true, cancellationToken: TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken);
 
-        Assert.True(await enumerator.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(await enumerator.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
         Assert.Equal("Early show", Assert.Single(enumerator.Current).Title);
-        await blockedFeed.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await enumerator.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        await blockedFeed.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        await enumerator.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.Equal(0, handler.Active);
         Assert.Equal(2, handler.MaximumActive);
@@ -253,14 +253,14 @@ public sealed class SimklCalendarEfficiencyTests
         var client = CreateClient(handler);
         using var cancellation = new CancellationTokenSource();
         var request = client.GetCalendarAsync(Start, End, cancellation.Token);
-        await twoStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await twoStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         await cancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
         Assert.Equal(0, handler.Active);
         block = false;
 
-        Assert.Empty(await client.GetCalendarAsync(Start, End, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Empty(await client.GetCalendarAsync(Start, End, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
         Assert.Equal(0, handler.Active);
     }
 
@@ -286,7 +286,7 @@ public sealed class SimklCalendarEfficiencyTests
         var client = CreateClient(handler);
         using var cancellation = new CancellationTokenSource();
         var request = client.GetCalendarAsync(Start, End, cancellation.Token);
-        await laterFeedStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await laterFeedStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         await cancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
@@ -312,7 +312,7 @@ public sealed class SimklCalendarEfficiencyTests
             Microsoft.Extensions.Options.Options.Create(new SimklOptions { ClientId = "test-client-id" }), new StateStore());
 
         await Assert.ThrowsAsync<TimeoutException>(() => client.GetCalendarAsync(Start, End, CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(10)));
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
 
         Assert.True(body.ReadStarted);
         Assert.True(body.WasDisposed);
@@ -325,12 +325,12 @@ public sealed class SimklCalendarEfficiencyTests
         IMediaFilteredStreamingPremiereDiscoveryProvider provider = new SimklCalendarDiscoveryProvider(legacy);
         var candidates = new List<ExternalPremiereCandidate>();
 
-        await foreach (var batch in provider.StreamCandidatesAsync(Start, End, false, true, forceRefresh: true)) candidates.AddRange(batch);
+        await foreach (var batch in provider.StreamCandidatesAsync(Start, End, false, true, forceRefresh: true, cancellationToken: TestContext.Current.CancellationToken)) candidates.AddRange(batch);
 
         Assert.Equal(PremiereMediaType.Movie, Assert.Single(candidates).MediaType);
         Assert.True(legacy.ForceRefresh);
         Assert.Equal(1, legacy.Calls);
-        await foreach (var _ in provider.StreamCandidatesAsync(Start, End, false, false)) Assert.Fail("No media types were selected.");
+        await foreach (var _ in provider.StreamCandidatesAsync(Start, End, false, false, cancellationToken: TestContext.Current.CancellationToken)) Assert.Fail("No media types were selected.");
         Assert.Equal(1, legacy.Calls);
     }
 
@@ -457,10 +457,10 @@ public sealed class SimklCalendarEfficiencyTests
         var client = CreateClient(handler, memory);
         var nextClient = acrossInstances ? CreateClient(handler, memory) : client;
         var first = client.GetCalendarAsync(new(2020, 9, 7), new(2020, 9, 13), true, false, CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         var second = nextClient.GetCalendarAsync(new(2020, 9, 14), new(2020, 9, 20), true, false, CancellationToken.None);
         release.SetResult();
-        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10));
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.Equal(2, handler.Paths.Count);
         Assert.Single(handler.Paths, path => path == "/calendar/2020/9/tv.json");
@@ -489,9 +489,9 @@ public sealed class SimklCalendarEfficiencyTests
         var client = CreateClient(handler, memory);
         var refreshClient = acrossInstances ? CreateClient(handler, memory) : client;
         var normal = client.GetCalendarAsync(Start, End, true, false, CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         var refreshed = await refreshClient.GetCalendarAsync(Start, End, true, false, CancellationToken.None, forceRefresh: true)
-            .WaitAsync(TimeSpan.FromSeconds(10));
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.Equal("Version 2", Assert.Single(refreshed).Title);
         release.SetResult();
         Assert.Equal("Version 1", Assert.Single(await normal).Title);
@@ -607,8 +607,7 @@ public sealed partial class PremiereServiceTests
             calendarCache: cache, sourceTimeoutSeconds: 1);
         var updates = new List<PremiereLoadProgress>();
 
-        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6),
-            filters: new() { ShowSeries = true, ShowMovies = true })) updates.Add(update);
+        await foreach (var update in service.StreamPremieresAsync(new(2026, 8, 31), new(2026, 9, 6), filters: new() { ShowSeries = true, ShowMovies = true }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
 
         Assert.True(handler.TvCleanupObserved);
         Assert.Equal(0, handler.Active);

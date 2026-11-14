@@ -323,7 +323,7 @@ public sealed class FileCalendarCacheTests : IDisposable
             future = new { nested = new { padding = largeUnknown } },
             items = Array.Empty<PremiereItem>()
         });
-        await File.WriteAllTextAsync(path, json);
+        await File.WriteAllTextAsync(path, json, TestContext.Current.CancellationToken);
 
         var metadata = await ((ICalendarCacheMaintenance)cache).GetWeekMetadataAsync(
             start,
@@ -343,8 +343,7 @@ public sealed class FileCalendarCacheTests : IDisposable
         var end = new DateOnly(2026, 5, 10);
         var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path,
-            """{"schemaVersion":8,"cachedAtUtc":"2026-05-08T10:00:00+00:00","itemCount":1,"completeness":{"unexpected":true},"items":[]}""");
+        await File.WriteAllTextAsync(path, """{"schemaVersion":8,"cachedAtUtc":"2026-05-08T10:00:00+00:00","itemCount":1,"completeness":{"unexpected":true},"items":[]}""", TestContext.Current.CancellationToken);
 
         var metadata = await ((ICalendarCacheMaintenance)cache).GetWeekMetadataAsync(
             start,
@@ -699,12 +698,12 @@ public sealed class FileCalendarCacheTests : IDisposable
         await cache.SetWeekAsync(start, end, "default", [Item("movie:1", "Unchanged")], CancellationToken.None);
         var original = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
         var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
-        var before = await File.ReadAllBytesAsync(path);
+        var before = await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken);
 
         await cache.UpdateWeekMetadataAsync(start, end, "default", original, original.Items,
             CalendarCacheMaintenanceKind.Scores, CancellationToken.None);
 
-        Assert.Equal(before, await File.ReadAllBytesAsync(path));
+        Assert.Equal(before, await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -717,15 +716,15 @@ public sealed class FileCalendarCacheTests : IDisposable
         var original = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
         var maintained = new[] { original.Items[0] with { ImdbScore = 7.4 } };
         var path = Path.Combine(_root, "cache", "20260504-20260510-default.json");
-        var json = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
+        var json = JsonNode.Parse(await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!;
         json["schemaVersion"] = 999;
-        await File.WriteAllTextAsync(path, json.ToJsonString());
-        var incompatible = await File.ReadAllBytesAsync(path);
+        await File.WriteAllTextAsync(path, json.ToJsonString(), TestContext.Current.CancellationToken);
+        var incompatible = await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken);
 
         Assert.Null(await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None));
         Assert.Null(await cache.UpdateWeekMetadataAsync(start, end, "default", original, maintained,
             CalendarCacheMaintenanceKind.Scores, CancellationToken.None));
-        Assert.Equal(incompatible, await File.ReadAllBytesAsync(path));
+        Assert.Equal(incompatible, await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken));
 
         File.Delete(path);
         Assert.Null(await cache.UpdateWeekMetadataAsync(start, end, "default", original, maintained,
@@ -749,20 +748,20 @@ public sealed class FileCalendarCacheTests : IDisposable
             NullLogger<CalendarDataMaintenanceService>.Instance);
 
         var maintenance = service.BackfillRecentScoresAsync(CancellationToken.None);
-        await omdb.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await omdb.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(maintenance.IsCompleted);
         try
         {
             await cache.SetWeekAsync(start, end, "default",
                 [old with { Title = "New discovery", PremiereDate = end }, Item("movie:2", "New row")],
-                CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+                CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         }
         finally
         {
             omdb.Release.TrySetResult();
         }
 
-        await maintenance.WaitAsync(TimeSpan.FromSeconds(5));
+        await maintenance.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var final = (await cache.GetWeekSnapshotAsync(start, end, "default", CancellationToken.None))!;
         Assert.Equal(2, final.Items.Count);
         Assert.Equal("New discovery", final.Items[0].Title);

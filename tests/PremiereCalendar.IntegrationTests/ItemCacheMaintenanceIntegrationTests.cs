@@ -32,23 +32,23 @@ public sealed class ItemCacheMaintenanceIntegrationTests : IDisposable
         var global = old with { Title = "Newer global title", PosterUrl = "https://example.test/new.jpg", ImdbScore = 7.4 };
         var metadataClock = now.AddHours(-3);
         var ratingClock = now.AddHours(-4);
-        await store.ReadManyAsync(coordinator.Partition, [key], true, default);
+        await store.ReadManyAsync(coordinator.Partition, [key], true, TestContext.Current.CancellationToken);
         await store.WriteManyAsync(coordinator.Partition, [new(key, 0,
             JsonSerializer.Serialize(ItemEnrichmentMetadata.FromItem(global)), metadataClock,
             priorRatings ? JsonSerializer.Serialize(ItemEnrichmentRatings.FromItem(global)) : null,
-            priorRatings ? ratingClock : null)], default);
+            priorRatings ? ratingClock : null)], TestContext.Current.CancellationToken);
         var cache = new FileCalendarCache(Microsoft.Extensions.Options.Options.Create(
             new CalendarCacheOptions { Enabled = true, Directory = "cache" }), environment, NullLogger<FileCalendarCache>.Instance);
-        await cache.SetWeekAsync(start, start.AddDays(6), "default", [old], default);
+        await cache.SetWeekAsync(start, start.AddDays(6), "default", [old], TestContext.Current.CancellationToken);
         var maintenance = new CalendarDataMaintenanceService(new WeekStore(start), cache,
             new ScoreBackfillService(null, new Scores(), new RatingMapper(), null, NullLogger<ScoreBackfillService>.Instance),
             new MissingExternalIdRepairService(null!, NullLogger<MissingExternalIdRepairService>.Instance),
             NullLogger<CalendarDataMaintenanceService>.Instance, coordinator);
 
-        var result = await maintenance.BackfillRecentScoresAsync(default);
+        var result = await maintenance.BackfillRecentScoresAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(1, result.ChangedCount);
-        var record = Assert.Single(await store.ReadManyAsync(coordinator.Partition, [key], false, default)).Value;
+        var record = Assert.Single(await store.ReadManyAsync(coordinator.Partition, [key], false, TestContext.Current.CancellationToken)).Value;
         var metadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(record.MetadataJson!)!;
         var ratings = JsonSerializer.Deserialize<ItemEnrichmentRatings>(record.RatingsJson!)!;
         Assert.Equal("Newer global title", metadata.Title);

@@ -23,7 +23,7 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         using var correlation = diagnostics.Telemetry.UseDiagnosticContext(context);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
 
-        Assert.Equal(83, (await Scores(client, "PrivateExampleTitle")).CriticScore);
+        Assert.Equal(83, (await Scores(client, "PrivateExampleTitle", TestContext.Current.CancellationToken)).CriticScore);
 
         var events = diagnostics.ReadEvents().Where(item => item.GetProperty("event").GetString() == "provider.rt.stage.completed").ToArray();
         Assert.All(events, item =>
@@ -67,7 +67,7 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
                 : Html("<script id=\"media-scorecard-json\">{invalid}</script>");
         });
         var client = CreateClient(handler, cache, telemetry: diagnostics.Telemetry);
-        Assert.False((await Scores(client, "Example")).HasAnyScore);
+        Assert.False((await Scores(client, "Example", TestContext.Current.CancellationToken)).HasAnyScore);
         var events = diagnostics.ReadEvents();
         if (failure == "timeout") Assert.Contains(events, item => item.GetProperty("event").GetString() == "provider.outcome"
             && item.GetProperty("details").GetProperty("reason").GetString() == "timeout");
@@ -91,7 +91,7 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         var client = CreateClient(handler, cache);
         using var scope = scoped ? ProviderRefreshScope.Use(ProviderRefreshScope.Create()) : null;
 
-        var scores = await Scores(client, "Example");
+        var scores = await Scores(client, "Example", TestContext.Current.CancellationToken);
 
         Assert.Equal(83, scores.CriticScore);
         Assert.Null(scores.AudienceScore);
@@ -111,7 +111,7 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         var client = CreateClient(handler, cache);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
 
-        Assert.Equal(new RottenTomatoesScores(91, 94), await Scores(client, "Example"));
+        Assert.Equal(new RottenTomatoesScores(91, 94), await Scores(client, "Example", TestContext.Current.CancellationToken));
         Assert.Equal(["/m/example", "/search", "/m/example_2026"],
             handler.Requests.Select(request => request.Uri.AbsolutePath));
     }
@@ -128,8 +128,8 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         var client = CreateClient(handler, cache);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
 
-        Assert.Equal(72, (await Scores(client, "First")).CriticScore);
-        Assert.Equal(95, (await Scores(client, "Second")).CriticScore);
+        Assert.Equal(72, (await Scores(client, "First", TestContext.Current.CancellationToken)).CriticScore);
+        Assert.Equal(95, (await Scores(client, "Second", TestContext.Current.CancellationToken)).CriticScore);
         Assert.Equal(1, handler.Requests.Count(request => request.Uri.AbsolutePath == "/m/example"));
         Assert.Equal(2, handler.Requests.Count(request => request.Uri.AbsolutePath == "/search"));
     }
@@ -168,10 +168,10 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         var client = CreateClient(handler, cache);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
 
-        Assert.Equal(new RottenTomatoesScores(91, 94), await Scores(client, "Example"));
+        Assert.Equal(new RottenTomatoesScores(91, 94), await Scores(client, "Example", TestContext.Current.CancellationToken));
         Assert.Equal(2, pageCalls);
         Assert.False(client.TryGetCachedScores(PremiereMediaType.Movie, "Example", 2026, "QExample", out _));
-        Assert.Equal(new RottenTomatoesScores(91, 94), await Scores(client, "Example"));
+        Assert.Equal(new RottenTomatoesScores(91, 94), await Scores(client, "Example", TestContext.Current.CancellationToken));
         Assert.Equal(2, pageCalls);
         Assert.True(client.TryGetCachedScores(PremiereMediaType.Movie, "Example", 2026, "QExample", out _));
     }
@@ -191,9 +191,9 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         var client = CreateClient(handler, cache);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
 
-        Assert.False((await Scores(client, "Example")).HasAnyScore);
+        Assert.False((await Scores(client, "Example", TestContext.Current.CancellationToken)).HasAnyScore);
         Assert.False(client.TryGetCachedScores(PremiereMediaType.Movie, "Example", 2026, "QExample", out _));
-        Assert.Equal(new RottenTomatoesScores(91, 94), await Scores(client, "Example"));
+        Assert.Equal(new RottenTomatoesScores(91, 94), await Scores(client, "Example", TestContext.Current.CancellationToken));
         Assert.Equal(2, pageCalls);
         Assert.True(client.TryGetCachedScores(PremiereMediaType.Movie, "Example", 2026, "QExample", out _));
     }
@@ -219,20 +219,20 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         using (ProviderRefreshScope.Use(ProviderRefreshScope.Create()))
         {
             var first = Scores(client, "First", cancelled.Token);
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var second = Scores(client, "Second");
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            var second = Scores(client, "Second", TestContext.Current.CancellationToken);
             cancelled.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
             Assert.False(pageToken.IsCancellationRequested);
             release.TrySetResult();
-            Assert.Equal(88, (await second.WaitAsync(TimeSpan.FromSeconds(5))).CriticScore);
+            Assert.Equal(88, (await second.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).CriticScore);
             Assert.Equal(1, pageCalls);
-            Assert.Equal(88, (await Scores(client, "Third")).CriticScore);
+            Assert.Equal(88, (await Scores(client, "Third", TestContext.Current.CancellationToken)).CriticScore);
             Assert.Equal(1, pageCalls);
         }
 
         using (ProviderRefreshScope.Use(ProviderRefreshScope.Create()))
-            Assert.Equal(93, (await Scores(client, "Second")).CriticScore);
+            Assert.Equal(93, (await Scores(client, "Second", TestContext.Current.CancellationToken)).CriticScore);
         Assert.Equal(2, pageCalls);
     }
 
@@ -257,12 +257,12 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
         using var cancelled = new CancellationTokenSource();
         var first = Scores(client, "First", cancelled.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
-        await abandoned.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await abandoned.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
-        Assert.Equal(91, (await Scores(client, "Second")).CriticScore);
+        Assert.Equal(91, (await Scores(client, "Second", TestContext.Current.CancellationToken)).CriticScore);
         Assert.Equal(2, pageCalls);
     }
 
@@ -279,8 +279,8 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         var second = CreateClient(secondHandler, secondCache, secondBaseUrl);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
 
-        Assert.Equal(72, (await Scores(first, "First")).CriticScore);
-        Assert.Equal(95, (await Scores(second, "Second")).CriticScore);
+        Assert.Equal(72, (await Scores(first, "First", TestContext.Current.CancellationToken)).CriticScore);
+        Assert.Equal(95, (await Scores(second, "Second", TestContext.Current.CancellationToken)).CriticScore);
         Assert.Single(firstHandler.Requests);
         Assert.Single(secondHandler.Requests);
     }
@@ -304,14 +304,14 @@ public sealed class RottenTomatoesPageReuseIntegrationTests
         });
         var client = CreateClient(handler, cache);
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
-        var ordinary = Scores(client, "First", force: false);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(95, (await Scores(client, "Second")).CriticScore);
+        var ordinary = Scores(client, "First", TestContext.Current.CancellationToken, force: false);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(95, (await Scores(client, "Second", TestContext.Current.CancellationToken)).CriticScore);
         release.TrySetResult();
-        Assert.Equal(72, (await ordinary.WaitAsync(TimeSpan.FromSeconds(5))).CriticScore);
-        Assert.Equal(95, (await Scores(client, "Third")).CriticScore);
+        Assert.Equal(72, (await ordinary.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).CriticScore);
+        Assert.Equal(95, (await Scores(client, "Third", TestContext.Current.CancellationToken)).CriticScore);
         Assert.Equal(2, pageCalls);
-        Assert.Equal(95, (await Scores(client, "Fourth", force: false)).CriticScore);
+        Assert.Equal(95, (await Scores(client, "Fourth", TestContext.Current.CancellationToken, force: false)).CriticScore);
         Assert.Equal(3, pageCalls);
     }
 

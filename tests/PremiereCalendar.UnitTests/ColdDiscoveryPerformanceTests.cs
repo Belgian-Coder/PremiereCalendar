@@ -59,9 +59,8 @@ public sealed partial class PremiereServiceTests
         {
             Directory.CreateDirectory(directory);
             var name = includeSeries ? "cold_discovery_movies_series" : "cold_discovery_movies";
-            await File.WriteAllTextAsync(Path.Combine(directory, name + ".projection.json"), projection);
-            await File.WriteAllTextAsync(Path.Combine(directory, name + ".measurement.json"),
-                JsonSerializer.Serialize(measurement, new JsonSerializerOptions { WriteIndented = true }));
+            await File.WriteAllTextAsync(Path.Combine(directory, name + ".projection.json"), projection, TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(directory, name + ".measurement.json"), JsonSerializer.Serialize(measurement, new JsonSerializerOptions { WriteIndented = true }), TestContext.Current.CancellationToken);
         }
     }
 
@@ -84,7 +83,7 @@ public sealed partial class PremiereServiceTests
                 updates.Enqueue(update);
                 if (HasEveryColdCore(update.Items, rows)) allCore.TrySetResult();
             }
-        });
+        }, TestContext.Current.CancellationToken);
         await fixture.Held!.Started.Task.WaitAsync(budget.Token);
         var accelerated = typeof(PremiereService).GetMethod("CanDiscoverCoreFirst", BindingFlags.Instance | BindingFlags.NonPublic) is not null;
         if (accelerated)
@@ -100,7 +99,7 @@ public sealed partial class PremiereServiceTests
         if (cancel)
         {
             await budget.CancelAsync();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run.WaitAsync(TimeSpan.FromSeconds(5)));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
             Assert.Equal(0, fixture.Held.Active);
             Assert.Empty(fixture.Cache.SetCalls);
             Assert.DoesNotContain(updates, update => update.Phase == "complete");
@@ -145,7 +144,7 @@ public sealed partial class PremiereServiceTests
         {
             await foreach (var update in fixture.Service.StreamCoreAsync(start, start.AddDays(6), forceRefresh: profile == "force",
                 filters: filters, cancellationToken: budget.Token)) updates.Enqueue(update);
-        });
+        }, TestContext.Current.CancellationToken);
         await fixture.Held!.Started.Task.WaitAsync(budget.Token);
         Assert.True(fixture.Handler.Paths.Count(path => path.Contains("/discover/", StringComparison.Ordinal)) < 32);
         Assert.DoesNotContain(updates, update => typeof(PremiereLoadProgress).GetProperty("IsCalendarReady")?.GetValue(update) is true);
@@ -214,7 +213,7 @@ public sealed partial class PremiereServiceTests
         var provider = new ColdPartialExternalProvider(candidate, retry);
         using var fixture = CreateColdFixture([row], held: false, discovery: [provider]);
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in fixture.Service.StreamCoreAsync(start, start, filters: ColdFilters(false))) updates.Add(update);
+        await foreach (var update in fixture.Service.StreamCoreAsync(start, start, filters: ColdFilters(false), cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         var final = Assert.Single(updates, update => update.IsFinal);
         Assert.True(final.HasSourceErrors);
         Assert.Equal(retry, final.RetryAfterUtc);
@@ -253,7 +252,7 @@ public sealed partial class PremiereServiceTests
                 // finished; the last source's own progress update precedes them.
                 if (update.IsCalendarReady && HasEveryColdCore(update.Items, rows)) allCore.TrySetResult();
             }
-        });
+        }, TestContext.Current.CancellationToken);
         await fixture.Held!.Started.Task.WaitAsync(budget.Token);
         await allCore.Task.WaitAsync(budget.Token);
         // Readiness has been emitted, so the foreign writer below cannot race the
@@ -371,13 +370,13 @@ public sealed partial class PremiereServiceTests
         Call("OptionalFinished", true);
         // This is the later-admission gap: one mapping already completed, and
         // this source now has only queued work while other sources own permits.
-        await Task.Delay(1000);
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
         Assert.False(deadline.IsCancellationRequested);
         Call("OptionalAdmitted");
         Call("OptionalWaiting");
         // A waiting sibling must not mask this source's own hung active work.
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-            await Task.Delay(Timeout.InfiniteTimeSpan, deadline.Token).WaitAsync(TimeSpan.FromSeconds(3)));
+            await Task.Delay(Timeout.InfiniteTimeSpan, deadline.Token).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
         Call("OptionalFinished", true);
         Call("OptionalFinished", false);
     }
@@ -417,7 +416,7 @@ public sealed partial class PremiereServiceTests
         var prime = Assert.Single(await first.GetPremieresAsync(start, start, CancellationToken.None, forceRefresh: true, filters: filters));
         var before = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(Assert.Single(store.Records.Values).MetadataJson!)!;
         clock.Advance(TimeSpan.FromMinutes(1));
-        await store.InvalidateTmdbAsync(PremiereMediaType.Series, [91], clock.GetUtcNow(), default);
+        await store.InvalidateTmdbAsync(PremiereMediaType.Series, [91], clock.GetUtcNow(), TestContext.Current.CancellationToken);
         tmdb.TvDetailsById[91] = Details(null);
         var refreshed = Assert.Single(await Service(new FakeTvmazeClient { ThrowOnLookup = true, ThrowOnSearch = true })
             .GetPremieresAsync(start, start, CancellationToken.None, filters: filters));

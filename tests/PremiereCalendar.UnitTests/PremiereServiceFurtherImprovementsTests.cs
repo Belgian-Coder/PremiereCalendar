@@ -23,16 +23,16 @@ public sealed partial class PremiereServiceTests
             var old = ItemCacheMovie(date);
             old.MovieDetailsById[901] = old.MovieDetailsById[901] with { PosterPath = "/old-poster.jpg" };
             await CreateService(old, omdb: ItemCacheOmdb("7.1"), itemEnrichmentCache: coordinator)
-                .GetPremieresAsync(date, date, default, filters: filters);
+                .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters);
             clock.Advance(TimeSpan.FromHours(1));
-            await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), default);
+            await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), TestContext.Current.CancellationToken);
         }
         var current = ItemCacheMovie(date);
         current.MovieDetailsById[901] = current.MovieDetailsById[901] with { PosterPath = "/current-poster.jpg" };
         var artwork = new RecordingArtworkProvider();
         var result = Assert.Single(await CreateService(current, omdb: ItemCacheOmdb("7.1"),
             artworkProviders: [artwork], itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: filters));
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters));
         Assert.EndsWith("/current-poster.jpg", result.PosterUrl);
         Assert.Equal("TMDb poster", result.ImageSource);
         Assert.Empty(artwork.Calls);
@@ -55,13 +55,13 @@ public sealed partial class PremiereServiceTests
         var old = ItemCacheMovie(date);
         old.MovieDetailsById[901] = old.MovieDetailsById[901] with { PosterPath = "/removed-poster.jpg" };
         await CreateService(old, omdb: ItemCacheOmdb("7.1"), itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: filters);
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters);
         clock.Advance(TimeSpan.FromHours(1));
-        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), default);
+        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), TestContext.Current.CancellationToken);
         var artwork = new RecordingArtworkProvider(returnCandidate: false);
         var result = Assert.Single(await CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"),
             artworkProviders: [artwork], itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: filters));
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters));
         Assert.Single(artwork.Calls);
         Assert.Null(result.PosterUrl);
         Assert.Null(result.ImageSource);
@@ -82,19 +82,19 @@ public sealed partial class PremiereServiceTests
         await CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"),
             rottenTomatoes: new ComponentTomatoesClient { Result = new(83, 91) },
             watchmode: new FakeWatchmodeClient { Sources = [new() { Id = 8, Name = "Saved availability", Kind = "flatrate" }] },
-            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default, filters: filters);
+            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters);
         var before = Assert.Single(store.Records.Values);
         var beforeMetadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(before.MetadataJson!)!;
         var beforeRatings = JsonSerializer.Deserialize<ItemEnrichmentRatings>(before.RatingsJson!)!;
         Assert.True(beforeMetadata.AvailabilityOwnedByWatchmode);
         clock.Advance(TimeSpan.FromHours(1));
-        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), default);
+        await store.InvalidateTmdbAsync(PremiereMediaType.Movie, [901], clock.GetUtcNow(), TestContext.Current.CancellationToken);
         var current = ItemCacheMovie(date);
         current.MovieDetailsById[901] = current.MovieDetailsById[901] with { Runtime = 120, Overview = "Corrected core overview" };
         var unavailable = new FakeWatchmodeClient { ThrowOnSources = true };
         var result = Assert.Single(await CreateService(current, omdb: new FakeOmdbClient { ThrowOnGet = true },
             watchmode: unavailable, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: filters));
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters));
         Assert.Equal(120, result.RuntimeMinutes);
         Assert.Equal("Corrected core overview", result.Overview);
         Assert.Contains(result.Sources, source => source.Id == 8 && source.Name == "Saved availability");
@@ -133,7 +133,7 @@ public sealed partial class PremiereServiceTests
 
         var service = CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes,
             artworkProviders: [artwork], watchmode: watchmode, itemEnrichmentCache: coordinator);
-        Assert.Empty(await service.GetPremieresAsync(date, date, default, filters: rejected));
+        Assert.Empty(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: rejected));
 
         var core = Assert.Single(store.Records.Values);
         var metadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(core.MetadataJson!)!;
@@ -151,7 +151,7 @@ public sealed partial class PremiereServiceTests
         var eligible = new CalendarFilters { ShowSeries = false };
         eligible.MovieFilters.OriginalLanguages = ["en"];
         eligible.MovieFilters.RuntimeMinMinutes = 90;
-        var result = Assert.Single(await service.GetPremieresAsync(date, date, default, filters: eligible));
+        var result = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: eligible));
         Assert.Equal("movie:901", result.CanonicalId);
         Assert.Equal("tt0000901", result.ImdbId);
         Assert.Equal(7.8, result.ImdbScore);
@@ -181,7 +181,7 @@ public sealed partial class PremiereServiceTests
         var tomatoes = new ComponentTomatoesClient { Result = new(83, 91) };
         await CreateService(ItemCacheMovie(date), omdb: initial, rottenTomatoes: tomatoes,
             imdbRatingsStore: dataset, calendarCache: cache, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: filters);
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters);
         var originalRecord = Assert.Single(store.Records.Values);
         var original = JsonSerializer.Deserialize<ItemEnrichmentRatings>(originalRecord.RatingsJson!)!;
 
@@ -191,7 +191,7 @@ public sealed partial class PremiereServiceTests
         tomatoes.Result = new(94, 96);
         await CreateService(new FakeTmdbClient(), omdb: failed, rottenTomatoes: tomatoes,
             imdbRatingsStore: dataset, calendarCache: cache, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: filters);
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters);
         Assert.Single(failed.Calls);
 
         clock.Advance(TimeSpan.FromMinutes(61));
@@ -199,7 +199,7 @@ public sealed partial class PremiereServiceTests
         tomatoes.Result = new(95, 97);
         var result = Assert.Single(await CreateService(new FakeTmdbClient(), omdb: failed, rottenTomatoes: tomatoes,
             imdbRatingsStore: dataset, calendarCache: cache, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: filters));
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters));
 
         var record = Assert.Single(store.Records.Values);
         var ratings = JsonSerializer.Deserialize<ItemEnrichmentRatings>(record.RatingsJson!)!;
@@ -233,7 +233,7 @@ public sealed partial class PremiereServiceTests
             CanonicalId = "series:901", MediaType = PremiereMediaType.Series,
             Type = PremiereItemType.SeriesPremiere, Title = "Ownership fixture"
         };
-        await coordinator.ImportAsync([legacy], default);
+        await coordinator.ImportAsync([legacy], TestContext.Current.CancellationToken);
         var before = Assert.Single(store.Records.Values);
         SetOptionalOwnershipMetadata(store, metadata => metadata with
         {
@@ -242,8 +242,8 @@ public sealed partial class PremiereServiceTests
             TvmazeFetchedUtc = before.MetadataFetchedUtc, ArtworkFetchedUtc = before.MetadataFetchedUtc
         });
         var identity = new ItemEnrichmentIdentity(PremiereMediaType.Series, 901);
-        var session = await coordinator.CreateSessionAsync(default);
-        await session.PrepareAsync([identity], null, default);
+        var session = await coordinator.CreateSessionAsync(TestContext.Current.CancellationToken);
+        await session.PrepareAsync([identity], null, TestContext.Current.CancellationToken);
         session.RecordComponentOutcome(identity, "tvmaze", false, clock.GetUtcNow().AddMinutes(20));
         session.RecordComponentOutcome(identity, "artwork", false, clock.GetUtcNow().AddMinutes(2));
         clock.Advance(TimeSpan.FromMinutes(3));
@@ -251,7 +251,7 @@ public sealed partial class PremiereServiceTests
         var tvmaze = new FakeTvmazeClient();
         var result = Assert.Single(await CreateService(OptionalOwnershipTmdb(date, true, null),
             tvmaze: tvmaze, omdb: ItemCacheOmdb("7.1"), artworkProviders: [artwork], itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: new CalendarFilters { ShowMovies = false }));
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: new CalendarFilters { ShowMovies = false }));
         Assert.Equal("https://assets.fanart.tv/poster.jpg", result.PosterUrl);
         Assert.Single(artwork.Calls);
         Assert.Empty(tvmaze.SearchCalls);
@@ -275,7 +275,7 @@ public sealed partial class PremiereServiceTests
         var filters = new CalendarFilters { ShowSeries = false };
         await CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"),
             calendarCache: cache, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, filters: filters);
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: filters);
         SetOptionalOwnershipMetadata(store, metadata => metadata with
             { OptionalFreshnessTracked = true, AvailabilityComplete = false, AvailabilityOwnedByWatchmode = true });
         clock.Advance(TimeSpan.FromHours(2));
@@ -288,11 +288,11 @@ public sealed partial class PremiereServiceTests
             .GetPremieresAsync(date, date, timeout.Token, filters: filters);
         try
         {
-            await Task.WhenAll(omdb.Entered.Task, watchmode.Entered.Task).WaitAsync(TimeSpan.FromSeconds(3));
+            await Task.WhenAll(omdb.Entered.Task, watchmode.Entered.Task).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             Assert.False(load.IsCompleted);
         }
         finally { release.TrySetResult(); }
-        var result = Assert.Single(await load.WaitAsync(TimeSpan.FromSeconds(3)));
+        var result = Assert.Single(await load.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
         Assert.Equal(8.4, result.ImdbScore);
         Assert.Contains(result.Sources, source => source.Id == 19);
     }
@@ -303,7 +303,7 @@ public sealed partial class PremiereServiceTests
         var clock = new ItemCacheClock();
         var memory = new MemoryItemEnrichmentStore(clock);
         var legacy = ItemCacheLegacyItem(new(2026, 11, 2), clock);
-        await ItemCacheCoordinator(memory, clock).ImportAsync([legacy], default);
+        await ItemCacheCoordinator(memory, clock).ImportAsync([legacy], TestContext.Current.CancellationToken);
         var original = Assert.Single(memory.Records.Values);
         var store = new OutageItemStore(memory) { Unavailable = true };
         var coordinator = new ItemEnrichmentCacheCoordinator(store,

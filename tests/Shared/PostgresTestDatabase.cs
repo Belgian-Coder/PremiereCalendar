@@ -7,6 +7,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PremiereCalendar.Services;
 #endif
 
+#if POSTGRES_TEST_INPROCESS
+// One migrated template database per test process; every test database is a cheap clone of it (see PostgresTemplateDatabase).
+[assembly: AssemblyFixture(typeof(PremiereCalendar.TestSupport.PostgresTemplateDatabase))]
+#endif
+
 namespace PremiereCalendar.TestSupport;
 
 /// <summary>
@@ -21,20 +26,8 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
     public const string ServerVariable = "PREMIERECALENDAR_TEST_POSTGRES";
     public const string PasswordFileVariable = "PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE";
 
-    private static readonly Lazy<ServerConfiguration> Server = new(ReadServerConfiguration);
+    internal static readonly Lazy<ServerConfiguration> Server = new(ReadServerConfiguration);
     private int _disposed;
-
-    /// <summary>
-    /// Many tests create their database synchronously from a constructor (xUnit has no async constructors). Those
-    /// blocked threads must not starve the pool the same databases need to complete their I/O, nor delay the timers
-    /// of unrelated timing-sensitive tests, so the pool starts with generous minimum thread counts.
-    /// </summary>
-    [System.Runtime.CompilerServices.ModuleInitializer]
-    internal static void ConfigureThreadPool()
-    {
-        ThreadPool.GetMinThreads(out var worker, out var io);
-        ThreadPool.SetMinThreads(Math.Max(worker, 64), Math.Max(io, 64));
-    }
 
     private PostgresTestDatabase(string name, NpgsqlConnectionStringBuilder application, string? passwordFile, string? password)
     {
@@ -94,23 +87,53 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
         var application = new NpgsqlConnectionStringBuilder(server.ConnectionString) { Database = name };
         // A password file overrides any inline password (Npgsql rejects both together); without one the inline password stays.
         if (server.PasswordFile is not null) application.Remove("Password");
-        await using (var admin = new NpgsqlConnection(server.AdminConnectionString))
-        {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{name}\"";
-            await create.ExecuteNonQueryAsync();
-        }
-
+#if POSTGRES_TEST_INPROCESS
+        // A migrated database is cloned from the template that the assembly fixture created once; creating it from
+        // scratch and running every migration for each test is what dominated the set-up time before.
+        var template = initializeSchema ? await PostgresTemplateDatabase.GetNameAsync() : null;
+#else
+        const string? template = null;
+#endif
+        await CreateDatabaseAsync(server, name, template);
         var database = new PostgresTestDatabase(name, application, server.PasswordFile, server.Password);
 #if POSTGRES_TEST_INPROCESS
-        if (initializeSchema)
+        if (template is not null)
         {
-            try { await database.InitializeSchemaAsync(); }
+            // Replaying the migrations used to leave an open, authenticated connection in the application's pool, so the
+            // first query of a test never paid for establishing one. Keep that: several tests give their first database
+            // read a few hundred milliseconds.
+            try { await using var warm = await database.OpenAsync(); }
             catch { await database.DisposeAsync(); throw; }
         }
 #endif
         return database;
+    }
+
+    /// <summary>Wraps an existing database of the configured server (used for the template; nothing is created or dropped here).</summary>
+    internal static PostgresTestDatabase Attach(ServerConfiguration server, string name)
+    {
+        var application = new NpgsqlConnectionStringBuilder(server.ConnectionString) { Database = name };
+        if (server.PasswordFile is not null) application.Remove("Password");
+        return new PostgresTestDatabase(name, application, server.PasswordFile, server.Password);
+    }
+
+    internal static async Task CreateDatabaseAsync(ServerConfiguration server, string name, string? template)
+    {
+        await using var admin = new NpgsqlConnection(server.AdminConnectionString);
+        await admin.OpenAsync();
+        for (var attempt = 1; ; attempt++)
+        {
+            await using var create = admin.CreateCommand();
+            create.CommandText = template is null
+                ? $"CREATE DATABASE \"{name}\""
+                : $"CREATE DATABASE \"{name}\" TEMPLATE \"{template}\"";
+            try { await create.ExecuteNonQueryAsync(); return; }
+            // 55006: another session still touches the template (for instance a connection that is closing).
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ObjectInUse && template is not null && attempt < 20)
+            {
+                await Task.Delay(50 * attempt);
+            }
+        }
     }
 
 #if POSTGRES_TEST_INPROCESS
@@ -140,16 +163,23 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-#if POSTGRES_TEST_INPROCESS
-        // ClearAllPools() does not touch NpgsqlDataSource pools; dispose this database's data sources explicitly.
-        DatabaseConnectionFactory.Dispose(AppOptions);
-#endif
-        using (var poolKey = new NpgsqlConnection(ConnectionString)) NpgsqlConnection.ClearPool(poolKey);
+        CloseConnections();
         await using var admin = new NpgsqlConnection(Server.Value.AdminConnectionString);
         await admin.OpenAsync();
         await using var drop = admin.CreateCommand();
         drop.CommandText = $"DROP DATABASE IF EXISTS \"{Name}\" WITH (FORCE)";
         await drop.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Closes every pooled connection to this database (data sources and plain Npgsql pools).</summary>
+    internal void CloseConnections()
+    {
+#if POSTGRES_TEST_INPROCESS
+        // ClearAllPools() does not touch NpgsqlDataSource pools; dispose this database's data sources explicitly.
+        DatabaseConnectionFactory.Dispose(AppOptions);
+#endif
+        using var poolKey = new NpgsqlConnection(ConnectionString);
+        NpgsqlConnection.ClearPool(poolKey);
     }
 
     private static ServerConfiguration ReadServerConfiguration()
@@ -171,5 +201,55 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
         return new ServerConfiguration(connectionString, admin.ConnectionString, passwordFile, password);
     }
 
-    private sealed record ServerConfiguration(string ConnectionString, string AdminConnectionString, string? PasswordFile, string? Password);
+    internal sealed record ServerConfiguration(string ConnectionString, string AdminConnectionString, string? PasswordFile, string? Password);
 }
+
+#if POSTGRES_TEST_INPROCESS
+/// <summary>
+/// Assembly fixture that owns the template database. xUnit creates it once, before the first test of the test
+/// process: it migrates one database and keeps it (with no open connections) as the template that
+/// <see cref="PostgresTestDatabase.CreateAsync"/> clones with <c>CREATE DATABASE ... TEMPLATE</c> (a file-level copy of a
+/// few hundred kilobytes) instead of replaying every migration for each test. Tests that only need a plain empty
+/// database, and runs without a configured server, never touch it; a configuration or connection failure is
+/// reported by the first test that needs a migrated database.
+/// </summary>
+public sealed class PostgresTemplateDatabase : IAsyncLifetime
+{
+    private static Task<string> s_name = Task.FromException<string>(new InvalidOperationException("The PostgreSQL template database was not created."));
+    private static string? s_created;
+
+    internal static Task<string> GetNameAsync() => s_name;
+
+    public async ValueTask InitializeAsync()
+    {
+        // Without a configured server nothing is created: PostgresTestDatabase.CreateAsync fails first, with its descriptive message.
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(PostgresTestDatabase.ServerVariable))) return;
+        try
+        {
+            var server = PostgresTestDatabase.Server.Value;
+            var name = $"premierecalendar_template_{Guid.NewGuid():N}";
+            await PostgresTestDatabase.CreateDatabaseAsync(server, name, template: null);
+            s_created = name;
+            var database = PostgresTestDatabase.Attach(server, name);
+            try { await database.InitializeSchemaAsync(); }
+            finally { database.CloseConnections(); }
+            s_name = Task.FromResult(name);
+        }
+        catch (Exception ex)
+        {
+            s_name = Task.FromException<string>(ex);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var name = Interlocked.Exchange(ref s_created, null);
+        if (name is null) return;
+        await using var admin = new NpgsqlConnection(PostgresTestDatabase.Server.Value.AdminConnectionString);
+        await admin.OpenAsync();
+        await using var drop = admin.CreateCommand();
+        drop.CommandText = $"DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)";
+        await drop.ExecuteNonQueryAsync();
+    }
+}
+#endif

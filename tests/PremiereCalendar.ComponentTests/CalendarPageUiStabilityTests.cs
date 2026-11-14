@@ -70,11 +70,11 @@ public sealed partial class CalendarPageTests
         var header = component.Find("[data-testid='calendar-command-bar']");
         Assert.NotNull(header.QuerySelector("[data-testid='calendar-status-row']"));
 
-        await service.Updates.Writer.WriteAsync(UiUpdate("Source", [UiMovie("movie:1", "First")]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Source", [UiMovie("movie:1", "First")]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Single(component.FindAll("[data-testid='premiere-card']")), UiWait);
         Assert.Single(component.FindAll("[data-testid='calendar-status-row']"));
 
-        await service.Updates.Writer.WriteAsync(UiUpdate("Complete", [UiMovie("movie:1", "First")], isFinal: true));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Complete", [UiMovie("movie:1", "First")], isFinal: true), Xunit.TestContext.Current.CancellationToken);
         service.Updates.Writer.TryComplete();
         component.WaitForAssertion(() => Assert.Empty(component.FindAll("[data-testid='refreshing']")), UiWait);
         Assert.Single(component.FindAll("[data-testid='calendar-status-row']"));
@@ -146,7 +146,7 @@ public sealed partial class CalendarPageTests
             PremiereDate = UiDay,
             OriginalLanguage = "en"
         };
-        await service.Updates.Writer.WriteAsync(UiUpdate("Source", [series]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Source", [series]), Xunit.TestContext.Current.CancellationToken);
 
         component.WaitForAssertion(() =>
         {
@@ -168,14 +168,14 @@ public sealed partial class CalendarPageTests
             VerificationState = PremiereVerificationState.Unverified,
             ExternalCandidateKey = "provider:key-2"
         };
-        await service.Updates.Writer.WriteAsync(UiUpdate("Provider", [first, unverified]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Provider", [first, unverified]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count), UiWait);
         // A verified card arrives after the unverified row.
-        await service.Updates.Writer.WriteAsync(UiUpdate("TMDb", [first, unverified, third]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("TMDb", [first, unverified, third]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(["First", "Third", "Provider row"], CardTitles(component)), UiWait);
 
         var verified = UiMovie("movie:22", "Verified row") with { ExternalCandidateKey = "provider:key-2" };
-        await service.Updates.Writer.WriteAsync(UiUpdate("Resolved", [first, verified, third]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Resolved", [first, verified, third]), Xunit.TestContext.Current.CancellationToken);
 
         component.WaitForAssertion(() =>
         {
@@ -193,10 +193,10 @@ public sealed partial class CalendarPageTests
         var component = RenderStreamed(service, "/movies?week=2026-05-04&sort=title");
         var zeta = UiMovie("movie:1", "Zeta");
         var alpha = UiMovie("movie:2", "Alpha");
-        await service.Updates.Writer.WriteAsync(UiUpdate("One", [zeta]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("One", [zeta]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(["Zeta"], CardTitles(component)), UiWait);
 
-        await service.Updates.Writer.WriteAsync(UiUpdate("Two", [zeta, alpha]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Two", [zeta, alpha]), Xunit.TestContext.Current.CancellationToken);
         service.Updates.Writer.TryComplete();
 
         component.WaitForAssertion(() => Assert.Equal(["Alpha", "Zeta"], CardTitles(component)), UiWait);
@@ -238,11 +238,11 @@ public sealed partial class CalendarPageTests
         var service = new ChannelPremiereService();
         var component = RenderStreamed(service);
 
-        await service.Updates.Writer.WriteAsync(UiUpdate("One", [UiMovie("movie:1", "First")]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("One", [UiMovie("movie:1", "First")]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(["First"], CardTitles(component)), UiWait);
 
         // Arrives inside the throttle window and the stream then goes quiet.
-        await service.Updates.Writer.WriteAsync(UiUpdate("Two", [UiMovie("movie:1", "First"), UiMovie("movie:2", "Second")]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Two", [UiMovie("movie:1", "First"), UiMovie("movie:2", "Second")]), Xunit.TestContext.Current.CancellationToken);
 
         component.WaitForAssertion(() => Assert.Equal(["First", "Second"], CardTitles(component)), TimeSpan.FromSeconds(3));
     }
@@ -255,12 +255,12 @@ public sealed partial class CalendarPageTests
         var zeta = UiMovie("movie:1", "Zeta");
         var alpha = UiMovie("movie:2", "Alpha");
 
-        await service.Updates.Writer.WriteAsync(UiUpdate("One", [zeta]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("One", [zeta]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(["Zeta"], CardTitles(component)), UiWait);
-        await service.Updates.Writer.WriteAsync(UiUpdate("Two", [zeta, alpha]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Two", [zeta, alpha]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(["Zeta", "Alpha"], CardTitles(component)), UiWait);
 
-        await service.Updates.Writer.WriteAsync(UiUpdate("Complete", [zeta, alpha], isFinal: true));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Complete", [zeta, alpha], isFinal: true), Xunit.TestContext.Current.CancellationToken);
         service.Updates.Writer.TryComplete();
 
         component.WaitForAssertion(() => Assert.Equal(["Alpha", "Zeta"], CardTitles(component)), UiWait);
@@ -274,12 +274,12 @@ public sealed partial class CalendarPageTests
         var zeta = UiMovie("movie:1", "Zeta");
         var alpha = UiMovie("movie:2", "Alpha");
 
-        await service.Updates.Writer.WriteAsync(UiUpdate("One", [zeta]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("One", [zeta]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(["Zeta"], CardTitles(component)), UiWait);
-        await service.Updates.Writer.WriteAsync(UiUpdate("Two", [zeta, alpha]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Two", [zeta, alpha]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(["Zeta", "Alpha"], CardTitles(component)), UiWait);
 
-        await service.Updates.Writer.WriteAsync(UiUpdate("Complete", [zeta, alpha], isFinal: true));
+        await service.Updates.Writer.WriteAsync(UiUpdate("Complete", [zeta, alpha], isFinal: true), Xunit.TestContext.Current.CancellationToken);
         service.Updates.Writer.TryComplete();
         component.WaitForAssertion(() => Assert.Empty(component.FindAll("[data-testid='refreshing']")), UiWait);
 
@@ -335,7 +335,7 @@ public sealed partial class CalendarPageTests
     {
         var service = new ChannelPremiereService();
         var component = RenderStreamed(service);
-        await service.Updates.Writer.WriteAsync(UiUpdate("One", [UiMovie("movie:1", "First")]));
+        await service.Updates.Writer.WriteAsync(UiUpdate("One", [UiMovie("movie:1", "First")]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Single(component.FindAll("[data-testid='premiere-card']")), UiWait);
 
         // Wait until the dialog is really open (and has captured one item) before the next update is written.
@@ -345,7 +345,7 @@ public sealed partial class CalendarPageTests
         Assert.DoesNotContain("DE", LanguageOptionLabels(component, "movie"));
 
         await service.Updates.Writer.WriteAsync(UiUpdate("Two",
-            [UiMovie("movie:1", "First"), UiMovie("movie:2", "Second"), UiMovie("movie:3", "German film", "de")]));
+            [UiMovie("movie:1", "First"), UiMovie("movie:2", "Second"), UiMovie("movie:3", "German film", "de")]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.Equal(2, component.FindAll("[data-testid='premiere-card']").Count), UiWait);
 
         // The open dialog works from the items captured when it opened.
@@ -366,7 +366,7 @@ public sealed partial class CalendarPageTests
         var service = new ChannelPremiereService();
         var component = RenderStreamed(service);
         await service.Updates.Writer.WriteAsync(UiUpdate("One",
-            [UiMovie("movie:1", "Flemish", "nl-BE"), UiMovie("movie:2", "Vlaams", "vls"), UiMovie("movie:3", "English")]));
+            [UiMovie("movie:1", "Flemish", "nl-BE"), UiMovie("movie:2", "Vlaams", "vls"), UiMovie("movie:3", "English")]), Xunit.TestContext.Current.CancellationToken);
         component.WaitForAssertion(() => Assert.NotEmpty(component.FindAll("[data-testid='premiere-card']")), UiWait);
 
         // The click can be queued behind load work, so wait for the opened dialog instead of asserting at once.

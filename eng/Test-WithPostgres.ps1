@@ -1,50 +1,101 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-Runs the PremiereCalendar test projects against a throwaway PostgreSQL server.
+Runs the PremiereCalendar xUnit.net 4 test projects against a throwaway PostgreSQL server.
 
 .DESCRIPTION
-Every test in this repository runs against PostgreSQL. This script starts a disposable postgres container
-(the image pinned in compose.yaml, data on tmpfs, max_connections=300) on a private Docker network inside the
-Ubuntu-24.04 WSL distribution, runs `dotnet test` for the requested projects inside premierecalendar-dev-app:latest
-(build it with eng\wsl-docker.ps1 -Action build), and always removes the server and the network afterwards.
+USAGE (works from any folder; use the absolute path of the script):
 
-It works from any folder: all paths are derived from the script location, and the repository is mounted into the
-container as /src. The network is created with an explicit subnet because the Docker default address pools are
-exhausted on the development machine.
+  # all suites (Unit, Component, Integration), results in <repo>\TestResults\<timestamp>\
+  pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
 
-.PARAMETER Project
-Test projects to run, by short name. Default: UnitTests, ComponentTests, IntegrationTests.
-BrowserTests need Playwright browsers and are not part of the default set.
+  # one suite
+  pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Suite Unit
+
+  # a subset: every test whose fully qualified name contains "ViewSync" (several values = OR)
+  pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Suite Unit -Filter ViewSync
+  pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Filter ViewSync,Wikimedia
+
+  # an xUnit.net query filter (assembly/namespace/class/method[trait=value]); see https://xunit.net/docs/query-filter-language
+  pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Suite Integration -QueryFilter '/*/*/PostgresResponseCacheTests/*'
+
+  # runner switches (any xUnit.net runner option), for example no parallelism or a thread count
+  pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Suite Unit -Parallel none
+  pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Suite Unit -MaxThreads 2 -RunnerArguments:-longRunning,30
+
+Lists (-Suite, -Filter, -RunnerArguments) are comma separated, also when the script is started with `pwsh -File`: -Suite Unit,Component.
+
+What it does: starts a disposable postgres container (the image pinned in compose.yaml, data on tmpfs,
+max_connections=300) on a private Docker network inside the Ubuntu-24.04 WSL distribution, builds the requested test
+projects inside premierecalendar-dev-app:latest (build that image with eng\wsl-docker.ps1 -Action build), runs each test
+executable directly (xUnit.net 4 projects are executables; this skips the `dotnet test` start-up cost) and always
+removes the server and the network afterwards. The repository is mounted into the container as /src. The network
+is created with an explicit subnet because the Docker default address pools are exhausted on the development machine.
+
+Results: every suite writes <Suite>.trx and <Suite>.ctrf.json (CTRF = Common Test Report Format, JSON) plus the
+console log <Suite>.log to <repo>\TestResults\<yyyyMMdd-HHmmss>\ ; TestResults\ is git-ignored. The console shows
+the xUnit.net summary and the wall time of each suite; the script exits non-zero when a suite fails.
+
+Incremental builds: the build output lives in the Docker volume premierecalendar-test-build-<id> (one per checkout,
+so worktrees never mix). Remove it with: wsl.exe -d Ubuntu-24.04 -- docker volume rm <name> (the name is printed).
+Use -FreshBuild to build from scratch into a throwaway location, -NoBuild to run the last build unchanged.
+
+Plain `dotnet test` also works (global.json selects Microsoft Testing Platform), for example inside the dev container:
+  dotnet test tests/PremiereCalendar.UnitTests/PremiereCalendar.UnitTests.csproj -c Release --filter-class '*ViewSync*'
+It needs PREMIERECALENDAR_TEST_POSTGRES set (see docs/Testing.md); this script sets everything up for you.
+
+.PARAMETER Suite
+Test suites to run: Unit, Component, Integration, Browser or All (Unit+Component+Integration+Browser). The full project
+names (UnitTests, ...) are accepted too. Default: Unit, Component, Integration. Browser needs Playwright browsers,
+which the Alpine dev image does not have, so it is never part of the default set. (Alias: -Project.)
 
 .PARAMETER Filter
-Optional dotnet test --filter expression.
+One or more substrings of the fully qualified test method name (namespace.class.method), matched case-sensitively and
+combined with OR. Example: -Filter ViewSync. The old VSTest form "FullyQualifiedName~ViewSync" is still accepted.
 
-.PARAMETER ExtraTestArguments
-Extra arguments appended to `dotnet test`. Values that start with a dash must be bound with the colon form,
-for example -ExtraTestArguments:-p:Foo=bar (see also -NoRuntimeAsync).
+.PARAMETER QueryFilter
+One or more xUnit.net query filters (see the link above), combined with OR. Cannot be combined with -Filter.
+
+.PARAMETER Parallel
+Overrides the assembly parallelization mode: none, collections or all (see tests/*/AssemblyConfiguration.cs).
+
+.PARAMETER MaxThreads
+Overrides the maximum number of test threads: a number, default, unlimited or a multiplier such as 2x.
+
+.PARAMETER RunnerArguments
+Extra arguments for the xUnit.net test executable (single-dash switches such as -longRunning 30 or -explicit on),
+comma separated. Values that start with a dash need the colon form: -RunnerArguments:-longRunning,30 or
+-RunnerArguments:-failSkips (the colon form works for lists too). Run a suite executable with -? to list every switch.
 
 .PARAMETER NoRuntimeAsync
 Builds and runs the tests with -p:UseRuntimeAsync=false (the .NET 11 runtime-async compiler feature is on by default).
 
-.PARAMETER BuildVolume
-Optional named Docker volume mounted at /PremiereCalendar.Build (the Directory.Build.props artifacts path) so that
-repeated runs build incrementally. Without it every run builds from scratch inside the container.
+.PARAMETER NoBuild
+Skips the build and runs the output of the previous run of the same checkout.
 
-.EXAMPLE
-pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project UnitTests -Filter "FullyQualifiedName~ViewSync"
+.PARAMETER FreshBuild
+Builds from scratch instead of using the per-checkout build volume.
+
+.PARAMETER Cpus
+CPU limit of the test container (default 4); the PostgreSQL container gets 2.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('UnitTests', 'ComponentTests', 'IntegrationTests', 'BrowserTests')]
-    [string[]] $Project = @('UnitTests', 'ComponentTests', 'IntegrationTests'),
-    [string] $Filter,
+    [Alias('Project')]
+    [string[]] $Suite = @('Unit', 'Component', 'Integration'),
+    [string[]] $Filter,
+    [string[]] $QueryFilter,
+    [ValidateSet('none', 'collections', 'all')]
+    [string] $Parallel,
+    [string] $MaxThreads,
+    [string[]] $RunnerArguments = @(),
     [ValidateSet('Release', 'Debug')]
     [string] $Configuration = 'Release',
     [ValidateRange(1, 64)]
     [int] $Cpus = 4,
-    [string[]] $ExtraTestArguments = @(),
     [switch] $NoRuntimeAsync,
+    [switch] $NoBuild,
+    [switch] $FreshBuild,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')]
     [string] $BuildVolume,
     [string] $DevImage = 'premierecalendar-dev-app:latest',
@@ -55,6 +106,25 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+
+# `pwsh -File script.ps1 -Suite Unit,Component` delivers "Unit,Component" as ONE string; accept both forms.
+$Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+if ($Filter) { $Filter = @($Filter | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) }
+$RunnerArguments = @($RunnerArguments | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+
+# Suite names: Unit / UnitTests, ..., All.
+$known = @('Unit', 'Component', 'Integration', 'Browser')
+$suites = [System.Collections.Generic.List[string]]::new()
+foreach ($item in $Suite) {
+    $name = ($item -replace 'Tests$', '')
+    if ($name -ieq 'All') { foreach ($k in $known) { if (-not $suites.Contains($k)) { $suites.Add($k) } }; continue }
+    $match = $known | Where-Object { $_ -ieq $name }
+    if (-not $match) { throw "Unknown suite '$item'. Use Unit, Component, Integration, Browser or All." }
+    if (-not $suites.Contains($match)) { $suites.Add($match) }
+}
+if ($suites.Count -eq 0) { throw 'No suite selected.' }
+if ($Filter -and $QueryFilter) { throw '-Filter and -QueryFilter cannot be combined.' }
+
 $composePath = Join-Path $root 'compose.yaml'
 $composeText = Get-Content -LiteralPath $composePath -Raw
 if ($composeText -notmatch '(?m)^\s*image:\s*(postgres:\S+@sha256:[0-9a-f]{64})\s*$') {
@@ -70,11 +140,13 @@ function Invoke-Wsl([string] $Script) {
     ((($Script -replace "`r`n", "`n").TrimEnd()) + "`n# end of script") | & $wsl -d Ubuntu-24.04 -- bash -s | Out-Host
     return [int] $LASTEXITCODE
 }
+function ConvertTo-ShellWord([string] $Value) { return "'" + ($Value -replace "'", "'\''") + "'" }
 
 $wslRoot = (& $wsl -d Ubuntu-24.04 -- wslpath -a ($root -replace '\\', '/')).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($wslRoot)) { throw 'Could not resolve the repository inside Ubuntu-24.04.' }
 
 $runId = [Guid]::NewGuid().ToString('N').Substring(0, 10)
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $network = "pcpg-net-$runId"
 $server = "pcpg-db-$runId"
 $password = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLowerInvariant()
@@ -85,23 +157,66 @@ $subnetOctet = Get-Random -Minimum 1 -Maximum 250
 $dbEnvFile = "/tmp/pcpg-env-$runId-db"
 $testEnvFile = "/tmp/pcpg-env-$runId-test"
 
-$projectList = ($Project | ForEach-Object { "tests/PremiereCalendar.$_/PremiereCalendar.$_.csproj" }) -join ' '
-$testArguments = @('-c', $Configuration, '--nologo') + $ExtraTestArguments
-if ($NoRuntimeAsync) { $testArguments += '-p:UseRuntimeAsync=false' }
-if (-not [string]::IsNullOrWhiteSpace($Filter)) { $testArguments += @('--filter', $Filter) }
-$quotedTestArguments = ($testArguments | ForEach-Object { "'" + ($_ -replace "'", "'\''") + "'" }) -join ' '
+# One build volume per checkout: msbuild's incremental checks compare timestamps, which must not mix checkouts.
+if (-not $BuildVolume -and -not $FreshBuild) {
+    $sha = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))
+    $BuildVolume = 'premierecalendar-test-build-' + [Convert]::ToHexString($sha).Substring(0, 8).ToLowerInvariant()
+}
 $buildMount = if ($BuildVolume) { "-v '$BuildVolume':/PremiereCalendar.Build" } else { '' }
+if ($BuildVolume) { Write-Host "Build volume: $BuildVolume" }
 
-$innerScript = @"
-printf %s "`$PC_TEST_PASSWORD" > /tmp/pc-test-postgres-password
+$resultsRelative = "TestResults/$stamp"
+$resultsHost = Join-Path (Join-Path $root 'TestResults') $stamp
+Write-Host "Results: $resultsHost"
+
+# Runner arguments (xUnit.net in-process runner switches).
+$runner = [System.Collections.Generic.List[string]]::new()
+if ($Filter) {
+    foreach ($f in $Filter) {
+        $text = $f -replace '^FullyQualifiedName~', ''
+        $runner.Add('-method'); $runner.Add("*$text*")
+    }
+}
+if ($QueryFilter) { foreach ($q in $QueryFilter) { $runner.Add('-filter'); $runner.Add($q) } }
+if ($Parallel) { $runner.Add('-parallelMode'); $runner.Add($Parallel) }
+if ($MaxThreads) { $runner.Add('-maxThreads'); $runner.Add($MaxThreads) }
+foreach ($a in $RunnerArguments) { $runner.Add($a) }
+$runnerWords = ($runner | ForEach-Object { ConvertTo-ShellWord $_ }) -join ' '
+$buildFlags = '-c ' + $Configuration + ' --nologo -v q' + $(if ($NoRuntimeAsync) { ' -p:UseRuntimeAsync=false' } else { '' })
+$doBuild = if ($NoBuild) { '0' } else { '1' }
+$suiteList = $suites -join ' '
+$configLower = $Configuration.ToLowerInvariant()
+
+$innerTemplate = @'
+printf %s "$PC_TEST_PASSWORD" > /tmp/pc-test-postgres-password
+mkdir -p '/src/@@RESULTS@@'
 status=0
-for project in $projectList; do
-  echo "=== dotnet test `$project"
-  dotnet test "`$project" $quotedTestArguments || status=1
+summary=''
+for suite in @@SUITES@@; do
+  name="PremiereCalendar.${suite}Tests"
+  proj="tests/$name/$name.csproj"
+  exe="/PremiereCalendar.Build/bin/$name/@@CONFIGLOWER@@/$name"
+  if [ '@@DOBUILD@@' = 1 ]; then
+    echo "=== build $name"
+    t0=$(date +%s)
+    dotnet build "$proj" @@BUILDFLAGS@@ || { echo "BUILD FAILED: $name"; status=1; summary="$summary\n$name: build failed"; continue; }
+    echo "build time: $(( $(date +%s) - t0 )) s"
+  fi
+  [ -x "$exe" ] || { echo "Missing test executable $exe (run without -NoBuild)"; status=1; summary="$summary\n$name: no executable"; continue; }
+  echo "=== run $name"
+  t0=$(date +%s)
+  # The exit code travels through a file because busybox sh has no PIPESTATUS.
+  { "$exe" -noLogo -result-trx "/src/@@RESULTS@@/$suite.trx" -result-ctrf "/src/@@RESULTS@@/$suite.ctrf.json" @@RUNNERWORDS@@ 2>&1; echo $? > /tmp/pc-suite-rc; } | tee "/src/@@RESULTS@@/$suite.log"
+  rc=$(cat /tmp/pc-suite-rc)
+  elapsed=$(( $(date +%s) - t0 ))
+  [ "$rc" = 0 ] || status=1
+  summary="$summary\n$name: exit $rc, ${elapsed} s"
 done
-exit `$status
-"@
-$innerEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($innerScript -replace "`r`n", "`n")))
+printf "\n=== summary%b\n" "$summary"
+exit $status
+'@
+$inner = $innerTemplate.Replace('@@RESULTS@@', $resultsRelative).Replace('@@SUITES@@', $suiteList).Replace('@@CONFIGLOWER@@', $configLower).Replace('@@DOBUILD@@', $doBuild).Replace('@@BUILDFLAGS@@', $buildFlags).Replace('@@RUNNERWORDS@@', $runnerWords)
+$innerEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($inner -replace "`r`n", "`n")))
 
 $startScript = @"
 set -u
@@ -133,6 +248,7 @@ done
 docker run --rm --network '$network' --cpus=$Cpus -v '$wslRoot':/src -v '$NugetVolume':/root/.nuget/packages $buildMount -w /src \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
   -e PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE=/tmp/pc-test-postgres-password \
+  -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   --env-file '$testEnvFile' -e PC_INNER_SCRIPT='$innerEncoded' '$DevImage' sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s' </dev/null
 "@
 
@@ -144,6 +260,7 @@ exit 0
 "@
 
 $exitCode = 1
+$started = Get-Date
 try {
     $exitCode = Invoke-Wsl $startScript
 }
@@ -151,5 +268,6 @@ finally {
     # Always remove the server and its network, even when the run fails or is interrupted.
     [void](Invoke-Wsl $stopScript)
 }
+Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] ((Get-Date) - $started).TotalSeconds, $resultsHost)
 if ($exitCode -ne 0) { throw "Tests did not pass (exit code $exitCode)." }
-Write-Host 'All requested test projects passed.'
+Write-Host "All requested test suites passed ($($suites -join ', '))."

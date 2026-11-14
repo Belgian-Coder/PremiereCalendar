@@ -1149,7 +1149,7 @@ public sealed class SettingsPageTests : BunitContext
             Assert.Empty(component.FindAll("[aria-label='SIMKL authorization code']"));
         }, TimeSpan.FromSeconds(3));
 
-        await Task.Delay(TimeSpan.FromMilliseconds(1300));
+        await Task.Delay(TimeSpan.FromMilliseconds(1300), Xunit.TestContext.Current.CancellationToken);
 
         Assert.Equal(1, simklClient.CheckPinCodeCallCount);
     }

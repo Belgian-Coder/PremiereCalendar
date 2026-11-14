@@ -123,9 +123,9 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var client = RottenTomatoes(handler, memory, Cache(CreateStore()));
         using var scope = ProviderRefreshScope.Use(ProviderRefreshScope.Create());
-        Assert.True((await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, default)).Successful);
+        Assert.True((await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, TestContext.Current.CancellationToken)).Successful);
         fail = true;
-        Assert.False((await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, default, true)).Successful);
+        Assert.False((await client.GetScoresWithStatusAsync(PremiereMediaType.Movie, "Example", 2026, null, TestContext.Current.CancellationToken, true)).Successful);
         Assert.True(client.TryGetCachedScores(PremiereMediaType.Movie, "Example", 2026, null, out var preserved));
         Assert.Equal(82, preserved.CriticScore);
     }
@@ -144,9 +144,9 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         {
             using var memory = new MemoryCache(new MemoryCacheOptions());
             var client = Tmdb(handler, memory, Cache(CreateStore()));
-            Assert.NotNull(await client.GetTvSeasonDetailsAsync(42, 1, default));
-            Assert.Equal(42, await client.FindTmdbIdByExternalIdAsync(PremiereMediaType.Movie, "tt0000042", "imdb_id", default));
-            Assert.Single(await client.SearchTitlesAsync(PremiereMediaType.Movie, "Example", 2026, default));
+            Assert.NotNull(await client.GetTvSeasonDetailsAsync(42, 1, TestContext.Current.CancellationToken));
+            Assert.Equal(42, await client.FindTmdbIdByExternalIdAsync(PremiereMediaType.Movie, "tt0000042", "imdb_id", TestContext.Current.CancellationToken));
+            Assert.Single(await client.SearchTitlesAsync(PremiereMediaType.Movie, "Example", 2026, TestContext.Current.CancellationToken));
         }
         Assert.Equal(3, handler.Requests.Count);
     }
@@ -179,7 +179,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         var restarted = Tmdb(handler, restartedMemory, Cache(CreateStore()));
         await Details(restarted, false);
         Assert.Single(handler.Requests);
-        await Task.Delay(TimeSpan.FromMilliseconds(1200));
+        await Task.Delay(TimeSpan.FromMilliseconds(1200), TestContext.Current.CancellationToken);
         await Details(restarted, false);
         Assert.Equal(2, handler.Requests.Count);
     }
@@ -228,7 +228,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         using var cancellation = new CancellationTokenSource();
         using var coldMemory = new MemoryCache(new MemoryCacheOptions());
         var pending = Tmdb(handler, coldMemory, Cache(blocked)).GetMovieDetailsAsync(42, cancellation.Token);
-        await blocked.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await blocked.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
         Assert.Single(handler.Requests);
@@ -242,7 +242,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var client = Tmdb(handler, memory, Cache(store));
         var requests = Enumerable.Range(0, 20).Select(_ => Details(client, false)).ToArray();
-        await store.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await store.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         store.ReleaseRead.TrySetResult();
         Assert.All(await Task.WhenAll(requests), value => Assert.Equal(42, value!.Id));
         Assert.Single(handler.Requests);
@@ -255,8 +255,8 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     {
         var blockedWrite = new InterceptingStore(CreateStore()) { BlockWrites = true };
         var save = Cache(blockedWrite, ioBudget: TimeSpan.FromMilliseconds(500)).SaveAsync("tmdb", "request", RottenTomatoesScores.Empty, CancellationToken.None);
-        await blockedWrite.WriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await save.WaitAsync(TimeSpan.FromSeconds(5));
+        await blockedWrite.WriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await save.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(blockedWrite.WriteCanceled);
         Assert.Empty(await CreateStore().GetByProviderAsync("responsecache-tmdb", 100, CancellationToken.None));
 
@@ -264,15 +264,15 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{\"id\":42}"));
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var fetch = Details(Tmdb(handler, memory, Cache(blockedRead, ioBudget: TimeSpan.FromMilliseconds(500))), false);
-        await blockedRead.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(42, (await fetch.WaitAsync(TimeSpan.FromSeconds(5)))!.Id);
+        await blockedRead.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(42, (await fetch.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))!.Id);
         Assert.True(blockedRead.ReadCanceled);
         Assert.Single(handler.Requests);
 
         var callerBlockedWrite = new InterceptingStore(CreateStore()) { BlockWrites = true };
         using var callerCancellation = new CancellationTokenSource();
         var canceledSave = Cache(callerBlockedWrite).SaveAsync("tmdb", "caller", RottenTomatoesScores.Empty, callerCancellation.Token);
-        await callerBlockedWrite.WriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await callerBlockedWrite.WriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         callerCancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceledSave);
         Assert.True(callerBlockedWrite.WriteCanceled);
@@ -286,7 +286,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var client = RottenTomatoes(handler, memory, Cache(store));
         var requests = Enumerable.Range(0, 20).Select(_ => Scores(client)).ToArray();
-        await store.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await store.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         store.ReleaseRead.TrySetResult();
         Assert.All(await Task.WhenAll(requests), value => Assert.Equal(RottenTomatoesScores.Empty, value));
         Assert.Equal("/search", Assert.Single(handler.Requests).Uri.AbsolutePath);
@@ -338,11 +338,11 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
             Row("responsecache-omdb-other", ProviderCacheScope.Item, "other-namespace", cutoff.AddDays(-1)),
             Row("omdb", ProviderCacheScope.Item, "legacy", cutoff.AddDays(-1))
         };
-        await store.SaveManyAsync(preserved.Append(expired), default);
-        Assert.Equal(1, await Cache(CreateStore(), new TestTimeProvider(now)).CleanupAsync(default));
-        Assert.Null(await store.GetAsync(expired.Provider, expired.Scope, expired.Key, default));
+        await store.SaveManyAsync(preserved.Append(expired), TestContext.Current.CancellationToken);
+        Assert.Equal(1, await Cache(CreateStore(), new TestTimeProvider(now)).CleanupAsync(TestContext.Current.CancellationToken));
+        Assert.Null(await store.GetAsync(expired.Provider, expired.Scope, expired.Key, TestContext.Current.CancellationToken));
         foreach (var row in preserved)
-            Assert.Equal(row, await store.GetAsync(row.Provider, row.Scope, row.Key, default));
+            Assert.Equal(row, await store.GetAsync(row.Provider, row.Scope, row.Key, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -351,12 +351,12 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         var now = DateTimeOffset.UtcNow;
         var inner = CreateStore();
         await inner.SaveAsync(new("responsecache-omdb", ProviderCacheScope.Item, "expired-outcome",
-            now.AddMonths(-3).AddTicks(-1), null, null, null, "{}"), default);
+            now.AddMonths(-3).AddTicks(-1), null, null, null, "{}"), TestContext.Current.CancellationToken);
         var blocked = new InterceptingStore(inner) { BlockReads = true, BlockProvider = "responsecache-omdb" };
         var cache = Cache(blocked, new TestTimeProvider(now), TimeSpan.FromMilliseconds(500));
-        Assert.Null(await cache.GetAsync<RottenTomatoesScores>("omdb", "blocked", TimeSpan.FromHours(1), default));
+        Assert.Null(await cache.GetAsync<RottenTomatoesScores>("omdb", "blocked", TimeSpan.FromHours(1), TestContext.Current.CancellationToken));
         Assert.True(blocked.ReadCanceled);
-        Assert.Equal(1, await cache.CleanupAsync(default));
+        Assert.Equal(1, await cache.CleanupAsync(TestContext.Current.CancellationToken));
     }
 
     [Theory]
@@ -392,7 +392,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         var sharedResponseCache = Cache(held);
         using var sharedMemory = new MemoryCache(new MemoryCacheOptions());
         var normal = Details(Tmdb(handler, sharedMemory, sharedResponseCache), television);
-        await held.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await held.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         title = "New";
         Assert.Equal("New", (await Details(Tmdb(handler, sharedMemory, sharedResponseCache), television, forceRefresh: true))!.Title);
         held.ReleaseRead.TrySetResult();
@@ -418,7 +418,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         var sharedResponseCache = Cache(held);
         using var sharedMemory = new MemoryCache(new MemoryCacheOptions());
         var normal = Scores(RottenTomatoes(handler, sharedMemory, sharedResponseCache));
-        await held.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await held.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         score = 91;
         Assert.Equal(91, (await Scores(RottenTomatoes(handler, sharedMemory, sharedResponseCache), forceRefresh: true)).CriticScore);
         held.ReleaseRead.TrySetResult();
@@ -455,10 +455,10 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     {
         // EXCLUSIVE mode blocks every INSERT/UPDATE on the table but still lets readers through: writes wait
         // on the lock until the response cache's I/O budget (or the caller's token) cancels them.
-        await using var writer = await _database.OpenAsync();
-        await using var transaction = await writer.BeginTransactionAsync();
+        await using var writer = await _database.OpenAsync(TestContext.Current.CancellationToken);
+        await using var transaction = await writer.BeginTransactionAsync(TestContext.Current.CancellationToken);
         await using (var hold = new NpgsqlCommand("LOCK TABLE ProviderCacheState IN EXCLUSIVE MODE", writer, transaction))
-            await hold.ExecuteNonQueryAsync();
+            await hold.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
         var responseCache = Cache(CreateStore(), clock, TimeSpan.FromMilliseconds(500));
         var started = Stopwatch.GetTimestamp();
@@ -476,7 +476,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         started = Stopwatch.GetTimestamp();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Cache(CreateStore()).SaveAsync("tmdb", "canceled", RottenTomatoesScores.Empty, cancellation.Token));
         Assert.InRange(Stopwatch.GetElapsedTime(started).TotalSeconds, 0, 3);
-        await transaction.RollbackAsync();
+        await transaction.RollbackAsync(TestContext.Current.CancellationToken);
         clock.Now = clock.Now.AddSeconds(6);
         await responseCache.SaveAsync("tmdb", "recovered", RottenTomatoesScores.Empty, CancellationToken.None);
         Assert.NotNull(await responseCache.GetAsync<RottenTomatoesScores>("tmdb", "recovered", TimeSpan.FromHours(12), CancellationToken.None));
@@ -530,9 +530,9 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var sharedResponseCache = Cache(CreateStore());
         var forced = Details(Tmdb(handler, memory, sharedResponseCache), false, forceRefresh: true);
-        await forceStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await forceStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var normal = Details(Tmdb(handler, memory, sharedResponseCache), false);
-        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         releaseForce.TrySetResult();
         if (forceSucceeds) Assert.Equal("New", (await forced)!.Title);
         else await Assert.ThrowsAsync<ExternalApiException>(() => forced);
@@ -577,9 +577,9 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var sharedResponseCache = Cache(CreateStore());
         var forced = Scores(RottenTomatoes(handler, memory, persistence ? sharedResponseCache : null), forceRefresh: true);
-        await forceStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await forceStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var normal = Scores(RottenTomatoes(handler, memory, persistence ? sharedResponseCache : null));
-        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         if (normalCompletesFirst)
         {
             releaseNormal.TrySetResult();
@@ -618,7 +618,7 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var sharedResponseCache = Cache(CreateStore());
         var normal = Scores(RottenTomatoes(handler, memory, sharedResponseCache));
-        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await normalStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(RottenTomatoesScores.Empty, await Scores(RottenTomatoes(handler, memory, sharedResponseCache), forceRefresh: true));
         releaseNormal.TrySetResult();
         Assert.Equal(88, (await normal).CriticScore);

@@ -14,7 +14,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     private IOptions<ProviderSchedulerOptions> _schedulerOptions = null!;
     private PostgresTestDatabase _database = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Directory.CreateDirectory(_root);
         _database = await PostgresTestDatabase.CreateAsync();
@@ -32,23 +32,23 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     {
         var policy = CreatePolicy();
         await using var active = await policy.AcquireAsync("priority", 1, CancellationToken.None);
-        var backgroundFirst = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Warmup);
-        var backgroundSecond = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Maintenance);
-        var foregroundFirst = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Foreground);
-        var foregroundSecond = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Foreground);
+        var backgroundFirst = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Warmup, TestContext.Current.CancellationToken);
+        var backgroundSecond = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Maintenance, TestContext.Current.CancellationToken);
+        var foregroundFirst = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Foreground, TestContext.Current.CancellationToken);
+        var foregroundSecond = AcquireWithPriorityAsync(policy, "priority", 1, () => ProviderWorkPriority.Foreground, TestContext.Current.CancellationToken);
 
         await CompleteCancelledAsync(active);
-        await using var first = await foregroundFirst.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var first = await foregroundFirst.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(foregroundSecond.IsCompleted);
         Assert.False(backgroundFirst.IsCompleted);
         await CompleteCancelledAsync(first);
-        await using var second = await foregroundSecond.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var second = await foregroundSecond.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(backgroundFirst.IsCompleted);
         await CompleteCancelledAsync(second);
-        await using var third = await backgroundFirst.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var third = await backgroundFirst.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(backgroundSecond.IsCompleted);
         await CompleteCancelledAsync(third);
-        await using var fourth = await backgroundSecond.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var fourth = await backgroundSecond.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await CompleteCancelledAsync(fourth);
         Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
     }
@@ -58,16 +58,16 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     {
         var policy = CreatePolicy();
         await using var active = await policy.AcquireAsync("promotion", 1, CancellationToken.None);
-        var olderBackground = AcquireWithPriorityAsync(policy, "promotion", 1, () => ProviderWorkPriority.Warmup);
+        var olderBackground = AcquireWithPriorityAsync(policy, "promotion", 1, () => ProviderWorkPriority.Warmup, TestContext.Current.CancellationToken);
         var priority = ProviderWorkPriority.Maintenance;
-        var promoted = AcquireWithPriorityAsync(policy, "promotion", 1, () => priority);
+        var promoted = AcquireWithPriorityAsync(policy, "promotion", 1, () => priority, TestContext.Current.CancellationToken);
         priority = ProviderWorkPriority.Foreground;
 
         await CompleteCancelledAsync(active);
-        await using var foreground = await promoted.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var foreground = await promoted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(olderBackground.IsCompleted);
         await CompleteCancelledAsync(foreground);
-        await using var background = await olderBackground.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var background = await olderBackground.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await CompleteCancelledAsync(background);
     }
 
@@ -76,21 +76,21 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
     {
         var policy = CreatePolicy();
         await using var active = await policy.AcquireAsync("fairness", 1, CancellationToken.None);
-        var background = AcquireWithPriorityAsync(policy, "fairness", 1, () => ProviderWorkPriority.Maintenance);
+        var background = AcquireWithPriorityAsync(policy, "fairness", 1, () => ProviderWorkPriority.Maintenance, TestContext.Current.CancellationToken);
         var foreground = Enumerable.Range(0, 9)
             .Select(_ => AcquireWithPriorityAsync(policy, "fairness", 1, () => ProviderWorkPriority.Foreground)).ToArray();
 
         await CompleteCancelledAsync(active);
         for (var index = 0; index < 8; index++)
         {
-            await using var lease = await foreground[index].WaitAsync(TimeSpan.FromSeconds(5));
+            await using var lease = await foreground[index].WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.False(background.IsCompleted);
             await CompleteCancelledAsync(lease);
         }
-        await using var backgroundLease = await background.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var backgroundLease = await background.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(foreground[8].IsCompleted);
         await CompleteCancelledAsync(backgroundLease);
-        await using var last = await foreground[8].WaitAsync(TimeSpan.FromSeconds(5));
+        await using var last = await foreground[8].WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await CompleteCancelledAsync(last);
     }
 
@@ -102,23 +102,23 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         await using var activeSecond = await policy.AcquireAsync("capacity", 2, CancellationToken.None);
         using var cancellation = new CancellationTokenSource();
         var cancelled = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Foreground, cancellation.Token);
-        var backgroundFirst = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Warmup);
-        var backgroundSecond = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Warmup);
-        var foreground = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Foreground);
+        var backgroundFirst = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Warmup, TestContext.Current.CancellationToken);
+        var backgroundSecond = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Warmup, TestContext.Current.CancellationToken);
+        var foreground = AcquireWithPriorityAsync(policy, "capacity", 2, () => ProviderWorkPriority.Foreground, TestContext.Current.CancellationToken);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
         Assert.Equal(2, Assert.Single(policy.GetSnapshots()).ActiveRequests);
 
         await CompleteCancelledAsync(activeFirst);
-        await using var foregroundLease = await foreground.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var foregroundLease = await foreground.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(backgroundFirst.IsCompleted);
         Assert.Equal(2, Assert.Single(policy.GetSnapshots()).ActiveRequests);
         await CompleteCancelledAsync(activeSecond);
-        await using var first = await backgroundFirst.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var first = await backgroundFirst.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(backgroundSecond.IsCompleted);
         Assert.Equal(2, Assert.Single(policy.GetSnapshots()).ActiveRequests);
         await CompleteCancelledAsync(foregroundLease);
-        await using var second = await backgroundSecond.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var second = await backgroundSecond.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(2, Assert.Single(policy.GetSnapshots()).ActiveRequests);
         await CompleteCancelledAsync(first);
         await CompleteCancelledAsync(second);
@@ -134,19 +134,19 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
             await using var failed = await policy.AcquireAsync("half-open-priority", 4, CancellationToken.None);
             await failed.CompleteAsync(ProviderExecutionResult.Failed, null, CancellationToken.None);
         }
-        var background = AcquireWithPriorityAsync(policy, "half-open-priority", 4, () => ProviderWorkPriority.Warmup);
-        var foreground = AcquireWithPriorityAsync(policy, "half-open-priority", 4, () => ProviderWorkPriority.Foreground);
+        var background = AcquireWithPriorityAsync(policy, "half-open-priority", 4, () => ProviderWorkPriority.Warmup, TestContext.Current.CancellationToken);
+        var foreground = AcquireWithPriorityAsync(policy, "half-open-priority", 4, () => ProviderWorkPriority.Foreground, TestContext.Current.CancellationToken);
         Assert.False(background.IsCompleted);
         Assert.False(foreground.IsCompleted);
         _time.Advance(TimeSpan.FromSeconds(60));
 
-        await using var probe = await foreground.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var probe = await foreground.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var halfOpen = Assert.Single(policy.GetSnapshots());
         Assert.Equal(ProviderCircuitState.HalfOpen, halfOpen.CircuitState);
         Assert.Equal(1, halfOpen.ActiveRequests);
         Assert.False(background.IsCompleted);
         await probe.CompleteAsync(ProviderExecutionResult.Success, null, CancellationToken.None);
-        await using var backgroundLease = await background.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var backgroundLease = await background.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ActiveRequests);
         await CompleteCancelledAsync(backgroundLease);
     }
@@ -176,9 +176,9 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
             .Select(_ => Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GetAsync("https://example.test/", cancellation.Token)))
             .ToArray();
 
-        await inner.RequestsStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        await inner.RequestsStarted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         cancellation.Cancel();
-        await Task.WhenAll(requests).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(requests).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         var snapshot = Assert.Single(policy.GetSnapshots(), value => value.Provider == "cancel-storm");
         Assert.Equal(0, snapshot.ActiveRequests);
@@ -198,8 +198,8 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
-        var request = client.GetAsync("https://example.test/");
-        await inner.RequestsStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        var request = client.GetAsync("https://example.test/", TestContext.Current.CancellationToken);
+        await inner.RequestsStarted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => _time.CreatedTimerCount == 1);
         Assert.False(request.IsCompleted);
         _time.Advance(TimeSpan.FromMilliseconds(100));
@@ -219,13 +219,13 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         var policy = CreatePolicy();
         using var body = new BlockingBodyContent();
         using var client = CreateBodyClient(policy, "buffered-body", body);
-        var request = client.GetAsync("https://example.test/");
-        await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+        var request = client.GetAsync("https://example.test/", TestContext.Current.CancellationToken);
+        await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ActiveRequests);
         Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ConsecutiveSuccesses);
 
         _time.Advance(TimeSpan.FromMilliseconds(100));
-        var exception = await Assert.ThrowsAsync<TaskCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        var exception = await Assert.ThrowsAsync<TaskCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.IsType<TimeoutException>(exception.InnerException);
         Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ConsecutiveFailures);
@@ -245,13 +245,13 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead, caller.Token);
         await using var stream = await response.Content.ReadAsStreamAsync(tokenOnlyOnRead ? CancellationToken.None : caller.Token);
         var read = stream.ReadAsync(new byte[1], tokenOnlyOnRead ? caller.Token : CancellationToken.None).AsTask();
-        await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+        await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ActiveRequests);
         Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ConsecutiveSuccesses);
 
         if (cancelCaller) caller.Cancel();
         else _time.Advance(TimeSpan.FromMilliseconds(100));
-        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5)));
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         if (!cancelCaller) Assert.IsType<TimeoutException>(exception.InnerException);
         var snapshot = Assert.Single(policy.GetSnapshots());
         Assert.Equal(0, snapshot.ActiveRequests);
@@ -268,9 +268,9 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         using var client = CreateBodyClient(policy, "buffered-cancel", body);
         using var caller = new CancellationTokenSource();
         var request = client.GetAsync("https://example.test/", caller.Token);
-        await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+        await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         caller.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         var snapshot = Assert.Single(policy.GetSnapshots());
         Assert.Equal(0, snapshot.ActiveRequests);
         Assert.Equal(0, snapshot.ConsecutiveFailures);
@@ -285,13 +285,13 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         using var body = new ControlledBodyStream();
         body.AddChunk([42]);
         using var client = CreateBodyClient(policy, "slow-body", new StreamContent(body));
-        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead);
-        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
         _time.Advance(TimeSpan.FromMilliseconds(60));
-        Assert.Equal(1, await stream.ReadAsync(new byte[1]));
-        var read = stream.ReadAsync(new byte[1]).AsTask();
+        Assert.Equal(1, await stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken));
+        var read = stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
         _time.Advance(TimeSpan.FromMilliseconds(40));
-        var exception = await Assert.ThrowsAsync<TaskCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5)));
+        var exception = await Assert.ThrowsAsync<TaskCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.IsType<TimeoutException>(exception.InnerException);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ConsecutiveFailures);
     }
@@ -303,9 +303,9 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         using var body = new ControlledBodyStream();
         body.Fail(new IOException("Provider disconnected during the body."));
         using var client = CreateBodyClient(policy, "body-io", new StreamContent(body));
-        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead);
-        await using var stream = await response.Content.ReadAsStreamAsync();
-        await Assert.ThrowsAsync<IOException>(() => stream.ReadAsync(new byte[1]).AsTask());
+        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<IOException>(() => stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken).AsTask());
         response.Dispose();
         var snapshot = Assert.Single(policy.GetSnapshots());
         Assert.Equal(0, snapshot.ActiveRequests);
@@ -325,11 +325,11 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
             Timeout = Timeout.InfiniteTimeSpan
         };
         using var message = new HttpRequestMessage(HttpMethod.Post, "https://example.test/");
-        var request = client.SendAsync(message);
-        await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+        var request = client.SendAsync(message, TestContext.Current.CancellationToken);
+        await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ConsecutiveFailures);
         _time.Advance(TimeSpan.FromMilliseconds(100));
-        var exception = await Assert.ThrowsAsync<TaskCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        var exception = await Assert.ThrowsAsync<TaskCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.IsType<TimeoutException>(exception.InnerException);
         Assert.Equal(1, inner.SendCount);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ConsecutiveFailures);
@@ -344,23 +344,23 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         var policy = CreatePolicy();
         using var body = new ControlledBodyStream();
         using var client = CreateBodyClient(policy, "abandoned-body", new StreamContent(body));
-        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead);
+        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
         Task<int>? read = null;
         if (pendingRead)
         {
-            var stream = await response.Content.ReadAsStreamAsync();
-            read = stream.ReadAsync(new byte[1]).AsTask();
-            await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+            var stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
+            read = stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
+            await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             stream.Dispose();
         }
         else response.Dispose();
-        if (read is not null) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5)));
+        if (read is not null) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         var snapshot = Assert.Single(policy.GetSnapshots());
         Assert.Equal(0, snapshot.ActiveRequests);
         Assert.Equal(0, snapshot.ConsecutiveFailures);
         Assert.Equal(0, snapshot.ConsecutiveSuccesses);
         Assert.Null(snapshot.EwmaLatencyMilliseconds);
-        await using var available = await policy.AcquireAsync("abandoned-body", 1, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        await using var available = await policy.AcquireAsync("abandoned-body", 1, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await available.CompleteAsync(ProviderExecutionResult.Cancelled, null, CancellationToken.None);
     }
 
@@ -377,18 +377,18 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
         content.Headers.TryAddWithoutValidation("X-Provider-Body", "preserved");
         using var client = CreateBodyClient(policy, "gzip-body", content);
-        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead);
+        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
         Assert.Equal("gzip", Assert.Single(response.Content.Headers.ContentEncoding));
         Assert.Equal(content.Headers.ContentLength, response.Content.Headers.ContentLength);
         Assert.Equal("application/octet-stream", response.Content.Headers.ContentType?.MediaType);
         Assert.Equal("preserved", Assert.Single(response.Content.Headers.GetValues("X-Provider-Body")));
-        await using var stream = await response.Content.ReadAsStreamAsync();
+        await using var stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
         await using var uncompressed = new System.IO.Compression.GZipStream(stream, System.IO.Compression.CompressionMode.Decompress);
         using var reader = new StreamReader(uncompressed);
-        Assert.Equal(expected, await reader.ReadToEndAsync());
+        Assert.Equal(expected, await reader.ReadToEndAsync(TestContext.Current.CancellationToken));
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ConsecutiveSuccesses);
         // A consumer may stop exactly at the gzip trailer; explicitly observe the transport EOF.
-        Assert.Equal(0, await stream.ReadAsync(new byte[1]));
+        Assert.Equal(0, await stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken));
         var snapshot = Assert.Single(policy.GetSnapshots());
         Assert.Equal(0, snapshot.ActiveRequests);
         Assert.Equal(1, snapshot.ConsecutiveSuccesses);
@@ -403,12 +403,12 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         var policy = CreatePolicy();
         using var body = new ControlledBodyStream();
         using var client = CreateBodyClient(policy, "sync-body", new StreamContent(body));
-        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead);
-        using var stream = response.Content.ReadAsStream();
+        using var response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
+        using var stream = response.Content.ReadAsStream(TestContext.Current.CancellationToken);
         var read = Task.Run(() => stream.Read(new byte[1], 0, 1));
-        await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+        await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         _time.Advance(TimeSpan.FromMilliseconds(100));
-        var exception = await Assert.ThrowsAsync<TaskCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5)));
+        var exception = await Assert.ThrowsAsync<TaskCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.IsType<TimeoutException>(exception.InnerException);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ConsecutiveFailures);
     }
@@ -427,7 +427,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
             Timeout = Timeout.InfiniteTimeSpan
         };
         using var request = new HttpRequestMessage(new HttpMethod(method), "https://example.test/");
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
         Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
         Assert.Equal(1, Assert.Single(policy.GetSnapshots()).ConsecutiveSuccesses);
     }
@@ -444,7 +444,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
-        var request = client.GetAsync("https://example.test/");
+        var request = client.GetAsync("https://example.test/", TestContext.Current.CancellationToken);
 
         await WaitUntilAsync(() => inner.SendCount == 1 && _time.CreatedTimerCount >= 2);
         _time.Advance(TimeSpan.FromMilliseconds(499));
@@ -453,7 +453,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         Assert.False(request.IsCompleted);
 
         _time.Advance(TimeSpan.FromMilliseconds(1));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Equal(1, inner.SendCount);
         var snapshot = Assert.Single(policy.GetSnapshots(), value => value.Provider == "retry-timeout");
         Assert.Equal(0, snapshot.ActiveRequests);
@@ -477,9 +477,9 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
-        var request = client.GetAsync("https://example.test/");
+        var request = client.GetAsync("https://example.test/", TestContext.Current.CancellationToken);
 
-        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Equal(StartUtc.AddSeconds(2), deferred.RetryAtUtc);
         Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, deferred.StatusCode);
         Assert.Equal(1, _time.CreatedTimerCount);
@@ -517,7 +517,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         Assert.False(second.IsCompleted);
 
         _time.Advance(TimeSpan.FromMilliseconds(1));
-        var leases = await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
+        var leases = await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(2, Assert.Single(restarted.GetSnapshots(), value => value.Provider == "persisted-cooldown").CurrentConcurrency);
         foreach (var lease in leases)
         {
@@ -552,7 +552,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
             _ => new HttpResponseMessage(System.Net.HttpStatusCode.OK));
         using var client = new HttpClient(new AdaptiveProviderHandler("shared-429", 4, policy) { InnerHandler = inner });
 
-        var send = client.GetAsync("https://example.test/");
+        var send = client.GetAsync("https://example.test/", TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => inner.SendCount == 1
             && Assert.Single(policy.GetSnapshots(), value => value.Provider == "shared-429").CooldownUntilUtc is not null);
         var snapshot = Assert.Single(policy.GetSnapshots(), value => value.Provider == "shared-429");
@@ -574,10 +574,10 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         Assert.False(sharedWaiter.IsCompleted);
 
         _time.Advance(TimeSpan.FromMilliseconds(1));
-        using var response = await send.WaitAsync(TimeSpan.FromSeconds(5));
+        using var response = await send.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(2, inner.SendCount);
-        var lease = await sharedWaiter.WaitAsync(TimeSpan.FromSeconds(5));
+        var lease = await sharedWaiter.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await lease.CompleteAsync(ProviderExecutionResult.Success, null, CancellationToken.None);
     }
 
@@ -620,7 +620,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         });
         using var client = new HttpClient(CreateAdaptiveHandler(policy, "remaining-budget", 1, TimeSpan.FromSeconds(10), inner))
         { Timeout = Timeout.InfiniteTimeSpan };
-        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/"));
+        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/", TestContext.Current.CancellationToken));
         Assert.Equal(StartUtc.AddSeconds(12), deferred.RetryAtUtc);
         Assert.Equal(1, inner.SendCount);
         Assert.Equal(1, _time.CreatedTimerCount);
@@ -639,11 +639,11 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         }, _ => new HttpResponseMessage(System.Net.HttpStatusCode.NoContent));
         using var client = new HttpClient(CreateAdaptiveHandler(policy, "fitting-budget", 1, TimeSpan.FromMilliseconds(500), inner))
         { Timeout = Timeout.InfiniteTimeSpan };
-        var request = client.GetAsync("https://example.test/");
+        var request = client.GetAsync("https://example.test/", TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => _time.CreatedTimerCount == 2);
         Assert.False(request.IsCompleted);
         _time.Advance(TimeSpan.FromMilliseconds(200));
-        using var response = await request.WaitAsync(TimeSpan.FromSeconds(5));
+        using var response = await request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(System.Net.HttpStatusCode.NoContent, response.StatusCode);
         Assert.Equal(2, inner.SendCount);
         Assert.Equal(0, Assert.Single(policy.GetSnapshots()).ActiveRequests);
@@ -663,7 +663,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         });
         using var client = new HttpClient(new AdaptiveProviderHandler("final-429", 1, policy, deferFinalThrottle: true) { InnerHandler = inner });
         using var message = new HttpRequestMessage(post ? HttpMethod.Post : HttpMethod.Get, "https://example.test/");
-        var request = client.SendAsync(message);
+        var request = client.SendAsync(message, TestContext.Current.CancellationToken);
         var attempts = post ? 1 : 3;
         for (var attempt = 1; attempt < attempts; attempt++)
         {
@@ -671,7 +671,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
             await WaitUntilAsync(() => _time.CreatedTimerCount == expectedTimers);
             _time.Advance(TimeSpan.FromMilliseconds(100));
         }
-        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        var deferred = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Equal(StartUtc.AddMilliseconds(attempts * 100), deferred.RetryAtUtc);
         Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, deferred.StatusCode);
         Assert.True(deferred.ResponseObserved);
@@ -718,7 +718,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         });
         using var client = new HttpClient(new AdaptiveProviderHandler("default-429", 1, policy) { InnerHandler = inner });
         using var message = new HttpRequestMessage(post ? HttpMethod.Post : HttpMethod.Get, "https://example.test/");
-        var request = client.SendAsync(message);
+        var request = client.SendAsync(message, TestContext.Current.CancellationToken);
         var attempts = post ? 1 : 3;
         for (var attempt = 1; attempt < attempts; attempt++)
         {
@@ -726,10 +726,10 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
             await WaitUntilAsync(() => _time.CreatedTimerCount == expectedTimers);
             _time.Advance(TimeSpan.FromMilliseconds(100));
         }
-        using var response = await request.WaitAsync(TimeSpan.FromSeconds(5));
+        using var response = await request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, response.StatusCode);
         Assert.Equal(TimeSpan.FromMilliseconds(100), response.Headers.RetryAfter!.Delta);
-        Assert.Equal("provider quota body", await response.Content.ReadAsStringAsync());
+        Assert.Equal("provider quota body", await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
         Assert.Equal(attempts, inner.SendCount);
     }
 
@@ -781,7 +781,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         var policy = CreatePolicy();
         var inner = new ScriptedHandler(_ => new HttpResponseMessage(denied));
         using var first = new HttpClient(new AdaptiveProviderHandler("denied", 2, policy) { InnerHandler = inner });
-        using var denial = await first.GetAsync("https://example.test/title1");
+        using var denial = await first.GetAsync("https://example.test/title1", TestContext.Current.CancellationToken);
         Assert.Equal(denied, denial.StatusCode);
         Assert.Equal(1, inner.SendCount);
         var state = Assert.Single(policy.GetSnapshots());
@@ -790,14 +790,14 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         var restartedPolicy = CreatePolicy();
         var nextInner = new ScriptedHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.NoContent));
         using var second = new HttpClient(new AdaptiveProviderHandler("denied", 2, restartedPolicy) { InnerHandler = nextInner });
-        var deferred = await Assert.ThrowsAsync<ProviderCircuitOpenException>(() => second.GetAsync("https://example.test/title2"));
+        var deferred = await Assert.ThrowsAsync<ProviderCircuitOpenException>(() => second.GetAsync("https://example.test/title2", TestContext.Current.CancellationToken));
         Assert.Equal(state.CooldownUntilUtc, deferred.RetryAtUtc);
         Assert.Equal(denied, deferred.StatusCode);
         Assert.Equal((int)denied, ProviderFailure.FromException(deferred).StatusCode);
         Assert.Equal((int)denied, state.AccessDenialStatusCode);
         Assert.Equal(0, nextInner.SendCount);
         _time.Advance(TimeSpan.FromMinutes(15));
-        using var recovered = await second.GetAsync("https://example.test/title3");
+        using var recovered = await second.GetAsync("https://example.test/title3", TestContext.Current.CancellationToken);
         Assert.Equal(System.Net.HttpStatusCode.NoContent, recovered.StatusCode);
         Assert.Equal(1, nextInner.SendCount);
         Assert.Equal(ProviderCircuitState.Closed, Assert.Single(restartedPolicy.GetSnapshots()).CircuitState);
@@ -895,7 +895,7 @@ public sealed class AdaptiveProviderPolicyReliabilityTests : IAsyncLifetime
         { State = new(null, error, null); return Task.CompletedTask; }
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_database is not null) await _database.DisposeAsync();
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);

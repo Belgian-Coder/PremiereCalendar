@@ -24,7 +24,7 @@ public sealed partial class PremiereServiceTests
         foreach (var id in new[] { 901, 902 }) initialTomatoes.Scores[(PremiereMediaType.Movie, $"Source list movie {id}", 2026, null)] = new RottenTomatoesScores(81, 87);
         await CreateService(SourceListTmdb(date, 901, 902), omdb: ItemCacheOmdb("7.1"), calendarCache: cache,
             rottenTomatoes: initialTomatoes, artworkProviders: [new RecordingArtworkProvider()],
-            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default, forceRefresh: true, filters: SourceListFilters());
+            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: SourceListFilters());
         var before = store.Records.Values.Single(record => record.Identity.TmdbId == 901);
         clock.Advance(TimeSpan.FromMinutes(5));
         var tmdb = SourceListTmdb(date, 901);
@@ -36,7 +36,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(tmdb, omdb: omdb, rottenTomatoes: tomatoes, watchmode: watchmode,
             artworkProviders: [artwork], discoveryProviders: [external], calendarCache: cache, itemEnrichmentCache: coordinator);
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamSourceRefreshAsync(date, date, SourceListFilters())) updates.Add(update);
+        await foreach (var update in service.StreamSourceRefreshAsync(date, date, SourceListFilters(), TestContext.Current.CancellationToken)) updates.Add(update);
 
         var final = Assert.Single(updates, update => update.IsFinal);
         Assert.False(final.HasSourceErrors);
@@ -69,7 +69,7 @@ public sealed partial class PremiereServiceTests
         var coordinator = ItemCacheCoordinator(store, clock);
         var cache = new FakeCalendarCache();
         await CreateService(SourceListTmdb(date, 901), omdb: ItemCacheOmdb("7.1"), calendarCache: cache,
-            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default, forceRefresh: true, filters: SourceListFilters());
+            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: SourceListFilters());
         var id = state == "missing" ? 903 : 901;
         if (state == "expired") clock.Advance(TimeSpan.FromDays(8));
         var tmdb = SourceListTmdb(date, id);
@@ -78,7 +78,7 @@ public sealed partial class PremiereServiceTests
         omdb.ItemsByImdbId[$"tt{id:0000000}"] = new OmdbItem { Response = "True", ImdbRating = "8.2" };
         var service = CreateService(tmdb, omdb: omdb, calendarCache: cache, itemEnrichmentCache: coordinator);
         PremiereLoadProgress? final = null;
-        await foreach (var update in service.StreamSourceRefreshAsync(date, date, SourceListFilters())) if (update.IsFinal) final = update;
+        await foreach (var update in service.StreamSourceRefreshAsync(date, date, SourceListFilters(), TestContext.Current.CancellationToken)) if (update.IsFinal) final = update;
 
         Assert.NotNull(final);
         Assert.False(final.HasSourceErrors);
@@ -99,14 +99,14 @@ public sealed partial class PremiereServiceTests
         var coordinator = ItemCacheCoordinator(new MemoryItemEnrichmentStore(clock), clock);
         var cache = new FakeCalendarCache();
         await CreateService(SourceListTmdb(date, 901), omdb: ItemCacheOmdb("7.1"), calendarCache: cache,
-            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, default, forceRefresh: true, filters: SourceListFilters());
+            itemEnrichmentCache: coordinator).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: SourceListFilters());
         // A later independent refresh has a newer observation time while all
         // enrichment remains fresh; equal provider clocks retain the store winner.
         clock.Advance(TimeSpan.FromMinutes(1));
         var tmdb = SourceListTmdb(date, 901);
         var omdb = ItemCacheOmdb("8.2");
         var item = Assert.Single(await CreateService(tmdb, omdb: omdb, calendarCache: cache, itemEnrichmentCache: coordinator)
-            .GetPremieresAsync(date, date, default, forceRefresh: true, filters: SourceListFilters()));
+            .GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: SourceListFilters()));
         Assert.Equal(8.2, item.ImdbScore);
         Assert.True(Assert.Single(tmdb.MovieDetailCalls).ForceRefresh);
         Assert.Single(omdb.Calls);
@@ -119,9 +119,9 @@ public sealed partial class PremiereServiceTests
         var scheduler = new SourceListRecordingScheduler();
         var cache = new FakeCalendarCache { Items = [ItemCacheLegacyItem(date, new ItemCacheClock())] };
         var service = CreateService(new FakeTmdbClient(), calendarCache: cache, workScheduler: scheduler);
-        await service.GetPremieresAsync(date, date, default, filters: SourceListFilters());
+        await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, filters: SourceListFilters());
         Assert.Empty(scheduler.Requests);
-        await foreach (var _ in service.StreamSourceRefreshAsync(date, date, SourceListFilters())) { }
+        await foreach (var _ in service.StreamSourceRefreshAsync(date, date, SourceListFilters(), TestContext.Current.CancellationToken)) { }
         var request = Assert.Single(scheduler.Requests);
         Assert.Contains("sources", request.DedupeKey, StringComparison.Ordinal);
         var payload = JsonSerializer.Deserialize<CalendarProviderWorkPayload>(request.PayloadJson)!;
@@ -144,10 +144,10 @@ public sealed partial class PremiereServiceTests
         var tmdb = new TmdbClient(http, memory, options, NullLogger<TmdbClient>.Instance, requestLimiter: limiter);
         var service = new PremiereService(tmdb, new FakeOmdbClient(), new FakeTvmazeClient(), new FakeWatchmodeClient(),
             new FakeCalendarCache(), new TrailerSelector(), new RatingMapper(), [], [], options, NullLogger<PremiereService>.Instance);
-        var primed = await service.GetPremieresAsync(date, date, default, forceRefresh: true, filters: SourceListFilters());
+        var primed = await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: SourceListFilters());
         var before = handler.Paths.Count;
         PremiereLoadProgress? final = null;
-        await foreach (var update in service.StreamSourceRefreshAsync(date, date, SourceListFilters())) if (update.IsFinal) final = update;
+        await foreach (var update in service.StreamSourceRefreshAsync(date, date, SourceListFilters(), TestContext.Current.CancellationToken)) if (update.IsFinal) final = update;
         Assert.NotNull(final);
         Assert.False(final.HasSourceErrors);
         Assert.Equal(before + 1, handler.Paths.Count);
@@ -201,10 +201,10 @@ public sealed partial class ProviderWorkSchedulerTests
         var payload = JsonSerializer.Deserialize<CalendarProviderWorkPayload>(request.PayloadJson)! with { RefreshSourceLists = true };
         request = request with { PayloadJson = JsonSerializer.Serialize(payload) };
         var previous = await PublishPartialTerminalAsync(request);
-        var next = await _scheduler.EnqueueAsync(request);
+        var next = await _scheduler.EnqueueAsync(request, TestContext.Current.CancellationToken);
         Assert.True(next.Created);
         Assert.NotEqual(previous.JobId, next.JobId);
-        Assert.Null((await _scheduler.GetAsync(next.JobId))!.CheckpointJson);
+        Assert.Null((await _scheduler.GetAsync(next.JobId, TestContext.Current.CancellationToken))!.CheckpointJson);
     }
 
     [Fact]
@@ -214,15 +214,15 @@ public sealed partial class ProviderWorkSchedulerTests
         var payload = new CalendarProviderWorkPayload(new(2026, 11, 2), new(2026, 11, 8), false,
             new CalendarFilters { ShowSeries = false }) { RefreshSourceLists = true };
         await _scheduler.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "source-list-resume", ProviderWorkPriority.Foreground,
-            JsonSerializer.Serialize(payload)));
+            JsonSerializer.Serialize(payload)), TestContext.Current.CancellationToken);
         await using var services = new ServiceCollection().AddSingleton<IPremiereLoadPipeline>(pipeline).BuildServiceProvider();
         var recovery = new DatabaseRecoveryState();
         recovery.Set(new(DatabaseSchema.CurrentVersion, DatabaseSchema.CurrentVersion, true, "ready", null));
         using var worker = new ProviderWorkSchedulerHostedService(_scheduler, services.GetRequiredService<IServiceScopeFactory>(), recovery,
             Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 }), NullLogger<ProviderWorkSchedulerHostedService>.Instance);
-        await worker.StartAsync(default);
-        try { await pipeline.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
-        finally { await worker.StopAsync(default); }
+        await worker.StartAsync(TestContext.Current.CancellationToken);
+        try { await pipeline.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); }
+        finally { await worker.StopAsync(TestContext.Current.CancellationToken); }
         Assert.False(pipeline.ForceRefresh);
         Assert.NotNull(pipeline.Resume);
         Assert.True(pipeline.Resume.RefreshSourceLists);

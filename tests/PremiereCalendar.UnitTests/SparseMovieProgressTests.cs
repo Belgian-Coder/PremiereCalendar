@@ -17,8 +17,7 @@ public sealed partial class PremiereServiceTests
         var tmdb = SparseMovieProgressClient(date, includeBackdrop);
         var service = CreateService(tmdb, itemEnrichmentCache: ItemCacheCoordinator(store, clock));
 
-        var result = Assert.Single(await service.GetPremieresAsync(date, date, default, forceRefresh: true,
-            filters: new CalendarFilters { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"] } }));
+        var result = Assert.Single(await service.GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, filters: new CalendarFilters { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"] } }));
 
         Assert.Equal(90, result.RuntimeMinutes);
         Assert.Equal("Completed sparse synopsis", result.Overview);
@@ -39,9 +38,7 @@ public sealed partial class PremiereServiceTests
         var date = new DateOnly(2026, 11, 2);
         var tmdb = SparseMovieProgressClient(date, includeBackdrop: false, duplicatePages: true);
         var reports = new List<PremiereLoadProgress>();
-        var result = Assert.Single(await CreateService(tmdb).GetPremieresAsync(date, date, default, forceRefresh: true,
-            progress: new RecordingProgress<PremiereLoadProgress>(reports.Add),
-            filters: new CalendarFilters { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"] } }));
+        var result = Assert.Single(await CreateService(tmdb).GetPremieresAsync(date, date, TestContext.Current.CancellationToken, forceRefresh: true, progress: new RecordingProgress<PremiereLoadProgress>(reports.Add), filters: new CalendarFilters { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"] } }));
 
         // The second page repeats the discovery/core hints after page one's
         // completed mapping. Those hints must retain the completed source row.

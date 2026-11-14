@@ -19,7 +19,7 @@ public sealed partial class PremiereServiceTests
         var initial = CreateService(ItemCacheMovie(date), omdb: ItemCacheOmdb("7.1"),
             calendarCache: files.CreateCache(), itemEnrichmentCache: coordinator);
         var checkpoints = new Dictionary<string, IReadOnlyList<PremiereItem>>(StringComparer.Ordinal);
-        await foreach (var update in initial.StreamCoreAsync(date, date, filters: filters))
+        await foreach (var update in initial.StreamCoreAsync(date, date, filters: filters, cancellationToken: TestContext.Current.CancellationToken))
         {
             var key = update.CheckpointKey;
             if (update.Phase != "complete" || update.IsFinal || update.HasSourceErrors || key is null
@@ -38,8 +38,7 @@ public sealed partial class PremiereServiceTests
         var resumed = CreateService(fresh, omdb: ItemCacheOmdb("7.1"), calendarCache: files.CreateCache(),
             discoveryProviders: [new TraktDiscoveryProvider(trakt)], itemEnrichmentCache: coordinator);
         PremiereLoadProgress? final = null;
-        await foreach (var update in resumed.StreamCoreAsync(date, date, filters: filters,
-                           resumeState: new ProviderWorkResumeState(checkpoints, null)))
+        await foreach (var update in resumed.StreamCoreAsync(date, date, filters: filters, resumeState: new ProviderWorkResumeState(checkpoints, null), cancellationToken: TestContext.Current.CancellationToken))
             if (update.IsFinal) final = update;
 
         Assert.NotNull(final);

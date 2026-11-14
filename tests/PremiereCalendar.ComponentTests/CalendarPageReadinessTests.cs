@@ -31,7 +31,7 @@ public sealed partial class CalendarPageTests
                 // Adjacent weeks start as soon as the calendar is ready, not when the stream ends.
                 Assert.Single(_prefetcher.WeekStarts);
             }, TimeSpan.FromSeconds(3));
-            await service.ForegroundReleased.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await service.ForegroundReleased.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
             Assert.False(service.Finished.Task.IsCompleted);
 
             service.ReleaseDetails.TrySetResult();
@@ -50,7 +50,7 @@ public sealed partial class CalendarPageTests
             Assert.False(service.Finished.Task.IsCompleted);
 
             service.ReleaseFinal.TrySetResult();
-            await service.Finished.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await service.Finished.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
             component.WaitForAssertion(() =>
             {
                 Assert.Empty(component.FindAll("[data-testid='calendar-enrichment']"));
@@ -105,7 +105,7 @@ public sealed partial class CalendarPageTests
         try
         {
             component.WaitForAssertion(() => Assert.Single(component.FindAll("[data-testid='calendar-enrichment']")));
-            await service.ForegroundReleased.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await service.ForegroundReleased.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
             navigation.NavigateTo("/movies?week=2026-05-11");
             component.WaitForAssertion(() =>
             {
@@ -115,7 +115,7 @@ public sealed partial class CalendarPageTests
 
             service.ReleaseDetails.TrySetResult();
             service.ReleaseFinal.TrySetResult();
-            await service.Finished.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await service.Finished.Task.WaitAsync(TimeSpan.FromSeconds(3), Xunit.TestContext.Current.CancellationToken);
             component.WaitForAssertion(() =>
             {
                 Assert.Contains("Next week movie", Assert.Single(component.FindAll("[data-testid='premiere-card']")).TextContent);

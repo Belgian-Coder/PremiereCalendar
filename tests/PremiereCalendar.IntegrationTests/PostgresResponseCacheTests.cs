@@ -25,12 +25,12 @@ public sealed class PostgresResponseCacheTests : IDisposable
         var lockedState = new ProviderCacheState("responsecache-tmdb", ProviderCacheScope.Item, "locked-response", DateTimeOffset.UtcNow,
             null, null, null, "{}");
         await store.SaveAsync(lockedState, CancellationToken.None);
-        await using var observer = await _database.OpenAsync();
-        await using (var blocker = await _database.OpenAsync())
+        await using var observer = await _database.OpenAsync(TestContext.Current.CancellationToken);
+        await using (var blocker = await _database.OpenAsync(TestContext.Current.CancellationToken))
         {
-            await using var transaction = await blocker.BeginTransactionAsync();
+            await using var transaction = await blocker.BeginTransactionAsync(TestContext.Current.CancellationToken);
             await using (var hold = new NpgsqlCommand("SELECT 1 FROM ProviderCacheState WHERE Provider = 'responsecache-tmdb' AND CacheKey = 'locked-response' FOR UPDATE", blocker, transaction))
-                await hold.ExecuteNonQueryAsync();
+                await hold.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
             using var waitBudget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var blockedWrite = store.SaveAsync(lockedState with { MetadataJson = "{\"new\":true}" }, waitBudget.Token);
             try
@@ -45,15 +45,15 @@ public sealed class PostgresResponseCacheTests : IDisposable
                 }
                 Assert.False(blockedWrite.IsCompleted);
                 var independent = await store.GetAsync("tmdb", ProviderCacheScope.Item, "independent-metadata", CancellationToken.None)
-                    .WaitAsync(TimeSpan.FromSeconds(1));
+                    .WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
                 Assert.Null(independent);
                 Assert.Null(await store.GetAsync("responsecache-tmdb", ProviderCacheScope.Item, "independent-response", CancellationToken.None)
-                    .WaitAsync(TimeSpan.FromSeconds(1)));
+                    .WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
                 Assert.NotNull(await restarted.GetAsync<TmdbDetailsWithExtras>("tmdb", "movie-detail-fixture", TimeSpan.FromHours(12), CancellationToken.None));
             }
             finally
             {
-                await transaction.RollbackAsync();
+                await transaction.RollbackAsync(TestContext.Current.CancellationToken);
                 await blockedWrite;
             }
         }

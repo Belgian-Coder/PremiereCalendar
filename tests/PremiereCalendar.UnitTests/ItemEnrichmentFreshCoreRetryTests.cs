@@ -24,11 +24,11 @@ public sealed partial class PremiereServiceTests
     {
         await using var fixture = await FreshCoreRetryFixture.CreateAsync();
         var eligible = fixture.StartEligible(change);
-        await fixture.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await fixture.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         var winner = await fixture.PublishCoreAsync(change);
         fixture.Release.TrySetResult();
-        await eligible.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default, rejectGenerationConflicts: false);
+        await eligible.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken, rejectGenerationConflicts: false);
 
         Assert.Equal(1, fixture.ProviderCalls);
         if (change is "matching" or "manual-ratings")
@@ -56,7 +56,7 @@ public sealed partial class PremiereServiceTests
     {
         await using var fixture = await FreshCoreRetryFixture.CreateAsync();
         var eligible = fixture.StartEligible();
-        await fixture.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await fixture.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         await fixture.PublishCoreAsync();
         var observed = fixture.Clock.GetUtcNow().AddMinutes(1);
         var winner = fixture.Current;
@@ -66,8 +66,8 @@ public sealed partial class PremiereServiceTests
             MetadataJson = JsonSerializer.Serialize(fixture.Core with { TmdbVotes = new(9.1, 9100, observed) })
         });
         fixture.Release.TrySetResult();
-        await eligible.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default);
+        await eligible.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
 
         fixture.AssertComplete(expectOriginalVotes: false);
         Assert.Equal(observed, fixture.Current.TmdbObservedUtc);
@@ -80,7 +80,7 @@ public sealed partial class PremiereServiceTests
     {
         await using var fixture = await FreshCoreRetryFixture.CreateAsync(tmdbOwnsComponents: true);
         var eligible = fixture.StartEligible();
-        await fixture.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await fixture.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         await fixture.PublishCoreAsync();
         var winner = fixture.Current;
         fixture.Replace(winner with { MetadataJson = JsonSerializer.Serialize(fixture.Core with
@@ -89,8 +89,8 @@ public sealed partial class PremiereServiceTests
             AvailabilityFetchedUtc = fixture.Clock.GetUtcNow().AddSeconds(1)
         }) });
         fixture.Release.TrySetResult();
-        await eligible.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default);
+        await eligible.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.AssertComplete();
     }
 
@@ -99,10 +99,10 @@ public sealed partial class PremiereServiceTests
     {
         await using var fixture = await FreshCoreRetryFixture.CreateAsync();
         var eligible = fixture.StartEligible();
-        await fixture.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await fixture.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         await fixture.PublishCoreAsync();
         fixture.Release.TrySetResult();
-        await eligible.WaitAsync(TimeSpan.FromSeconds(3));
+        await eligible.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         ItemEnrichmentRecord? foreign = null;
         fixture.Store.BeforeWrite = (writes, _) =>
         {
@@ -114,7 +114,7 @@ public sealed partial class PremiereServiceTests
             }
             return Task.CompletedTask;
         };
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
 
         Assert.NotNull(foreign);
         Assert.Equal(foreign, fixture.Current);

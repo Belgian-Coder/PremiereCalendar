@@ -90,8 +90,8 @@ public sealed class IntegrationSettingsStoreTests : IDisposable
             }
         };
 
-        await store.SaveAsync(settings);
-        var loaded = await store.GetAsync();
+        await store.SaveAsync(settings, TestContext.Current.CancellationToken);
+        var loaded = await store.GetAsync(TestContext.Current.CancellationToken);
 
         Assert.True(loaded.Sonarr.Enabled);
         Assert.Equal("http://sonarr.local:8989/", loaded.Sonarr.BaseUrl);
@@ -131,10 +131,10 @@ public sealed class IntegrationSettingsStoreTests : IDisposable
         Assert.Equal("simkl-token", loaded.Sources.Simkl.AccessToken);
         Assert.Equal(30, loaded.Sources.Simkl.MinimumActivityCheckMinutes);
 
-        await using var connection = await _database.OpenAsync();
+        await using var connection = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await using var count = connection.CreateCommand();
         count.CommandText = "SELECT COUNT(*) FROM AppParameters";
-        Assert.True(Convert.ToInt64(await count.ExecuteScalarAsync()) > 0);
+        Assert.True(Convert.ToInt64(await count.ExecuteScalarAsync(TestContext.Current.CancellationToken)) > 0);
     }
 
     [Fact]
@@ -156,7 +156,7 @@ public sealed class IntegrationSettingsStoreTests : IDisposable
             .Build();
         var store = new IntegrationSettingsStore(_database.Options, configuration);
 
-        var loaded = await store.GetAsync();
+        var loaded = await store.GetAsync(TestContext.Current.CancellationToken);
 
         Assert.Empty(loaded.Sources.Tmdb.BearerToken);
         Assert.Empty(loaded.Sources.Trakt.ClientId);

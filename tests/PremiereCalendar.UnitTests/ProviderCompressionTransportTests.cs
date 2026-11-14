@@ -15,7 +15,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
     private PostgresTestDatabase _database = null!;
     private readonly CapturingLogger _logger = new();
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _database = await PostgresTestDatabase.CreateAsync();
         _policy = new AdaptiveProviderPolicy(
@@ -51,7 +51,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         await using var server = new LoopbackServer(encoding, compressed);
         using var client = CreateClient("compressed-" + encoding);
 
-        using var response = await client.GetAsync(server.Url, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await client.GetAsync(server.Url, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
 
         Assert.Contains(encoding, server.LastRequestHeaders, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("zstd", server.LastRequestHeaders, StringComparison.OrdinalIgnoreCase);
@@ -61,7 +61,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         Assert.Null(response.Content.Headers.ContentLength);
         Assert.Equal(1, Assert.Single(_policy.GetSnapshots()).ActiveRequests);
 
-        var body = await response.Content.ReadAsStringAsync();
+        var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(payload, body);
         Assert.True(compressed.Length < Encoding.UTF8.GetByteCount(payload) / 4, "the fixture must actually compress");
@@ -77,15 +77,15 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         var payload = JsonPayload();
         await using var server = new LoopbackServer("gzip", Compress(payload, "gzip"));
         using var client = CreateClient("compressed-stream");
-        using var response = await client.GetAsync(server.Url, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await client.GetAsync(server.Url, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
 
-        await using var stream = await response.Content.ReadAsStreamAsync();
+        await using var stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
         var buffer = new byte[16];
-        Assert.True(await stream.ReadAsync(buffer) > 0);
+        Assert.True(await stream.ReadAsync(buffer, TestContext.Current.CancellationToken) > 0);
         Assert.Equal(1, Assert.Single(_policy.GetSnapshots()).ActiveRequests);
 
         using var rest = new MemoryStream();
-        await stream.CopyToAsync(rest);
+        await stream.CopyToAsync(rest, TestContext.Current.CancellationToken);
 
         Assert.Equal(0, Assert.Single(_policy.GetSnapshots()).ActiveRequests);
         Assert.Equal(payload.Length, 16 + rest.Length);
@@ -97,14 +97,14 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         await using var server = new LoopbackServer("identity", Encoding.UTF8.GetBytes("{}"), "session=abc123; Path=/");
         using (var client = new HttpClient(ProviderClientServiceExtensions.CreateProviderPrimaryHandler()))
         {
-            using (await client.GetAsync(server.Url)) { }
-            using (await client.GetAsync(server.Url)) { }
+            using (await client.GetAsync(server.Url, TestContext.Current.CancellationToken)) { }
+            using (await client.GetAsync(server.Url, TestContext.Current.CancellationToken)) { }
         }
 
         // The factory replaces the handler every ProviderHandlerLifetime, which discards its cookie container.
         using (var recycled = new HttpClient(ProviderClientServiceExtensions.CreateProviderPrimaryHandler()))
         {
-            using (await recycled.GetAsync(server.Url)) { }
+            using (await recycled.GetAsync(server.Url, TestContext.Current.CancellationToken)) { }
         }
 
         Assert.Equal(3, server.AllRequestHeaders.Count);
@@ -155,7 +155,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         using var provider = services.BuildServiceProvider();
         using var client = provider.GetRequiredService<IHttpClientFactory>().CreateClient("bomb");
 
-        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url));
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url, TestContext.Current.CancellationToken));
     }
 
     [Theory]
@@ -167,7 +167,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         await using var server = new LoopbackServer(encoding, CompressZeros(8 * 1024 * 1024, encoding));
         using var client = CreateClient("bomb-buffered-" + encoding, cap);
 
-        var failure = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url));
+        var failure = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url, TestContext.Current.CancellationToken));
 
         Assert.Contains("limit", failure.Message, StringComparison.OrdinalIgnoreCase);
         var snapshot = Assert.Single(_policy.GetSnapshots());
@@ -183,8 +183,8 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         const long cap = 1024 * 1024;
         await using var server = new LoopbackServer(encoding, CompressZeros(8 * 1024 * 1024, encoding));
         using var client = CreateClient("bomb-streamed-" + encoding, cap);
-        using var response = await client.GetAsync(server.Url, HttpCompletionOption.ResponseHeadersRead);
-        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var response = await client.GetAsync(server.Url, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
         var buffer = new byte[64 * 1024];
         long total = 0;
 
@@ -192,7 +192,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         {
             while (true)
             {
-                var read = await stream.ReadAsync(buffer);
+                var read = await stream.ReadAsync(buffer, TestContext.Current.CancellationToken);
                 if (read == 0) return;
                 total += read;
             }
@@ -214,7 +214,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         await using var server = new LoopbackServer(encoding, CompressZeros(512 * 1024, encoding));
         using var client = CreateClient("oversize-decoded-" + encoding, cap);
 
-        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url + "titles/42?apikey=top-secret"));
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url + "titles/42?apikey=top-secret", TestContext.Current.CancellationToken));
 
         AssertOversizeWarning("oversize-decoded-" + encoding, "/titles/42", cap);
         var snapshot = Assert.Single(_policy.GetSnapshots());
@@ -231,7 +231,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
 
         // HttpClient used to reject this body itself, which disposed the content and recorded a cancelled "disposed"
         // request instead of the oversize failure that a decoded body gets.
-        var failure = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url + "library?token=top-secret"));
+        var failure = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(server.Url + "library?token=top-secret", TestContext.Current.CancellationToken));
 
         Assert.IsType<ProviderResponseTooLargeException>(failure);
         AssertOversizeWarning("oversize-declared-buffered", "/library", cap);
@@ -246,11 +246,11 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         const long cap = 64 * 1024;
         await using var server = new LoopbackServer("identity", new byte[256 * 1024]);
         using var client = CreateClient("oversize-declared-streamed", cap);
-        using var response = await client.GetAsync(server.Url + "library", HttpCompletionOption.ResponseHeadersRead);
+        using var response = await client.GetAsync(server.Url + "library", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
         // The oversized declared length is not exposed, so HttpClient cannot reject the body before the wrapper does.
         Assert.Null(response.Content.Headers.ContentLength);
 
-        await Assert.ThrowsAsync<ProviderResponseTooLargeException>(() => response.Content.ReadAsStreamAsync());
+        await Assert.ThrowsAsync<ProviderResponseTooLargeException>(() => response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken));
 
         AssertOversizeWarning("oversize-declared-streamed", "/library", cap);
         var snapshot = Assert.Single(_policy.GetSnapshots());
@@ -271,8 +271,8 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         // The outer limit handler only supplies the default; a request-specific limit (SIMKL library pulls) wins.
         request.Options.Set(ProviderRequestOptions.MaxResponseBytes, 1024 * 1024L);
 
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-        await response.Content.CopyToAsync(Stream.Null);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
+        await response.Content.CopyToAsync(Stream.Null, TestContext.Current.CancellationToken);
 
         Assert.Equal(0, Assert.Single(_policy.GetSnapshots()).ActiveRequests);
         Assert.Equal(1, Assert.Single(_policy.GetSnapshots()).ConsecutiveSuccesses);
@@ -296,7 +296,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         await using var server = new LoopbackServer("gzip", Compress(payload, "gzip"));
         using var client = CreateClient("within-cap", 1024 * 1024);
 
-        Assert.Equal(payload, await client.GetStringAsync(server.Url));
+        Assert.Equal(payload, await client.GetStringAsync(server.Url, TestContext.Current.CancellationToken));
         Assert.Equal(0, Assert.Single(_policy.GetSnapshots()).ActiveRequests);
     }
 
@@ -355,7 +355,7 @@ public sealed class ProviderCompressionTransportTests : IAsyncLifetime
         return output.ToArray();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_database is not null) await _database.DisposeAsync();
     }

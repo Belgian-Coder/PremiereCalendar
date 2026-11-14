@@ -28,7 +28,7 @@ public sealed partial class PremiereServiceTests
         var cached = ReliabilityItems(start, 2_000);
         var scheduler = new RecordingWorkScheduler([]);
         var service = CreateService(new FakeTmdbClient(), calendarCache: new FakeCalendarCache { ExpiredItems = cached }, workScheduler: scheduler);
-        await using var updates = service.StreamPremieresAsync(start, start.AddDays(6), filters: new CalendarFilters { ShowSeries = false }).GetAsyncEnumerator();
+        await using var updates = service.StreamPremieresAsync(start, start.AddDays(6), filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await updates.MoveNextAsync());
         Assert.Equal(2_000, updates.Current.Items.Count);
         Assert.True(updates.Current.IsStaleCache);
@@ -47,8 +47,7 @@ public sealed partial class PremiereServiceTests
         var service = CreateService(new FakeTmdbClient(), calendarCache: new FakeCalendarCache { Items = cached },
             rottenTomatoes: rt, workScheduler: scheduler);
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamPremieresAsync(start, start.AddDays(6),
-            filters: new CalendarFilters { ShowSeries = false, ScoreSource = ScoreSource.RottenTomatoes })) updates.Add(update);
+        await foreach (var update in service.StreamPremieresAsync(start, start.AddDays(6), filters: new CalendarFilters { ShowSeries = false, ScoreSource = ScoreSource.RottenTomatoes }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         Assert.False(updates[0].IsFinal);
         Assert.True(updates[0].FromCache);
         Assert.True(updates[^1].IsFinal);
@@ -64,7 +63,7 @@ public sealed partial class PremiereServiceTests
         var cache = new FakeCalendarCache();
         var service = CreateService(new FakeTmdbClient(), discoveryProviders: [new ReliabilityFailedProvider()], calendarCache: cache);
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamCoreAsync(start, start, filters: new CalendarFilters { ShowSeries = false })) updates.Add(update);
+        await foreach (var update in service.StreamCoreAsync(start, start, filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         var failed = Assert.Single(updates, update => update.HasSourceErrors && !update.IsFinal);
         Assert.True(failed.HasSourceErrors);
         Assert.Equal("complete", failed.Phase);
@@ -81,13 +80,12 @@ public sealed partial class PremiereServiceTests
         var stalled = new ReliabilityWaitingProvider();
         var tmdb = new FakeTmdbClient { MovieItems = [new TmdbMovieDiscoverItem { Id = 1, Title = "One", ReleaseDate = "2026-10-26" }] };
         var service = CreateService(tmdb, discoveryProviders: [stalled]);
-        await using (var updates = service.StreamCoreAsync(start, start,
-            filters: new CalendarFilters { ShowSeries = false }).GetAsyncEnumerator())
+        await using (var updates = service.StreamCoreAsync(start, start, filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken))
         {
             Assert.True(await updates.MoveNextAsync());
-            await stalled.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await stalled.Started.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         }
-        await stalled.Stopped.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await stalled.Stopped.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
     }
 
     [Theory]
@@ -109,8 +107,7 @@ public sealed partial class PremiereServiceTests
         };
         await Assert.ThrowsAsync<ProviderWorkLeaseLostException>(async () =>
         {
-            await foreach (var update in service.StreamCoreAsync(start, start, forceRefresh: true,
-                filters: new CalendarFilters { ShowSeries = combinedMedia }, resumeState: resume)) { }
+            await foreach (var update in service.StreamCoreAsync(start, start, forceRefresh: true, filters: new CalendarFilters { ShowSeries = combinedMedia }, resumeState: resume, cancellationToken: TestContext.Current.CancellationToken)) { }
         });
         Assert.True(guarded);
         Assert.Empty(cache.SetCalls);
@@ -143,8 +140,7 @@ public sealed partial class PremiereServiceTests
         var tmdb = new FakeTmdbClient();
         var service = CreateService(tmdb, discoveryProviders: [new ReliabilityFailedProvider()], calendarCache: cache);
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamCoreAsync(start, start.AddDays(6), forceRefresh: true,
-            filters: new CalendarFilters { ShowSeries = combinedMedia })) updates.Add(update);
+        await foreach (var update in service.StreamCoreAsync(start, start.AddDays(6), forceRefresh: true, filters: new CalendarFilters { ShowSeries = combinedMedia }, cancellationToken: TestContext.Current.CancellationToken)) updates.Add(update);
         var final = updates[^1];
         Assert.True(final.IsFinal);
         Assert.True(final.IsStaleCache);

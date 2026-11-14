@@ -32,7 +32,7 @@ public sealed partial class PremiereServiceTests
             {
                 var session = await coordinator.CreateSessionAsync(CancellationToken.None);
                 await session.PrepareAsync([identity], null, CancellationToken.None);
-                await Task.Delay(10);
+                await Task.Delay(10, TestContext.Current.CancellationToken);
                 var fetched = TimeProvider.System.GetUtcNow();
                 var proposed = await session.GetAsync(identity, true, (previous, _, _, _) => Task.FromResult(new ItemEnrichmentRefresh(null,
                     previous.Ratings! with

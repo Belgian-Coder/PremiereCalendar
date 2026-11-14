@@ -20,24 +20,24 @@ public sealed partial class PremiereServiceTests
         if (optionalCompletesDuringFlush) fixture.Store.BeforeWrite = async (_, token) =>
         { entered.TrySetResult(); await release.Task.WaitAsync(token); };
         var optional = fixture.StartOptional();
-        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        var coreFlush = fixture.Session.FlushAsync(default);
+        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        var coreFlush = fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         try
         {
             if (optionalCompletesDuringFlush)
             {
-                await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
                 fixture.ReleaseOptional.TrySetResult();
-                await optional.WaitAsync(TimeSpan.FromSeconds(3));
+                await optional.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
                 Assert.True(fixture.Session.HasPendingWrites);
             }
         }
         finally { release.TrySetResult(); }
-        await coreFlush.WaitAsync(TimeSpan.FromSeconds(3));
+        await coreFlush.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         fixture.Store.BeforeWrite = null;
         fixture.ReleaseOptional.TrySetResult();
-        await optional.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default);
+        await optional.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(2, fixture.Current.MetadataRevision);
         fixture.AssertOptionalAccepted();
@@ -57,8 +57,8 @@ public sealed partial class PremiereServiceTests
     {
         await using var fixture = await CoreContinuationFixture.CreateAsync();
         var optional = fixture.StartOptional();
-        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default);
+        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         var current = fixture.Current;
         var foreign = change switch
         {
@@ -71,8 +71,8 @@ public sealed partial class PremiereServiceTests
         };
         fixture.Replace(foreign);
         fixture.ReleaseOptional.TrySetResult();
-        await optional.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default, rejectGenerationConflicts: false);
+        await optional.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken, rejectGenerationConflicts: false);
 
         Assert.Equal(foreign.MetadataJson, fixture.Current.MetadataJson);
         Assert.Equal(foreign.Generation, fixture.Current.Generation);
@@ -91,7 +91,7 @@ public sealed partial class PremiereServiceTests
     {
         await using var fixture = await CoreContinuationFixture.CreateAsync();
         var optional = fixture.StartOptional();
-        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         // A winner read is not an exclusive-writer receipt. An identical core
         // winner is safe to continue; a changed core must retain its own values.
         var equivalent = change == "equivalent";
@@ -99,10 +99,10 @@ public sealed partial class PremiereServiceTests
         fixture.Replace(fixture.Current with { MetadataJson = JsonSerializer.Serialize(metadata),
             MetadataFetchedUtc = change == "clock" ? fixture.CoreClock.AddMinutes(1) : fixture.CoreClock, MetadataRevision = 1,
             MetadataInvalidatedUtc = change == "invalidation" ? fixture.CoreClock.AddMinutes(1) : null });
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.ReleaseOptional.TrySetResult();
-        await optional.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default);
+        await optional.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
 
         var accepted = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(fixture.Current.MetadataJson!)!;
         Assert.Equal(equivalent ? 2 : 1, fixture.Current.MetadataRevision);
@@ -121,11 +121,11 @@ public sealed partial class PremiereServiceTests
     {
         await using var fixture = await CoreContinuationFixture.CreateAsync();
         var forced = fixture.StartOptional(forceRefresh: true);
-        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default);
+        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.ReleaseOptional.TrySetResult();
-        await forced.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default);
+        await forced.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(1, fixture.Current.MetadataRevision);
         var metadata = JsonSerializer.Deserialize<ItemEnrichmentMetadata>(fixture.Current.MetadataJson!)!;
@@ -148,20 +148,20 @@ public sealed partial class PremiereServiceTests
             await release.Task.WaitAsync(token);
             throw new IOException("Held first core flush failed.");
         };
-        var failedFlush = fixture.Session.FlushAsync(default);
+        var failedFlush = fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         try
         {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             var optional = fixture.StartOptional();
-            await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             fixture.ReleaseOptional.TrySetResult();
-            await optional.WaitAsync(TimeSpan.FromSeconds(3));
+            await optional.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             Assert.True(fixture.Session.HasPendingWrites);
         }
         finally { release.TrySetResult(); }
-        await failedFlush.WaitAsync(TimeSpan.FromSeconds(3));
+        await failedFlush.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         fixture.Store.BeforeWrite = null;
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
 
         fixture.AssertOptionalAccepted();
         Assert.Equal(1, fixture.OptionalCalls);
@@ -175,15 +175,15 @@ public sealed partial class PremiereServiceTests
     {
         await using var fixture = await CoreContinuationFixture.CreateAsync();
         var optional = fixture.StartOptional();
-        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        await fixture.Session.FlushAsync(default);
+        await fixture.OptionalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         fixture.ReleaseOptional.TrySetResult();
-        await optional.WaitAsync(TimeSpan.FromSeconds(3));
+        await optional.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         fixture.Store.BeforeWrite = (_, _) => throw new IOException("Optional flush failed.");
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
         Assert.True(fixture.Session.HasPendingWrites);
         fixture.Store.BeforeWrite = null;
-        await fixture.Session.FlushAsync(default);
+        await fixture.Session.FlushAsync(TestContext.Current.CancellationToken);
 
         fixture.AssertOptionalAccepted();
         Assert.Equal(1, fixture.OptionalCalls);

@@ -5,9 +5,10 @@ namespace PremiereCalendar.UnitTests;
 
 public sealed partial class ProviderWorkSchedulerTests
 {
-    [WindowsPublicationFact]
+    [Fact]
     public async Task PublicationGateHonorsAnotherProcessFileLockAndCancellation()
     {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "This cross-process FileShare.None check uses Windows PowerShell.");
         var directory = Path.Combine(_root, "external-publication");
         Directory.CreateDirectory(directory);
         var ready = Path.Combine(_root, "holder-ready");
@@ -20,7 +21,7 @@ public sealed partial class ProviderWorkSchedulerTests
                 [System.IO.File]::WriteAllText($Ready, 'ready')
                 while (-not [System.IO.File]::Exists($Release)) { Start-Sleep -Milliseconds 20 }
             } finally { $stream.Dispose() }
-            """);
+            """, TestContext.Current.CancellationToken);
         var start = new ProcessStartInfo("powershell.exe")
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true
@@ -43,11 +44,11 @@ public sealed partial class ProviderWorkSchedulerTests
         }
         finally
         {
-            await File.WriteAllTextAsync(release, "release");
-            try { await holder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
-            catch (TimeoutException) { holder.Kill(entireProcessTree: true); await holder.WaitForExitAsync(); }
+            await File.WriteAllTextAsync(release, "release", TestContext.Current.CancellationToken);
+            try { await holder.WaitForExitAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); }
+            catch (TimeoutException) { holder.Kill(entireProcessTree: true); await holder.WaitForExitAsync(TestContext.Current.CancellationToken); }
         }
-        Assert.True(holder.ExitCode == 0, await holder.StandardError.ReadToEndAsync());
+        Assert.True(holder.ExitCode == 0, await holder.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken));
         await CalendarCachePublicationLock.RunAsync(directory, _ => Task.CompletedTask, CancellationToken.None);
     }
 
@@ -75,7 +76,7 @@ public sealed partial class ProviderWorkSchedulerTests
                     return Task.CompletedTask;
                 }, CancellationToken.None);
             });
-        }, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        }, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(nested);
         var holderEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseHolder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -88,19 +89,11 @@ public sealed partial class ProviderWorkSchedulerTests
         try
         {
             startDetached.TrySetResult();
-            Assert.NotSame(detachedEntered.Task, await Task.WhenAny(detachedEntered.Task, Task.Delay(150)));
+            Assert.NotSame(detachedEntered.Task, await Task.WhenAny(detachedEntered.Task, Task.Delay(150, TestContext.Current.CancellationToken)));
         }
         finally { releaseHolder.TrySetResult(); }
-        await holder.WaitAsync(TimeSpan.FromSeconds(5));
-        await detached.WaitAsync(TimeSpan.FromSeconds(5));
+        await holder.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await detached.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(detachedEntered.Task.IsCompletedSuccessfully);
-    }
-
-    private sealed class WindowsPublicationFactAttribute : FactAttribute
-    {
-        public WindowsPublicationFactAttribute()
-        {
-            if (!OperatingSystem.IsWindows()) Skip = "This cross-process FileShare.None check uses Windows PowerShell.";
-        }
     }
 }

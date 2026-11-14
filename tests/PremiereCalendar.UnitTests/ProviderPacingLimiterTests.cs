@@ -18,7 +18,7 @@ public sealed class ProviderPacingLimiterTests
         var survivor = limiter.WaitAsync(CancellationToken.None);
         abandoned.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceled);
-        await survivor.WaitAsync(TimeSpan.FromSeconds(5));
+        await survivor.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(timer.Elapsed >= TimeSpan.FromMilliseconds(450), "The second admission must not burst alongside the first.");
     }
 }

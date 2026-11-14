@@ -18,7 +18,7 @@ public sealed class PostgresImdbRatingsStoreTests : IDisposable
         await store.ReplaceAllAsync([new("tt-original", 7.5, 10, oldImport)], oldImport, CancellationToken.None);
         var oldState = new ImdbDatasetState(oldImport, 1, "previous failure");
         await store.SaveStateAsync(oldState, CancellationToken.None);
-        await using var observer = await _database.OpenAsync();
+        await using var observer = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await BlockStatePublicationAsync(observer);
 
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -55,8 +55,8 @@ public sealed class PostgresImdbRatingsStoreTests : IDisposable
             release.TrySetResult();
             await using var unlock = observer.CreateCommand();
             unlock.CommandText = "SELECT pg_advisory_unlock(193684)";
-            await unlock.ExecuteNonQueryAsync();
-            await import.WaitAsync(TimeSpan.FromSeconds(15));
+            await unlock.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await import.WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
         }
 
         Assert.Equal(5002, await import);
@@ -116,7 +116,7 @@ public sealed class PostgresImdbRatingsStoreTests : IDisposable
         await store.ReplaceAllAsync([new("tt-original", 7.5, 10, oldImport)], oldImport, CancellationToken.None);
         var oldState = new ImdbDatasetState(oldImport, 1, "existing error");
         await store.SaveStateAsync(oldState, CancellationToken.None);
-        await using var observer = await _database.OpenAsync();
+        await using var observer = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await BlockStatePublicationAsync(observer);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var import = store.ReplaceAllAsync([new("tt-new", 9.5, 20, oldImport.AddDays(1))], oldImport.AddDays(1), cancellation.Token);
@@ -132,7 +132,7 @@ public sealed class PostgresImdbRatingsStoreTests : IDisposable
             cancellation.Cancel();
             await using var unlock = observer.CreateCommand();
             unlock.CommandText = "SELECT pg_advisory_unlock(193684)";
-            await unlock.ExecuteNonQueryAsync();
+            await unlock.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
             await Record.ExceptionAsync(() => import);
         }
     }

@@ -17,12 +17,12 @@ public sealed partial class ProviderWorkSchedulerTests
         var occurrence = NightlyCalendarWarmupPlanner.MostRecentOccurrence(now, new CalendarWarmupOptions());
         var payload = NightlyCalendarWarmupPlanner.BuildWindows(occurrence.NightDate, occurrence.CutoffUtc)[0];
         var handle = await _scheduler.EnqueueAsync(new(ProviderWorkKind.CalendarWarmup, payload.DedupeKey,
-            ProviderWorkPriority.Warmup, JsonSerializer.Serialize(payload)));
-        var claimed = (await _scheduler.ClaimNextAsync(false, "prior-night-owner", default))!;
+            ProviderWorkPriority.Warmup, JsonSerializer.Serialize(payload)), TestContext.Current.CancellationToken);
+        var claimed = (await _scheduler.ClaimNextAsync(false, "prior-night-owner", TestContext.Current.CancellationToken))!;
         await _scheduler.PublishAsync(claimed, new ProviderWorkProgress(handle.JobId, ProviderWorkState.Running, "Provider deferred",
             CalendarProgress: new PremiereLoadProgress("Partial", 0, 0, [], IsFinal: true)
-            { HasSourceErrors = true, RetryAfterUtc = now.AddHours(1) }), default);
-        await _scheduler.PreemptAsync(claimed, default);
+            { HasSourceErrors = true, RetryAfterUtc = now.AddHours(1) }), TestContext.Current.CancellationToken);
+        await _scheduler.PreemptAsync(claimed, TestContext.Current.CancellationToken);
         var cache = new NightlyLeafCache { Metadata = new(now, 0, 3, CalendarCacheCompleteness.Complete) };
         var state = new NightlySchedulerStateStore();
         state.Values[payload.ReceiptKey] = payload.ReceiptValue;
@@ -41,14 +41,14 @@ public sealed partial class ProviderWorkSchedulerTests
         using var worker = new ProviderWorkSchedulerHostedService(_scheduler, services.GetRequiredService<IServiceScopeFactory>(),
             recovery, Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 }),
             NullLogger<ProviderWorkSchedulerHostedService>.Instance);
-        await worker.StartAsync(default);
+        await worker.StartAsync(TestContext.Current.CancellationToken);
         try
         {
             await WaitUntilAsync(async () => (await _scheduler.GetAsync(handle.JobId))!.State == ProviderWorkState.Completed);
             Assert.Equal(0, pipeline.SourceFetches);
             Assert.Equal(0, pipeline.Publications);
         }
-        finally { await worker.StopAsync(default); }
+        finally { await worker.StopAsync(TestContext.Current.CancellationToken); }
     }
 
     [Fact]
@@ -62,7 +62,7 @@ public sealed partial class ProviderWorkSchedulerTests
         var state = new NightlySchedulerStateStore();
         var pipeline = new NightlyHandoffPipeline(cache, payload.RefreshNotBeforeUtc);
         var nightly = await _scheduler.EnqueueAsync(new(ProviderWorkKind.CalendarWarmup, payload.DedupeKey,
-            ProviderWorkPriority.Warmup, JsonSerializer.Serialize(payload)));
+            ProviderWorkPriority.Warmup, JsonSerializer.Serialize(payload)), TestContext.Current.CancellationToken);
         await using var services = new ServiceCollection().AddOptions()
             .AddSingleton<IAppStateStore>(state)
             .AddSingleton<IPremiereLoadPipeline>(pipeline)
@@ -77,14 +77,14 @@ public sealed partial class ProviderWorkSchedulerTests
         using var worker = new ProviderWorkSchedulerHostedService(_scheduler, services.GetRequiredService<IServiceScopeFactory>(),
             recovery, Microsoft.Extensions.Options.Options.Create(new ProviderSchedulerOptions { LeaseSeconds = 30 }),
             NullLogger<ProviderWorkSchedulerHostedService>.Instance);
-        await worker.StartAsync(default);
+        await worker.StartAsync(TestContext.Current.CancellationToken);
         try
         {
-            await pipeline.SourceCheckpointed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await pipeline.SourceCheckpointed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             var foreground = await _scheduler.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "nightly-foreground-preemption",
-                ProviderWorkPriority.Foreground, JsonSerializer.Serialize(new CalendarProviderWorkPayload(date, date, false, payload.Filters))));
-            await pipeline.ForegroundEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await pipeline.NightResumed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                ProviderWorkPriority.Foreground, JsonSerializer.Serialize(new CalendarProviderWorkPayload(date, date, false, payload.Filters))), TestContext.Current.CancellationToken);
+            await pipeline.ForegroundEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await pipeline.NightResumed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.Contains("night-source", pipeline.Resume!.CompletedSources.Keys);
             Assert.True(pipeline.Resume.RefreshCalendarSnapshot);
             Assert.NotNull(pipeline.Resume.PublishCacheAsync);
@@ -95,11 +95,11 @@ public sealed partial class ProviderWorkSchedulerTests
                 && (await _scheduler.GetAsync(foreground.JobId))!.State == ProviderWorkState.Completed);
             Assert.Equal(1, pipeline.SourceFetches);
             Assert.Equal(1, pipeline.Publications);
-            Assert.Equal(0, (await _scheduler.GetAsync(nightly.JobId))!.AttemptCount);
+            Assert.Equal(0, (await _scheduler.GetAsync(nightly.JobId, TestContext.Current.CancellationToken))!.AttemptCount);
             Assert.NotNull(cache.Metadata);
             Assert.Equal(payload.ReceiptValue, state.Values[payload.ReceiptKey]);
         }
-        finally { await worker.StopAsync(default); }
+        finally { await worker.StopAsync(TestContext.Current.CancellationToken); }
     }
 
     private sealed class NightlyLeafCache : ICalendarCacheMaintenance

@@ -15,7 +15,7 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
     private AdaptiveProviderPolicy _policy = null!;
     private PostgresTestDatabase _database = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Directory.CreateDirectory(_root);
         _database = await PostgresTestDatabase.CreateAsync();
@@ -40,24 +40,24 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
         request.Headers.TryAddWithoutValidation("Authorization", "Bearer secret-header");
         Task<HttpResponseMessage> pending;
         using (_telemetry.UseDiagnosticContext(context))
-            pending = client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            pending = client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
         await UntilAsync(() => Events().Any(e => EventName(e) == "provider.attempt.started"));
         // The initialized policy reaches its capacity wait synchronously before yielding.
         _time.Advance(TimeSpan.FromMilliseconds(20));
         await holder.CompleteAsync(ProviderExecutionResult.Success, null, CancellationToken.None);
-        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.DoesNotContain(Events(), e => EventName(e) == "provider.request.completed");
         using (_telemetry.UseDiagnosticContext(_telemetry.CreateDiagnosticContext(source: "unrelated")))
         {
-            await using var stream = await response.Content.ReadAsStreamAsync();
+            await using var stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
             var bytes = new byte[64];
-            var read = stream.ReadAsync(bytes.AsMemory()).AsTask();
-            await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+            var read = stream.ReadAsync(bytes.AsMemory(), TestContext.Current.CancellationToken).AsTask();
+            await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             _time.Advance(TimeSpan.FromMilliseconds(50));
             body.AddChunk(Encoding.UTF8.GetBytes("secret-body"));
             body.Finish();
             Assert.Equal("secret-body", Encoding.UTF8.GetString(bytes, 0, await read));
-            Assert.Equal(0, await stream.ReadAsync(bytes.AsMemory()));
+            Assert.Equal(0, await stream.ReadAsync(bytes.AsMemory(), TestContext.Current.CancellationToken));
         }
         var events = Events();
         Assert.All(events, e =>
@@ -89,10 +89,10 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
         });
         Task<HttpResponseMessage> pending;
         var context = _telemetry.CreateDiagnosticContext();
-        using (_telemetry.UseDiagnosticContext(context)) pending = client.GetAsync("https://example.test/?key=secret-retry");
+        using (_telemetry.UseDiagnosticContext(context)) pending = client.GetAsync("https://example.test/?key=secret-retry", TestContext.Current.CancellationToken);
         await UntilAsync(() => _time.CreatedTimerCount == 1);
         _time.Advance(TimeSpan.FromSeconds(1));
-        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var events = Events();
         Assert.Equal(2, sends);
         Assert.Equal(2, events.Count(e => EventName(e) == "provider.attempt.completed"));
@@ -113,8 +113,8 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
             sends++;
             return new(HttpStatusCode.Forbidden) { Content = new StringContent("private-denial-body") };
         });
-        using var first = await client.GetAsync("https://example.test/first?apikey=secret-key");
-        await Assert.ThrowsAsync<ProviderCircuitOpenException>(() => client.GetAsync("https://example.test/second?apikey=secret-key"));
+        using var first = await client.GetAsync("https://example.test/first?apikey=secret-key", TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<ProviderCircuitOpenException>(() => client.GetAsync("https://example.test/second?apikey=secret-key", TestContext.Current.CancellationToken));
         Assert.Equal(1, sends);
         var events = Events();
         var denied = Assert.Single(events, e => EventName(e) == "provider.attempt.completed"
@@ -144,14 +144,14 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
                 return response;
             })
         });
-        var observed = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.PostAsync("https://example.test/?key=private-key", new StringContent("")));
+        var observed = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.PostAsync("https://example.test/?key=private-key", new StringContent(""), TestContext.Current.CancellationToken));
         var responseFailure = ProviderFailure.FromException(observed);
         Assert.True(observed.ResponseObserved);
         Assert.False(responseFailure.IsLocal);
         Assert.Equal("rate_limited", responseFailure.Reason);
         Assert.Equal(429, responseFailure.StatusCode);
         Assert.DoesNotContain(Events(), item => EventName(item) == "provider.admission.deferred");
-        var local = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/?key=private-key"));
+        var local = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/?key=private-key", TestContext.Current.CancellationToken));
         var localFailure = ProviderFailure.FromException(local);
         Assert.False(local.ResponseObserved);
         Assert.True(localFailure.IsLocal);
@@ -177,7 +177,7 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
             response.Headers.RetryAfter = new(TimeSpan.FromSeconds(30));
             return response;
         });
-        var exception = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/"));
+        var exception = await Assert.ThrowsAsync<ProviderRetryAfterException>(() => client.GetAsync("https://example.test/", TestContext.Current.CancellationToken));
         var failure = ProviderFailure.FromException(exception);
         Assert.True(exception.ResponseObserved);
         Assert.False(failure.IsLocal);
@@ -192,10 +192,10 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
     {
         var sends = 0;
         using var client = CreateClient(_ => new(++sends == 1 ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.NoContent));
-        var pending = client.GetAsync("https://example.test/");
+        var pending = client.GetAsync("https://example.test/", TestContext.Current.CancellationToken);
         await UntilAsync(() => _time.CreatedTimerCount == 1);
         _time.Advance(TimeSpan.FromSeconds(2));
-        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var events = Events();
         var retry = Assert.Single(events, e => EventName(e) == "provider.retry.scheduled").GetProperty("details");
         Assert.Equal("http5xx", retry.GetProperty("reason").GetString());
@@ -215,11 +215,11 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
         using var cancellation = new CancellationTokenSource();
         HttpResponseMessage response;
         using (_telemetry.UseDiagnosticContext(context))
-            response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead);
+            response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
         using (response)
         {
             var read = response.Content.ReadAsByteArrayAsync(cancellation.Token);
-            await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+            await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             _time.Advance(TimeSpan.FromMilliseconds(40));
             if (dispose) response.Dispose(); else cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read);
@@ -253,12 +253,12 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
         }) { Timeout = Timeout.InfiniteTimeSpan };
         HttpResponseMessage response;
         using (_telemetry.UseDiagnosticContext(context))
-            response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead);
+            response = await client.GetAsync("https://example.test/", HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
         using (response)
         {
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            var read = stream.ReadAsync(new byte[16].AsMemory()).AsTask();
-            await body.Started.WaitAsync(TimeSpan.FromSeconds(5));
+            await using var stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
+            var read = stream.ReadAsync(new byte[16].AsMemory(), TestContext.Current.CancellationToken).AsTask();
+            await body.Started.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             _time.Advance(TimeSpan.FromMilliseconds(100));
             var error = await Assert.ThrowsAsync<TaskCanceledException>(() => read);
             Assert.IsType<TimeoutException>(error.InnerException);
@@ -302,7 +302,7 @@ public sealed class AdaptiveProviderDiagnosticsTests : IAsyncLifetime
             await Task.Delay(1);
         }
     }
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         _diagnostics.Dispose();
         if (_database is not null) await _database.DisposeAsync();

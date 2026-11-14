@@ -3,7 +3,6 @@ using System.Text.RegularExpressions;
 using Deque.AxeCore.Playwright;
 using Microsoft.Playwright;
 using Microsoft.Playwright.Xunit;
-using Xunit.Abstractions;
 
 namespace PremiereCalendar.BrowserTests;
 
@@ -162,7 +161,7 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             var artifactRoot = Path.Combine(AppContext.BaseDirectory, "TestResults", $"browser-{width}x{height}-{Guid.NewGuid():N}");
             Directory.CreateDirectory(artifactRoot);
             await Page.ScreenshotAsync(new() { Path = Path.Combine(artifactRoot, "page.png"), FullPage = true });
-            await File.WriteAllTextAsync(Path.Combine(artifactRoot, "page.html"), await Page.ContentAsync());
+            await File.WriteAllTextAsync(Path.Combine(artifactRoot, "page.html"), await Page.ContentAsync(), TestContext.Current.CancellationToken);
             await Context.Tracing.StopAsync(new() { Path = Path.Combine(artifactRoot, "trace.zip") });
             throw;
         }

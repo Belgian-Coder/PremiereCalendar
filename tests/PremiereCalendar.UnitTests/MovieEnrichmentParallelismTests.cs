@@ -44,8 +44,8 @@ public sealed partial class PremiereServiceTests
             CancellationToken.None,
             filters: MovieOnlyFilters());
 
-        await ratingsStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await rottenTomatoesStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await ratingsStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await rottenTomatoesStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(operation.IsCompleted);
 
         releaseRatings.SetResult(new OmdbItem
@@ -57,11 +57,11 @@ public sealed partial class PremiereServiceTests
             Plot = "OMDb fallback plot",
             Ratings = [new OmdbRating { Source = "Rotten Tomatoes", Value = "80%" }]
         });
-        await artworkStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await artworkStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(releaseRottenTomatoes.Task.IsCompleted);
 
         releaseRottenTomatoes.SetResult(true);
-        var item = Assert.Single(await operation.WaitAsync(TimeSpan.FromSeconds(5)));
+        var item = Assert.Single(await operation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
 
         Assert.Equal("movie:9401", item.CanonicalId);
         Assert.Equal("Parallel movie", item.Title);
@@ -105,17 +105,17 @@ public sealed partial class PremiereServiceTests
             filters: MovieOnlyFilters());
 
         await Task.WhenAll(rottenTomatoes.Started.Task, artwork.Started.Task, sources.Started.Task)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         cancellation.Cancel();
         await Task.WhenAll(rottenTomatoes.CancellationObserved.Task, artwork.CancellationObserved.Task, sources.CancellationObserved.Task)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         Assert.False(operation.IsCompleted);
         rottenTomatoes.Release.TrySetResult(true);
         artwork.Release.TrySetResult(true);
         sources.Release.TrySetResult(true);
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.True(rottenTomatoes.Completed.Task.IsCompletedSuccessfully);
         Assert.True(artwork.Completed.Task.IsCompletedSuccessfully);
         Assert.True(sources.Completed.Task.IsCompletedSuccessfully);
@@ -197,8 +197,8 @@ public sealed partial class PremiereServiceTests
             CancellationToken.None,
             filters: MovieOnlyFilters());
 
-        await ratingsStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await rottenTomatoesStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await ratingsStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await rottenTomatoesStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(operation.IsCompleted);
         Assert.Equal("tt0094021", requestedImdbId);
         Assert.Equal(PremiereMediaType.Movie, requestedMediaType);
@@ -219,7 +219,7 @@ public sealed partial class PremiereServiceTests
         });
         Assert.False(releaseRottenTomatoes.Task.IsCompleted);
         releaseRottenTomatoes.SetResult(true);
-        var item = Assert.Single(await operation.WaitAsync(TimeSpan.FromSeconds(5)));
+        var item = Assert.Single(await operation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
 
         Assert.Equal("tt0094021", item.ImdbId);
         Assert.Equal("Candidate fallback title", item.Title);

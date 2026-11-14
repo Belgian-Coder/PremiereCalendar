@@ -118,9 +118,8 @@ public sealed partial class PremiereServiceTests
         if (!string.IsNullOrWhiteSpace(directory))
         {
             Directory.CreateDirectory(directory);
-            await File.WriteAllTextAsync(Path.Combine(directory, "warm_refresh_button.projection.json"), projection);
-            await File.WriteAllTextAsync(Path.Combine(directory, "warm_refresh_button.measurement.json"),
-                JsonSerializer.Serialize(measurement, new JsonSerializerOptions { WriteIndented = true }));
+            await File.WriteAllTextAsync(Path.Combine(directory, "warm_refresh_button.projection.json"), projection, TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(directory, "warm_refresh_button.measurement.json"), JsonSerializer.Serialize(measurement, new JsonSerializerOptions { WriteIndented = true }), TestContext.Current.CancellationToken);
         }
 
         Dictionary<string, int> Counts() => new()
@@ -289,9 +288,8 @@ public sealed partial class PremiereServiceTests
         if (!string.IsNullOrWhiteSpace(directory))
         {
             Directory.CreateDirectory(directory);
-            await File.WriteAllTextAsync(Path.Combine(directory, scenario + ".projection.json"), projection);
-            await File.WriteAllTextAsync(Path.Combine(directory, scenario + ".measurement.json"),
-                JsonSerializer.Serialize(measurement, new JsonSerializerOptions { WriteIndented = true }));
+            await File.WriteAllTextAsync(Path.Combine(directory, scenario + ".projection.json"), projection, TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(directory, scenario + ".measurement.json"), JsonSerializer.Serialize(measurement, new JsonSerializerOptions { WriteIndented = true }), TestContext.Current.CancellationToken);
         }
     }
 
@@ -372,8 +370,7 @@ public sealed partial class PremiereServiceTests
             ? new ProviderWorkResumeState(new Dictionary<string, IReadOnlyList<PremiereItem>>(), null) { RefreshCalendarSnapshot = true }
             : null;
         var updates = new List<PremiereLoadProgress>();
-        await foreach (var update in service.StreamCoreAsync(start, start.AddDays(6),
-            filters: new CalendarFilters { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"] } }, resumeState: resume))
+        await foreach (var update in service.StreamCoreAsync(start, start.AddDays(6), filters: new CalendarFilters { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"] } }, resumeState: resume, cancellationToken: TestContext.Current.CancellationToken))
             updates.Add(update);
         var final = Assert.Single(updates, update => update.IsFinal);
         Assert.False(final.HasSourceErrors);
@@ -410,9 +407,9 @@ public sealed partial class PremiereServiceTests
         using var cancellation = new CancellationTokenSource();
         var load = service.GetPremieresAsync(start, start.AddDays(6), cancellation.Token, forceRefresh: true,
             filters: new CalendarFilters { ShowSeries = false, MovieFilters = { OriginalLanguages = ["en"] } });
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await cancellation.CancelAsync();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => load.WaitAsync(TimeSpan.FromSeconds(5)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => load.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Equal(0, Volatile.Read(ref active));
         Assert.True(Volatile.Read(ref cancelled) > 0);
         Assert.Empty(cache.SetCalls);
@@ -461,7 +458,7 @@ public sealed partial class PremiereServiceTests
         using var tomatoes = fixture.Tomatoes;
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await using var updates = fixture.Service.StreamCoreAsync(start, start, forceRefresh: true,
-            filters: filters, cancellationToken: budget.Token).GetAsyncEnumerator();
+            filters: filters, cancellationToken: budget.Token).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         var visible = false;
         while (await updates.MoveNextAsync())
         {

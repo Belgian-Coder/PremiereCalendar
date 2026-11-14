@@ -13,7 +13,7 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
     private ProviderAdaptiveStateStore _providerStore = null!;
     private PostgresTestDatabase _database = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Directory.CreateDirectory(_root);
         var environment = new TestEnvironment(_root);
@@ -32,8 +32,8 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
     public async Task DuplicateCallersAttachToOneActiveJob()
     {
         var request = new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "same-week", ProviderWorkPriority.Foreground, "{}");
-        var first = await _scheduler.EnqueueAsync(request);
-        var second = await _scheduler.EnqueueAsync(request);
+        var first = await _scheduler.EnqueueAsync(request, TestContext.Current.CancellationToken);
+        var second = await _scheduler.EnqueueAsync(request, TestContext.Current.CancellationToken);
         Assert.True(first.Created);
         Assert.False(second.Created);
         Assert.Equal(first.JobId, second.JobId);
@@ -42,36 +42,36 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
     [Fact]
     public async Task ClaimsForegroundBeforeMaintenanceAndCheckpointsWithoutExpiringLease()
     {
-        await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.ImdbDatasetRefresh, "maintenance", ProviderWorkPriority.Maintenance, "{}"));
-        var foreground = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "foreground", ProviderWorkPriority.Foreground, "{}"));
+        await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.ImdbDatasetRefresh, "maintenance", ProviderWorkPriority.Maintenance, "{}"), TestContext.Current.CancellationToken);
+        var foreground = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "foreground", ProviderWorkPriority.Foreground, "{}"), TestContext.Current.CancellationToken);
 
         var claimed = await _scheduler.ClaimNextAsync(false, "test", CancellationToken.None);
         Assert.Equal(foreground.JobId, claimed!.JobId);
-        await using (var legacy = await _database.OpenAsync())
+        await using (var legacy = await _database.OpenAsync(TestContext.Current.CancellationToken))
         {
             await using var seed = legacy.CreateCommand();
             seed.CommandText = "UPDATE ProviderWorkJobs SET ProgressJson='legacy duplicate' WHERE JobId=@id";
             seed.Parameters.AddWithValue("id", claimed.JobId);
-            await seed.ExecuteNonQueryAsync();
+            await seed.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
         await _scheduler.PublishAsync(claimed, new ProviderWorkProgress(claimed.JobId, ProviderWorkState.Running, "page 2", 2, 5), CancellationToken.None);
-        var persisted = await _scheduler.GetAsync(claimed.JobId);
+        var persisted = await _scheduler.GetAsync(claimed.JobId, TestContext.Current.CancellationToken);
         Assert.Contains("page 2", persisted!.CheckpointJson);
-        await using var connection = await _database.OpenAsync();
+        await using var connection = await _database.OpenAsync(TestContext.Current.CancellationToken);
         await using var leases = connection.CreateCommand();
         leases.CommandText = "SELECT COUNT(*) FROM ProviderWorkLeases WHERE JobId=@id";
         leases.Parameters.AddWithValue("id", claimed.JobId);
-        Assert.Equal(1L, await leases.ExecuteScalarAsync());
+        Assert.Equal(1L, await leases.ExecuteScalarAsync(TestContext.Current.CancellationToken));
         await using var payload = connection.CreateCommand();
         payload.CommandText = "SELECT ProgressJson FROM ProviderWorkJobs WHERE JobId=@id";
         payload.Parameters.AddWithValue("id", claimed.JobId);
-        Assert.Equal(DBNull.Value, await payload.ExecuteScalarAsync());
+        Assert.Equal(DBNull.Value, await payload.ExecuteScalarAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public async Task PersistedCheckpointRestoresCompletedSourceItemsAndAttachesLateSubscriber()
     {
-        var handle = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "resume", ProviderWorkPriority.Foreground, "{}"));
+        var handle = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "resume", ProviderWorkPriority.Foreground, "{}"), TestContext.Current.CancellationToken);
         var claimed = await _scheduler.ClaimNextAsync(false, "test", CancellationToken.None);
         Assert.NotNull(claimed);
         var item = new PremiereCalendar.Models.PremiereItem
@@ -90,10 +90,10 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
         };
         await _scheduler.PublishAsync(claimed!, new ProviderWorkProgress(claimed.JobId, ProviderWorkState.Running, "source complete", 1, 2, calendar), CancellationToken.None);
 
-        var persisted = await _scheduler.GetAsync(handle.JobId);
+        var persisted = await _scheduler.GetAsync(handle.JobId, TestContext.Current.CancellationToken);
         var checkpoint = ProviderWorkScheduler.TryReadCheckpoint(persisted!.CheckpointJson);
         Assert.Equal("Checkpoint movie", Assert.Single(checkpoint!.CompletedSources["tmdb:movies"]).Title);
-        await using var updates = _scheduler.WatchAsync(new ProviderWorkHandle(handle.JobId, false)).GetAsyncEnumerator();
+        await using var updates = _scheduler.WatchAsync(new ProviderWorkHandle(handle.JobId, false), TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await updates.MoveNextAsync());
         Assert.Equal("source complete", updates.Current.Message);
     }
@@ -128,7 +128,7 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
             "Provider work completed."));
 
         var updates = new List<ProviderWorkProgress>();
-        await foreach (var update in broadcast.Subscribe().ReadAllAsync())
+        await foreach (var update in broadcast.Subscribe().ReadAllAsync(TestContext.Current.CancellationToken))
         {
             updates.Add(update);
         }
@@ -146,16 +146,16 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
     [Fact]
     public async Task ForegroundEnqueuePreemptsBackgroundWithoutConsumingRetry()
     {
-        var background = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarWarmup, "background", ProviderWorkPriority.Warmup, "{}"));
+        var background = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarWarmup, "background", ProviderWorkPriority.Warmup, "{}"), TestContext.Current.CancellationToken);
         var claimed = await _scheduler.ClaimNextAsync(false, "test", CancellationToken.None);
         Assert.NotNull(claimed);
         using var execution = _scheduler.BeginExecution(claimed!, CancellationToken.None);
 
-        await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "foreground-preempt", ProviderWorkPriority.Foreground, "{}"));
+        await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, "foreground-preempt", ProviderWorkPriority.Foreground, "{}"), TestContext.Current.CancellationToken);
         Assert.True(execution.IsCancellationRequested);
         await _scheduler.PreemptAsync(claimed, CancellationToken.None);
 
-        var snapshot = await _scheduler.GetAsync(background.JobId);
+        var snapshot = await _scheduler.GetAsync(background.JobId, TestContext.Current.CancellationToken);
         Assert.NotNull(snapshot);
         Assert.Equal(ProviderWorkState.Queued, snapshot!.State);
         Assert.Equal(0, snapshot.AttemptCount);
@@ -165,12 +165,12 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
     [Fact]
     public async Task ExpiredLeaseIsRequeuedWithoutConsumingAttempt()
     {
-        var handle = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarWarmup, "warmup", ProviderWorkPriority.Warmup, "{}"));
+        var handle = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarWarmup, "warmup", ProviderWorkPriority.Warmup, "{}"), TestContext.Current.CancellationToken);
         var now = DateTimeOffset.UtcNow.AddMinutes(-5);
         var claimed = await _store.ClaimNextAsync(false, "abandoned", now, TimeSpan.FromSeconds(30), CancellationToken.None);
         Assert.NotNull(claimed);
         await _store.RecoverExpiredLeasesAsync(DateTimeOffset.UtcNow, CancellationToken.None);
-        var recovered = await _scheduler.GetAsync(handle.JobId);
+        var recovered = await _scheduler.GetAsync(handle.JobId, TestContext.Current.CancellationToken);
         Assert.Equal(ProviderWorkState.Queued, recovered!.State);
         Assert.Equal(0, recovered.AttemptCount);
     }
@@ -178,10 +178,10 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
     [Fact]
     public async Task TransientFailureRetriesAndIncrementsAttempt()
     {
-        var handle = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.ProviderDeltaSync, "delta", ProviderWorkPriority.Maintenance, "{}"));
+        var handle = await _scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.ProviderDeltaSync, "delta", ProviderWorkPriority.Maintenance, "{}"), TestContext.Current.CancellationToken);
         var claimed = await _scheduler.ClaimNextAsync(false, "test", CancellationToken.None);
         await _scheduler.FailAsync(claimed!, new HttpRequestException("secret URL should not persist"), CancellationToken.None);
-        var retried = await _scheduler.GetAsync(handle.JobId);
+        var retried = await _scheduler.GetAsync(handle.JobId, TestContext.Current.CancellationToken);
         Assert.Equal(ProviderWorkState.RetryWaiting, retried!.State);
         Assert.Equal(1, retried.AttemptCount);
         Assert.Equal("A provider request failed.", retried.LastError);
@@ -243,7 +243,7 @@ public sealed partial class ProviderWorkSchedulerTests : IAsyncLifetime
         Assert.Equal(newer, persisted.UpdatedUtc);
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_database is not null) await _database.DisposeAsync();
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);

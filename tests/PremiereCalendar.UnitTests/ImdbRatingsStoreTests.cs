@@ -94,7 +94,7 @@ public sealed class ImdbRatingsStoreTests : IDisposable
             await store.SaveStateAsync(oldState, CancellationToken.None);
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             import = store.ReplaceAllStreamingAsync(PausedRatings(entered, release, newImport), newImport, CancellationToken.None);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             var single = await store.GetByImdbIdAsync("tt0000001", deadline.Token);
@@ -107,7 +107,7 @@ public sealed class ImdbRatingsStoreTests : IDisposable
             Assert.False(import.IsCompleted);
 
             release.TrySetResult();
-            Assert.Equal(2, await import.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(2, await import.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
             var published = await store.GetByImdbIdsAsync(["tt0000001", "tt-new", "tt0000925"], CancellationToken.None);
             Assert.Equal(2, published.Count);
             Assert.All(published.Values, rating => Assert.Equal(newImport, rating.ImportedAtUtc));

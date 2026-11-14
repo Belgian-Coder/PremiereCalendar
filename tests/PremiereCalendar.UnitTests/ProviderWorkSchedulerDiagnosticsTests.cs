@@ -20,7 +20,7 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
     private ProviderWorkScheduler _scheduler = null!;
     private PostgresTestDatabase _database = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Directory.CreateDirectory(_root);
         _database = await PostgresTestDatabase.CreateAsync();
@@ -37,7 +37,7 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
         var payload = JsonSerializer.Serialize(new CalendarProviderWorkPayload(new(2026, 10, 26), new(2026, 11, 1), false, null));
         ProviderWorkHandle handle;
         using (_telemetry.UseDiagnosticContext(_telemetry.CreateDiagnosticContext(source: "foreground")))
-            handle = await _scheduler.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "secret-dedupe", ProviderWorkPriority.Foreground, payload));
+            handle = await _scheduler.EnqueueAsync(new(ProviderWorkKind.CalendarForeground, "secret-dedupe", ProviderWorkPriority.Foreground, payload), TestContext.Current.CancellationToken);
         _time.Advance(TimeSpan.FromMilliseconds(40));
         await using var services = new ServiceCollection().AddSingleton<IPremiereLoadPipeline>(pipeline).BuildServiceProvider();
         var recovery = new DatabaseRecoveryState();
@@ -79,7 +79,7 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
         var raw = string.Join("\n", events.Select(e => e.GetRawText()));
         foreach (var secret in new[] { "secret-dedupe", "secret-title", "secret-message", "PayloadJson", "CompletedSources", "LastError" })
             Assert.DoesNotContain(secret, raw, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(ProviderWorkState.Completed, (await _scheduler.GetAsync(handle.JobId))!.State);
+        Assert.Equal(ProviderWorkState.Completed, (await _scheduler.GetAsync(handle.JobId, TestContext.Current.CancellationToken))!.State);
     }
 
     [Theory]
@@ -104,7 +104,7 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
         var lost = Assert.Single(events, e => Name(e) == "scheduler.lease.lost").GetProperty("details");
         Assert.Equal(checkpoint ? "checkpoint" : "complete", lost.GetProperty("stage").GetString());
         Assert.Equal("ownership_rejected", lost.GetProperty("outcome").GetString());
-        Assert.NotEqual(ProviderWorkState.Completed, (await _scheduler.GetAsync(job.JobId))!.State);
+        Assert.NotEqual(ProviderWorkState.Completed, (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!.State);
     }
 
     [Theory]
@@ -133,7 +133,7 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
             }
         }
         finally { _scheduler.EndExecution(job, execution); }
-        Assert.Equal(expectedState, (await _scheduler.GetAsync(job.JobId))!.State);
+        Assert.Equal(expectedState, (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!.State);
         var events = Events();
         var durable = Assert.Single(events, e => Name(e) == expectedEvent).GetProperty("details");
         // The clock advanced during execution; persistence itself did not advance it.
@@ -175,7 +175,7 @@ public sealed class ProviderWorkSchedulerDiagnosticsTests : IAsyncLifetime
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (!await predicate()) await Task.Delay(10, timeout.Token);
     }
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         _diagnostics.Dispose();
         if (_database is not null) await _database.DisposeAsync();

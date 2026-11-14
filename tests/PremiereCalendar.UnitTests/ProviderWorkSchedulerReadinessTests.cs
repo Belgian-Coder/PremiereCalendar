@@ -14,7 +14,7 @@ public sealed partial class ProviderWorkSchedulerTests
         var job = await ClaimCalendarAsync("ready-checkpoint");
         await _scheduler.PublishAsync(job, Progress(job, "initial"), CancellationToken.None);
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await using var watcher = _scheduler.WatchAsync(new(job.JobId, false), budget.Token).GetAsyncEnumerator();
+        await using var watcher = _scheduler.WatchAsync(new(job.JobId, false), budget.Token).GetAsyncEnumerator(TestContext.Current.CancellationToken);
         Assert.True(await watcher.MoveNextAsync());
         var ready = new PremiereLoadProgress("Details", 1, 1, [Item(1)])
         {
@@ -31,7 +31,7 @@ public sealed partial class ProviderWorkSchedulerTests
         else
             await _scheduler.PreemptAsync(job, CancellationToken.None);
 
-        var saved = (await _scheduler.GetAsync(job.JobId))!;
+        var saved = (await _scheduler.GetAsync(job.JobId, TestContext.Current.CancellationToken))!;
         Assert.Equal(retry ? ProviderWorkState.RetryWaiting : ProviderWorkState.Queued, saved.State);
         var calendar = ProviderWorkScheduler.TryReadCheckpoint(saved.CheckpointJson)!.CalendarProgress!;
         Assert.False(calendar.IsFinal);

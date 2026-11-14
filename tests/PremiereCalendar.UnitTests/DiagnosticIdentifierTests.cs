@@ -184,12 +184,12 @@ public sealed class DiagnosticIdentifierTests
 
         using (telemetry.UseDiagnosticContext(consumer))
         {
-            await foreach (var value in telemetry.WithDiagnosticContext(Produce(), producer))
+            await foreach (var value in telemetry.WithDiagnosticContext(Produce(TestContext.Current.CancellationToken), producer, TestContext.Current.CancellationToken))
             {
                 Assert.Equal(consumer, telemetry.CaptureDiagnosticContext());
                 await Task.Yield();
                 Assert.Equal(consumer, telemetry.CaptureDiagnosticContext());
-                await Task.Delay(1);
+                await Task.Delay(1, TestContext.Current.CancellationToken);
                 seen.Add((producerSeen[value], telemetry.CaptureDiagnosticContext()));
             }
             Assert.Equal(consumer, telemetry.CaptureDiagnosticContext());

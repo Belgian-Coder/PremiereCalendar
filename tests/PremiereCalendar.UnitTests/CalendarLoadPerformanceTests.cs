@@ -8,7 +8,6 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PremiereCalendar.Models;
 using PremiereCalendar.Options;
 using PremiereCalendar.Services;
-using Xunit.Abstractions;
 
 namespace PremiereCalendar.UnitTests;
 
@@ -17,7 +16,9 @@ public sealed partial class PremiereServiceTests
     private readonly ITestOutputHelper _evidence;
     public PremiereServiceTests(ITestOutputHelper evidence) => _evidence = evidence;
 
-    [Theory]
+    // A measured benchmark with a time budget ("fresh" must produce its first result within one second): it runs alone,
+    // never beside another test, so the budget measures the code and not the host's current load.
+    [Theory(DisableParallelization = true)]
     [InlineData("fresh")]
     [InlineData("stale")]
     [InlineData("cold")]
@@ -63,10 +64,10 @@ public sealed partial class PremiereServiceTests
             {
                 var payload = new CalendarProviderWorkPayload(start.AddDays(-i * 7), start.AddDays(-i * 7 + 6), false, null);
                 await scheduler.EnqueueAsync(new ProviderWorkRequest(ProviderWorkKind.CalendarForeground, $"occupied-{i}",
-                    ProviderWorkPriority.Foreground, JsonSerializer.Serialize(payload)));
+                    ProviderWorkPriority.Foreground, JsonSerializer.Serialize(payload)), TestContext.Current.CancellationToken);
             }
             await worker.StartAsync(CancellationToken.None);
-            await pipeline.Occupied.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await pipeline.Occupied.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             release = ReleaseWorkersAsync(pipeline);
             await ResetWriteCountersAsync(evidenceDatabase);
             var allocated = GC.GetTotalAllocatedBytes();
@@ -75,8 +76,7 @@ public sealed partial class PremiereServiceTests
             using var loadBudget = new CancellationTokenSource(TimeSpan.FromSeconds(90));
             double? firstMilliseconds = null;
             IReadOnlyList<PremiereItem> items = [];
-            await foreach (var update in service.StreamPremieresAsync(start, start.AddDays(6),
-                filters: new CalendarFilters { ShowSeries = false }).WithCancellation(loadBudget.Token))
+            await foreach (var update in service.StreamPremieresAsync(start, start.AddDays(6), filters: new CalendarFilters { ShowSeries = false }, cancellationToken: TestContext.Current.CancellationToken).WithCancellation(loadBudget.Token))
             {
                 firstMilliseconds ??= timer.Elapsed.TotalMilliseconds;
                 items = update.Items;
