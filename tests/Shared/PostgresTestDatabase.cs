@@ -144,7 +144,7 @@ internal sealed class PostgresTestDatabase : IDisposable, IAsyncDisposable
         // ClearAllPools() does not touch NpgsqlDataSource pools; dispose this database's data sources explicitly.
         DatabaseConnectionFactory.Dispose(AppOptions);
 #endif
-        NpgsqlConnection.ClearPool(new NpgsqlConnection(ConnectionString));
+        using (var poolKey = new NpgsqlConnection(ConnectionString)) NpgsqlConnection.ClearPool(poolKey);
         await using var admin = new NpgsqlConnection(Server.Value.AdminConnectionString);
         await admin.OpenAsync();
         await using var drop = admin.CreateCommand();

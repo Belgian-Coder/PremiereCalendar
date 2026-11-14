@@ -25,7 +25,9 @@ public sealed class ProviderWorkCheckpointCodecBufferTests
         // A pooled array would be handed out again after it was returned.
         Assert.NotSame(large, second);
         // The shared pool never saw the oversized array either.
-        Assert.NotSame(large, ArrayPool<byte>.Shared.Rent(Limit + 1));
+        var rentedFromShared = ArrayPool<byte>.Shared.Rent(Limit + 1);
+        try { Assert.NotSame(large, rentedFromShared); }
+        finally { ArrayPool<byte>.Shared.Return(rentedFromShared); }
     }
 
     [Fact]
