@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import contextlib
 import fnmatch
 import glob
@@ -294,6 +293,8 @@ def resolve_plan(root, args):
     require(HOSTS[host][1:] == (target["platform"], target["architecture"]), "Host override is incompatible with target platform/architecture")
     require(1 <= args.jobs <= MAX_JOBS, f"--jobs must be in 1..{MAX_JOBS}")
     require(1 <= args.timeout_seconds <= 86400, "--timeout-seconds must be in 1..86400")
+    require(args.execution_context != "console" or 30 <= args.timeout_seconds <= 14400,
+            "Console --timeout-seconds must be in 30..14400 (host bridge bound)")
     interpreter = args.remote_python or (CONSOLE_PYTHON.get(host) if args.execution_context == "console" else None)
     if interpreter:
         interpreter = validate_python_path(interpreter, target["platform"])
@@ -346,11 +347,6 @@ def validate_python_path(value, os_name):
     return value
 
 
-def powershell_command(script):
-    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-    return "powershell -NoProfile -NonInteractive -EncodedCommand " + encoded
-
-
 def remote_command(plan, probed_python=None):
     native_os = HOSTS[plan["host"]][1]
     interpreter = plan["remotePython"]
@@ -358,13 +354,19 @@ def remote_command(plan, probed_python=None):
         require(interpreter, "Console interpreter path is unresolved")
         interpreter = validate_python_path(interpreter, native_os)
         if native_os == "windows":
-            return powershell_command("$ErrorActionPreference='Stop'; & 'C:/ProgramData/BuildRelease/Invoke-NativeBuildJob.ps1' -PythonExecutable '" + interpreter + "'; exit $LASTEXITCODE")
+            # OpenSSH's verified cmd.exe default shell starts PS7 directly.
+            # No PowerShell 5 wrapper/pipeline may decode the binary protocol.
+            return subprocess.list2cmdline([
+                "C:/Program Files/PowerShell/7/pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-File", "C:/ProgramData/BuildRelease/Invoke-NativeBuildJob.ps1", "-PythonExecutable", interpreter.replace("/", "\\"),
+                "-TimeoutSeconds", str(plan["timeoutSeconds"])])
         return shlex.join(["sudo", "-n", CONSOLE_PYTHON["macbook-pro"],
-                           "/usr/local/libexec/build-release/invoke_native_build_job.py", "--python-executable", interpreter])
+                           "/usr/local/libexec/build-release/invoke_native_build_job.py", "--python-executable", interpreter,
+                           "--timeout-seconds", str(plan["timeoutSeconds"])])
     if interpreter:
         interpreter = validate_python_path(interpreter, native_os)
         if native_os == "windows":
-            return powershell_command("$ErrorActionPreference='Stop'; & '" + interpreter + "' '-c' '" + LAUNCHER.replace("'", "''") + "'; exit $LASTEXITCODE")
+            return subprocess.list2cmdline([interpreter, "-c", LAUNCHER])
         return shlex.join([interpreter, "-c", LAUNCHER])
     require(probed_python in ("py -3", "python", "python3"), "Unverified Python probe result")
     return f'{probed_python} -c "{LAUNCHER}"'
@@ -454,7 +456,7 @@ def verify_bundle(root, bundle, commit, expected_hash):
     require(heads == [f"{commit} refs/heads/request-release-source"], "Bundle source SHA/ref mismatch")
 
 
-def prepare_worktree(root, manifest, target, commit, bundle, origin=None, main_upload=False):
+def prepare_worktree(root, manifest, target, commit, bundle, origin=None, main_context=False):
     parent = within(root, root / manifest["worktreeDirectory"])
     parent.mkdir(parents=True, exist_ok=True)
     path = within(root, parent / ("release-" + target))
@@ -483,8 +485,8 @@ def prepare_worktree(root, manifest, target, commit, bundle, origin=None, main_u
         require(not current_origin or current_origin == origin, "Owned clone has a different origin; preserved")
         if not current_origin:
             git(path, "remote", "add", "origin", origin)
-    if main_upload:
-        require(origin, "Main upload requires credential-free canonical origin")
+    if main_context:
+        require(origin, "Main context requires credential-free canonical origin")
         main_exists = git(path, "show-ref", "--verify", "--quiet", "refs/heads/main", check=False).returncode == 0
         if main_exists:
             require(git(path, "merge-base", "--is-ancestor", "refs/heads/main", commit, check=False).returncode == 0,
@@ -530,6 +532,8 @@ def execute_commands(worktree, output, request):
     for phase in request["phases"]:
         for index, argv in enumerate(target["commands"][phase]):
             resolved = interpolate(argv, variables, request["parameters"])
+            if resolved[0] in ("python", "python3", "python.exe", "python3.exe"):
+                resolved[0] = sys.executable
             started = time.monotonic()
             log_path = output.parent / f"{phase}-{index}.log"
             # Drain continuously and retain bounded metadata; never echo logs over SSH.
@@ -620,7 +624,7 @@ def remote_main():
                 git(root, "checkout", "--detach", request["commit"])
             # Check ignored state against pinned source without touching primary index.
             worktree = prepare_worktree(root, manifest, request["target"], request["commit"], bundle, request["origin"],
-                                        request["mode"] == "upload" and target["uploadPolicy"] == "existing-gates")
+                                        request["sourceBranch"] == "main")
             ensure_ignored(worktree, manifest)
             clone_state = within(worktree, worktree / manifest["stateDirectory"])
             new_clone_state = not clone_state.exists()
@@ -774,9 +778,8 @@ def dispatch(root, args, plan):
     clean_source(root)
     require(git(root, "rev-parse", "HEAD").stdout.decode().strip() == plan["commit"],
             "Non-plan requests require selected checkout HEAD to equal --commit; select a clean checkout at that commit")
-    if plan["mode"] == "upload":
-        require(git(root, "symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.decode().strip() == plan["sourceBranch"],
-                "Source branch changed after planning; submit a fresh upload request")
+    actual_branch = git(root, "symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.decode().strip() or None
+    require(actual_branch == plan["sourceBranch"], "Source branch changed after planning; submit a fresh request")
     origin = git(root, "config", "--get", "remote.origin.url", check=False).stdout.decode().strip()
     require(origin and not re.search(r"[\x00-\x20]", origin) and not re.search(r"://[^/]*@", origin),
             "A credential-free origin URL is required for project identity")
