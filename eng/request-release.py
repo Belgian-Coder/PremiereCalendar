@@ -817,7 +817,10 @@ def dispatch(root, args, plan):
     state = within(root, root / plan["manifest"]["stateDirectory"])
     ensure_ignored(root, plan["manifest"])
     check_pinned_ignores(root, plan["commit"], plan["manifest"])
-    state.mkdir(parents=True, exist_ok=True)
+    new_state = not state.exists()
+    if new_state:
+        state.mkdir(parents=True)
+    ownership(state, {"project": plan["manifest"]["project"]}, create=new_state)
     with tempfile.TemporaryDirectory(prefix="transport-", dir=state) as scratch:
         within(state, Path(scratch))
         bundle = Path(scratch) / "source.bundle"
