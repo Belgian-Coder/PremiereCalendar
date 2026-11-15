@@ -27,7 +27,9 @@ function ConvertTo-WslPath([string] $Path) {
 
 function Invoke-HarnessWsl([string] $Script, [switch] $ReturnExitCode) {
     # stdin avoids the Windows -> bash command-line quoting layer.
-    (($Script -replace "`r`n", "`n").TrimEnd() + "`n# end of script") |
+    # An inherited Docker context must never redirect local checks to the NAS.
+    $localEngine = "unset DOCKER_CONTEXT; export DOCKER_HOST=unix:///var/run/docker.sock`n"
+    (($localEngine + $Script -replace "`r`n", "`n").TrimEnd() + "`n# end of script") |
         & wsl.exe -d Ubuntu-24.04 -- bash -s | Out-Host
     # -ReturnExitCode lets a caller report its own failure (for example failed tests) after printing a summary.
     if ($ReturnExitCode) { return [int] $LASTEXITCODE }

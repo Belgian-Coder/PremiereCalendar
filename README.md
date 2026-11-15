@@ -217,9 +217,9 @@ pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Chec
 pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Clean -WhatIf
 ```
 
-After every commit and release, follow the [bounded cleanup checkpoint](AGENTS.md#cleanup-checkpoint).
-It preserves warm caches and evidence; the separate `Clean` reset above is not
-the checkpoint's default action.
+Follow the [development workflow](AGENTS.md#development-workflow) when reviewing
+cleanup. Preserve warm caches and evidence; the separate `Clean` reset above
+requires explicit permission for the exact deletions.
 
 The check fails for unexpected `bin`/`obj`/`TestResults` directories, build output
 over 1.5 GB, or native Development data over 512 MB. Cleanup preserves package

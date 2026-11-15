@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "project": "PremiereCalendar",
+  "stateDirectory": "artifacts/remote-release",
+  "worktreeDirectory": ".wt",
+  "targets": {
+    "nas-linux-amd64": {
+      "host": "windows11-vm",
+      "platform": "windows",
+      "architecture": "x64",
+      "parameters": {
+        "version": {
+          "requiredModes": ["validate", "package"],
+          "pattern": "^[0-9]{1,6}\\.[0-9]{1,6}\\.[0-9]{1,6}$"
+        },
+        "expected-old-version": {
+          "requiredModes": ["validate", "package"],
+          "pattern": "^[0-9]{1,6}\\.[0-9]{1,6}\\.[0-9]{1,6}$"
+        },
+        "expected-old-digest": {
+          "requiredModes": ["validate", "package"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "expected-stack-revision": {
+          "requiredModes": ["validate", "package"],
+          "pattern": "^[1-9][0-9]{0,5}$|^1000000$"
+        }
+      },
+      "commands": {
+        "validate": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "validate", "-Revision", "{commit}", "-Output", "{output}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expected-old-version}", "-ExpectedOldDigest", "{param:expected-old-digest}", "-ExpectedStackRevision", "{param:expected-stack-revision}"]],
+        "package": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "package", "-Revision", "{commit}", "-Output", "{output}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expected-old-version}", "-ExpectedOldDigest", "{param:expected-old-digest}", "-ExpectedStackRevision", "{param:expected-stack-revision}"]],
+        "upload": []
+      },
+      "artifacts": [
+        "release/*/premierecalendar-*.tar",
+        "release/*/build-metadata.json",
+        "release/*/candidate-artifacts.json"
+      ],
+      "uploadPolicy": "unsupported",
+      "notes": [
+        "Artifact is linux/amd64; execution host is Windows x64 with Ubuntu-24.04 WSL and its already-running local Docker engine.",
+        "The exact .NET 11.0.100 SDK comes from the pinned container; no host SDK fallback or Mac/ARM64 release qualification exists.",
+        "Validation runs the canonical unit/component/integration suites once. Separate browser and every production review, backup, scan/SBOM and exact-image runtime gate remain mandatory.",
+        "Required version and installed-baseline parameters initialize a fresh SHA-bound bundle; never fabricate them. Candidate output never means release acceptance.",
+        "Only declared public candidate archives and identity evidence are collected; private bundle data, credentials and caches are excluded.",
+        "No draft upload destination exists. The canonical separately authorized Load-Image.ps1 still targets Portainer on the NAS with all existing gates; this candidate capability never deploys or uploads production artifacts."
+      ]
+    }
+  }
+}

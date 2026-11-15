@@ -20,17 +20,25 @@ Historical evidence (docs/releases/**, dated documents such as *-20261107.md, an
 $EvidenceDocuments) is only checked for broken links and absolute D:\Projects\PremiereCalendar paths; the
 statements in them describe the past.
 
+-SourceOnly permits absent machine-local evidence links in historical documents (artifacts/** and legacy
+PremiereCalendar.Build.* sibling folders). It reports the count explicitly; repository source links, anchors,
+maintained documentation and script references are still checked. The default remains strict.
+
 .EXAMPLE
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-Docs.ps1
 #>
 [CmdletBinding()]
-param()
+param([switch] $SourceOnly)
 
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$rootPrefix = $root.TrimEnd('\') + '\'
+$rootPrefix = $root.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
 # Git-ignored evidence (artifacts/**, sibling build folders) lives only in the primary checkout, not in a worktree.
-$mainRoot = if ($root -match '^(.*)\\(?:\.worktrees|\.wt)\\[^\\]+$') { $Matches[1] } else { $root }
+$common = & git -C $root rev-parse --path-format=absolute --git-common-dir
+if ($LASTEXITCODE -ne 0) { throw 'The documentation check must run from a Git checkout.' }
+$mainRoot = Split-Path -Parent ([IO.Path]::GetFullPath($common))
+$pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+$unavailableEvidence = [Collections.Generic.List[string]]::new()
 
 # Undated documents that record past validation runs or designs; they are checked for links only.
 $EvidenceDocuments = @(
@@ -60,7 +68,8 @@ function Get-HeadingAnchors([string] $MarkdownFile) {
         $slug = ($slug -replace '\s', '-')
         [void]$anchors.Add($slug)
     }
-    $anchors
+    # Preserve the set even when the document has zero or one heading.
+    return ,$anchors
 }
 $anchorCache = @{}
 
@@ -85,18 +94,29 @@ foreach ($file in $markdown) {
             if ($target -match '^(https?:|mailto:|tel:|data:)') { continue }
             $path, $fragment = $target, $null
             if ($target.Contains('#')) { $path, $fragment = $target.Split('#', 2) }
+            $path = [Uri]::UnescapeDataString($path).Replace('\', '/')
+            # Old absolute Windows links refer to this project even in a native Mac checkout.
+            if ($path -match '^D:/Projects/PremiereCalendar/(.*)$') { $path = Join-Path $root $Matches[1] }
             $resolved = if ([string]::IsNullOrEmpty($path)) { $file.FullName }
-                        elseif ($path -match '^[A-Za-z]:[\\/]') { [IO.Path]::GetFullPath($path) }
-                        else { [IO.Path]::GetFullPath((Join-Path $directory ([Uri]::UnescapeDataString($path)))) }
-            if (-not (Test-Path -LiteralPath $resolved) -and $mainRoot -ne $root -and $resolved.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                $resolved = Join-Path $mainRoot $resolved.Substring($rootPrefix.Length)
-            }
-            if (-not (Test-Path -LiteralPath $resolved) -and $mainRoot -ne $root) {
-                # '../../PremiereCalendar.Build.*' from docs/ leaves the worktree; retry relative to the primary checkout.
-                $mainDirectory = Join-Path $mainRoot (Split-Path -Parent $relative)
-                $resolved = [IO.Path]::GetFullPath((Join-Path $mainDirectory ([Uri]::UnescapeDataString($path))))
+                        elseif ([IO.Path]::IsPathRooted($path)) { [IO.Path]::GetFullPath($path) }
+                        else { [IO.Path]::GetFullPath((Join-Path $directory $path)) }
+            $artifactPrefix = Join-Path $root 'artifacts/'
+            $isLocalEvidence = $resolved.StartsWith($artifactPrefix, $pathComparison) -or
+                ($target -match '^\.\./\.\./PremiereCalendar\.Build\.[^/\\]+[/\\]')
+            if (-not (Test-Path -LiteralPath $resolved) -and $mainRoot -ne $root -and $isLocalEvidence) {
+                if ($resolved.StartsWith($rootPrefix, $pathComparison)) {
+                    $resolved = Join-Path $mainRoot $resolved.Substring($rootPrefix.Length)
+                } else {
+                    # '../../PremiereCalendar.Build.*' from docs/ leaves the worktree; retry relative to the primary checkout.
+                    $mainDirectory = Join-Path $mainRoot (Split-Path -Parent $relative)
+                    $resolved = [IO.Path]::GetFullPath((Join-Path $mainDirectory $path))
+                }
             }
             if (-not (Test-Path -LiteralPath $resolved)) {
+                if ($SourceOnly -and $isEvidence -and $isLocalEvidence) {
+                    $unavailableEvidence.Add("${relative}:${number}: $target")
+                    continue
+                }
                 Add-Problem $file.FullName $number "broken link target '$target'"
                 continue
             }
@@ -168,6 +188,9 @@ foreach ($script in $scripts) {
     }
 }
 
+if ($unavailableEvidence.Count -gt 0) {
+    Write-Warning "$($unavailableEvidence.Count) machine-local historical evidence links unavailable; -SourceOnly does not verify those results. Omit -SourceOnly for the strict check."
+}
 if ($errors.Count -gt 0) {
     $errors | ForEach-Object { Write-Host $_ -ForegroundColor Red }
     throw "$($errors.Count) documentation problem(s) found."

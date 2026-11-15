@@ -49,6 +49,27 @@
   it requires explicit permission for those exact deletions; inspect `-WhatIf`
   first. Never clean a sibling directory or remove credentials.
 
+## Cross-host checks
+
+- Keep editable source in native host folders. Use native PowerShell 7, Git,
+  Python 3 and Bash for the static checks in `docs/Testing.md#portable-static-checks`.
+  These checks require neither a .NET SDK nor a running service. On a fresh
+  host, `eng/Test-Docs.ps1 -SourceOnly` explicitly reports unavailable historical
+  machine-local evidence; the default documentation check remains strict.
+- Application builds, PostgreSQL tests and release acceptance still use the
+  supported Linux containers. Windows helpers require Ubuntu-24.04 WSL and an
+  already running local engine. They pin the local Docker socket, ignoring an
+  inherited remote context. Never replace container acceptance with native SDK
+  compilation, even when a host has the exact SDK.
+- macOS ARM64 currently supports the static lane only. The WSL helpers and NAS
+  release scripts are not a Mac execution backend; do not invent ARM64 release,
+  signing or browser acceptance. Use an approved Windows builder for the
+  existing linux/amd64 release artifact.
+- Share only committed source across hosts. Keep mutable outputs, test results,
+  databases, credentials and package caches on their owning host/worktree;
+  keep OS/architecture caches separate. Do not copy another host's `artifacts`,
+  `.secrets`, `.local-data` or ignored prototype worktrees.
+
 ## Development workflow
 
 Use `.wt/<task>` on a `feature/` branch for concurrent writers. Name each

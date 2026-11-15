@@ -8,12 +8,14 @@ Static check that works from any folder. PowerShell files are parsed with the Po
 Python files are compiled in memory (nothing is written next to the sources). Also fails when a script that
 must stay LF (*.py, *.sh, *.sql) contains CRLF, because those files run inside Linux containers and WSL.
 Files ignored by git (scratch folders, artifacts, build output) are skipped.
+Python sources are compiled in one isolated interpreter invocation. -PythonExecutable may name an existing
+Python 3 interpreter outside PATH; this check never installs an interpreter or SDK.
 
 .EXAMPLE
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-ScriptSyntax.ps1
 #>
 [CmdletBinding()]
-param()
+param([string] $PythonExecutable)
 
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -22,8 +24,8 @@ $names = (& git -C $root ls-files -z --cached --others --exclude-standard) -spli
 if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed.' }
 $files = @($names | ForEach-Object { Join-Path $root $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Get-Item)
 $problems = [Collections.Generic.List[string]]::new()
-$python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+$python = if ($PythonExecutable) { Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop }
+          else { Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
 $pyChecked = 0
 $psChecked = 0
 
@@ -37,15 +39,33 @@ foreach ($file in $files) {
             foreach ($e in $parseErrors) { $problems.Add("${relative}:$($e.Extent.StartLineNumber): $($e.Message)") }
         }
         '.py' {
-            if (-not $python) { $problems.Add("${relative}: python is not available to check this file"); break }
             $pyChecked++
-            $code = 'import sys; compile(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1], "exec")'
-            $output = & $python.Source -I -c $code $file.FullName 2>&1
-            if ($LASTEXITCODE -ne 0) { $problems.Add("${relative}: $($output -join ' ')") }
         }
     }
     if ($file.Extension -in '.py', '.sh', '.sql') {
         if ([IO.File]::ReadAllText($file.FullName).Contains("`r")) { $problems.Add("${relative}: contains CR characters; it must be LF") }
+    }
+}
+
+if ($pyChecked -gt 0) {
+    if (-not $python) {
+        $problems.Add("Python 3 is required to check $pyChecked Python files. Put it on PATH or pass -PythonExecutable <existing-interpreter>; no Python checks ran.")
+    } else {
+        $code = @'
+import json, sys
+failed = False
+for path in json.load(sys.stdin):
+    try:
+        with open(path, encoding="utf-8") as source:
+            compile(source.read(), path, "exec")
+    except (SyntaxError, UnicodeError, OSError) as error:
+        print(f"{path}: {error}")
+        failed = True
+sys.exit(1 if failed else 0)
+'@
+        $pythonFiles = @($files | Where-Object Extension -eq '.py' | ForEach-Object FullName)
+        $output = ConvertTo-Json -InputObject $pythonFiles -Compress | & $python.Source -I -c $code 2>&1
+        if ($LASTEXITCODE -ne 0) { $problems.Add("Python syntax check failed: $($output -join ' ')") }
     }
 }
 

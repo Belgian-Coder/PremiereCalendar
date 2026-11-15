@@ -55,6 +55,34 @@ The bundle is `D:\Projects\PremiereCalendar\artifacts\release\<bundle name>` (gi
 
 ## Before you start
 
+### Candidate adapter
+
+`eng/release/Invoke-Candidate.ps1` exposes the existing linux/amd64 build to the
+shared request client through `eng/release-targets.json`. Its execution host is
+Windows x64 with the supported Ubuntu-24.04 WSL engine; the artifact platform
+does not imply native Windows or Mac binaries.
+
+Pass an exact committed SHA, target `linux-amd64`, and an absolute fresh request
+directory under this checkout's ignored artifacts directory. `-Mode plan` or
+`-WhatIf` previews without network calls or writes. Execution requires the real
+`-Version`, `-ExpectedOldVersion`, `-ExpectedOldDigest` and
+`-ExpectedStackRevision`; the adapter initializes a uniquely named canonical
+bundle inside the request output and binds it to those parameters and the SHA.
+Do not infer an installed baseline from historical notes.
+
+`validate` calls `Invoke-ReleaseTests.ps1` once. `package` calls `Build-Image.ps1`
+and writes `candidate-artifacts.json` with the archive hash, size, source revision
+and image identity. Both phases share the same request output and lock; package
+does not rerun validation. A retry uses a fresh request directory. Only the
+declared public candidate archive and identity manifests are eligible for
+collection; private evidence and credentials stay on their owner host.
+
+These are candidate operations: the manifest states that release acceptance and
+upload have not occurred. Every browser, source review, backup, vulnerability,
+SBOM, database and exact-image runtime gate remains required before production.
+Candidate upload is unsupported because no draft destination exists. The
+separately authorized production load/deploy runbook below remains unchanged.
+
 1. Finish and commit the release, including `docs\releases\<version>.md` (the notes are never generated from inferred metrics). The installed-acceptance section is added in the closure commit afterwards; do not edit notes or docs between the release commit and `Close-Release.ps1`, because the gates re-validate the working tree against the commit.
 2. Collect the facts about what is installed now: the version, the image configuration digest pinned in the live stack (`sha256:...`), the Portainer stack revision (StackFileVersion), and the source revision of the installed build. The old digest must appear exactly once in the stack file.
 3. Choose the version, bundle name (the version, or `<version>-candidate2` for a retry) and a resource prefix that has not been used (the default is derived from the bundle name).

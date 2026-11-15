@@ -117,6 +117,44 @@ Every test case runs in parallel (`ParallelMode.All`, see `tests/*/AssemblyConfi
 
 ## Scoped feedback and output ownership
 
+### Portable static checks
+
+Run these from the native checkout on WINDOWS11-VM, PC-MARC or MacBook-Pro
+ARM64 with PowerShell 7 and Git. Python 3 is required for Python syntax checks;
+Bash (Git Bash on Windows) enables the intercepted shell lifecycle checks.
+No SDK, WSL, Docker daemon, credentials or database is required. Commands below
+use relative paths from the repository root; the scripts also work by absolute
+path from any folder.
+
+```powershell
+pwsh -NoProfile -File ./tests/Harness.Tests.ps1
+pwsh -NoProfile -File ./tests/ValidationTools.Tests.ps1
+pwsh -NoProfile -File ./eng/Test-ScriptSyntax.ps1
+pwsh -NoProfile -File ./eng/Test-Docs.ps1 -SourceOnly
+git diff --check
+```
+
+The syntax checker compiles all Python files in one isolated interpreter process
+without writing bytecode. Pass `-PythonExecutable <existing-Python-3-path>` to it
+or `ValidationTools.Tests.ps1` if Python is not on PATH. Missing Python fails the
+syntax check; it never falls back to another SDK or installs anything.
+
+The default documentation check remains strict. `-SourceOnly` permits unavailable
+machine-local evidence links only in historical records, reports their count,
+and continues checking source files, anchors, maintained documents and script
+references. It does not establish that the historical tests ran. Use the strict
+check on the evidence-owning host when checking those links is required.
+
+macOS ARM64 execution has not been qualified. Static checks are suitable for
+that host, but the WSL build/test helpers and release scripts require a Windows
+builder. The accepted release platform is linux/amd64; a native Mac build or an
+emulated container is not independently established release acceptance. Keep
+editable source native and retain writable caches/results on their owning
+host and worktree, separated by OS/architecture. The existing container caches
+and old WSL prototype remain in place.
+
+### Scoped application checks
+
 ```powershell
 # Check the harness itself without SDK, PostgreSQL, Docker or WSL.
 pwsh -NoProfile -File D:\Projects\PremiereCalendar\tests\Harness.Tests.ps1

@@ -37,9 +37,11 @@ function global:wsl.exe {
     $global:HarnessWslCalls++
     if ($CommandArguments -contains 'wslpath') {
         $path = $CommandArguments[-1]
-        if ($path -notmatch '^([A-Za-z]):/(.*)$') { throw "Unexpected mock path: $path" }
-        $drive = $Matches[1].ToLowerInvariant(); $relative = $Matches[2]
-        "/mnt/$drive/$relative"
+        if ($path -match '^([A-Za-z]):/(.*)$') {
+            $drive = $Matches[1].ToLowerInvariant(); $relative = $Matches[2]
+            "/mnt/$drive/$relative"
+        } elseif ($path.StartsWith('/')) { $path }
+        else { throw "Unexpected mock path: $path" }
     } elseif ($CommandArguments -contains '-s') {
         $global:HarnessCapturedScripts.Add(($input -join "`n"))
     } else { throw 'Unexpected WSL operation.' }
@@ -79,6 +81,9 @@ try {
     Assert-Harness ($global:HarnessCapturedScripts.Count -eq 2) 'Expected two intercepted bash scripts.'
     $checkScript = $global:HarnessCapturedScripts[0]
     $testScript = $global:HarnessCapturedScripts[1]
+    foreach ($captured in @($checkScript, $testScript)) {
+        Assert-Harness ($captured.StartsWith('unset DOCKER_CONTEXT; export DOCKER_HOST=unix:///var/run/docker.sock')) 'Docker calls can inherit a remote context.'
+    }
     Assert-Harness ($checkScript -match 'flock -n 9' -and $testScript -match 'flock -n 9') 'Check/test output locking is missing.'
     Assert-Harness ($testScript -match 'trap cleanup EXIT') 'Disposable resource cleanup is missing.'
     Assert-Harness ($testScript -notmatch '/tmp/pcpg-env') 'Test credentials escaped into WSL host temp files.'
@@ -88,8 +93,11 @@ try {
     Assert-Harness ($inner.Contains('exe="/build/bin/$name/release/$name"') -and $inner.Contains('for suite in Component; do') -and $inner.Contains('-result-ctrf')) 'Test executables are not run directly with TRX/CTRF results.'
     Assert-Harness ($inner.Contains('NO TESTS RAN')) 'A filter that matches no test is reported as a pass.'
     Assert-Harness ($testScript -match 'artifacts/build/linux' -and $testScript -match 'ArtifactsPath=/build') 'Container build state is not this checkout''s artifacts/build/linux.'
-    $bash = Join-Path $env:ProgramFiles 'Git/bin/bash.exe'
-    if (Test-Path -LiteralPath $bash) {
+    $bash = if ($IsWindows) { Join-Path $env:ProgramFiles 'Git/bin/bash.exe' } else {
+        $bashCommand = Get-Command bash -ErrorAction SilentlyContinue
+        if ($bashCommand) { $bashCommand.Source }
+    }
+    if ($bash -and (Test-Path -LiteralPath $bash)) {
         foreach ($shellScript in @($checkScript, $testScript, $inner)) {
             ($shellScript -replace "`r`n", "`n") | & $bash -n
             Assert-Harness ($LASTEXITCODE -eq 0) 'Generated bash failed syntax validation.'
@@ -99,9 +107,9 @@ try {
         foreach ($expectedExit in @(0, 7)) {
             $sandbox = Join-Path $root ('artifacts/harness-tests/lifecycle-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
-            $linuxSandbox = '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/')
-            $linuxRoot = '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/')
-            $linuxPackages = '/mnt/' + $context.PackageRoot.Substring(0, 1).ToLowerInvariant() + '/' + ($context.PackageRoot.Substring(3) -replace '\\', '/')
+            $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
+            $linuxRoot = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }
+            $linuxPackages = if ($IsWindows) { '/mnt/' + $context.PackageRoot.Substring(0, 1).ToLowerInvariant() + '/' + ($context.PackageRoot.Substring(3) -replace '\\', '/') } else { $context.PackageRoot }
             $simulation = $testScript.Replace($linuxPackages, "$linuxSandbox/packages").Replace($linuxRoot, $linuxSandbox)
             $dockerDouble = @"
 flock() { return 0; }
@@ -119,7 +127,7 @@ docker() {
             # The sandbox is this test's own: remove it so repeated runs leave nothing behind.
             if ($sandbox.StartsWith((Join-Path $root 'artifacts/harness-tests') + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $sandbox -Recurse -Force }
         }
-    } else { Write-Warning 'Git Bash is absent: generated bash syntax validation was not performed.' }
+    } else { Write-Warning 'Bash is absent: generated bash syntax and lifecycle validation were not performed.' }
 } finally {
     Remove-Item Function:\wsl.exe
     Remove-Variable HarnessCapturedScripts, HarnessWslCalls -Scope Global
