@@ -83,6 +83,21 @@ SBOM, database and exact-image runtime gate remains required before production.
 Candidate upload is unsupported because no draft destination exists. The
 separately authorized production load/deploy runbook below remains unchanged.
 
+The vendored `eng/request-release.py` client uses Python 3.10 or newer with only
+the standard library. Run an offline plan from this checkout with:
+
+```powershell
+python eng/request-release.py --target nas-linux-amd64 --mode plan
+```
+
+The plan reads the manifest from the selected committed SHA, prints any missing
+parameters and makes no SSH request or filesystem changes. Actual candidate
+requests require declared nonsecret parameters `version`, `expectedOldVersion`,
+`expectedOldDigest` and `expectedStackRevision`, passed as repeated
+`--parameter NAME=VALUE` arguments. These map to the existing PowerShell argument
+names above. Schedule execution with the coordinating owner; a plan is not
+permission to start a remote build or contact production.
+
 1. Finish and commit the release, including `docs\releases\<version>.md` (the notes are never generated from inferred metrics). The installed-acceptance section is added in the closure commit afterwards; do not edit notes or docs between the release commit and `Close-Release.ps1`, because the gates re-validate the working tree against the commit.
 2. Collect the facts about what is installed now: the version, the image configuration digest pinned in the live stack (`sha256:...`), the Portainer stack revision (StackFileVersion), and the source revision of the installed build. The old digest must appear exactly once in the stack file.
 3. Choose the version, bundle name (the version, or `<version>-candidate2` for a retry) and a resource prefix that has not been used (the default is derived from the bundle name).

@@ -84,6 +84,28 @@ try {
     $count++
     Assert-Rejected { & $candidate -Target linux-amd64 -Mode upload -Revision $revision -Output $candidateOutput } '*Candidate upload is unsupported*'
     Assert-Rejected { & $candidate -Target linux-amd64 -Mode package -Revision $revision -Output $root } '*Output must stay*'
+    if ($python) {
+        # The vendored contract validates the repository-owned manifest and declared placeholders.
+        # Import without bytecode and never invoke dispatch/SSH from this static regression.
+        $client = Join-Path $root 'eng/request-release.py'
+        $manifest = Join-Path $root 'eng/release-targets.json'
+        $contractCheck = @'
+import runpy, sys
+from pathlib import Path
+client = runpy.run_path(sys.argv[1], run_name="contract_test")
+manifest = client["load_manifest"](Path(sys.argv[2]).read_bytes())
+target = manifest["targets"]["nas-linux-amd64"]
+assert set(target["parameters"]) == {"version", "expectedOldVersion", "expectedOldDigest", "expectedStackRevision"}
+assert target["uploadPolicy"] == "unsupported" and target["commands"]["upload"] == []
+for phase in ("validate", "package"):
+    argv = client["interpolate"](target["commands"][phase][0], {"commit": "a" * 40, "output": "fixture-output", "target": "nas-linux-amd64", "jobs": "2"}, {"version": "0.0.2", "expectedOldVersion": "0.0.1", "expectedOldDigest": "sha256:" + "b" * 64, "expectedStackRevision": "1"})
+    assert argv[argv.index("-ExpectedOldVersion") + 1] == "0.0.1"
+    assert argv[argv.index("-ExpectedStackRevision") + 1] == "1"
+'@
+        & $python.Source -I -B -c $contractCheck $client $manifest
+        if ($LASTEXITCODE -ne 0) { throw 'Release manifest does not satisfy the shared client contract.' }
+        $count++
+    }
     Write-Host "$count validation-tool checks passed; fixtures stayed inside this worktree's artifacts."
 } finally {
     $absolute = [IO.Path]::GetFullPath($sandbox)

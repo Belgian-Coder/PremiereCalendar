@@ -13,22 +13,22 @@
           "requiredModes": ["validate", "package"],
           "pattern": "^[0-9]{1,6}\\.[0-9]{1,6}\\.[0-9]{1,6}$"
         },
-        "expected-old-version": {
+        "expectedOldVersion": {
           "requiredModes": ["validate", "package"],
           "pattern": "^[0-9]{1,6}\\.[0-9]{1,6}\\.[0-9]{1,6}$"
         },
-        "expected-old-digest": {
+        "expectedOldDigest": {
           "requiredModes": ["validate", "package"],
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
-        "expected-stack-revision": {
+        "expectedStackRevision": {
           "requiredModes": ["validate", "package"],
           "pattern": "^[1-9][0-9]{0,5}$|^1000000$"
         }
       },
       "commands": {
-        "validate": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "validate", "-Revision", "{commit}", "-Output", "{output}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expected-old-version}", "-ExpectedOldDigest", "{param:expected-old-digest}", "-ExpectedStackRevision", "{param:expected-stack-revision}"]],
-        "package": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "package", "-Revision", "{commit}", "-Output", "{output}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expected-old-version}", "-ExpectedOldDigest", "{param:expected-old-digest}", "-ExpectedStackRevision", "{param:expected-stack-revision}"]],
+        "validate": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "validate", "-Revision", "{commit}", "-Output", "{output}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expectedOldVersion}", "-ExpectedOldDigest", "{param:expectedOldDigest}", "-ExpectedStackRevision", "{param:expectedStackRevision}"]],
+        "package": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "package", "-Revision", "{commit}", "-Output", "{output}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expectedOldVersion}", "-ExpectedOldDigest", "{param:expectedOldDigest}", "-ExpectedStackRevision", "{param:expectedStackRevision}"]],
         "upload": []
       },
       "artifacts": [
