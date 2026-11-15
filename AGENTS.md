@@ -72,9 +72,11 @@ no other writer can race the formatter. There are no fixed story quotas, model
 lanes, review counts, time/cost reports or mandatory cleanup JSON receipts.
 Full CI is not an automatic per-commit or per-push local requirement.
 Operational approval, data compatibility, signing, safety and release gates
-remain required. Both Codex and Claude Code use the PC-managed administrator
-launch policy only for the twelve approved project roots and their `.wt`
-worktrees; do not install or declare elevation in project configuration.
+remain required. Both Codex and Claude Code use the PC-managed default
+administrator launch policy for Git projects whose primary roots are direct
+children of D:\Projects, including future projects and their registered .wt
+worktrees. No fixed project allowlist or per-project setup is required; do not
+install or declare elevation in project configuration.
 
 Preserve warm dependencies and OS/cache isolation. Remove only proven task-owned
 disposable files and clean, pushed worktrees after reviewing ignored contents
