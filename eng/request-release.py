@@ -426,6 +426,30 @@ def ownership(path, identity, create=False):
             json.dump(expected, stream, sort_keys=True)
 
 
+def exclude_owner_marker(path):
+    # Called only for newly created native roots or verified task-owned clones.
+    # Never alter an existing primary repository's excludes.
+    excludes = within(path, path / ".git" / "info" / "exclude")
+    excludes.parent.mkdir(exist_ok=True)
+    existing = excludes.read_text("utf-8") if excludes.exists() else ""
+    if "/.request-release-owner.json" not in existing.splitlines():
+        with excludes.open("a", encoding="utf-8") as stream:
+            stream.write("\n/.request-release-owner.json\n")
+
+
+def validate_origin(origin):
+    require(isinstance(origin, str) and origin and not re.search(r"[\x00-\x20]", origin) and not re.search(r"://[^/]*@", origin),
+            "A credential-free origin URL is required for project identity")
+
+
+def validate_source_branch(branch):
+    if branch is None:
+        return
+    require(isinstance(branch, str) and branch and branch != "HEAD" and not re.search(r"[\x00-\x20]", branch), "Invalid source branch")
+    checked = run(["git", "check-ref-format", "--branch", branch], check=False)
+    require(checked.returncode == 0 and checked.stdout.strip() == branch.encode("utf-8"), "Invalid named Git source branch")
+
+
 def read_exact(stream, size, destination=None):
     remaining = size
     chunks = []
@@ -470,13 +494,7 @@ def prepare_worktree(root, manifest, target, commit, bundle, origin=None, main_c
         path.mkdir()
         git(path, "init")
         ownership(path, identity, create=True)
-    excludes = within(path, path / ".git" / "info" / "exclude")
-    excludes.parent.mkdir(exist_ok=True)
-    existing_excludes = excludes.read_text("utf-8") if excludes.exists() else ""
-    if "/.request-release-owner.json" not in existing_excludes.splitlines():
-        # Only this independently owned clone; never the primary repository.
-        with excludes.open("a", encoding="utf-8") as stream:
-            stream.write("\n/.request-release-owner.json\n")
+    exclude_owner_marker(path)
     git(path, "fetch", "--no-tags", "--no-write-fetch-head", str(bundle), "refs/heads/request-release-source")
     require(not git(path, "ls-tree", "--name-only", commit, ".request-release-owner.json").stdout,
             "Pinned source must not track the workspace ownership marker")
@@ -522,11 +540,14 @@ def collect_artifacts(output, patterns):
     return sorted(results, key=lambda artifact: artifact["path"])
 
 
-def execute_commands(worktree, output, request):
+def execute_commands(worktree, output, request, project_root):
     results = []
+    original_root = Path(project_root).resolve()
+    require(Path(worktree).resolve().is_relative_to(original_root), "Execution clone is outside the validated native project root")
     temporary = within(worktree, output.parent / "tmp")
     temporary.mkdir(exist_ok=True)
-    environment = dict(os.environ, TMPDIR=str(temporary), TEMP=str(temporary), TMP=str(temporary))
+    environment = dict(os.environ, TMPDIR=str(temporary), TEMP=str(temporary), TMP=str(temporary),
+                       BUILD_RELEASE_PROJECT_ROOT=str(original_root))
     variables = {"output": str(output), "target": request["target"], "commit": request["commit"], "jobs": str(request["jobs"])}
     target = request["manifest"]["targets"][request["target"]]
     for phase in request["phases"]:
@@ -565,6 +586,8 @@ def remote_main():
     require(isinstance(request, dict), "Invalid request")
     require(sys.version_info >= (3, 10), "Python >=3.10 is required on the execution host")
     require(request["executionContext"] in ("current", "console"), "Invalid execution context")
+    validate_origin(request["origin"])
+    validate_source_branch(request["sourceBranch"])
     manifest = load_manifest(json_bytes(request["manifest"]))
     require(request["host"] in HOSTS and request["target"] in manifest["targets"], "Invalid request target")
     target = manifest["targets"][request["target"]]
@@ -621,7 +644,14 @@ def remote_main():
             require(pinned == manifest, "Manifest differs from pinned source")
             check_pinned_ignores(root, request["commit"], manifest)
             if created:
-                git(root, "checkout", "--detach", request["commit"])
+                require(not git(root, "ls-tree", "--name-only", request["commit"], ".request-release-owner.json").stdout,
+                        "Pinned source must not track the workspace ownership marker")
+                git(root, "remote", "add", "origin", request["origin"])
+                exclude_owner_marker(root)
+                if request["sourceBranch"]:
+                    git(root, "checkout", "-b", request["sourceBranch"], request["commit"])
+                else:
+                    git(root, "checkout", "--detach", request["commit"])
             # Check ignored state against pinned source without touching primary index.
             worktree = prepare_worktree(root, manifest, request["target"], request["commit"], bundle, request["origin"],
                                         request["sourceBranch"] == "main")
@@ -635,7 +665,7 @@ def remote_main():
             output = clone_run / "output"
             output.mkdir()
             started = time.monotonic()
-            commands, code = execute_commands(worktree, output, request)
+            commands, code = execute_commands(worktree, output, request, root)
             within(worktree, output)
             artifacts = collect_artifacts(output, target["artifacts"]) if code == 0 else []
             require(code != 0 or request["mode"] == "validate" or artifacts,
@@ -781,8 +811,7 @@ def dispatch(root, args, plan):
     actual_branch = git(root, "symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.decode().strip() or None
     require(actual_branch == plan["sourceBranch"], "Source branch changed after planning; submit a fresh request")
     origin = git(root, "config", "--get", "remote.origin.url", check=False).stdout.decode().strip()
-    require(origin and not re.search(r"[\x00-\x20]", origin) and not re.search(r"://[^/]*@", origin),
-            "A credential-free origin URL is required for project identity")
+    validate_origin(origin)
     # Copy only the credential-free identity; the owned clone's canonical uploader
     # remains responsible for authenticated upstream fetch and branch validation.
     state = within(root, root / plan["manifest"]["stateDirectory"])
