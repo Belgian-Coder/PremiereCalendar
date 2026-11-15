@@ -203,6 +203,7 @@ if ($Plan) {
         RunnerArguments = $runner.ToArray()
         BuildStorage = if ($FreshBuild) { 'container-local (discarded)' } elseif ($BuildVolume) { $BuildVolume } else { $buildRoot }
         PackageStorage = if ($NugetVolume) { $NugetVolume } else { $context.PackageRoot }
+        NugetScratch = '/root/.nuget/packages/.scratch'
         Results = $resultsHost
         PostgreSqlImage = $postgresImage
         DevImage = $DevImage
@@ -302,7 +303,7 @@ done
 [ "`$ready" = 1 ] || { echo 'Disposable PostgreSQL did not become ready.' >&2; docker logs --tail 40 '$server' >&2 || true; exit 24; }
 docker run --rm --name '$runnerName' --network '$network' --cpus=$Cpus -v $(ConvertTo-BashLiteral $wslRoot):/src \
   -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -w /src \
-  -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+  -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
   -e PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE=/tmp/pc-test-postgres-password \
   -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' '$DevImage' sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s' </dev/null

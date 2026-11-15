@@ -96,6 +96,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
         Assert.True(built >= 1);
 
         await factory.DisposeAsync();
+        Assert.Equal(built, DatabaseConnectionFactory.DisposedFor(database.AppOptions));
 
         // The host removed its cached data source after its hosted services stopped, so the next use builds a new one.
         using var connection = DatabaseConnectionFactory.Create(database.AppOptions);

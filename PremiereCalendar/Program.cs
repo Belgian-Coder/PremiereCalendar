@@ -78,8 +78,10 @@ builder.Services
 
 var app = builder.Build();
 // Dispose this host's PostgreSQL pools only after every hosted service has stopped using them.
+// The service provider can already be disposed when ApplicationStopped callbacks run.
+var databaseOptionsForShutdown = app.Services.GetRequiredService<IOptions<AppDatabaseOptions>>().Value;
 app.Lifetime.ApplicationStopped.Register(() =>
-    DatabaseConnectionFactory.Dispose(app.Services.GetRequiredService<IOptions<AppDatabaseOptions>>().Value));
+    DatabaseConnectionFactory.Dispose(databaseOptionsForShutdown));
 app.Lifetime.ApplicationStarted.Register(() =>
     app.Services.GetRequiredService<PremiereTelemetry>().RecordDiagnostic("diagnostics.started",
         details: new() { Stage = "startup", Outcome = "running" }));

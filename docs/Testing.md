@@ -131,6 +131,7 @@ pwsh -NoProfile -File ./tests/Harness.Tests.ps1
 pwsh -NoProfile -File ./tests/ValidationTools.Tests.ps1
 pwsh -NoProfile -File ./eng/Test-ScriptSyntax.ps1
 pwsh -NoProfile -File ./eng/Test-Docs.ps1 -SourceOnly
+python -B ./tests/test_source_fingerprints.py
 git diff --check
 ```
 
@@ -145,6 +146,16 @@ interpreters versus 0.060113 seconds in one batch (72.02% less compiler-phase
 time; medians of five alternating warm samples, no cache clearing). Source
 hashes stayed unchanged and malformed-file/no-bytecode regression checks passed.
 This measures static compilation startup only, not application or release speed.
+
+The source fingerprint gate also batches exact committed C# reads through one
+Git process. On the same PC-MARC source `9210b3283e5aeb24c982853cdf4a6e8337cf582a`,
+three alternating warm verification samples over 544 fingerprints and 401 C#
+blobs had medians of 10.441452 seconds before and 0.265914 seconds after (97.45%
+less source-check time). Output matched byte-for-byte; all native SHA-256,
+committed blob, inventory, clean-source and LF guards remain. The batch reader
+checks frame sizes, separators and object identity and rejects duplicate paths.
+Its 28 regressions cover valid and malformed source/frames. This is a measured
+source-verification improvement, not a 97% end-to-end build claim.
 
 The default documentation check remains strict. `-SourceOnly` permits unavailable
 machine-local evidence links only in historical records, reports their count,
@@ -192,6 +203,16 @@ For a native Windows source checkout, the canonical release test runner also
 forwards `-BuildVolume` and `-NugetVolume`: use task-owned Linux/amd64 Docker
 volumes to keep writable Linux state on the WSL engine's ext4 filesystem. Keep
 musl service output and glibc browser output in distinct build volumes.
+
+Every supplied container consumer of a shared Linux package cache (test runner,
+scoped check and Compose watcher) sets `NUGET_SCRATCH` to
+`/root/.nuget/packages/.scratch` inside that same cache mount. Thus the package
+downloads and extraction locks share one namespace, including a `-NugetVolume`
+override. Ordinary build outputs and test/application temporary files remain
+isolated. All concurrent consumers of a package cache must use this mapping;
+do not start an older watcher with isolated NuGet locks beside a new restore.
+Do not restart someone else's stack to adopt it. This follows
+[NuGet's shared-cache coordination requirement](https://learn.microsoft.com/en-us/nuget/consume-packages/managing-the-global-packages-and-cache-folders).
 
 The default helper covers unit, component and integration projects. Browser tests are opt-in (`-Project Browser -DevImage <prepared-image>`): the Alpine SDK development image does not include compatible Playwright browsers. Use the established prepared browser environment, run after service tests (not alongside them), and retain all timing/assertion budgets. Never report default tests as complete browser acceptance. There is no npm toolchain in this Blazor project.
 

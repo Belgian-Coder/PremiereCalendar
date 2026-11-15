@@ -61,7 +61,7 @@ $commands = @{
     up = "$compose up --build -d --wait"
     down = "$compose down"
     build = "$compose build"
-    check = "docker run --rm --cpus=4 -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages premierecalendar-dev-app:latest dotnet build $projectPath -c Release --nologo"
+    check = "docker run --rm --cpus=4 -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch premierecalendar-dev-app:latest dotnet build $projectPath -c Release --nologo"
     logs = "$compose logs --tail=200 app database"
     reset = "$compose down --volumes --remove-orphans"
 }

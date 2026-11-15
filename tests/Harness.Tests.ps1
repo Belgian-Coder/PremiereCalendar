@@ -60,6 +60,8 @@ try {
     $query = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -QueryFilter '/*/*/PostgresResponseCacheTests/*' -RunnerArguments:-longRunning,30 -FreshBuild -NoRestore -Plan
     $viaDocker = & (Join-Path $root 'eng/wsl-docker.ps1') test -Project Unit -Filter ViewSync -Plan
     $bounded = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project All -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -Plan
+    $sharedCacheA = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -NugetVolume fixture-linux-amd64-nuget -Plan
+    $sharedCacheB = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Component -NugetVolume fixture-linux-amd64-nuget -NoRuntimeAsync -Plan
     Assert-Harness ($global:HarnessWslCalls -eq 0) '-Plan invoked WSL.'
     Assert-Harness ($plan.Projects.Count -eq 1 -and $plan.Projects[0] -eq 'ComponentTests') 'Scoped project selection changed.'
     Assert-Harness ($plan.RunnerArguments -contains $runnerFilter) 'The exact filter was not preserved.'
@@ -72,6 +74,8 @@ try {
     Assert-Harness ($query.BuildArguments -contains '--no-restore' -and $query.BuildStorage -like 'container-local*') '-NoRestore / -FreshBuild regressed.'
     Assert-Harness ($viaDocker.Projects.Count -eq 1 -and $viaDocker.Projects[0] -eq 'UnitTests' -and $viaDocker.RunnerArguments -contains '*ViewSync*') 'wsl-docker test no longer forwards -Project/-Filter.'
     Assert-Harness ($bounded.Projects.Count -eq 4 -and $bounded.Cpus -eq 3 -and $bounded.BuildArguments -contains '-maxcpucount:3' -and $bounded.RunnerArguments -contains '3') 'Worker budgets changed the complete suite roster or were not propagated.'
+    Assert-Harness ($sharedCacheA.PackageStorage -eq $sharedCacheB.PackageStorage -and $sharedCacheA.NugetScratch -eq $sharedCacheB.NugetScratch -and $sharedCacheA.NugetScratch -eq $plan.NugetScratch) 'Shared named packages use different extraction-lock namespaces.'
+    Assert-Harness ($check.Command.Contains("NUGET_SCRATCH=$($plan.NugetScratch)")) 'Scoped checks and default shared packages use different extraction-lock namespaces.'
     Assert-Harness ($plan.BuildStorage -eq $context.BuildRoot) 'Check build state left artifacts/build/linux.'
     $rejected = $false
     try { & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Filter 'FullyQualifiedName~A&Name~B' -Plan | Out-Null } catch { $rejected = $true }
@@ -85,7 +89,10 @@ try {
     $testScript = $global:HarnessCapturedScripts[1]
     foreach ($captured in @($checkScript, $testScript)) {
         Assert-Harness ($captured.StartsWith('unset DOCKER_CONTEXT; export DOCKER_HOST=unix:///var/run/docker.sock')) 'Docker calls can inherit a remote context.'
+        Assert-Harness ($captured.Contains('NUGET_SCRATCH=/root/.nuget/packages/.scratch')) 'Shared NuGet packages have isolated extraction locks.'
     }
+    $compose = Get-Content -LiteralPath (Join-Path $root 'compose.dev.yaml') -Raw
+    Assert-Harness ($compose -match 'NUGET_SCRATCH: /root/\.nuget/packages/\.scratch') 'Development restores do not share the package-cache lock namespace.'
     Assert-Harness ($checkScript -match 'flock -n 9' -and $testScript -match 'flock -n 9') 'Check/test output locking is missing.'
     Assert-Harness ($testScript -match 'trap cleanup EXIT') 'Disposable resource cleanup is missing.'
     Assert-Harness ($testScript -notmatch '/tmp/pcpg-env') 'Test credentials escaped into WSL host temp files.'

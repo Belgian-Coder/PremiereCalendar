@@ -72,8 +72,52 @@ def freeze(args):
     print(json.dumps({'fingerprinted': len(fingerprints), 'csharp': sum(n.endswith('.cs') for n in fingerprints), 'revision': head}))
 
 
+def committed_csharp(repo, revision):
+    """Read exact committed C# blobs through one Git batch, preserving binary bytes."""
+    expected = {}
+    for entry in git(repo, 'ls-tree', '-r', '-z', revision).split(b'\0'):
+        if not entry:
+            continue
+        metadata, path = entry.split(b'\t', 1)
+        if path.endswith(b'.cs'):
+            fields = metadata.split()
+            if len(fields) != 3 or fields[1] != b'blob':
+                raise SystemExit('Committed C# source is not a Git blob')
+            name = path.decode('utf-8')
+            if name in expected:
+                raise SystemExit('Duplicate committed C# path')
+            expected[name] = fields[2].decode('ascii')
+    committed = {}
+    with subprocess.Popen(['git', '-C', str(repo), 'cat-file', '--batch'],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as blobs:
+        for name, oid in expected.items():
+            blobs.stdin.write((oid + '\n').encode('ascii'))
+            blobs.stdin.flush()
+            header = blobs.stdout.readline().split()
+            if len(header) != 3 or header[0].decode('ascii') != oid or header[1] != b'blob':
+                raise SystemExit('Unexpected Git batch response while verifying committed source')
+            try:
+                size = int(header[2])
+            except ValueError:
+                raise SystemExit('Invalid Git blob size')
+            if size < 0:
+                raise SystemExit('Invalid Git blob size')
+            raw = blobs.stdout.read(size)
+            if len(raw) != size or blobs.stdout.read(1) != b'\n':
+                raise SystemExit('Truncated Git blob while verifying committed source')
+            identity = hashlib.sha1(b'blob ' + str(size).encode('ascii') + b'\0' + raw).hexdigest()
+            if identity != oid:
+                raise SystemExit('Git blob content does not match its object ID')
+            committed[name] = raw
+        blobs.stdin.close()
+        if blobs.wait() != 0:
+            raise SystemExit('Git batch source verification failed')
+    return committed
+
+
 def check(repo, fingerprints, revision):
     problems = []
+    committed = committed_csharp(repo, revision) if revision else {}
     for name, want in fingerprints.items():
         path = repo / name
         if not path.is_file():
@@ -83,11 +127,10 @@ def check(repo, fingerprints, revision):
         if sha(data) != want:
             problems.append(f'changed since fingerprinting: {name}')
         if revision and name.endswith('.cs'):
-            committed = git(repo, 'show', f'{revision}:{name}', check=False)
-            if committed != data:
+            if committed.get(name) != data:
                 problems.append(f'differs from the committed blob: {name}')
     if revision:
-        committed_cs = {n for n in git(repo, 'ls-tree', '-r', '-z', '--name-only', revision).decode('utf-8').split('\0') if n.endswith('.cs')}
+        committed_cs = set(committed)
         tested_cs = {n for n in fingerprints if n.endswith('.cs')}
         if committed_cs != tested_cs:
             problems.append(f'C# inventory differs: {len(committed_cs ^ tested_cs)} file(s) are committed but untested or vice versa')
@@ -98,9 +141,19 @@ def check(repo, fingerprints, revision):
 def verify(args):
     repo = pathlib.Path(args.repo).resolve()
     raw = pathlib.Path(args.verify).read_bytes()
-    fingerprints = json.loads(raw.decode('utf-8-sig'))
+    def unique_paths(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise SystemExit('Duplicate path in fingerprint file')
+            result[name] = value
+        return result
+    fingerprints = json.loads(raw.decode('utf-8-sig'), object_pairs_hook=unique_paths)
     if not isinstance(fingerprints, dict) or not fingerprints:
         raise SystemExit('The fingerprint file must be a non-empty object')
+    for want in fingerprints.values():
+        if not isinstance(want, str) or len(want) != 64 or any(c not in '0123456789abcdef' for c in want):
+            raise SystemExit('Fingerprint values must be lowercase SHA-256 digests')
     check(repo, fingerprints, args.revision)
     print(json.dumps({'verified': len(fingerprints), 'revision': args.revision, 'fingerprintsSha256': sha(raw)}))
 

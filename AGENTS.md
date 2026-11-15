@@ -35,6 +35,8 @@
   `artifacts/`; native Development data belongs in `.local-data/`. Mutable build
   state is per worktree. Linux packages may be shared through the primary
   project's `artifacts/packages/linux`; do not mix Linux/Windows package caches.
+  Shared package consumers also share `NUGET_SCRATCH` within that package mount;
+  keep ordinary temporary/build state isolated and preserve warm caches.
 - Do not run build/test checks simultaneously in one worktree. The supplied
   helpers lock their shared check outputs; the development watcher has a
   separate build directory. Only one development stack can bind the default

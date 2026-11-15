@@ -40,6 +40,7 @@ services:
       Urls: http://0.0.0.0:8080
       ArtifactsPath: /build
       NUGET_PACKAGES: /root/.nuget/packages
+      NUGET_SCRATCH: /root/.nuget/packages/.scratch
       CalendarCache__Directory: /src/PremiereCalendar/App_Data/cache/calendar
       ImageCache__Directory: /src/PremiereCalendar/App_Data/cache/images
       Telemetry__LogDirectory: /src/PremiereCalendar/App_Data/logs
