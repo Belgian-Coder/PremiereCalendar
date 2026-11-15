@@ -205,7 +205,7 @@ are shared with worktrees through this project's primary `artifacts/packages/lin
 Native Development caches/logs stay in `.local-data/`; Compose preserves its
 named application-data and PostgreSQL volumes. Previous sibling build/data
 directories are untouched. Scratch worktrees belong inside the checkout under
-the ignored `.worktrees` directory (benchmark and scratch folders under `.bench`
+the ignored `.wt` directory (benchmark and scratch folders under `.bench`
 and `.scratch`). See [Testing](docs/Testing.md#scoped-feedback-and-output-ownership)
 for scoped checks and release acceptance.
 

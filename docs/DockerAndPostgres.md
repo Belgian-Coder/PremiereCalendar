@@ -36,8 +36,8 @@ run every acceptance gate on that immutable image ID, and activate that same ima
 Rebuilding after acceptance requires revalidating the replacement. Scoped checks,
 cached restore results and a green health endpoint do not replace complete
 regression, browser, scan, SBOM, database, boot-asset and hardened-runtime checks.
-After every release, complete the [bounded cleanup checkpoint](../AGENTS.md#cleanup-checkpoint)
-before reporting completion, as after every commit and again after pushing.
+After every release, complete the [development cleanup review](../AGENTS.md#development-workflow)
+before reporting completion; ordinary commits need no separate cleanup receipt.
 Retain release/rollback/audit evidence and warm build/dependency caches; remove
 only verified task-owned disposable files and eligible completed worktrees.
 `Workspace-Maintenance.ps1 -Mode Clean` is a separate, explicitly authorized

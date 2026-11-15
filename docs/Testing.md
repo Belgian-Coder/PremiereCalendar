@@ -80,7 +80,7 @@ Component tests cover Blazor rendering:
 
 ## Run
 
-Docker Engine must already be running in the Ubuntu-24.04 WSL distribution and the development image must exist: the helpers never start the daemon, install tools or build the image implicitly (build the image once with `wsl-docker.ps1 build`). All commands work from any folder; each script works on the checkout that contains it, so for a worktree use the script under `D:\Projects\PremiereCalendar\.worktrees\<name>\eng`. Add `-Plan` to any command to print the selected projects, build and runner arguments and output paths without invoking WSL or Docker.
+Docker Engine must already be running in the Ubuntu-24.04 WSL distribution and the development image must exist: the helpers never start the daemon, install tools or build the image implicitly (build the image once with `wsl-docker.ps1 build`). All commands work from any folder; each script works on the checkout that contains it, so for a worktree use the script under `D:\Projects\PremiereCalendar\.wt\<name>\eng`. Add `-Plan` to any command to print the selected projects, build and runner arguments and output paths without invoking WSL or Docker.
 
 ```powershell
 # Preview only (no WSL/Docker): what would run and where the output goes

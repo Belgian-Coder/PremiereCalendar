@@ -30,7 +30,7 @@ $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $rootPrefix = $root.TrimEnd('\') + '\'
 # Git-ignored evidence (artifacts/**, sibling build folders) lives only in the primary checkout, not in a worktree.
-$mainRoot = if ($root -match '^(.*)\\\.worktrees\\[^\\]+$') { $Matches[1] } else { $root }
+$mainRoot = if ($root -match '^(.*)\\(?:\.worktrees|\.wt)\\[^\\]+$') { $Matches[1] } else { $root }
 
 # Undated documents that record past validation runs or designs; they are checked for links only.
 $EvidenceDocuments = @(
@@ -111,7 +111,7 @@ foreach ($file in $markdown) {
         # Absolute paths written for the owner (full-path commands) must exist in this checkout.
         foreach ($m in [regex]::Matches($line, 'D:\\Projects\\PremiereCalendar\\([^\s''"`<>|*?){}]+)')) {
             $candidate = $m.Groups[1].Value.TrimEnd('.', ',', ';', ':')
-            if ($candidate -match '^(\.worktrees|artifacts|PremiereCalendar\.)') { continue }
+            if ($candidate -match '^(\.worktrees|\.wt|artifacts|PremiereCalendar\.)') { continue }
             if ($candidate -notmatch '\.[A-Za-z0-9]{1,8}$') { continue }
             if (-not (Test-Path -LiteralPath (Join-Path $root $candidate))) {
                 Add-Problem $file.FullName $number "documented path does not exist: D:\Projects\PremiereCalendar\$candidate"

@@ -39,3 +39,5 @@ tests/**
 .bench/**
 .secrets
 .secrets/**
+.wt
+.wt/**

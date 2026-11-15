@@ -46,7 +46,7 @@ $leaked = [Collections.Generic.List[string]]::new()
 while ($pending.Count -gt 0) {
     foreach ($directory in Get-ChildItem -LiteralPath $pending.Pop() -Directory -Force) {
         if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
-        if ($directory.Name -in @('.git', '.worktrees', '.secrets', '.local-data', 'artifacts', '.dotnet', '.vs', '.idea', 'node_modules', '.scratch', '.bench')) { continue }
+        if ($directory.Name -in @('.git', '.worktrees', '.wt', '.secrets', '.local-data', 'artifacts', '.dotnet', '.vs', '.idea', 'node_modules', '.scratch', '.bench')) { continue }
         if ($directory.Name -in @('bin', 'obj', 'TestResults')) { $leaked.Add($directory.FullName) } else { $pending.Push($directory.FullName) }
     }
 }

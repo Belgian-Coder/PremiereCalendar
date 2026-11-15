@@ -15,7 +15,7 @@
   those files or redundant hooks that print `AGENTS.md`. A global user
   `~/.claude/CLAUDE.md` does not disable native loading. Follow applicable nested
   instructions without changing persistent model routing.
-- Keep worktrees under `.worktrees/` in this project. Preserve unrelated changes;
+- Keep worktrees under `.wt/` in this project. Preserve unrelated changes;
   use a dedicated branch/worktree when another task owns the primary checkout.
 - Read `docs/Testing.md` and `docs/DockerAndPostgres.md` before running checks.
   The supported SDK is supplied by the existing Ubuntu-24.04 WSL Docker image;
@@ -49,47 +49,34 @@
   it requires explicit permission for those exact deletions; inspect `-WhatIf`
   first. Never clean a sibling directory or remove credentials.
 
-# Cleanup checkpoint
+## Development workflow
 
-After **every commit and every release**, complete a bounded cleanup checkpoint
-before continuing or reporting completion; repeat it after pushing. The owner
-authorizes removal only of proven task-owned disposable temporary files/fixtures
-and finished, clean, pushed worktrees inside this project.
+Use `.wt/<task>` on a `feature/` branch for concurrent writers. Name each
+writer's owned paths and choose one integrator; read-only agents may share a
+checkout. Preserve unrelated index entries, working changes and local commits.
+Stage explicit owned paths; never use broad add, reset, stash or clean.
 
-- Identify exact owned paths and their provenance. Inspect tracked, untracked
-  and ignored contents; resolve every removal target inside this project and
-  reject links or paths that can escape it. If ownership is unclear, retain the
-  material and report the exact cleanup limit.
-- Preserve user WIP, unknown/untracked user data, authentication material,
-  audit/release/rollback evidence and warm reusable dependency/incremental caches.
-  Age, an ignored path or an apparently successful release does not prove that
-  data is disposable. Never run broad `git clean`, `git worktree prune`, recursive
-  sweeps or unconditional `bin`/`obj`/Docker/BuildKit cache pruning.
-- Keep active or unpushed worktrees. Remove a completed worktree from the primary
-  checkout only after verifying its HEAD is included in fetched remote `main`,
-  its index/working tree are clean, and it contains no retained data or caches.
-  Use `git worktree remove <verified-path>` without force. If protected material
-  remains, retain the worktree and report why.
-- A checkpoint can correctly remove nothing. Report the exact removed and
-  retained paths; cleanup never authorizes deployment, service administration,
-  production data deletion or a change to the release gates above.
+Choose focused, valuable checks at meaningful checkpoints. Reuse successful
+results while relevant inputs, dependencies, configuration and environment match.
+Only the integrator runs combined validation once after integration; broaden
+checks for unresolved risk or release requirements. Add regression tests for
+valuable behavior, not trivial changes or tests that mirror implementation.
+Build incrementally once; do not retry with clean builds or repeat restore,
+packaging or full CI without a concrete reason. Documentation-only changes need
+text/reference review and `git diff --check`, not app launches, screenshots,
+builds or routine independent reviews.
 
-## Validation proportional to risk
+Do not install automatic development validation, formatting, startup, polling,
+cost-reporting or Stop hooks. Format only explicitly requested owned files while
+no other writer can race the formatter. There are no fixed story quotas, model
+lanes, review counts, time/cost reports or mandatory cleanup JSON receipts.
+Full CI is not an automatic per-commit or per-push local requirement.
+Operational approval, data compatibility, signing, safety and release gates
+remain required. Both Codex and Claude Code use the PC-managed administrator
+launch policy only for the twelve approved project roots and their `.wt`
+worktrees; do not install or declare elevation in project configuration.
 
-For Codex desktop and Claude Code, choose checks by asking what meaningful
-failure they can catch and whether that benefit justifies their cost. For
-instruction/documentation-only edits, review the changed text, references and
-`git diff --check`; skip unrelated builds, tests, app launches, screenshots and
-independent reviews. Do not start WSL or install tools just to validate prose.
-For implementation changes, build/check the changed module and run affected
-tests first; broaden only for unresolved risk, integration effects or release
-criteria. Full CI and release gates remain required where the change or release
-warrants them, including safety, security, device and data-compatibility checks.
-
-Reuse successful evidence while its relevant source, dependencies, configuration
-and environment remain unchanged. Do not automatically repeat broad validation
-after each edit or at agent Stop. Preserve useful warm caches and incremental
-outputs under the existing cleanup rules. Report what ran, what was skipped and
-any material gap. This policy takes precedence over routine unconditional local
-validation/review instructions; approval, operational safety and release gates
-remain intact.
+Preserve warm dependencies and OS/cache isolation. Remove only proven task-owned
+disposable files and clean, pushed worktrees after reviewing ignored contents
+and checking resolved paths stay in the project; retain unknown data, caches,
+evidence and recovery branches. Never force worktree removal or sweep/prune.
