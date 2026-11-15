@@ -1,5 +1,7 @@
 # Series rerun metrics: 1.2.10
 
+Historical evidence availability: inline paths below identify original local evidence that is unavailable in this checkout. They are provenance references, not downloadable artifacts or a new verification of the recorded results. Existing results and source identities are unchanged.
+
 ## Scope limitation
 
 This execution used the recovered **All Episodes** payload: `ShowSeries=true`, `ShowMovies=false`, `SeriesDateMode=AllEpisodes`, dates October 19–25, 2026, and cache key `b9798e131cfd057cb213`. The user clarified that the intended product scope is new movies and new series, excluding new seasons or episodes. This trace therefore documents the requested legacy workload and its performance; it does **not** validate the intended new movies/new series workload. Both before and after caches contained only series episode rows: no movie rows and no series-premiere rows.
@@ -81,7 +83,7 @@ Daily rows changed from `925/950/1046/1033/938/598/733` to `925/949/1045/1033/93
 
 IMDb score coverage rose from 3,244 to 3,318 rows (+74 net). Comparing only the 6,219 canonical IDs present in both snapshots isolates **78 gained IMDb scores and zero lost**; IMDb vote-count coverage gained the same 78 and lost zero on common IDs. RT critic and audience score coverage was unchanged (159 and 194 rows). TMDb score coverage was unchanged on common IDs. Two common rows lost `runtimeMinutes` and two lost `tvmazeAverageRuntimeMinutes`; these are field regressions to account for alongside the score gains.
 
-The complete before/after coverage tables and common-ID gain/loss counts are in [cache-comparison.md](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/cache-comparison.md).
+The complete before/after coverage tables and common-ID gain/loss counts are in cache-comparison.md (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/cache-comparison.md`).
 
 The provider status table below totals **9,968 observed HTTP responses**, plus 41 no-status timeout/cancellation header outcomes. These are correlated to this job; failures without headers are counted separately.
 
@@ -132,9 +134,9 @@ Provider response-cache write diagnostics included TMDb: 2,501 saved, 8 failed a
 
 ## Evidence files
 
-- [Metrics analyzer](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/Program.cs), built successfully with zero warnings/errors after the final changes.
-- [Final event report](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/force-final/metrics-report.md), [summary JSON](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/force-final/metrics-summary.json), and [sanitized correlated events](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/force-final/correlated-events-redacted.ndjson).
-- [Execution segments](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/force-final/execution-segments.json), [cache comparison](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/cache-comparison.md), and [after-cache distribution](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/cache-after.md).
-- Browser captures: [before completion](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/browser-before-completion.png), [terminal before reload](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/browser-terminal-before-reload.png), and [after reload](D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/browser-final.png).
+- Metrics analyzer (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/Program.cs`), built successfully with zero warnings/errors after the final changes.
+- Final event report (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/force-final/metrics-report.md`), summary JSON (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/force-final/metrics-summary.json`), and sanitized correlated events (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/force-final/correlated-events-redacted.ndjson`).
+- Execution segments (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/force-final/execution-segments.json`), cache comparison (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/cache-comparison.md`), and after-cache distribution (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/cache-after.md`).
+- Browser captures: before completion (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/browser-before-completion.png`), terminal before reload (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/browser-terminal-before-reload.png`), and after reload (`D:/Projects/PremiereCalendar/artifacts/investigations/series-rerun1210-20261102/browser-final.png`).
 - Captured payloads, cache snapshots, health snapshots, and job state JSON are in the same validation folder.
 

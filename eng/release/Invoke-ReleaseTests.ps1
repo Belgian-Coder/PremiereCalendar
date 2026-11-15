@@ -6,8 +6,8 @@ Step 6: runs the full test suites against a throwaway PostgreSQL and records sou
 .DESCRIPTION
 Requires HEAD to be -ExpectedRevision with a clean tracked tree. Before anything runs it fingerprints the tracked
 source (freeze_test_source.py: every *.cs file must be LF, because the evidence compares raw bytes with the committed
-Git blobs), then runs eng\Test-WithPostgres.ps1 with its defaults (unit, component and integration projects in the
-development image, PostgreSQL on tmpfs) in a child PowerShell and keeps the console output as test-run.log. Afterwards
+Git blobs), then runs eng\Test-WithPostgres.ps1 with all unit, component and integration projects in the
+development image with PostgreSQL on tmpfs in a child PowerShell and keeps the console output as test-run.log. Afterwards
 the fingerprints are verified again, so the evidence proves that exactly the committed bytes were tested.
 test-summary.json (per suite: passed, failed, skipped, source revision, fingerprint hash) is what the Load, Deploy and
 Close gates read; a focused or partial run can never satisfy them.
@@ -29,6 +29,15 @@ The exact 40-character release commit.
 Optional path of a JSON array [{suite, passed, failed, skipped}] produced from the real test run; it replaces the
 parsing of the result files. Use it if the runner's result format changes.
 
+.PARAMETER Cpus
+CPU quota for the SDK/test container (default 2); the disposable PostgreSQL has its own 2-CPU limit.
+
+.PARAMETER MaxThreads
+Maximum xUnit test threads (default 2). This changes scheduling, never the selected test roster.
+
+.PARAMETER BuildMaxCpuCount
+Maximum MSBuild workers (default 2). Defaults are bounded for shared release hosts.
+
 .EXAMPLE
 pwsh -File D:\Projects\PremiereCalendar\eng\release\Invoke-ReleaseTests.ps1 -Bundle D:\Projects\PremiereCalendar\artifacts\release\1.2.20 -ExpectedRevision 0123456789abcdef0123456789abcdef01234567
 #>
@@ -36,7 +45,10 @@ pwsh -File D:\Projects\PremiereCalendar\eng\release\Invoke-ReleaseTests.ps1 -Bun
 param(
     [Parameter(Mandatory)][string] $Bundle,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $ExpectedRevision,
-    [string] $SummaryJson
+    [string] $SummaryJson,
+    [ValidateRange(1, 64)][int] $Cpus = 2,
+    [ValidateRange(1, 64)][int] $MaxThreads = 2,
+    [ValidateRange(1, 64)][int] $BuildMaxCpuCount = 2
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,7 +65,7 @@ $resultsEvidence = Join-Path $ctx.Bundle 'tests'
 $plan = @(
     "Require HEAD = $ExpectedRevision, a clean tracked tree; refuse if $fingerprints, $log, $receipt, $summaryPath or the folder $resultsEvidence exist",
     "freeze_test_source.py: fail if any *.cs file has CR characters; write $fingerprints",
-    "Run $testScript (full default set: unit, component, integration) in a child pwsh; keep the console output as $log",
+    "Run $testScript (all unit, component, integration) with Cpus=$Cpus, MaxThreads=$MaxThreads, BuildMaxCpuCount=$BuildMaxCpuCount in a child pwsh; keep the console output as $log",
     'Verify the fingerprints again (the tested bytes are the committed bytes)',
     "Write $summaryPath (suites: $($requiredSuites -join ', ')) and $receipt")
 if (Show-ReleasePlan -Title "Invoke-ReleaseTests $($ctx.BundleName)" -Step $plan) { return }
@@ -69,7 +81,8 @@ function Invoke-TestRunner {
     # results folder named by the script's "Results: <folder>" line.
     param([string] $LogPath)
     $pwsh = (Get-Command pwsh).Source
-    & $pwsh -NoProfile -File $testScript 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $LogPath | Out-Host
+    & $pwsh -NoProfile -File $testScript -Cpus $Cpus -MaxThreads $MaxThreads -BuildMaxCpuCount $BuildMaxCpuCount 2>&1 |
+        ForEach-Object { "$_" } | Tee-Object -FilePath $LogPath | Out-Host
     $code = [int]$LASTEXITCODE
     $line = @(Get-Content -LiteralPath $LogPath | Where-Object { $_ -match '^Total wall time: .* Results: (.+)$' }) | Select-Object -Last 1
     $folder = if ($line -and $line -match 'Results: (.+)$') { $Matches[1].Trim() } else { $null }
@@ -125,7 +138,8 @@ $summary = @($entries | ForEach-Object {
 Write-NewJson -Path $summaryPath -Object $summary
 Write-NewJson -Path $receipt -Object ([ordered]@{
         sourceRevision = $ExpectedRevision; startedUtc = $started.ToString('O'); finishedUtc = $finished.ToString('O')
-        runner = 'eng\Test-WithPostgres.ps1 (defaults)'; exitCode = $exit; logSha256 = Get-FileSha256 $log
+        runner = 'eng\Test-WithPostgres.ps1 (all unit/component/integration)'; exitCode = $exit; logSha256 = Get-FileSha256 $log
+        resources = [ordered]@{ cpus = $Cpus; maxThreads = $MaxThreads; buildMaxCpuCount = $BuildMaxCpuCount; postgresCpus = 2 }
         testedSourceFingerprintsSha256 = $fingerprintHash; summarySource = $(if ($SummaryJson) { 'supplied -SummaryJson' } else { 'CTRF/log files of the runner' }) })
 $summary | ForEach-Object { Write-Host ("{0}: {1} passed, {2} failed, {3} skipped" -f $_.suite, $_.passed, $_.failed, $_.skipped) }
 if (@($summary | Where-Object { $_.failed -ne 0 -or $_.passed -lt 1 }).Count -gt 0) { throw 'A suite has failures or no passed cases; see test-summary.json.' }

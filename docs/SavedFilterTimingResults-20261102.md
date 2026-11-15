@@ -1,5 +1,7 @@
 # Saved-filter timing results — 2026-11-02
 
+Historical evidence availability: inline paths below identify original local evidence that is unavailable in this checkout. They are provenance references, not downloadable artifacts or a new verification of the recorded results. Existing results and source identities are unchanged.
+
 Installed **v1.2.11** preserves the actual English/Dutch filters, new-series first-debut scope, series runtime 0–360 and movie runtime 45–360. Date-only navigation and reload retained those selections.
 
 | Installed forced refresh | Enqueue to complete | Final complete rows | HTTP responses |
@@ -10,7 +12,7 @@ Installed **v1.2.11** preserves the actual English/Dutch filters, new-series fir
 
 These are separate live observations with existing caches retained. They do not establish a cold-cache guarantee or controlled cross-version speedup. The earlier v1.2.10 observation below took 15.689s for the same 49-row scope with 449 responses; provider waits and process/cache state differed. The unrestricted [legacy all-episodes trace](SeriesRerunResults-20261102.md) was not representative of the saved user filters.
 
-[Installed detailed report](D:/Projects/PremiereCalendar/artifacts/release/1.2.11/installed-profiles/combined-installed-results.md) contains per-provider statuses, source and checkpoint timing, and the separately recorded final repair/backfill stages. Trakt returned HTTP403 and contributed no rows; non-2xx responses are not data successes. Wait/stage totals overlap and are not additive to elapsed wall time. The persisted detailed event writer remained healthy, with zero dropped events, writer failures and operational logging failures.
+Installed detailed report (`D:/Projects/PremiereCalendar/artifacts/release/1.2.11/installed-profiles/combined-installed-results.md`) contains per-provider statuses, source and checkpoint timing, and the separately recorded final repair/backfill stages. Trakt returned HTTP403 and contributed no rows; non-2xx responses are not data successes. Wait/stage totals overlap and are not additive to elapsed wall time. The persisted detailed event writer remained healthy, with zero dropped events, writer failures and operational logging failures.
 
 ## Earlier v1.2.10 scope and run
 
@@ -55,5 +57,5 @@ The analyzer read 15 files / 789,003 lines and retained 5,811 events for this jo
 
 Detailed machine-readable output: `metrics-summary.json`, `cache-comparison.json`; readable analyzer output: `metrics-report.md`, `cache-comparison.md`; selected sanitized events: `correlated-events-redacted.ndjson`.
 
-The original artifacts are retained in `artifacts/investigations/saved-filter-timings-20261102/actual-user-force1210/`; [detailed timings](D:/Projects/PremiereCalendar/artifacts/investigations/saved-filter-timings-20261102/actual-user-force1210/metrics-report.md), [machine-readable summary](D:/Projects/PremiereCalendar/artifacts/investigations/saved-filter-timings-20261102/actual-user-force1210/metrics-summary.json), [cache comparison](D:/Projects/PremiereCalendar/artifacts/investigations/saved-filter-timings-20261102/actual-user-force1210/cache-comparison.md) and [current-week browser proof](D:/Projects/PremiereCalendar/artifacts/investigations/saved-filter-timings-20261102/user-current-week.png).
+The original artifacts are retained in `artifacts/investigations/saved-filter-timings-20261102/actual-user-force1210/`; detailed timings (`D:/Projects/PremiereCalendar/artifacts/investigations/saved-filter-timings-20261102/actual-user-force1210/metrics-report.md`), machine-readable summary (`D:/Projects/PremiereCalendar/artifacts/investigations/saved-filter-timings-20261102/actual-user-force1210/metrics-summary.json`), cache comparison (`D:/Projects/PremiereCalendar/artifacts/investigations/saved-filter-timings-20261102/actual-user-force1210/cache-comparison.md`) and current-week browser proof (`D:/Projects/PremiereCalendar/artifacts/investigations/saved-filter-timings-20261102/user-current-week.png`).
 

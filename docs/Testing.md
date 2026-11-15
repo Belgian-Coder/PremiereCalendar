@@ -2,7 +2,7 @@
 
 Normal automated tests must not call live external providers. TMDb, OMDb, TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, Wikimedia, Sonarr, and Radarr behavior must be covered with fake HTTP handlers, test doubles, and JSON fixtures.
 
-The Windows host has no .NET SDK that matches `global.json`, so tests never run on the host: they run in the development image inside Ubuntu 24.04 on WSL, through the script described under [Run](#run). The runner is xUnit.net 4.0.3 (package `xunit.v3`) on Microsoft.Testing.Platform v2; the test projects are executables and `Microsoft.NET.Test.Sdk` and `coverlet.collector` are no longer used (Playwright uses `Microsoft.Playwright.Xunit.v3`). For acceptance that includes browser timing budgets, run the suites one at a time; running the memory/CPU-intensive service fixtures concurrently with Playwright can distort those timings. Keep all existing assertions unchanged. See [speed and reliability validation](SpeedReliabilityValidation.md) for the measured workload, PostgreSQL and container evidence, and review results.
+Supported application acceptance uses the SDK pinned by `global.json` in the Linux development image inside Ubuntu 24.04 on WSL, through the script described under [Run](#run). An installed native SDK does not replace that container qualification. The runner is xUnit.net 4.0.3 (package `xunit.v3`) on Microsoft.Testing.Platform v2; the test projects are executables and `Microsoft.NET.Test.Sdk` and `coverlet.collector` are no longer used (Playwright uses `Microsoft.Playwright.Xunit.v3`). For acceptance that includes browser timing budgets, run the suites one at a time; running the memory/CPU-intensive service fixtures concurrently with Playwright can distort those timings. Keep all existing assertions unchanged. See [speed and reliability validation](SpeedReliabilityValidation.md) for the measured workload, PostgreSQL and container evidence, and review results.
 
 ## Layers
 
@@ -139,6 +139,13 @@ without writing bytecode. Pass `-PythonExecutable <existing-Python-3-path>` to i
 or `ValidationTools.Tests.ps1` if Python is not on PATH. Missing Python fails the
 syntax check; it never falls back to another SDK or installs anything.
 
+At source `dbf17a67306f44283025a87e2ea5c6af3b1f480b` on PC-MARC with Python
+3.12.11, the same nine Python files compiled in 0.214855 seconds with separate
+interpreters versus 0.060113 seconds in one batch (72.02% less compiler-phase
+time; medians of five alternating warm samples, no cache clearing). Source
+hashes stayed unchanged and malformed-file/no-bytecode regression checks passed.
+This measures static compilation startup only, not application or release speed.
+
 The default documentation check remains strict. `-SourceOnly` permits unavailable
 machine-local evidence links only in historical records, reports their count,
 and continues checking source files, anchors, maintained documents and script
@@ -174,6 +181,13 @@ pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit
 Each checkout/worktree owns `artifacts/build/linux` for checks, `artifacts/build/linux-dev` for the watcher, `artifacts/build/host` for native builds, and a timestamped `artifacts/test-results/<run>` folder per run. `-NoRuntimeAsync` has a separate build directory (`artifacts/build/linux-no-runtime-async`). Helpers lock check outputs to reject concurrent writers in one worktree. Do not bypass that lock with concurrent raw `dotnet` commands. The primary project's `artifacts/packages/linux` is shared across worktrees; native packages stay separate under each checkout's `artifacts/packages/host`. Sharing downloaded packages does not share `obj`/`bin`, test databases, results or development volumes. No files are moved from old sibling output directories.
 
 `-NoRestore` and `-NoBuild` are explicit rerun options only after a successful matching restore/build of the same worktree, configuration and runtime-async mode. Normal runs keep restore validation and incremental compilation enabled; `-FreshBuild` builds from scratch in a throwaway container location. Legacy `-BuildVolume`/`-NugetVolume` overrides remain available for existing Docker caches; a build-volume override must belong exclusively to that worktree/mode. A filtered run is feedback, never proof that the complete regression suite passed.
+
+Use explicit shared-host budgets: `-Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2`
+bounds the runner container, xUnit scheduling and MSBuild workers respectively.
+PostgreSQL has its separate two-CPU quota; suites still run serially and every
+selected test executes. The release test entry point defaults all three budgets
+to two, records them in its receipt, and always runs the complete unit/component/
+integration roster. The request adapter maps `-Jobs` to those same budgets.
 
 The default helper covers unit, component and integration projects. Browser tests are opt-in (`-Project Browser -DevImage <prepared-image>`): the Alpine SDK development image does not include compatible Playwright browsers. Use the established prepared browser environment, run after service tests (not alongside them), and retain all timing/assertion budgets. Never report default tests as complete browser acceptance. There is no npm toolchain in this Blazor project.
 

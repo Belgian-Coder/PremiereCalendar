@@ -96,6 +96,9 @@ Builds from scratch in a throwaway container location instead of this checkout's
 .PARAMETER Cpus
 CPU limit of the test container (default 4); the PostgreSQL container gets 2.
 
+.PARAMETER BuildMaxCpuCount
+Maximum MSBuild worker count (default 2). Suites still build and run sequentially.
+
 .PARAMETER BuildVolume
 Legacy override: a Docker volume name used instead of this checkout's artifacts\build\linux. It must belong exclusively
 to this worktree and runtime-async mode.
@@ -122,6 +125,8 @@ param(
     [string] $Configuration = 'Release',
     [ValidateRange(1, 64)]
     [int] $Cpus = 4,
+    [ValidateRange(1, 64)]
+    [int] $BuildMaxCpuCount = 2,
     [switch] $NoRuntimeAsync,
     [switch] $NoRestore,
     [switch] $NoBuild,
@@ -186,7 +191,7 @@ if ($QueryFilter) { foreach ($q in $QueryFilter) { $runner.Add('-filter'); $runn
 if ($Parallel) { $runner.Add('-parallelMode'); $runner.Add($Parallel) }
 if ($MaxThreads) { $runner.Add('-maxThreads'); $runner.Add($MaxThreads) }
 foreach ($a in $RunnerArguments) { $runner.Add($a) }
-$buildArguments = @('-c', $Configuration, '--nologo', '-v', 'q')
+$buildArguments = @('-c', $Configuration, '--nologo', '-v', 'q', "-maxcpucount:$BuildMaxCpuCount")
 if ($NoRuntimeAsync) { $buildArguments += '-p:UseRuntimeAsync=false' }
 if ($NoRestore) { $buildArguments += '--no-restore' }
 
@@ -201,6 +206,8 @@ if ($Plan) {
         Results = $resultsHost
         PostgreSqlImage = $postgresImage
         DevImage = $DevImage
+        Cpus = $Cpus
+        BuildMaxCpuCount = $BuildMaxCpuCount
     }
     return
 }

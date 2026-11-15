@@ -23,7 +23,8 @@ param(
     [ValidatePattern('^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$')][string] $Version,
     [ValidatePattern('^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$')][string] $ExpectedOldVersion,
     [ValidatePattern('^sha256:[0-9a-f]{64}$')][string] $ExpectedOldDigest,
-    [ValidateRange(0, 1000000)][int] $ExpectedStackRevision = 0
+    [ValidateRange(0, 1000000)][int] $ExpectedStackRevision = 0,
+    [ValidateRange(1, 16)][int] $Jobs = 2
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -44,7 +45,7 @@ $bundleRoot = Join-Path $outputPath 'release'
 $bundle = Join-Path $bundleRoot $bundleName
 $commands = [ordered]@{
     initialize = @('pwsh', '-NoProfile', '-File', (Join-Path $PSScriptRoot 'Initialize-Release.ps1'), '-Version', $Version, '-BundleName', $bundleName, '-BundleRoot', $bundleRoot, '-ResourcePrefix', "pcc$suffix", '-ExpectedOldVersion', $ExpectedOldVersion, '-ExpectedOldDigest', $ExpectedOldDigest, '-ExpectedStackRevision', "$ExpectedStackRevision")
-    validate = @('pwsh', '-NoProfile', '-File', (Join-Path $PSScriptRoot 'Invoke-ReleaseTests.ps1'), '-Bundle', $bundle, '-ExpectedRevision', $Revision)
+    validate = @('pwsh', '-NoProfile', '-File', (Join-Path $PSScriptRoot 'Invoke-ReleaseTests.ps1'), '-Bundle', $bundle, '-ExpectedRevision', $Revision, '-Cpus', "$Jobs", '-MaxThreads', "$Jobs", '-BuildMaxCpuCount', "$Jobs")
     package = @('pwsh', '-NoProfile', '-File', (Join-Path $PSScriptRoot 'Build-Image.ps1'), '-Bundle', $bundle, '-ExpectedRevision', $Revision)
 }
 if ($Mode -eq 'plan' -or $WhatIfPreference) {
@@ -52,7 +53,7 @@ if ($Mode -eq 'plan' -or $WhatIfPreference) {
         Target = $Target; Revision = $Revision; Output = $outputPath
         Builder = 'Windows x64 / Ubuntu-24.04 WSL / local Docker socket'
         RequiredInput = 'Version, ExpectedOldVersion, ExpectedOldDigest and ExpectedStackRevision (real version/installed baseline)'
-        Commands = $commands; UploadSupported = $false; ReleaseAccepted = $false
+        Commands = $commands; Jobs = $Jobs; UploadSupported = $false; ReleaseAccepted = $false
         ArtifactManifest = Join-Path $bundle 'candidate-artifacts.json'
     }
     return
@@ -77,7 +78,7 @@ Assert-CleanSourceAtRevision -Revision $Revision
 # Each request owns its lock. Existing release evidence and warm build caches stay untouched.
 $lock = [IO.File]::Open((Join-Path $outputPath 'candidate.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::None)
 try {
-    $binding = [ordered]@{ schema = 1; sourceRevision = $Revision; target = $Target; version = $Version; oldVersion = $ExpectedOldVersion; oldDigest = $ExpectedOldDigest; stackRevision = $ExpectedStackRevision }
+    $binding = [ordered]@{ schema = 1; sourceRevision = $Revision; target = $Target; version = $Version; oldVersion = $ExpectedOldVersion; oldDigest = $ExpectedOldDigest; stackRevision = $ExpectedStackRevision; jobs = $Jobs }
     $bindingPath = Join-Path $outputPath 'candidate-request.json'
     if (Test-Path -LiteralPath $bindingPath) {
         $existing = Read-Json $bindingPath

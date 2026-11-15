@@ -59,6 +59,7 @@ try {
     $suiteAlias = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Suite Unit,Integration -Filter ViewSync,Wikimedia -Parallel none -MaxThreads 2 -Plan
     $query = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -QueryFilter '/*/*/PostgresResponseCacheTests/*' -RunnerArguments:-longRunning,30 -FreshBuild -NoRestore -Plan
     $viaDocker = & (Join-Path $root 'eng/wsl-docker.ps1') test -Project Unit -Filter ViewSync -Plan
+    $bounded = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project All -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -Plan
     Assert-Harness ($global:HarnessWslCalls -eq 0) '-Plan invoked WSL.'
     Assert-Harness ($plan.Projects.Count -eq 1 -and $plan.Projects[0] -eq 'ComponentTests') 'Scoped project selection changed.'
     Assert-Harness ($plan.RunnerArguments -contains $runnerFilter) 'The exact filter was not preserved.'
@@ -70,6 +71,7 @@ try {
     Assert-Harness (@($query.RunnerArguments) -join ' ' -eq '-filter /*/*/PostgresResponseCacheTests/* -longRunning 30') 'Query filter / runner arguments changed.'
     Assert-Harness ($query.BuildArguments -contains '--no-restore' -and $query.BuildStorage -like 'container-local*') '-NoRestore / -FreshBuild regressed.'
     Assert-Harness ($viaDocker.Projects.Count -eq 1 -and $viaDocker.Projects[0] -eq 'UnitTests' -and $viaDocker.RunnerArguments -contains '*ViewSync*') 'wsl-docker test no longer forwards -Project/-Filter.'
+    Assert-Harness ($bounded.Projects.Count -eq 4 -and $bounded.Cpus -eq 3 -and $bounded.BuildArguments -contains '-maxcpucount:3' -and $bounded.RunnerArguments -contains '3') 'Worker budgets changed the complete suite roster or were not propagated.'
     Assert-Harness ($plan.BuildStorage -eq $context.BuildRoot) 'Check build state left artifacts/build/linux.'
     $rejected = $false
     try { & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Filter 'FullyQualifiedName~A&Name~B' -Plan | Out-Null } catch { $rejected = $true }

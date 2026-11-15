@@ -27,8 +27,8 @@
         }
       },
       "commands": {
-        "validate": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "validate", "-Revision", "{commit}", "-Output", "{output}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expectedOldVersion}", "-ExpectedOldDigest", "{param:expectedOldDigest}", "-ExpectedStackRevision", "{param:expectedStackRevision}"]],
-        "package": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "package", "-Revision", "{commit}", "-Output", "{output}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expectedOldVersion}", "-ExpectedOldDigest", "{param:expectedOldDigest}", "-ExpectedStackRevision", "{param:expectedStackRevision}"]],
+        "validate": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "validate", "-Revision", "{commit}", "-Output", "{output}", "-Jobs", "{jobs}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expectedOldVersion}", "-ExpectedOldDigest", "{param:expectedOldDigest}", "-ExpectedStackRevision", "{param:expectedStackRevision}"]],
+        "package": [["pwsh", "-NoProfile", "-File", "eng/release/Invoke-Candidate.ps1", "-Target", "linux-amd64", "-Mode", "package", "-Revision", "{commit}", "-Output", "{output}", "-Jobs", "{jobs}", "-Version", "{param:version}", "-ExpectedOldVersion", "{param:expectedOldVersion}", "-ExpectedOldDigest", "{param:expectedOldDigest}", "-ExpectedStackRevision", "{param:expectedStackRevision}"]],
         "upload": []
       },
       "artifacts": [

@@ -84,6 +84,36 @@ try {
     $count++
     Assert-Rejected { & $candidate -Target linux-amd64 -Mode upload -Revision $revision -Output $candidateOutput } '*Candidate upload is unsupported*'
     Assert-Rejected { & $candidate -Target linux-amd64 -Mode package -Revision $revision -Output $root } '*Output must stay*'
+    $boundedPlan = & $candidate -Target linux-amd64 -Mode plan -Revision $revision -Output $candidateOutput -Jobs 3
+    foreach ($parameter in @('-Cpus', '-MaxThreads', '-BuildMaxCpuCount')) {
+        $argv = $boundedPlan.Commands.validate
+        if ($argv[[array]::IndexOf($argv, $parameter) + 1] -ne '3') { throw "Candidate budget did not reach $parameter." }
+    }
+    $count++
+    # Execute the real release runner function with an intercepted child executable.
+    # This proves the public budgets cross the child-process boundary without a database/build.
+    Write-Fixture 'eng/capture-runner.ps1' @'
+param([switch] $NoProfile, [string] $File, [int] $Cpus, [int] $MaxThreads, [int] $BuildMaxCpuCount)
+if (-not $NoProfile -or $File -ne 'fixture-test-runner.ps1' -or $Cpus -ne 3 -or $MaxThreads -ne 5 -or $BuildMaxCpuCount -ne 2 -or $args.Count) { throw 'Release child argv lost budgets or acquired a test filter.' }
+$global:LASTEXITCODE = 0
+Write-Output 'Total wall time: 0 s. Results: fixture-results'
+'@
+    $runnerTokens = $null; $runnerErrors = $null
+    $releaseAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'eng/release/Invoke-ReleaseTests.ps1'), [ref]$runnerTokens, [ref]$runnerErrors)
+    $runnerFunction = $releaseAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-TestRunner' }, $true)
+    & {
+        $runnerStub = Join-Path $sandbox 'eng/capture-runner.ps1'
+        function Get-Command([string] $Name) {
+            if ($Name -ne 'pwsh') { throw "Unexpected child executable lookup: $Name" }
+            [pscustomobject]@{ Source = $runnerStub }
+        }
+        . ([scriptblock]::Create($runnerFunction.Extent.Text))
+        $Cpus = 3; $MaxThreads = 5; $BuildMaxCpuCount = 2
+        $testScript = 'fixture-test-runner.ps1'
+        $run = Invoke-TestRunner -LogPath (Join-Path $sandbox 'runner.log') 6>$null
+        if ($run.ExitCode -ne 0 -or $run.ResultsFolder -ne 'fixture-results') { throw 'Release runner status/result parsing regressed.' }
+    }
+    $count++
     if ($python) {
         # The vendored contract validates the repository-owned manifest and declared placeholders.
         # Import without bytecode and never invoke dispatch/SSH from this static regression.

@@ -27,7 +27,7 @@ Steps 3 to 7 never touch the NAS or production. Steps 1, 8, 9 and the optional p
 
 - PowerShell 7 (`pwsh`; 7.5 or later preferred), Python 3 and git on the host; run the scripts from the machine that holds the local Docker engine. Run them from any folder: they derive every path from their own location.
 - Docker Engine in the `Ubuntu-24.04` WSL distribution (it must already be running: the repository helpers, including `D:\Projects\PremiereCalendar\eng\wsl-docker.ps1`, never start it). Every Docker call is pinned to `unix:///var/run/docker.sock` of that distribution, never to an inherited context, because a context can point at the NAS engine.
-- The images pinned in `Dockerfile` (SDK, ASP.NET runtime) and `compose.yaml` (PostgreSQL) present locally or pullable by digest; the scripts read the pins from those files. The SDK for the build is the container's: the Windows host has no matching .NET SDK.
+- The images pinned in `Dockerfile` (SDK, ASP.NET runtime) and `compose.yaml` (PostgreSQL) present locally or pullable by digest; the scripts read the pins from those files. The SDK for supported builds is the container's; a native SDK does not replace container acceptance.
 - Access to the NAS shares and the Portainer wrapper `\\NAS\Data\Backups\Infrastructure\NUC\windows11-vm\scripts\portainer\Invoke-PortainerApi.ps1`. The wrapper owns the credentials; the release scripts never read, store or print them.
 - A committed release commit: the release notes `docs\releases\<version>.md` are part of it, and the tracked tree is clean (`HEAD` is the release commit).
 
@@ -76,6 +76,12 @@ and image identity. Both phases share the same request output and lock; package
 does not rerun validation. A retry uses a fresh request directory. Only the
 declared public candidate archive and identity manifests are eligible for
 collection; private evidence and credentials stay on their owner host.
+
+The shared client's `--jobs` reaches the adapter's `-Jobs`, then the release
+runner's `-Cpus`, `-MaxThreads` and `-BuildMaxCpuCount` (two by default).
+The same-request binding includes the budget so a package cannot silently reuse
+evidence from a request with different scheduling parameters. These limits do
+not select or omit tests; complete regression and separate browser checks remain.
 
 These are candidate operations: the manifest states that release acceptance and
 upload have not occurred. Every browser, source review, backup, vulnerability,
@@ -190,7 +196,7 @@ Scans the exported archive (the exact bytes that will be deployed) with Trivy (v
 ## Step 6: tests
 
 ```powershell
-pwsh -File "$rel\Invoke-ReleaseTests.ps1" -Bundle $bundle -ExpectedRevision $commit
+pwsh -File "$rel\Invoke-ReleaseTests.ps1" -Bundle $bundle -ExpectedRevision $commit -Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2
 ```
 
 Requires the same clean commit, freezes fingerprints of the tracked source (it fails when a `*.cs` file contains CR characters), runs `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` with its defaults (xUnit.net 4 on Microsoft.Testing.Platform: the unit, component and integration suites against a throwaway PostgreSQL), verifies the fingerprints again and writes `test-summary.json` per suite. The counts come from the CTRF JSON files the script writes to `<repo>\artifacts\test-results\<timestamp>\` (the summary line of each suite's console log is the fallback, `-SummaryJson` an override); the console log, the CTRF and TRX files are copied into the bundle as `test-run.log` and `tests\*`. A focused or partial run cannot satisfy the gates. Tests may run any time before step 8, also before the build.
