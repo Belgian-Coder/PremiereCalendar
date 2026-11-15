@@ -188,6 +188,10 @@ PostgreSQL has its separate two-CPU quota; suites still run serially and every
 selected test executes. The release test entry point defaults all three budgets
 to two, records them in its receipt, and always runs the complete unit/component/
 integration roster. The request adapter maps `-Jobs` to those same budgets.
+For a native Windows source checkout, the canonical release test runner also
+forwards `-BuildVolume` and `-NugetVolume`: use task-owned Linux/amd64 Docker
+volumes to keep writable Linux state on the WSL engine's ext4 filesystem. Keep
+musl service output and glibc browser output in distinct build volumes.
 
 The default helper covers unit, component and integration projects. Browser tests are opt-in (`-Project Browser -DevImage <prepared-image>`): the Alpine SDK development image does not include compatible Playwright browsers. Use the established prepared browser environment, run after service tests (not alongside them), and retain all timing/assertion budgets. Never report default tests as complete browser acceptance. There is no npm toolchain in this Blazor project.
 

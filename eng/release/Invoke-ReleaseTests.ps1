@@ -38,6 +38,12 @@ Maximum xUnit test threads (default 2). This changes scheduling, never the selec
 .PARAMETER BuildMaxCpuCount
 Maximum MSBuild workers (default 2). Defaults are bounded for shared release hosts.
 
+.PARAMETER BuildVolume
+Optional existing helper override for an exclusively owned per-worktree Linux/amd64 build volume on ext4.
+
+.PARAMETER NugetVolume
+Optional Linux-only NuGet volume override. Keep it separate from native-host caches.
+
 .EXAMPLE
 pwsh -File D:\Projects\PremiereCalendar\eng\release\Invoke-ReleaseTests.ps1 -Bundle D:\Projects\PremiereCalendar\artifacts\release\1.2.20 -ExpectedRevision 0123456789abcdef0123456789abcdef01234567
 #>
@@ -48,7 +54,9 @@ param(
     [string] $SummaryJson,
     [ValidateRange(1, 64)][int] $Cpus = 2,
     [ValidateRange(1, 64)][int] $MaxThreads = 2,
-    [ValidateRange(1, 64)][int] $BuildMaxCpuCount = 2
+    [ValidateRange(1, 64)][int] $BuildMaxCpuCount = 2,
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $BuildVolume,
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $NugetVolume
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,7 +73,7 @@ $resultsEvidence = Join-Path $ctx.Bundle 'tests'
 $plan = @(
     "Require HEAD = $ExpectedRevision, a clean tracked tree; refuse if $fingerprints, $log, $receipt, $summaryPath or the folder $resultsEvidence exist",
     "freeze_test_source.py: fail if any *.cs file has CR characters; write $fingerprints",
-    "Run $testScript (all unit, component, integration) with Cpus=$Cpus, MaxThreads=$MaxThreads, BuildMaxCpuCount=$BuildMaxCpuCount in a child pwsh; keep the console output as $log",
+    "Run $testScript (all unit, component, integration) with Cpus=$Cpus, MaxThreads=$MaxThreads, BuildMaxCpuCount=$BuildMaxCpuCount, BuildVolume=$BuildVolume, NugetVolume=$NugetVolume in a child pwsh; keep the console output as $log",
     'Verify the fingerprints again (the tested bytes are the committed bytes)',
     "Write $summaryPath (suites: $($requiredSuites -join ', ')) and $receipt")
 if (Show-ReleasePlan -Title "Invoke-ReleaseTests $($ctx.BundleName)" -Step $plan) { return }
@@ -81,7 +89,10 @@ function Invoke-TestRunner {
     # results folder named by the script's "Results: <folder>" line.
     param([string] $LogPath)
     $pwsh = (Get-Command pwsh).Source
-    & $pwsh -NoProfile -File $testScript -Cpus $Cpus -MaxThreads $MaxThreads -BuildMaxCpuCount $BuildMaxCpuCount 2>&1 |
+    $storage = @{}
+    if ($BuildVolume) { $storage.BuildVolume = $BuildVolume }
+    if ($NugetVolume) { $storage.NugetVolume = $NugetVolume }
+    & $pwsh -NoProfile -File $testScript -Cpus $Cpus -MaxThreads $MaxThreads -BuildMaxCpuCount $BuildMaxCpuCount @storage 2>&1 |
         ForEach-Object { "$_" } | Tee-Object -FilePath $LogPath | Out-Host
     $code = [int]$LASTEXITCODE
     $line = @(Get-Content -LiteralPath $LogPath | Where-Object { $_ -match '^Total wall time: .* Results: (.+)$' }) | Select-Object -Last 1
@@ -140,6 +151,7 @@ Write-NewJson -Path $receipt -Object ([ordered]@{
         sourceRevision = $ExpectedRevision; startedUtc = $started.ToString('O'); finishedUtc = $finished.ToString('O')
         runner = 'eng\Test-WithPostgres.ps1 (all unit/component/integration)'; exitCode = $exit; logSha256 = Get-FileSha256 $log
         resources = [ordered]@{ cpus = $Cpus; maxThreads = $MaxThreads; buildMaxCpuCount = $BuildMaxCpuCount; postgresCpus = 2 }
+        storage = [ordered]@{ buildVolume = $BuildVolume; nugetVolume = $NugetVolume }
         testedSourceFingerprintsSha256 = $fingerprintHash; summarySource = $(if ($SummaryJson) { 'supplied -SummaryJson' } else { 'CTRF/log files of the runner' }) })
 $summary | ForEach-Object { Write-Host ("{0}: {1} passed, {2} failed, {3} skipped" -f $_.suite, $_.passed, $_.failed, $_.skipped) }
 if (@($summary | Where-Object { $_.failed -ne 0 -or $_.passed -lt 1 }).Count -gt 0) { throw 'A suite has failures or no passed cases; see test-summary.json.' }
