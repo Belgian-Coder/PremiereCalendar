@@ -231,11 +231,9 @@ Write-NewJson -Path $imageFile -Object ([ordered]@{ version = $cfg.version; sour
 function Get-SchemaState {
     param([string] $Path, [int] $MaxVersion = $cfg.oldSchemaVersion)
     $sql = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'schema-state.sql') -Raw
-    $wsl = $script:ReleaseWsl; $prefix = $script:ReleaseDockerPrefix
-    $readOnly = if ($historical) { @('-e', 'PGOPTIONS=-c default_transaction_read_only=on') } else { @() }
+    $readOnly = @(if ($historical) { '-e'; 'PGOPTIONS=-c default_transaction_read_only=on' })
     $schemaDb = if ($historical) { $fixtureObservation.databaseId } else { $db }
-    $text = $sql | & $wsl @prefix exec -i @readOnly $schemaDb psql -X -A -t -F '|' -q -v ON_ERROR_STOP=1 -v "maxver=$MaxVersion" -U postgres -d premierecalendar
-    if ($LASTEXITCODE -ne 0) { throw 'Could not read the sanitized database state.' }
+    $text = Invoke-LocalDockerInput -InputText ($sql + "`n") -DockerArguments (@('exec', '-i') + @($readOnly) + @($schemaDb, 'psql', '-X', '-A', '-t', '-F', '|', '-q', '-v', 'ON_ERROR_STOP=1', '-v', "maxver=$MaxVersion", '-U', 'postgres', '-d', 'premierecalendar'))
     Write-NewText -Path $Path -Text ((@($text) -join "`n") + "`n")
 }
 

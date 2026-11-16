@@ -9,6 +9,7 @@
 #     them); anything but GET needs the script to have been started with -AllowMutation;
 #   * -WhatIf on a release script only prints the plan: no Docker, NAS, Portainer or network call is made.
 
+. (Join-Path $PSScriptRoot '../Wsl.Transport.ps1')
 $script:ReleaseRepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $script:ReleaseScriptRoot = $PSScriptRoot
 $script:ReleaseWsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
@@ -17,6 +18,29 @@ $script:ReleaseDockerPrefix = @('-d', $script:ReleaseDistro, '--exec', 'docker',
 $script:ReleaseAllowMutation = $false
 $script:ReleaseEndpointId = 2
 $script:ReleasePortainerApi = '\\NAS\Data\Backups\Infrastructure\NUC\windows11-vm\scripts\portainer\Invoke-PortainerApi.ps1'
+
+# One monotonic release-step budget caps successive WSL calls and poll loops;
+# the outer stage watchdog still bounds non-WSL work and total completion.
+# Binary Restore-Backup retains its separate 900-second stream contract; it is not
+# routed through this text transport or claimed to share its cancellation path.
+$script:ReleaseStepSeconds = switch ([IO.Path]::GetFileName([string]$MyInvocation.ScriptName)) {
+    'Test-BackupCompatibility.ps1' { 900 }
+    'Invoke-Smoke.ps1' { 900 }
+    'Initialize-Release.ps1' { 120 }
+    default { 1800 }
+}
+$script:ReleaseStepClock = [Diagnostics.Stopwatch]::StartNew()
+$script:ReleaseLoopBudget = $null
+
+function Get-ReleaseRemainingSeconds([double] $CallLimit = 0) {
+    $remaining = $script:ReleaseStepSeconds - $script:ReleaseStepClock.Elapsed.TotalSeconds
+    if ($null -ne $script:ReleaseLoopBudget) {
+        $remaining = [Math]::Min($remaining, $script:ReleaseLoopBudget.Seconds - $script:ReleaseLoopBudget.Clock.Elapsed.TotalSeconds)
+    }
+    if ($CallLimit -gt 0) { $remaining = [Math]::Min($remaining, $CallLimit) }
+    if ($remaining -le 0) { throw 'The release step/loop deadline expired; resource cleanup is unconfirmed.' }
+    $remaining
+}
 
 # ---------------------------------------------------------------- paths, names, hashes
 
@@ -196,19 +220,47 @@ function Invoke-ReleasePython {
 
 # ---------------------------------------------------------------- local Docker (WSL), never the NAS engine
 
+function Invoke-ReleaseDockerClient([string[]] $DockerArguments, [string] $InputText = '',
+    [double] $CallLimit = 0, [switch] $CaptureOutput,
+    [IO.TextWriter] $StandardOutputWriter, [IO.TextWriter] $StandardErrorWriter) {
+    $total = Get-ReleaseRemainingSeconds $CallLimit
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    Assert-HarnessWslRunning $script:ReleaseDistro -TimeoutSeconds ([Math]::Min(5, $total))
+    $remaining = [Math]::Min((Get-ReleaseRemainingSeconds $CallLimit), $total - $clock.Elapsed.TotalSeconds)
+    if ($remaining -lt 6) { throw 'Insufficient release deadline remains for Docker execution and drain.' }
+    # Direct argv needs no shell or text quoting. Two seconds for termination
+    # and three for drain fit inside this call and the enclosing step/loop.
+    $guestSeconds = [Math]::Floor($remaining) - 5
+    $words = @('-d', $script:ReleaseDistro, '--exec', 'timeout', '--signal=TERM', '--kill-after=2s', "${guestSeconds}s", 'docker', '--host', 'unix:///var/run/docker.sock') + $DockerArguments
+    $result = Invoke-HarnessWslClient (New-HarnessWslStartInfo $words) -InputText $InputText -TimeoutSeconds $remaining -CaptureOutput:$CaptureOutput -StandardOutputWriter $StandardOutputWriter -StandardErrorWriter $StandardErrorWriter
+    Assert-WslTransportCompletion $result $remaining
+    if ($result.InputFailed -or $result.ExitCode -in 124, 125, 126, 127, 137) { throw "Local Docker transport/deadline failed (exit $($result.ExitCode)); resource cleanup is unconfirmed." }
+    $result
+}
+
+function ConvertFrom-ReleaseDockerOutput([string] $Text) {
+    if ($Text.Length -eq 0) { return }
+    # Match native line output without inventing a trailing empty record.
+    ($Text -replace '\r?\n$', '') -split '\r?\n'
+}
+
 function Invoke-LocalDocker {
     # A plain function on purpose: native flags such as -e and --name must not bind to PowerShell parameters.
-    $wsl = $script:ReleaseWsl; $prefix = $script:ReleaseDockerPrefix
-    $output = & $wsl @prefix @args
-    if ($LASTEXITCODE -ne 0) { throw "Local Docker command failed (exit $LASTEXITCODE): docker $($args -join ' ')" }
-    $output
+    $result = Invoke-ReleaseDockerClient -DockerArguments @($args) -CaptureOutput -StandardErrorWriter ([Console]::Error)
+    if ($result.ExitCode -ne 0) { throw "Local Docker command failed (exit $($result.ExitCode))." }
+    ConvertFrom-ReleaseDockerOutput $result.Output
+}
+
+function Invoke-LocalDockerInput([string] $InputText, [string[]] $DockerArguments) {
+    $result = Invoke-ReleaseDockerClient -DockerArguments $DockerArguments -InputText $InputText -CaptureOutput -StandardErrorWriter ([Console]::Error)
+    if ($result.ExitCode -ne 0) { throw "Local Docker text-input command failed (exit $($result.ExitCode))." }
+    ConvertFrom-ReleaseDockerOutput $result.Output
 }
 
 function Test-LocalDocker {
     # Exit status only: true when the command succeeds (used for existence probes).
-    $wsl = $script:ReleaseWsl; $prefix = $script:ReleaseDockerPrefix
-    & $wsl @prefix @args *> $null
-    $LASTEXITCODE -eq 0
+    $result = Invoke-ReleaseDockerClient -DockerArguments @($args) -CallLimit 30 -StandardOutputWriter ([IO.TextWriter]::Null) -StandardErrorWriter ([IO.TextWriter]::Null)
+    $result.ExitCode -eq 0
 }
 
 function Invoke-LocalDockerJson {
@@ -221,21 +273,26 @@ function Invoke-LocalDockerToFile {
     # file and returns the exit code instead of throwing. A plain function so that native flags pass through.
     $logPath = $args[0]
     $dockerArguments = @($args | Select-Object -Skip 1)
-    Assert-FilesAbsent $logPath
-    $wsl = $script:ReleaseWsl; $prefix = $script:ReleaseDockerPrefix
-    $lines = & $wsl @prefix @dockerArguments 2>&1
-    $code = $LASTEXITCODE
-    Write-NewText -Path $logPath -Text ((@($lines | ForEach-Object { "$_" }) -join "`n") + "`n")
-    $code
+    $stream = $null; $writer = $null
+    try {
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($logPath)))
+        $stream = [IO.FileStream]::new($logPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
+        $writer.AutoFlush = $true
+        $result = Invoke-ReleaseDockerClient -DockerArguments $dockerArguments -StandardOutputWriter $writer -StandardErrorWriter $writer
+        [int] $result.ExitCode
+    } finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        elseif ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function Invoke-LocalShell {
     # Runs a bash script inside the WSL distribution; the script travels over stdin so no quoting layer alters it.
     param([Parameter(Mandatory)][string] $Script)
-    $wsl = $script:ReleaseWsl
-    # Out-Host keeps the script's own output out of the return value, which is only the exit code.
-    ((($Script -replace "`r`n", "`n").TrimEnd()) + "`n# end of script") | & $wsl -d $script:ReleaseDistro --exec bash -s | Out-Host
-    [int]$LASTEXITCODE
+    $remaining = [int][Math]::Floor((Get-ReleaseRemainingSeconds))
+    if ($remaining -lt 26) { throw 'Insufficient release deadline remains for guest script/cleanup/drain.' }
+    Invoke-HarnessWsl -Script $Script -ReturnExitCode -WslDistribution $script:ReleaseDistro -TimeoutSeconds $remaining
 }
 
 function Assert-LocalDockerAvailable {
@@ -251,11 +308,16 @@ function Assert-DockerNamesFree {
 
 function Wait-LocalCondition {
     param([Parameter(Mandatory)][scriptblock] $Condition, [int] $Attempts = 60, [int] $DelaySeconds = 1, [Parameter(Mandatory)][string] $Message)
-    for ($i = 0; $i -lt $Attempts; $i++) {
-        if (& $Condition) { return }
-        Start-Sleep -Seconds $DelaySeconds
-    }
-    throw $Message
+    $previous = $script:ReleaseLoopBudget
+    $script:ReleaseLoopBudget = @{ Seconds = [Math]::Min((Get-ReleaseRemainingSeconds), $Attempts * [Math]::Max(1, $DelaySeconds)); Clock = [Diagnostics.Stopwatch]::StartNew() }
+    try {
+        for ($i = 0; $i -lt $Attempts; $i++) {
+            if (& $Condition) { return }
+            $remaining = Get-ReleaseRemainingSeconds
+            Start-Sleep -Milliseconds ([int]([Math]::Min($DelaySeconds, $remaining) * 1000))
+        }
+        throw $Message
+    } finally { $script:ReleaseLoopBudget = $previous }
 }
 
 # ---------------------------------------------------------------- Portainer (NAS), through the credential-holding wrapper

@@ -6,8 +6,19 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $root 'eng/release/ReleaseCommon.ps1')
-$script:ReleaseWsl = (Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop).Source
-$script:ReleaseDockerPrefix = @('-I', '-B', '-c', 'import json,sys; print(json.dumps(sys.argv[1:]))')
+$fixturePython = (Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop).Source
+function Assert-HarnessWslRunning { }
+function New-HarnessWslStartInfo([string[]] $Arguments) {
+    $start = [Diagnostics.ProcessStartInfo]::new($fixturePython)
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $first = [array]::IndexOf($Arguments, 'docker') + 3
+    if ($first -lt 3 -or $Arguments[$first - 1] -ne 'unix:///var/run/docker.sock') { throw 'Local Docker argv lost its explicit socket.' }
+    foreach ($word in (@('-I', '-B', '-c', 'import json,sys; print(json.dumps(sys.argv[1:]))') + $Arguments[$first..($Arguments.Length - 1)])) { $start.ArgumentList.Add($word) }
+    $start
+}
 $cfg = [pscustomobject]@{ sdkImage = 'fixture-sdk'; postgresImage = 'fixture-postgres' }
 $ctx = [pscustomobject]@{ BundleName = 'fixture-bundle' }
 $db = 'fixture-db'; $network = 'fixture-network'; $label = 'fixture-label'

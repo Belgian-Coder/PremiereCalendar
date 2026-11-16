@@ -25,6 +25,11 @@ $commonLiteral = (Join-Path $release 'ReleaseCommon.ps1').Replace("'", "''")
 . '$commonLiteral'
 function Assert-LocalDockerAvailable { `$global:FixtureDouble.Calls.Add(@('available')) }
 function Invoke-LocalDocker { Invoke-FixtureDockerDouble @args }
+function Invoke-LocalDockerInput {
+    param([string]`$InputText, [string[]]`$DockerArguments)
+    `$InputText | Invoke-FixtureSqlDouble @DockerArguments
+    if (`$LASTEXITCODE -ne 0) { throw 'Fixture SQL command failed.' }
+}
 function Test-LocalDocker { Test-FixtureDockerDouble @args }
 function Invoke-ReleasePython { Invoke-FixtureComparisonDouble @args }
 function Wait-LocalCondition {
@@ -226,6 +231,7 @@ try {
     $f = New-FixtureCase -Default
     & $helper -Bundle $f.New
     Assert-FixtureTest ((Test-Path (Join-Path $f.New 'schema-backup-compatibility.json')) -and -not (Test-Path (Join-Path $f.New 'existing-fixture-compatibility.json')) -and $f.SqlCalls -eq 2) 'Default canonical compatibility behavior changed.'
+    Assert-FixtureTest (@($f.Calls | Where-Object { $_ -contains 'psql' -and $_ -contains '' }).Count -eq 0) 'Canonical SQL argv gained an empty read-only override token.'
 
     # Exercise the actual production same-backup binding function with a new,
     # different backup; historical comparison success cannot bind it.

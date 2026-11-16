@@ -72,6 +72,8 @@ function Invoke-HarnessWslClient($StartInfo, [string] $InputText = '', [double] 
 }
 '@
 $commonText = Get-Content -LiteralPath (Join-Path $root 'eng/Harness.Common.ps1') -Raw
+$commonText = $commonText.Replace('. (Join-Path $PSScriptRoot ''Wsl.Transport.ps1'')', '')
+$commonText = (Get-Content -LiteralPath (Join-Path $root 'eng/Wsl.Transport.ps1') -Raw) + "`n" + $commonText
 $tokens = $null; $errors = $null
 $commonAst = [Management.Automation.Language.Parser]::ParseInput($commonText, [ref]$tokens, [ref]$errors)
 $replace = @($commonAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in 'New-HarnessWslStartInfo', 'Invoke-HarnessWslClient' }, $false))

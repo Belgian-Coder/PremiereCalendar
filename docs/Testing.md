@@ -98,6 +98,24 @@ failure preserves an earlier test failure; otherwise it makes the run fail.
 If cleanup is unresolved, preserve the log and inspect the exact recorded
 resources before another run. Do not infer cleanup from Windows process exit.
 
+Development and release text calls share `eng/Wsl.Transport.ps1`. Release Docker
+arguments use `ArgumentList` and the explicit local socket; SQL text travels on
+stdin. JSON reads stdout only, while stderr stays separate. Combined UTF-8 logs
+are opened with `CreateNew` and drain continuously; existing evidence is never
+overwritten. Each pipe retains incomplete Unicode pairs until the next chunk,
+so interleaved output cannot corrupt supplementary characters. A wrapper error
+or transport/input/drain deadline throws even during an existence
+probe, so uncertainty cannot be interpreted as an available resource name.
+
+Release WSL calls share a monotonic step budget: 120 seconds for candidate
+initialization, 900 for compatibility/smoke, and 1800 for other release entry
+points. Poll loops also cap each child call within their attempts/delay budget;
+existence probes have a 30-second cap. Guest termination and output drain are
+reserved inside each call. Outer stage watchdogs still bound non-WSL work and
+total completion, and must report retained clients/resources on failure.
+Binary `Restore-Backup.ps1` keeps its separate 900-second streaming contract;
+it is not converted to text or claimed to use this cancellation/drain path.
+
 ```powershell
 # Preview only (no WSL/Docker): what would run and where the output goes
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit -Filter ViewSync -Plan
@@ -145,6 +163,7 @@ path from any folder.
 ```powershell
 pwsh -NoProfile -File ./tests/Harness.Tests.ps1
 pwsh -NoProfile -File ./tests/HarnessProcess.Tests.ps1
+pwsh -NoProfile -File ./tests/ReleaseTransport.Tests.ps1 -PythonExecutable python
 pwsh -NoProfile -File ./tests/HarnessCacheRoot.Tests.ps1
 pwsh -NoProfile -File ./tests/ExistingRestoreFixture.Tests.ps1
 pwsh -NoProfile -File ./tests/ReleaseDockerArguments.Tests.ps1
