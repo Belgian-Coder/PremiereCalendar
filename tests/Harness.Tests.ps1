@@ -54,6 +54,39 @@ function global:wsl.exe {
     } else { throw 'Unexpected WSL operation.' }
     $global:LASTEXITCODE = 0
 }
+# Generate the real scripts with only the native transport replaced. The owned
+# process implementation is exercised separately by HarnessProcess.Tests.ps1.
+$transportSandbox = Join-Path $root ('artifacts/harness-tests/transport-' + [guid]::NewGuid().ToString('N'))
+[void] (New-Item -ItemType Directory -Path $transportSandbox)
+$fixtureCommon = Join-Path $transportSandbox 'Harness.Common.ps1'
+$mockTransport = @'
+function New-HarnessWslStartInfo([string[]] $Arguments, [switch] $UnicodeOutput) {
+    $start = [Diagnostics.ProcessStartInfo]::new('wsl.exe')
+    foreach ($word in $Arguments) { $start.ArgumentList.Add($word) }
+    $start
+}
+function Invoke-HarnessWslClient($StartInfo, [string] $InputText = '', [double] $TimeoutSeconds = 5, [switch] $CaptureOutput) {
+    $words = @($StartInfo.ArgumentList)
+    $text = if ($words -contains '-s') { $InputText | wsl.exe @words } else { wsl.exe @words }
+    [pscustomobject]@{ Output = ($text -join "`n"); ExitCode = $global:LASTEXITCODE; TimedOut = $false; OutputDrained = $true; InputFailed = $false; ClientPid = 0 }
+}
+'@
+$commonText = Get-Content -LiteralPath (Join-Path $root 'eng/Harness.Common.ps1') -Raw
+$tokens = $null; $errors = $null
+$commonAst = [Management.Automation.Language.Parser]::ParseInput($commonText, [ref]$tokens, [ref]$errors)
+$replace = @($commonAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in 'New-HarnessWslStartInfo', 'Invoke-HarnessWslClient' }, $false))
+foreach ($node in ($replace | Sort-Object { $_.Extent.StartOffset } -Descending)) { $commonText = $commonText.Remove($node.Extent.StartOffset, $node.Extent.EndOffset - $node.Extent.StartOffset) }
+$commonText = $mockTransport + "`n" + $commonText
+[IO.File]::WriteAllText($fixtureCommon, $commonText)
+. $fixtureCommon
+function Invoke-HarnessFixtureScript([string] $Path, [hashtable] $Parameters) {
+    $text = Get-Content -LiteralPath $Path -Raw
+    $text = $text.Replace('. (Join-Path $PSScriptRoot ''Harness.Common.ps1'')', ('. ' + "'" + $fixtureCommon.Replace("'", "''") + "'"))
+    $t = $null; $e = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$t, [ref]$e)
+    $text = $text.Insert($ast.ParamBlock.Extent.EndOffset, ("`n`$PSScriptRoot = '" + (Split-Path -Parent $Path).Replace("'", "''") + "'`n"))
+    & ([scriptblock]::Create($text)) @Parameters
+}
 try {
     # -Filter takes test-name substrings (xUnit.net 4 runs the test executables with -method *text*); the shell
     # metacharacters must reach the runner as one literal argument.
@@ -69,7 +102,7 @@ try {
     $bounded = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project All -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -Plan
     $sharedCacheA = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -NugetVolume fixture-linux-amd64-nuget -Plan
     $sharedCacheB = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Component -NugetVolume fixture-linux-amd64-nuget -NoRuntimeAsync -Plan
-    $portable = & (Join-Path $root 'eng/wsl-docker.ps1') test -Project All -WslDistribution PC-MARC-Dev -DevImage prepared-browser:local -CacheFlavor glibc -NoRuntimeAsync -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -Plan
+    $portable = & (Join-Path $root 'eng/wsl-docker.ps1') test -Project All -WslDistribution PC-MARC-Dev -DevImage prepared-browser:local -CacheFlavor glibc -NoRuntimeAsync -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -TimeoutSeconds 2400 -Plan
     $watch = & (Join-Path $root 'eng/wsl-docker.ps1') up -Plan
     $checkPortable = & (Join-Path $root 'eng/wsl-docker.ps1') check -WslDistribution PC-MARC-Dev -BuildVolume fixture-build -NugetVolume fixture-packages -Cpus 3 -BuildMaxCpuCount 3 -Plan
     Assert-Harness ($global:HarnessWslCalls -eq 0) '-Plan invoked WSL.'
@@ -93,6 +126,7 @@ try {
     Assert-Harness ($portable.Projects.Count -eq 4 -and $portable.WslDistribution -eq 'PC-MARC-Dev' -and $portable.CacheFlavor -eq 'glibc' -and $portable.Cpus -eq 3 -and $portable.BuildArguments -contains '-maxcpucount:3' -and $portable.RunnerArguments -contains '3') 'Local test forwarding lost profile/budgets or changed All.'
     Assert-Harness ($portable.BuildStorage -ne $plan.BuildStorage -and $portable.PackageStorage -eq $plan.PackageStorage) 'ABI isolation or shared project packages regressed.'
     Assert-Harness ($portable.BuildStorage -match '-glibc-sync-check$' -and $portable.BuildArguments -contains '-p:UseRuntimeAsync=false') 'Local test forwarding lost runtime-async mode.'
+    Assert-Harness ($default.TimeoutSeconds -eq 1800 -and $check.TimeoutSeconds -eq 1800 -and $portable.TimeoutSeconds -eq 2400) 'Total deadlines were not explicit or forwarded.'
     Assert-Harness ($watch.BuildStorage -ne $plan.BuildStorage -and $watch.BuildStorage -match '-watch$' -and $watch.PackageStorage -eq $plan.PackageStorage) 'Watcher state is not separate with shared packages.'
     Assert-Harness ($checkPortable.BuildStorage -eq 'fixture-build' -and $checkPortable.PackageStorage -eq 'fixture-packages' -and $checkPortable.Command -match '--cpus=3' -and $checkPortable.Command -match '-maxcpucount:3') 'Scoped check override/budget propagation failed.'
     $primaryStorage = Get-HarnessStorage $primaryContext
@@ -119,14 +153,14 @@ try {
     Assert-Harness $rejected 'VSTest filter expressions are silently accepted.'
     Assert-Harness ($alternate.BuildStorage -ne $plan.BuildStorage) 'Runtime-async modes share build state.'
     Assert-Harness ($check.Command -match 'dotnet build PremiereCalendar/PremiereCalendar.csproj') 'App check expands to the full solution.'
-    & (Join-Path $root 'eng/wsl-docker.ps1') check
-    & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project ComponentTests -Filter $filter -WslDistribution PC-MARC-Dev 6>$null | Out-Null
+    Invoke-HarnessFixtureScript (Join-Path $root 'eng/wsl-docker.ps1') @{ Action = 'check' }
+    Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'ComponentTests'; Filter = $filter; WslDistribution = 'PC-MARC-Dev' } 6>$null | Out-Null
     Assert-Harness ($global:HarnessCapturedScripts.Count -eq 2) 'Expected two intercepted bash scripts.'
     $checkScript = $global:HarnessCapturedScripts[0]
     $testScript = $global:HarnessCapturedScripts[1]
     Assert-Harness ($global:HarnessCapturedArgv.Count -eq 8) 'Named-volume execution unexpectedly converts mutable host cache paths.'
-    Assert-Harness (($global:HarnessCapturedArgv[1][0..4] -join '|') -eq '-d|Ubuntu-24.04|--|wslpath|-a' -and ($global:HarnessCapturedArgv[3] -join '|') -eq '-d|Ubuntu-24.04|--|bash|-s') 'Default distro did not reach the actual WSL argv boundary.'
-    Assert-Harness (($global:HarnessCapturedArgv[5][0..4] -join '|') -eq '-d|PC-MARC-Dev|--|wslpath|-a' -and ($global:HarnessCapturedArgv[7] -join '|') -eq '-d|PC-MARC-Dev|--|bash|-s') 'Explicit distro did not reach both WSL operations.'
+    Assert-Harness (($global:HarnessCapturedArgv[1][0..4] -join '|') -eq '-d|Ubuntu-24.04|--|wslpath|-a' -and ($global:HarnessCapturedArgv[3][0..4] -join '|') -eq '-d|Ubuntu-24.04|--exec|timeout|--signal=TERM' -and ($global:HarnessCapturedArgv[3][-2..-1] -join '|') -eq 'bash|-s') 'Default distro/deadline did not reach the WSL argv boundary.'
+    Assert-Harness (($global:HarnessCapturedArgv[5][0..4] -join '|') -eq '-d|PC-MARC-Dev|--|wslpath|-a' -and ($global:HarnessCapturedArgv[7][0..4] -join '|') -eq '-d|PC-MARC-Dev|--exec|timeout|--signal=TERM') 'Explicit distro did not reach both WSL operations.'
     $callsBeforeStopped = $global:HarnessWslCalls
     $global:HarnessRunningDistros = @()
     foreach ($operation in @('path', 'bash')) {
@@ -160,6 +194,9 @@ try {
     Assert-Harness ($checkScript -match 'flock -n 9' -and $testScript -match 'flock -n 9') 'Check/test output locking is missing.'
     Assert-Harness ($testScript -match 'trap cleanup EXIT') 'Disposable resource cleanup is missing.'
     Assert-Harness ($testScript -notmatch '/tmp/pcpg-env') 'Test credentials escaped into WSL host temp files.'
+    Assert-Harness ($testScript -match "export POSTGRES_PASSWORD='([0-9a-f]{32})'") 'Disposable test password is not confined to the input script.'
+    $testPassword = $Matches[1]
+    Assert-Harness (-not (($global:HarnessCapturedArgv | ForEach-Object { $_ -join ' ' }) -join "`n").Contains($testPassword)) 'Test password escaped into native command arguments.'
     Assert-Harness ($testScript -match "PC_INNER_SCRIPT='([^']+)'") 'Encoded inner test script is missing.'
     $inner = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
     Assert-Harness ($inner.Contains((ConvertTo-BashLiteral $runnerFilter))) 'Shell filter quoting changed.'
@@ -185,7 +222,7 @@ try {
                 $global:LASTEXITCODE = 0
                 'Total wall time: 0 s. Results: fixture-results'
             }
-            $WslDistribution = 'PC-MARC-Dev'; $Cpus = 3; $MaxThreads = '3'; $BuildMaxCpuCount = 3
+            $WslDistribution = 'PC-MARC-Dev'; $Cpus = 3; $MaxThreads = '3'; $BuildMaxCpuCount = 3; $TimeoutSeconds = 2400
             $BuildVolume = 'fixture-build'; $NugetVolume = 'fixture-packages'; $testScript = 'fixture-test-runner.ps1'
             . ([scriptblock]::Create($launchFunction.Extent.Text))
             Invoke-TestRunner -LogPath (Join-Path $sandbox 'test-run.log')
@@ -194,6 +231,7 @@ try {
         $releaseWords = $global:HarnessReleaseArgv -join '|'
         Assert-Harness ($releaseWords -match '-WslDistribution:?\|PC-MARC-Dev' -and $releaseWords -match '-BuildVolume:?\|fixture-build' -and $releaseWords -match '-NugetVolume:?\|fixture-packages') 'Canonical test wrapper lost distribution/storage forwarding.'
         Assert-Harness ($releaseWords -match '-Cpus\|3' -and $releaseWords -match '-MaxThreads\|3' -and $releaseWords -match '-BuildMaxCpuCount\|3' -and $global:HarnessReleaseArgv -notcontains '-Project') 'Canonical test wrapper changed full roster/budget forwarding.'
+        Assert-Harness ($releaseWords -match '-TimeoutSeconds:?\|2400') 'Canonical wrapper did not forward its explicit total deadline.'
     } finally {
         Remove-Variable HarnessReleaseArgv -Scope Global
         if ($sandbox.StartsWith((Join-Path $root 'artifacts/harness-tests') + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $sandbox -Recurse -Force }
@@ -206,6 +244,7 @@ try {
         foreach ($name in @('wsl-docker.ps1', 'Harness.Common.ps1')) {
             Copy-Item -LiteralPath (Join-Path $root "eng/$name") -Destination (Join-Path $sandbox "eng/$name")
         }
+        [IO.File]::WriteAllText((Join-Path $sandbox 'eng/Harness.Common.ps1'), $commonText)
         Copy-Item -LiteralPath (Join-Path $root 'compose.dev.yaml') -Destination (Join-Path $sandbox 'compose.dev.yaml')
         $entry = Join-Path $sandbox 'eng/wsl-docker.ps1'
         & $entry build 6>$null | Out-Null
@@ -235,28 +274,64 @@ try {
         }
         # Execute the lifecycle with a shell-function Docker double. All paths
         # point into this project's sandbox; no Docker executable can be called.
-        foreach ($expectedExit in @(0, 7)) {
+        foreach ($case in @(
+            @{ TestExit = 0; Cleanup = 'ok'; Expected = 0 },
+            @{ TestExit = 7; Cleanup = 'ok'; Expected = 7 },
+            @{ TestExit = 7; Cleanup = 'fail'; Expected = 7 },
+            @{ TestExit = 0; Cleanup = 'fail'; Expected = 75 },
+            @{ TestExit = 0; Cleanup = 'foreign'; Expected = 75 },
+            @{ TestExit = 0; Cleanup = 'timeout'; Expected = 75 }
+            @{ TestExit = 0; Cleanup = 'creation'; Expected = 9 }
+        )) {
             $sandbox = Join-Path $root ('artifacts/harness-tests/lifecycle-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
             $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
             $linuxRoot = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }
             $linuxPackages = if ($IsWindows) { '/mnt/' + $context.PackageRoot.Substring(0, 1).ToLowerInvariant() + '/' + ($context.PackageRoot.Substring(3) -replace '\\', '/') } else { $context.PackageRoot }
             $simulation = $testScript.Replace($linuxPackages, "$linuxSandbox/packages").Replace($linuxRoot, $linuxSandbox)
+            Assert-Harness ($simulation -match 'premierecalendar.test=([0-9a-f]{10})') 'Test run label missing.'
+            $label = $Matches[1]
+            $runnerId = 'a' * 64; $serverId = 'b' * 64; $networkId = 'c' * 64
             $dockerDouble = @"
 flock() { return 0; }
+# Intercept timeout as well as Docker: never let a shell function double fall
+# through to a real Docker executable via timeout's child-process lookup.
+timeout() {
+  [ "`$1" = --kill-after=1s ] && [ "`$2" = 1s ] || return 99
+  shift 2
+  if [ '$($case.Cleanup)' = timeout ] && [ "`$3" = inspect ]; then return 124; fi
+  "`$@"
+}
 docker() {
   printf '%s %s\n' "`$1" "`${2-}" >> '$linuxSandbox/docker-calls.txt'
   if [ "`$1" = info ]; then echo linux/amd64; return 0; fi
   if [ "`$1" = image ]; then echo 'linux/amd64 sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; return 0; fi
-  if [ "`$1" = run ] && [ "`${2-}" = --rm ]; then return $expectedExit; fi
+  if [ "`$1" = network ] && [ "`$2" = create ]; then echo '$networkId'; return 0; fi
+  if [ "`$1" = run ]; then if [ '$($case.Cleanup)' = creation ]; then return 9; fi; echo '$serverId'; return 0; fi
+  if [ "`$1" = create ]; then echo '$runnerId'; return 0; fi
+  if [ "`$1" = start ]; then return $($case.TestExit); fi
+  if [ "`${2-}" = inspect ]; then
+    if [ '$($case.Cleanup)' = foreign ]; then echo "`${!#}|foreign-run"; else echo "`${!#}|$label"; fi
+    return 0
+  fi
+  if [ "`${2-}" = rm ] && [ '$($case.Cleanup)' = fail ]; then return 1; fi
   return 0
 }
 "@
-            (($dockerDouble + "`n" + $simulation) -replace "`r`n", "`n") | & $bash -s
-            Assert-Harness ($LASTEXITCODE -eq $expectedExit) 'Test runner exit status was not preserved.'
+            $observed = (($dockerDouble + "`n" + $simulation) -replace "`r`n", "`n") | & $bash -s 2>&1
+            Assert-Harness ($LASTEXITCODE -eq $case.Expected) "Test/cleanup exit status was not preserved: $($case.Cleanup), $($case.TestExit)."
             $calls = Get-Content (Join-Path $sandbox 'docker-calls.txt')
-            Assert-Harness (@($calls | Where-Object { $_ -eq 'rm -f' }).Count -eq 2) 'Runner/database cleanup did not execute on exit.'
-            Assert-Harness ($calls[-1] -eq 'network rm') 'Network cleanup did not execute on exit.'
+            if ($case.Cleanup -eq 'creation') {
+                Assert-Harness (@($calls | Where-Object { $_ -eq 'container rm' }).Count -eq 0 -and $calls[-1] -eq 'network rm') 'Unknown creation was removed by name or the verified network was retained.'
+                Assert-Harness (($observed -join "`n") -match 'state=unresolved-creation') 'Unknown creation was falsely reported as cleaned.'
+            } elseif ($case.Cleanup -in 'foreign', 'timeout') {
+                Assert-Harness (@($calls | Where-Object { $_ -match ' rm$' }).Count -eq 0) 'Cleanup removed resources without verified ownership.'
+                Assert-Harness (($observed -join "`n") -match 'state=unresolved-identity') 'Unverified cleanup was not reported.'
+            } else {
+                Assert-Harness (@($calls | Where-Object { $_ -eq 'container rm' }).Count -eq 2) 'Runner/database cleanup did not execute on exit.'
+                Assert-Harness ($calls[-1] -eq 'network rm') 'Network cleanup did not execute on exit.'
+                Assert-Harness (($observed -join "`n") -match $(if ($case.Cleanup -eq 'ok') { 'state=removed' } else { 'state=unresolved-removal' })) 'Cleanup disposition was not reported.'
+            }
             # The sandbox is this test's own: remove it so repeated runs leave nothing behind.
             if ($sandbox.StartsWith((Join-Path $root 'artifacts/harness-tests') + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $sandbox -Recurse -Force }
         }
@@ -298,6 +373,9 @@ docker() {
 } finally {
     Remove-Item Function:\wsl.exe
     Remove-Variable HarnessCapturedScripts, HarnessWslCalls, HarnessCapturedArgv, HarnessRunningDistros, HarnessRunningListExit -Scope Global
+    $transportPath = [IO.Path]::GetFullPath($transportSandbox)
+    if (-not $transportPath.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'artifacts/harness-tests')) + [IO.Path]::DirectorySeparatorChar) -or (Get-Item -LiteralPath $transportPath).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Unexpected transport fixture path; preserving it.' }
+    Remove-Item -LiteralPath $transportPath -Recurse
 }
 [xml] $properties = Get-Content (Join-Path $root 'Directory.Build.props') -Raw
 Assert-Harness ($properties.Project.PropertyGroup.ArtifactsPath.InnerText -like '*artifacts/build/host') 'Native build output escaped the checkout.'

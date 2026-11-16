@@ -47,6 +47,7 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $NugetVolume,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$')][string] $DevImage = 'premierecalendar-dev-app:latest',
     [ValidateSet('musl', 'glibc')][string] $CacheFlavor,
+    [ValidateRange(30, 86400)][int] $TimeoutSeconds = 1800,
     [switch] $NoRuntimeAsync,
     [switch] $Plan
 )
@@ -59,7 +60,7 @@ if ($Project -notin 'App', 'All') { $Project = ($Project -replace 'Tests$', '') 
 
 if ($Action -eq 'test') {
     $arguments = @{ Plan = $Plan; WslDistribution = $WslDistribution; Cpus = $Cpus; BuildMaxCpuCount = $BuildMaxCpuCount;
-        MaxThreads = $MaxThreads; DevImage = $DevImage; NoRuntimeAsync = $NoRuntimeAsync }
+        MaxThreads = $MaxThreads; DevImage = $DevImage; NoRuntimeAsync = $NoRuntimeAsync; TimeoutSeconds = $TimeoutSeconds }
     foreach ($name in @('BuildVolume', 'NugetVolume', 'CacheFlavor')) {
         $value = Get-Variable -Name $name -ValueOnly
         if ($value) { $arguments[$name] = $value }
@@ -95,9 +96,10 @@ if ($Plan) {
     [pscustomobject]@{ Action = $Action; Project = $Project; Context = $context; Command = $commands[$Action];
         WslDistribution = $WslDistribution; CacheFlavor = $CacheFlavor; DevImage = $DevImage;
         BuildStorage = $storage.BuildVolume; PackageStorage = $storage.NugetVolume; Cpus = $Cpus; BuildMaxCpuCount = $BuildMaxCpuCount;
-        NugetHttpCache = '/root/.nuget/packages/.http-cache' }
+        NugetHttpCache = '/root/.nuget/packages/.http-cache'; TimeoutSeconds = $TimeoutSeconds }
     return
 }
+$budgetClock = [Diagnostics.Stopwatch]::StartNew()
 $wslRoot = ConvertTo-WslPath $context.Root -WslDistribution $WslDistribution
 $preflight = if ($Action -eq 'check') { Get-HarnessPreflight -Image $DevImage } else { Get-HarnessPreflight }
 if ($Action -eq 'up') {
@@ -106,7 +108,11 @@ if ($Action -eq 'up') {
     $preflight = Get-HarnessPreflight -Image $Matches[1] -ImageVariable 'postgres_image'
 }
 # Refuse an unavailable/wrong engine before writing even the native dev secret.
-if ($Action -in 'up', 'build') { Invoke-HarnessWsl "set -eu`n$preflight" -WslDistribution $WslDistribution }
+if ($Action -in 'up', 'build') {
+    $remaining = [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds)
+    if ($remaining -lt 26) { throw 'Insufficient total helper deadline remains before preflight.' }
+    Invoke-HarnessWsl "set -eu`n$preflight" -WslDistribution $WslDistribution -TimeoutSeconds $remaining
+}
 # The development stack reads its PostgreSQL password from a Docker secret file that is not committed. Creating it is a
 # local file write only: the image build needs no password, and an existing file is never touched.
 if ($Action -eq 'up') {
@@ -140,4 +146,6 @@ $lock
 $volumes
 $command
 "@
-Invoke-HarnessWsl $script -WslDistribution $WslDistribution
+$remaining = [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds)
+if ($remaining -lt 26) { throw 'Insufficient total helper deadline remains before execution.' }
+Invoke-HarnessWsl $script -WslDistribution $WslDistribution -TimeoutSeconds $remaining

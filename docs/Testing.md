@@ -82,6 +82,22 @@ Component tests cover Blazor rendering:
 
 The selected WSL distribution and its local Linux/amd64 Docker Engine must already be running, and the development image must exist. Select `-WslDistribution PC-MARC-Dev` on PC-MARC; the compatibility default is `Ubuntu-24.04`. Helpers never start the distribution or daemon, install tools, pull images or build them implicitly (build the image once with the explicit `wsl-docker.ps1 build` action). All commands work from any folder; each script works on its containing checkout, so use the worktree's own script. Add `-Plan` to print the selected projects, arguments, storage profile and output paths without invoking WSL or Docker.
 
+`-TimeoutSeconds` sets the total helper budget: 1800 seconds by default,
+including WSL execution, guest cleanup and output drain. Browser qualification
+explicitly passes `-TimeoutSeconds 2400` to retain its 2400-second bound.
+`wsl-docker.ps1` and `Invoke-ReleaseTests.ps1` forward this budget. The guest
+deadline reserves 15 seconds for termination/cleanup and five seconds for output
+drain within the total. Input stays on stdin; both output streams drain concurrently.
+Cancellation stops only the owned Windows client, never a distro or shared WSL
+host. It does not prove that Linux processes or Docker resources stopped.
+
+Disposable test containers and their network carry a unique
+`premierecalendar.test` label. Cleanup verifies immutable IDs and that label,
+bounds each Docker call, and prints `PC_TEST_CLEANUP` dispositions. A cleanup
+failure preserves an earlier test failure; otherwise it makes the run fail.
+If cleanup is unresolved, preserve the log and inspect the exact recorded
+resources before another run. Do not infer cleanup from Windows process exit.
+
 ```powershell
 # Preview only (no WSL/Docker): what would run and where the output goes
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit -Filter ViewSync -Plan
@@ -128,6 +144,7 @@ path from any folder.
 
 ```powershell
 pwsh -NoProfile -File ./tests/Harness.Tests.ps1
+pwsh -NoProfile -File ./tests/HarnessProcess.Tests.ps1
 pwsh -NoProfile -File ./tests/HarnessCacheRoot.Tests.ps1
 pwsh -NoProfile -File ./tests/ExistingRestoreFixture.Tests.ps1
 pwsh -NoProfile -File ./tests/ReleaseDockerArguments.Tests.ps1
@@ -140,7 +157,7 @@ git diff --check
 
 The syntax checker compiles all Python files in one isolated interpreter process
 without writing bytecode. Pass `-PythonExecutable <existing-Python-3-path>` to it
-or `ValidationTools.Tests.ps1` if Python is not on PATH. Missing Python fails the
+or `ValidationTools.Tests.ps1` / `HarnessProcess.Tests.ps1` if Python is not on PATH. Missing Python fails the
 syntax check; it never falls back to another SDK or installs anything.
 
 At source `dbf17a67306f44283025a87e2ea5c6af3b1f480b` on PC-MARC with Python

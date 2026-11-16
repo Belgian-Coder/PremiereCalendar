@@ -1,0 +1,87 @@
+#Requires -Version 7.0
+# Native pipe/deadline checks; Python is a controlled child, never a WSL/SDK fallback.
+[CmdletBinding()]
+param([string] $PythonExecutable = 'python')
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $root 'eng/Harness.Common.ps1')
+$python = (Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop).Source
+$fixture = Join-Path $PSScriptRoot 'fixtures/harness_client.py'
+$folder = Join-Path $root ('artifacts/harness-process-tests/' + [guid]::NewGuid().ToString('N'))
+[void] (New-Item -ItemType Directory -Path $folder)
+$count = 0
+function Assert-Process([bool] $Condition, [string] $Message) {
+    if (-not $Condition) { throw $Message }
+    $script:count++
+}
+function New-FixtureStart([string] $Mode, [string[]] $Extra = @()) {
+    $start = [Diagnostics.ProcessStartInfo]::new($python)
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    foreach ($word in (@('-I', '-B', $fixture, $Mode) + $Extra)) { $start.ArgumentList.Add($word) }
+    $start
+}
+function Invoke-CapturedFixture($Start, [string] $Text, [double] $Seconds) {
+    $oldOut = [Console]::Out; $oldError = [Console]::Error
+    $out = [IO.StringWriter]::new(); $errorText = [IO.StringWriter]::new()
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        [Console]::SetOut($out); [Console]::SetError($errorText)
+        $result = Invoke-HarnessWslClient -StartInfo $Start -InputText $Text -TimeoutSeconds $Seconds
+        [pscustomobject]@{ Result = $result; Out = $out.ToString(); Error = $errorText.ToString(); Seconds = $clock.Elapsed.TotalSeconds }
+    } finally { [Console]::SetOut($oldOut); [Console]::SetError($oldError); $out.Dispose(); $errorText.Dispose() }
+}
+$secret = [guid]::NewGuid().ToString('N')
+$inputText = $secret + ('x' * 524288)
+$start = New-FixtureStart duplex
+$run = Invoke-CapturedFixture $start $inputText 10
+Assert-Process ($run.Result.ExitCode -eq 0 -and -not $run.Result.TimedOut -and -not $run.Result.InputFailed -and $run.Result.OutputDrained) 'Concurrent pipe/slow-input fixture failed.'
+Assert-Process ($run.Out -eq (('O' * 262144) + "`nSTDOUT_END`nINPUT_BYTES=$([Text.Encoding]::UTF8.GetByteCount($inputText))`n")) 'Stdout was lost, duplicated or changed.'
+Assert-Process ($run.Error -eq (('E' * 262144) + "`nSTDERR_END`n")) 'Stderr was lost, duplicated or changed.'
+Assert-Process (-not ($run.Out + $run.Error + ($start.ArgumentList -join ' ') + ($run.Result | ConvertTo-Json)).Contains($secret)) 'Input secret escaped into output, arguments or receipt.'
+
+$start = New-FixtureStart delay
+$run = Invoke-CapturedFixture $start $inputText 0.4
+Assert-Process ($run.Result.TimedOut -and -not $run.Result.OutputDrained -and $run.Seconds -lt 2) 'Blocked input/process did not respect its deadline.'
+Assert-Process (-not (Get-Process -Id $run.Result.ClientPid -ErrorAction SilentlyContinue)) 'Owned timed-out client remains live.'
+
+$pidFile = Join-Path $folder 'child.pid'
+$run = Invoke-CapturedFixture (New-FixtureStart inherited_pipe @($pidFile)) '' 0.4
+Assert-Process ($run.Result.ExitCode -eq 0 -and $run.Result.TimedOut -and -not $run.Result.OutputDrained -and $run.Seconds -lt 1.5) 'An inherited pipe handle bypassed the drain deadline.'
+Assert-Process ($run.Out -eq "PARENT_END`n") 'Parent output was not preserved before drain timeout.'
+$childId = [int] (Get-Content -LiteralPath $pidFile -Raw)
+Assert-Process ([bool] (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'Client ownership killed an unrelated descendant tree.'
+# This independently bounded fixture child self-exits; do not kill a tree.
+$wait = [Diagnostics.Stopwatch]::StartNew()
+while ((Get-Process -Id $childId -ErrorAction SilentlyContinue) -and $wait.Elapsed.TotalSeconds -lt 4) { Start-Sleep -Milliseconds 25 }
+Assert-Process (-not (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'Controlled inherited-handle child did not self-exit.'
+
+$run = Invoke-CapturedFixture (New-FixtureStart exit7) $secret 3
+Assert-Process ($run.Result.ExitCode -eq 7 -and -not $run.Result.TimedOut -and $run.Result.OutputDrained) 'Native failure exit code changed.'
+Assert-Process ($run.Out -eq "EXPECTED_FAILURE`n" -and -not ($run | ConvertTo-Json -Depth 5).Contains($secret)) 'Failure output exposed input or was incomplete.'
+$run = Invoke-CapturedFixture (New-FixtureStart early7) $inputText 3
+Assert-Process ($run.Result.ExitCode -eq 7 -and $run.Result.InputFailed -and $run.Result.OutputDrained -and -not $run.Result.TimedOut) 'Early native failure lost its exit/input/drain distinction.'
+$code = & {
+    function Assert-HarnessWslRunning { }
+    function New-HarnessWslStartInfo { New-FixtureStart exit7 }
+    Invoke-HarnessWsl -Script $secret -ReturnExitCode -TimeoutSeconds 30
+}
+Assert-Process ($code -eq 7) 'ReturnExitCode no longer preserves a native failure.'
+$code = & {
+    function Assert-HarnessWslRunning { }
+    function New-HarnessWslStartInfo { New-FixtureStart early7 }
+    Invoke-HarnessWsl -Script $inputText -ReturnExitCode -TimeoutSeconds 30
+}
+Assert-Process ($code -eq 7) 'An early input rejection replaced the original nonzero native exit.'
+$failure = & {
+    function Assert-HarnessWslRunning { }
+    function New-HarnessWslStartInfo { New-FixtureStart exit7 }
+    try { Invoke-HarnessWsl -Script $secret -TimeoutSeconds 30; '' } catch { $_.Exception.Message }
+}
+Assert-Process ($failure -match 'exit 7' -and -not $failure.Contains($secret)) 'Default failure behavior or secret-safe diagnostic changed.'
+[ordered]@{ checks = $count; state = 'passed'; noWslOrDocker = $true; secretExposed = $false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $folder 'summary.json')
+Write-Host "$count native harness process checks passed. Evidence: $folder"

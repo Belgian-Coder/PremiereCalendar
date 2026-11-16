@@ -47,6 +47,9 @@ Optional Linux-only NuGet volume override. Keep it separate from native-host cac
 .PARAMETER WslDistribution
 Explicit local test distribution (default Ubuntu-24.04). Does not change other release or NAS transports.
 
+.PARAMETER TimeoutSeconds
+Total test helper budget including guest cleanup and output drain (default 1800 seconds).
+
 .EXAMPLE
 pwsh -File D:\Projects\PremiereCalendar\eng\release\Invoke-ReleaseTests.ps1 -Bundle D:\Projects\PremiereCalendar\artifacts\release\1.2.20 -ExpectedRevision 0123456789abcdef0123456789abcdef01234567
 #>
@@ -59,6 +62,7 @@ param(
     [ValidateRange(1, 64)][int] $Cpus = 2,
     [ValidateRange(1, 64)][int] $MaxThreads = 2,
     [ValidateRange(1, 64)][int] $BuildMaxCpuCount = 2,
+    [ValidateRange(30, 86400)][int] $TimeoutSeconds = 1800,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $BuildVolume,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $NugetVolume
 )
@@ -71,7 +75,7 @@ $log = Join-Path $ctx.Bundle 'test-run.log'
 $receipt = Join-Path $ctx.Bundle 'test-run.json'
 $summaryPath = Join-Path $ctx.Bundle 'test-summary.json'
 $testScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Test-WithPostgres.ps1'))
-$localParameters = @{ WslDistribution = $WslDistribution; Cpus = $Cpus; MaxThreads = $MaxThreads; BuildMaxCpuCount = $BuildMaxCpuCount }
+$localParameters = @{ WslDistribution = $WslDistribution; Cpus = $Cpus; MaxThreads = $MaxThreads; BuildMaxCpuCount = $BuildMaxCpuCount; TimeoutSeconds = $TimeoutSeconds }
 if ($BuildVolume) { $localParameters.BuildVolume = $BuildVolume }
 if ($NugetVolume) { $localParameters.NugetVolume = $NugetVolume }
 # Resolve the test profile through its pure plan; do not change ReleaseCommon's
@@ -83,7 +87,7 @@ $resultsEvidence = Join-Path $ctx.Bundle 'tests'
 $plan = @(
     "Require HEAD = $ExpectedRevision, a clean tracked tree; refuse if $fingerprints, $log, $receipt, $summaryPath or the folder $resultsEvidence exist",
     "freeze_test_source.py: fail if any *.cs file has CR characters; write $fingerprints",
-    "Run $testScript (all unit, component, integration) with WslDistribution=$WslDistribution, Cpus=$Cpus, MaxThreads=$MaxThreads, BuildMaxCpuCount=$BuildMaxCpuCount, BuildVolume=$($localTestPlan.BuildStorage), NugetVolume=$($localTestPlan.PackageStorage) in a child pwsh; keep the console output as $log",
+    "Run $testScript (all unit, component, integration) with WslDistribution=$WslDistribution, Cpus=$Cpus, MaxThreads=$MaxThreads, BuildMaxCpuCount=$BuildMaxCpuCount, TimeoutSeconds=$TimeoutSeconds, BuildVolume=$($localTestPlan.BuildStorage), NugetVolume=$($localTestPlan.PackageStorage) in a child pwsh; keep the console output as $log",
     'Verify the fingerprints again (the tested bytes are the committed bytes)',
     "Write $summaryPath (suites: $($requiredSuites -join ', ')) and $receipt")
 if (Show-ReleasePlan -Title "Invoke-ReleaseTests $($ctx.BundleName)" -Step $plan) { return }
@@ -99,7 +103,7 @@ function Invoke-TestRunner {
     # results folder named by the script's "Results: <folder>" line.
     param([string] $LogPath)
     $pwsh = (Get-Command pwsh).Source
-    $storage = @{ WslDistribution = $WslDistribution }
+    $storage = @{ WslDistribution = $WslDistribution; TimeoutSeconds = $TimeoutSeconds }
     if ($BuildVolume) { $storage.BuildVolume = $BuildVolume }
     if ($NugetVolume) { $storage.NugetVolume = $NugetVolume }
     & $pwsh -NoProfile -File $testScript -Cpus $Cpus -MaxThreads $MaxThreads -BuildMaxCpuCount $BuildMaxCpuCount @storage 2>&1 |
@@ -160,7 +164,7 @@ Write-NewJson -Path $summaryPath -Object $summary
 Write-NewJson -Path $receipt -Object ([ordered]@{
         sourceRevision = $ExpectedRevision; startedUtc = $started.ToString('O'); finishedUtc = $finished.ToString('O')
         runner = 'eng\Test-WithPostgres.ps1 (all unit/component/integration)'; exitCode = $exit; logSha256 = Get-FileSha256 $log
-        resources = [ordered]@{ cpus = $Cpus; maxThreads = $MaxThreads; buildMaxCpuCount = $BuildMaxCpuCount; postgresCpus = 2 }
+        resources = [ordered]@{ cpus = $Cpus; maxThreads = $MaxThreads; buildMaxCpuCount = $BuildMaxCpuCount; postgresCpus = 2; timeoutSeconds = $TimeoutSeconds }
         storage = [ordered]@{ buildVolume = $localTestPlan.BuildStorage; nugetVolume = $localTestPlan.PackageStorage; wslDistribution = $WslDistribution; cacheFlavor = $localTestPlan.CacheFlavor }
         testedSourceFingerprintsSha256 = $fingerprintHash; summarySource = $(if ($SummaryJson) { 'supplied -SummaryJson' } else { 'CTRF/log files of the runner' }) })
 $summary | ForEach-Object { Write-Host ("{0}: {1} passed, {2} failed, {3} skipped" -f $_.suite, $_.passed, $_.failed, $_.skipped) }

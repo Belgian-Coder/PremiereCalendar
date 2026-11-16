@@ -31,8 +31,8 @@ Lists (-Project, -Filter, -RunnerArguments) are comma separated, also when the s
 What it does: inside one WSL shell (Ubuntu-24.04) it takes this checkout's check lock, starts a disposable postgres
 container (the image pinned in compose.yaml, data on tmpfs, max_connections=300) on a private Docker network, builds
 the requested test projects inside premierecalendar-dev-app:latest, runs each test executable directly (xUnit.net 4
-projects are executables; this skips the `dotnet test` start-up cost) and removes the server, the runner and the
-network when it exits, however it exits. The repository is mounted into the container as /src. The network is created
+projects are executables; this skips the `dotnet test` start-up cost) and attempts bounded, ownership-verified cleanup
+of the server, runner and network on exit. Unresolved cleanup is reported and fails the run. The repository is mounted into the container as /src. The network is created
 with an explicit subnet because the Docker default address pools can be exhausted. The test password is generated per
 run and travels only over stdin and inherited environment variables, never through arguments or WSL temp files.
 
@@ -114,6 +114,10 @@ Linux ABI for build isolation: musl (default image) or glibc. Required with a cu
 .PARAMETER Plan
 Prints the plan (projects, build and runner arguments, storage, results folder, images) and returns without invoking
 WSL or Docker.
+
+.PARAMETER TimeoutSeconds
+Total WSL execution, bounded guest cleanup and output-drain budget (default 1800 seconds).
+Browser qualification explicitly uses 2400 seconds. A timeout never proves Linux cleanup.
 #>
 [CmdletBinding()]
 param(
@@ -146,6 +150,7 @@ param(
     [string] $WslDistribution = 'Ubuntu-24.04',
     [ValidateSet('musl', 'glibc')]
     [string] $CacheFlavor,
+    [ValidateRange(30, 86400)][int] $TimeoutSeconds = 1800,
     [switch] $Plan
 )
 
@@ -226,10 +231,12 @@ if ($Plan) {
         DevImage = $DevImage
         Cpus = $Cpus
         BuildMaxCpuCount = $BuildMaxCpuCount
+        TimeoutSeconds = $TimeoutSeconds
     }
     return
 }
 
+$budgetClock = [Diagnostics.Stopwatch]::StartNew()
 $wslRoot = ConvertTo-WslPath $context.Root -WslDistribution $WslDistribution
 $wslBuild = $storage.BuildVolume
 $wslPackages = $storage.NugetVolume
@@ -287,13 +294,50 @@ $innerEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($inner
 $script = @"
 set -eu
 cleanup() {
-  docker rm -f '$runnerName' >/dev/null 2>&1 || true
-  docker rm -f '$server' >/dev/null 2>&1 || true
-  docker network rm '$network' >/dev/null 2>&1 || true
+  original=`$?
+  trap - EXIT INT TERM
+  set +e
+  cleanup_failed=0
+  cleanup_resource container "`$runner_id" '$runnerName' "`$runner_attempted"
+  cleanup_resource container "`$server_id" '$server' "`$server_attempted"
+  cleanup_resource network "`$network_id" '$network' "`$network_attempted"
+  [ "`$original" = 0 ] || exit "`$original"
+  [ "`$cleanup_failed" = 0 ] || exit 75
 }
+cleanup_resource() {
+  kind=`$1; id=`$2; name=`$3; attempted=`$4
+  [ "`$attempted" = 1 ] || return 0
+  if [ -z "`$id" ]; then
+    echo "PC_TEST_CLEANUP kind=`$kind name=`$name label=$runId state=unresolved-creation" >&2
+    cleanup_failed=1; return 0
+  fi
+  # Each inspect/removal is independently bounded, including timeout's kill
+  # grace: at most 12s for all three resources within the guest's 15s grace.
+  case "`$id" in *[!0-9a-f]*|'') cleanup_failed=1; echo "PC_TEST_CLEANUP kind=`$kind name=`$name state=invalid-id" >&2; return 0 ;; esac
+  if [ "`${#id}" != 64 ]; then cleanup_failed=1; echo "PC_TEST_CLEANUP kind=`$kind name=`$name state=invalid-id" >&2; return 0; fi
+  format='{{.Id}}|{{index .Labels "premierecalendar.test"}}'
+  if [ "`$kind" = container ]; then
+    format='{{.Id}}|{{index .Config.Labels "premierecalendar.test"}}'
+  fi
+  identity=`$(timeout --kill-after=1s 1s docker "`$kind" inspect --format "`$format" "`$id" 2>/dev/null)
+  if [ "`$identity" != "`$id|$runId" ]; then
+    echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=unresolved-identity" >&2
+    cleanup_failed=1; return 0
+  fi
+  if [ "`$kind" = container ]; then
+    timeout --kill-after=1s 1s docker container rm -f "`$id" >/dev/null 2>&1
+  else
+    timeout --kill-after=1s 1s docker network rm "`$id" >/dev/null 2>&1
+  fi
+  if [ "`$?" = 0 ]; then echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=removed"
+  else echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=unresolved-removal" >&2; cleanup_failed=1; fi
+}
+runner_id=''; server_id=''; network_id=''
+runner_attempted=0; server_attempted=0; network_attempted=0
 $(Get-HarnessPreflight -Image $DevImage)
 $(Get-HarnessPreflight -Image $postgresImage -ImageVariable 'postgres_image')
 command -v flock >/dev/null
+command -v timeout >/dev/null
 mkdir -p $quotedDirectories
 exec 9>$(ConvertTo-BashLiteral "$wslRoot/artifacts/check.lock")
 flock -n 9 || { echo 'Another build/test check owns this worktree. Use another worktree or wait.' >&2; exit 21; }
@@ -304,29 +348,44 @@ export POSTGRES_PASSWORD='$password' PGPASSWORD='$password' PC_TEST_PASSWORD='$p
 created=0
 for attempt in 0 1 2 3 4 5; do
   octet=`$(( ($subnetOctet + attempt * 7) % 250 + 1 ))
-  if docker network create --subnet "10.141.`$octet.0/24" '$network' >/dev/null 2>&1; then created=1; break; fi
+  network_attempted=1
+  if network_id=`$(docker network create --label premierecalendar.test=$runId --subnet "10.141.`$octet.0/24" '$network' 2>/dev/null); then created=1; break; fi
 done
 [ "`$created" = 1 ] || { echo 'Could not create an isolated 10.141.x.0/24 network.' >&2; exit 22; }
-docker run --pull=never -d --name '$server' --network '$network' --cpus=2 --tmpfs /var/lib/postgresql \
+server_attempted=1
+server_id=`$(docker run --pull=never -d --name '$server' --label premierecalendar.test=$runId --network '$network' --cpus=2 --tmpfs /var/lib/postgresql \
   -e POSTGRES_PASSWORD -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=postgres \
-  "`$postgres_image" -c max_connections=300 >/dev/null
+  "`$postgres_image" -c max_connections=300)
 ready=0
 for i in `$(seq 1 90); do
   if docker exec -e PGPASSWORD '$server' psql -h 127.0.0.1 -U premierecalendar -d postgres -Atc 'select 1' >/dev/null 2>&1; then ready=1; break; fi
   sleep 2
 done
 [ "`$ready" = 1 ] || { echo 'Disposable PostgreSQL did not become ready.' >&2; docker logs --tail 40 '$server' >&2 || true; exit 24; }
-docker run --rm --pull=never --name '$runnerName' --network '$network' --cpus=$Cpus -v $(ConvertTo-BashLiteral $wslRoot):/src \
+runner_attempted=1
+runner_id=`$(docker create --pull=never --name '$runnerName' --label premierecalendar.test=$runId --network '$network' --cpus=$Cpus -v $(ConvertTo-BashLiteral $wslRoot):/src \
   -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -w /src \
   -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
   -e PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE=/tmp/pc-test-postgres-password \
-  -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' "`$dev_image" sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s' </dev/null
+  -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' "`$dev_image" sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s')
+case "`$runner_id`$server_id`$network_id" in *[!0-9a-f]*|'') echo 'Invalid immutable test resource identity.' >&2; exit 28 ;; esac
+[ "`${#runner_id}" = 64 ] && [ "`${#server_id}" = 64 ] && [ "`${#network_id}" = 64 ] || exit 28
+echo "PC_TEST_RESOURCES runner=`$runner_id server=`$server_id network=`$network_id label=$runId"
+docker start --attach "`$runner_id" </dev/null
 "@
 
 Write-Host "Results: $resultsHost"
+Write-Host "Test run label: premierecalendar.test=$runId; resource names: $runnerName, $server, $network"
 $started = Get-Date
-$exitCode = Invoke-HarnessWsl $script -ReturnExitCode -WslDistribution $WslDistribution
+$remaining = [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds)
+if ($remaining -lt 26) { throw 'Insufficient total test deadline remains for execution, cleanup and drain.' }
+try {
+    $exitCode = Invoke-HarnessWsl $script -ReturnExitCode -WslDistribution $WslDistribution -TimeoutSeconds $remaining
+} catch {
+    [Console]::Error.WriteLine("Test resources with label premierecalendar.test=$runId may remain: $runnerName, $server, $network. Guest cleanup is unconfirmed; inspect exact ownership before removal.")
+    throw
+}
 Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] ((Get-Date) - $started).TotalSeconds, $resultsHost)
 if ($exitCode -ne 0) { throw "Tests did not pass (exit code $exitCode; see the messages above)." }
 Write-Host "All requested test projects passed ($($suites -join ', '))."
