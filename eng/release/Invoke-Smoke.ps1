@@ -62,14 +62,14 @@ $null = New-Item -ItemType Directory -Path $probeRoot
 $null = New-Item -ItemType Directory -Path (Join-Path $probeRoot 'src'), (Join-Path $probeRoot 'out')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'timezone-probe\Program.cs'), (Join-Path $PSScriptRoot 'timezone-probe\TimezoneProbe.csproj') -Destination (Join-Path $probeRoot 'src')
 $null = Invoke-LocalDocker run --rm --name $probeBuild -v "$(ConvertTo-WslPath (Join-Path $probeRoot 'src')):/probe-src:ro" -v "$(ConvertTo-WslPath (Join-Path $probeRoot 'out')):/out" `
-    --tmpfs /tmp:rw,size=512m -e DOTNET_CLI_HOME=/tmp/dotnet-home -e DOTNET_CLI_TELEMETRY_OPTOUT=1 --entrypoint sh $cfg.sdkImage `
+    --tmpfs '/tmp:rw,size=512m' -e DOTNET_CLI_HOME=/tmp/dotnet-home -e DOTNET_CLI_TELEMETRY_OPTOUT=1 --entrypoint sh $cfg.sdkImage `
     -ec 'cp -r /probe-src /tmp/probe && dotnet publish /tmp/probe -c Release -p:UseAppHost=false -o /out'
 if (-not (Test-Path -LiteralPath (Join-Path $probeRoot 'out\TimezoneProbe.dll'))) { throw 'The time-zone probe was not built.' }
 
 $connection = 'Host=smoke-db;Database=premierecalendar;Username=premierecalendar;GSS Encryption Mode=Disable'
 $null = Invoke-LocalDocker network create --internal --subnet $subnet --label $label $network
 $null = Invoke-LocalDocker run -d --name $db --label $label --network $network --network-alias smoke-db --read-only `
-    --tmpfs /var/lib/postgresql:rw,size=512m --tmpfs /tmp:rw,size=64m --tmpfs /run/postgresql:rw,size=16m `
+    --tmpfs '/var/lib/postgresql:rw,size=512m' --tmpfs '/tmp:rw,size=64m' --tmpfs '/run/postgresql:rw,size=16m' `
     -e PGDATA=/var/lib/postgresql/data/pgdata -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=premierecalendar -e POSTGRES_HOST_AUTH_METHOD=trust $cfg.postgresImage
 Wait-LocalCondition -Attempts 30 -Message 'The smoke PostgreSQL did not become ready.' -Condition { Test-LocalDocker exec $db pg_isready -U premierecalendar -d premierecalendar }
 $hardening = @('--read-only', '--user', '1654:999', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', '--tmpfs', '/app/App_Data:rw,uid=1654,gid=999,mode=0770,size=128m')

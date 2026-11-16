@@ -76,7 +76,7 @@ function Get-SchemaState {
 Get-SchemaState -Path $before
 $connection = 'Host=backup-db;Database=premierecalendar;Username=postgres;GSS Encryption Mode=Disable'
 $null = Invoke-LocalDocker run -d --name $app --label "premierecalendar.validation=compat-$($ctx.BundleName)" --network $network `
-    --read-only --user 1654:999 --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /tmp:rw,noexec,nosuid,size=64m --tmpfs /app/App_Data:rw,uid=1654,gid=999,mode=0770,size=128m `
+    --read-only --user 1654:999 --cap-drop ALL --security-opt no-new-privileges:true --tmpfs '/tmp:rw,noexec,nosuid,size=64m' --tmpfs '/app/App_Data:rw,uid=1654,gid=999,mode=0770,size=128m' `
     -e AppDatabase__Provider=PostgreSql -e "AppDatabase__ConnectionString=$connection" `
     -e ProviderScheduler__Enabled=false -e ProviderDeltaSync__Enabled=false -e CalendarWarmup__Enabled=false -e CalendarCache__Enabled=false `
     -e CalendarCache__AdjacentWeekPrefetchEnabled=false -e ItemEnrichmentCache__Enabled=false -e ImdbDataset__Enabled=false `

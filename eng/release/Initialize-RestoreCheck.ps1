@@ -39,7 +39,7 @@ if (-not (Test-LocalDocker image inspect $cfg.postgresImage)) { throw "The pinne
 Assert-DockerNamesFree -Container $db -Network $network
 $null = Invoke-LocalDocker network create --internal --subnet $subnet --label $label $network
 $null = Invoke-LocalDocker run --pull=never -d --name $db --label $label --network $network --network-alias backup-db --read-only `
-    --tmpfs /var/lib/postgresql:rw,size=1024m --tmpfs /tmp:rw,size=64m --tmpfs /run/postgresql:rw,size=16m `
+    --tmpfs '/var/lib/postgresql:rw,size=1024m' --tmpfs '/tmp:rw,size=64m' --tmpfs '/run/postgresql:rw,size=16m' `
     -e PGDATA=/var/lib/postgresql/data/pgdata -e POSTGRES_USER=postgres -e POSTGRES_DB=premierecalendar -e POSTGRES_HOST_AUTH_METHOD=trust $cfg.postgresImage
 Wait-LocalCondition -Attempts 45 -Message 'The isolated PostgreSQL did not become ready.' -Condition { Test-LocalDocker exec $db pg_isready -U postgres -d premierecalendar }
 Write-Host "Isolated PostgreSQL ready: $db on internal network $network ($subnet)"
