@@ -80,7 +80,7 @@ Component tests cover Blazor rendering:
 
 ## Run
 
-Docker Engine must already be running in the Ubuntu-24.04 WSL distribution and the development image must exist: the helpers never start the daemon, install tools or build the image implicitly (build the image once with `wsl-docker.ps1 build`). All commands work from any folder; each script works on the checkout that contains it, so for a worktree use the script under `D:\Projects\PremiereCalendar\.wt\<name>\eng`. Add `-Plan` to any command to print the selected projects, build and runner arguments and output paths without invoking WSL or Docker.
+The selected WSL distribution and its local Linux/amd64 Docker Engine must already be running, and the development image must exist. Select `-WslDistribution PC-MARC-Dev` on PC-MARC; the compatibility default is `Ubuntu-24.04`. Helpers never start the distribution or daemon, install tools, pull images or build them implicitly (build the image once with the explicit `wsl-docker.ps1 build` action). All commands work from any folder; each script works on its containing checkout, so use the worktree's own script. Add `-Plan` to print the selected projects, arguments, storage profile and output paths without invoking WSL or Docker.
 
 ```powershell
 # Preview only (no WSL/Docker): what would run and where the output goes
@@ -128,6 +128,9 @@ path from any folder.
 
 ```powershell
 pwsh -NoProfile -File ./tests/Harness.Tests.ps1
+pwsh -NoProfile -File ./tests/HarnessCacheRoot.Tests.ps1
+pwsh -NoProfile -File ./tests/ExistingRestoreFixture.Tests.ps1
+pwsh -NoProfile -File ./tests/ReleaseDockerArguments.Tests.ps1
 pwsh -NoProfile -File ./tests/ValidationTools.Tests.ps1
 pwsh -NoProfile -File ./eng/Test-ScriptSyntax.ps1
 pwsh -NoProfile -File ./eng/Test-Docs.ps1 -SourceOnly
@@ -189,9 +192,17 @@ pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit
 | Razor/CSS/JavaScript/navigation | App build and relevant component tests; affected browser cases | Complete suites and serial browser performance/accessibility checks |
 | Database, dependency, container or cross-cutting change | Affected integration/project build first | Complete regression, database and exact-image release gates |
 
-Each checkout/worktree owns `artifacts/build/linux` for checks, `artifacts/build/linux-dev` for the watcher, `artifacts/build/host` for native builds, and a timestamped `artifacts/test-results/<run>` folder per run. `-NoRuntimeAsync` has a separate build directory (`artifacts/build/linux-no-runtime-async`). Helpers lock check outputs to reject concurrent writers in one worktree. Do not bypass that lock with concurrent raw `dotnet` commands. The primary project's `artifacts/packages/linux` is shared across worktrees; native packages stay separate under each checkout's `artifacts/packages/host`. Sharing downloaded packages does not share `obj`/`bin`, test databases, results or development volumes. No files are moved from old sibling output directories.
+Each checkout/worktree owns named ext4 Docker build volumes, separated by Linux/amd64 ABI (`musl` or `glibc`), runtime-async mode and check/watcher role. A project-scoped Linux/amd64 NuGet volume is shared across worktrees. Source and timestamped `artifacts/test-results/<run>` reports stay in the native checkout. Existing native output remains under `artifacts/build/host` and native packages under `artifacts/packages/host`; old Linux bind caches are preserved. Helpers retain the worktree's `artifacts/check.lock` to reject concurrent check/test writers. Do not bypass that lock with concurrent raw `dotnet` commands. Sharing packages does not share `obj`/`bin`, test databases, results or application data. See [Docker and PostgreSQL](DockerAndPostgres.md#local-development) for the profile naming and watcher mapping.
 
-`-NoRestore` and `-NoBuild` are explicit rerun options only after a successful matching restore/build of the same worktree, configuration and runtime-async mode. Normal runs keep restore validation and incremental compilation enabled; `-FreshBuild` builds from scratch in a throwaway container location. Legacy `-BuildVolume`/`-NugetVolume` overrides remain available for existing Docker caches; a build-volume override must belong exclusively to that worktree/mode. A filtered run is feedback, never proof that the complete regression suite passed.
+The frozen request client supplies `BUILD_RELEASE_PROJECT_ROOT` for independent
+execution clones. A validated protocol owner, exact manifest-derived clone path,
+native primary root and matching credential-free origin bind this hint before
+any cache use. Invalid hints fail without fallback. The canonical primary selects
+the shared package/HTTP/SCRATCH namespace; mutable build state remains per clone.
+`HarnessCacheRoot.Tests.ps1` exercises real independent and linked Git fixtures,
+refuses foreign/linked/malformed bindings, and checks primary WIP preservation.
+
+`-NoRestore` and `-NoBuild` are explicit rerun options only after a successful matching restore/build of the same worktree, configuration, image ABI and runtime-async mode. Normal runs keep restore validation and incremental compilation enabled; `-FreshBuild` builds from scratch in a throwaway container location. `-BuildVolume`/`-NugetVolume` preserve explicit Docker cache overrides; a build-volume override must belong exclusively to that worktree/ABI/mode. A custom prepared `-DevImage` requires explicit `-CacheFlavor musl|glibc`, and the browser lane uses `glibc`. Execution checks the local image's Linux/amd64 identity and runs its immutable ID with pulls disabled. A filtered run is feedback, never proof that the complete regression suite passed.
 
 Use explicit shared-host budgets: `-Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2`
 bounds the runner container, xUnit scheduling and MSBuild workers respectively.
@@ -200,21 +211,38 @@ selected test executes. The release test entry point defaults all three budgets
 to two, records them in its receipt, and always runs the complete unit/component/
 integration roster. The request adapter maps `-Jobs` to those same budgets.
 For a native Windows source checkout, the canonical release test runner also
-forwards `-BuildVolume` and `-NugetVolume`: use task-owned Linux/amd64 Docker
-volumes to keep writable Linux state on the WSL engine's ext4 filesystem. Keep
-musl service output and glibc browser output in distinct build volumes.
+forwards `-WslDistribution`, `-BuildVolume` and `-NugetVolume`; its receipt records
+the resolved ext4 volumes and distro. Defaults isolate musl service output from
+the explicitly selected glibc browser profile. Other release/NAS transports retain
+their compatibility configuration.
 
 Every supplied container consumer of a shared Linux package cache (test runner,
 scoped check and Compose watcher) sets `NUGET_SCRATCH` to
 `/root/.nuget/packages/.scratch` inside that same cache mount. Thus the package
 downloads and extraction locks share one namespace, including a `-NugetVolume`
 override. Ordinary build outputs and test/application temporary files remain
-isolated. All concurrent consumers of a package cache must use this mapping;
-do not start an older watcher with isolated NuGet locks beside a new restore.
+isolated. All concurrent consumers of a package cache must use this mapping.
+`NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache` also retains HTTP
+metadata in the same mount with NuGet's normal expiration and revalidation.
+Package auditing and freshness checks remain enabled.
+Do not start an older watcher with isolated NuGet locks beside a new restore.
 Do not restart someone else's stack to adopt it. This follows
 [NuGet's shared-cache coordination requirement](https://learn.microsoft.com/en-us/nuget/consume-packages/managing-the-global-packages-and-cache-folders).
 
-The default helper covers unit, component and integration projects. Browser tests are opt-in (`-Project Browser -DevImage <prepared-image>`): the Alpine SDK development image does not include compatible Playwright browsers. Use the established prepared browser environment, run after service tests (not alongside them), and retain all timing/assertion budgets. Never report default tests as complete browser acceptance. There is no npm toolchain in this Blazor project.
+The default helper covers unit, component and integration projects. Browser tests are opt-in (`-Project Browser -DevImage <prepared-image> -CacheFlavor glibc`): the Alpine SDK development image does not include compatible Playwright browsers. Use the established prepared browser environment, run after service tests (not alongside them), and retain all timing/assertion budgets. Never report default tests as complete browser acceptance. There is no npm toolchain in this Blazor project.
+
+The browser performance contract requires three forward window transitions and
+one Previous transition, checking each completed range and every ordered canonical
+ID with at most 40 mounted cards. Its unchanged 3,000 ms wall budget includes all
+four actions and completion waits. This measures committed DOM state, not
+completed paint or end-to-end scroll timing. Both viewports separately exercise
+real downward/upward scrolling through the existing IntersectionObserver
+autoload triggers, checking exact ordered progression/restoration and bounded
+cards. Dispatch/DOM-completion timestamps provide separate diagnostics.
+This contract retains action/network/source tracing and failure
+HTML/full-page PNG, with continuous trace screenshots/DOM snapshots disabled;
+console, CLS and long-task observers remain enabled. Record the capture profile
+alongside results when comparing timings.
 
 There are no skipped PostgreSQL tests: when `PREMIERECALENDAR_TEST_POSTGRES` is missing, every database-backed test fails with a message that names the variable. One test is skipped on Linux because it depends on Windows file-lock semantics.
 

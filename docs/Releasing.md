@@ -212,6 +212,20 @@ pwsh -File "$rel\Test-BackupCompatibility.ps1" -Bundle $bundle
 
 `Test-BackupCompatibility.ps1` starts the same image against the restored production backup with background services disabled and compares sanitized states (row counts, migration history and one-way fingerprints of the settings, filter, view-sync, SIMKL and item-enrichment tables) before and after. It fails unless the installed schema's migration history is unchanged, the candidate reaches its own schema and every preserved table is identical.
 
+For explicitly approved premerge qualification, `-OriginalRestoreBundle` together
+with `-ContinuityProof` can bind a new candidate to an existing, continuously
+running isolated fixture. A prior read-only observation must prove the original
+completion anchor, unchanged receipt hashes, exact resource identities and
+isolation, and the original post-compatibility sanitized state. The helper
+revalidates that binding before and around candidate startup; it never repeats a
+restore, restarts the database, or copies/relabels the original evidence.
+
+This mode writes distinct `existing-fixture-*` diagnostics and a historical-only
+`existing-fixture-compatibility.json`. It cannot satisfy production image,
+same-backup or freshness gates. The normal release still requires its own fresh
+backup, restore and canonical compatibility evidence; an old fixture's continuity
+does not make its backup fresh. See the script's parameter help for the descriptor.
+
 ## Step 8: load the image
 
 ```powershell

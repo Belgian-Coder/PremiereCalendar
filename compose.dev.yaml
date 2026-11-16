@@ -2,6 +2,7 @@ name: premierecalendar-dev
 
 services:
   database:
+    cpus: 2
     image: postgres:18.6-alpine3.24@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
     environment:
       POSTGRES_DB: premierecalendar
@@ -24,6 +25,7 @@ services:
     networks: [backend]
 
   app:
+    cpus: ${PREMIERECALENDAR_CPUS:-2}
     image: premierecalendar-dev-app:latest
     build:
       context: .
@@ -41,6 +43,7 @@ services:
       ArtifactsPath: /build
       NUGET_PACKAGES: /root/.nuget/packages
       NUGET_SCRATCH: /root/.nuget/packages/.scratch
+      NUGET_HTTP_CACHE_PATH: /root/.nuget/packages/.http-cache
       CalendarCache__Directory: /src/PremiereCalendar/App_Data/cache/calendar
       ImageCache__Directory: /src/PremiereCalendar/App_Data/cache/images
       Telemetry__LogDirectory: /src/PremiereCalendar/App_Data/logs
@@ -48,8 +51,8 @@ services:
       - postgres_password
     volumes:
       - ./:/src
-      - ${PREMIERECALENDAR_NUGET_CACHE:-./artifacts/packages/linux}:/root/.nuget/packages
-      - ./artifacts/build/linux-dev:/build
+      - nuget-cache:/root/.nuget/packages
+      - watch-build:/build
       - app-data:/src/PremiereCalendar/App_Data
     ports:
       - "127.0.0.1:5299:8080"
@@ -63,6 +66,13 @@ secrets:
     file: ./.secrets/dev-postgres-password
 
 volumes:
+  # External caches are prepared by wsl-docker and survive compose down --volumes.
+  nuget-cache:
+    external: true
+    name: ${PREMIERECALENDAR_NUGET_VOLUME:?Use eng/wsl-docker.ps1 for the project cache identity}
+  watch-build:
+    external: true
+    name: ${PREMIERECALENDAR_BUILD_VOLUME:?Use eng/wsl-docker.ps1 for the worktree build identity}
   postgres-data:
   app-data:
 

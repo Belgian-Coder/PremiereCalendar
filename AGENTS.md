@@ -18,12 +18,13 @@
 - Keep worktrees under `.wt/` in this project. Preserve unrelated changes;
   use a dedicated branch/worktree when another task owns the primary checkout.
 - Read `docs/Testing.md` and `docs/DockerAndPostgres.md` before running checks.
-  The supported SDK is supplied by the existing Ubuntu-24.04 WSL Docker image;
+  The supported SDK is supplied by a prepared Linux/amd64 Docker image in WSL;
+  select `-WslDistribution PC-MARC-Dev` on PC-MARC (default `Ubuntu-24.04`).
   do not install a host SDK or change WSL/Docker configuration as a fallback.
 - Start with `eng/wsl-docker.ps1 check -Project App -Plan` or
   `eng/Test-WithPostgres.ps1 -Project <suite> -Filter <expression> -Plan`.
   Plans invoke neither WSL nor Docker. Execution requires an already running
-  Docker daemon; helpers never start it implicitly.
+  selected WSL distribution and Docker daemon; helpers never start them implicitly.
 - Tests run on xUnit.net 4 over Microsoft.Testing.Platform. `-Project` also accepts `Unit`,
   `Component`, `Integration`, `Browser` or `All` (alias `-Suite`); `-Filter` takes test-name
   substrings and `-QueryFilter` an xUnit.net query filter. Results (TRX, CTRF, log) go to
@@ -33,8 +34,9 @@
   This Blazor project has no separate npm frontend build.
 - Keep output, reports and temporary files in this checkout's ignored
   `artifacts/`; native Development data belongs in `.local-data/`. Mutable build
-  state is per worktree. Linux packages may be shared through the primary
-  project's `artifacts/packages/linux`; do not mix Linux/Windows package caches.
+  state defaults to named ext4 Docker volumes per worktree, ABI and runtime mode;
+  the watcher uses separate build state. Linux packages share a project-scoped
+  Linux/amd64 volume; do not mix Linux/Windows package caches. Preserve old bind caches.
   Shared package consumers also share `NUGET_SCRATCH` within that package mount;
   keep ordinary temporary/build state isolated and preserve warm caches.
 - Do not run build/test checks simultaneously in one worktree. The supplied
@@ -63,8 +65,8 @@
   host, `eng/Test-Docs.ps1 -SourceOnly` explicitly reports unavailable historical
   machine-local evidence; the default documentation check remains strict.
 - Application builds, PostgreSQL tests and release acceptance still use the
-  supported Linux containers. Windows helpers require Ubuntu-24.04 WSL and an
-  already running local engine. They pin the local Docker socket, ignoring an
+  supported Linux containers. Windows helpers require an explicitly selected,
+  already running WSL distribution and local Linux/amd64 engine. They pin the local Docker socket, ignoring an
   inherited remote context. Never replace container acceptance with native SDK
   compilation, even when a host has the exact SDK.
 - macOS ARM64 currently supports the static lane only. The WSL helpers and NAS

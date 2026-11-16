@@ -30,6 +30,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not [IO.Path]::IsPathRooted($Output)) { throw '-Output must be an absolute request-directory path.' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+# Validate transport cache routing before creating request output/locks or
+# invoking canonical initializers. Scope local helpers away from ReleaseCommon.
+& {
+    . (Join-Path $root 'eng/Harness.Common.ps1')
+    Get-HarnessContext $root | Out-Null
+}
 $outputPath = [IO.Path]::GetFullPath($Output).TrimEnd('\', '/')
 $prefix = (Join-Path $root 'artifacts').TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
 $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }

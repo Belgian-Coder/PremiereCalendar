@@ -93,8 +93,8 @@ try {
     # Execute the real release runner function with an intercepted child executable.
     # This proves the public budgets cross the child-process boundary without a database/build.
     Write-Fixture 'eng/capture-runner.ps1' @'
-param([switch] $NoProfile, [string] $File, [int] $Cpus, [int] $MaxThreads, [int] $BuildMaxCpuCount, [string] $BuildVolume, [string] $NugetVolume)
-if (-not $NoProfile -or $File -ne 'fixture-test-runner.ps1' -or $Cpus -ne 3 -or $MaxThreads -ne 5 -or $BuildMaxCpuCount -ne 2 -or $BuildVolume -ne 'fixture-linux-amd64-build' -or $NugetVolume -ne 'fixture-linux-amd64-nuget' -or $args.Count) { throw 'Release child argv lost budgets/storage or acquired a test filter.' }
+param([switch] $NoProfile, [string] $File, [int] $Cpus, [int] $MaxThreads, [int] $BuildMaxCpuCount, [string] $BuildVolume, [string] $NugetVolume, [string] $WslDistribution)
+if (-not $NoProfile -or $File -ne 'fixture-test-runner.ps1' -or $Cpus -ne 3 -or $MaxThreads -ne 5 -or $BuildMaxCpuCount -ne 2 -or $BuildVolume -ne 'fixture-linux-amd64-build' -or $NugetVolume -ne 'fixture-linux-amd64-nuget' -or $WslDistribution -ne 'PC-MARC-Dev' -or $args.Count) { throw 'Release child argv lost budgets/storage/distribution or acquired a test filter.' }
 $global:LASTEXITCODE = 0
 Write-Output 'Total wall time: 0 s. Results: fixture-results'
 '@
@@ -109,6 +109,7 @@ Write-Output 'Total wall time: 0 s. Results: fixture-results'
         }
         . ([scriptblock]::Create($runnerFunction.Extent.Text))
         $Cpus = 3; $MaxThreads = 5; $BuildMaxCpuCount = 2
+        $WslDistribution = 'PC-MARC-Dev'
         $BuildVolume = 'fixture-linux-amd64-build'; $NugetVolume = 'fixture-linux-amd64-nuget'
         $testScript = 'fixture-test-runner.ps1'
         $run = Invoke-TestRunner -LogPath (Join-Path $sandbox 'runner.log') 6>$null

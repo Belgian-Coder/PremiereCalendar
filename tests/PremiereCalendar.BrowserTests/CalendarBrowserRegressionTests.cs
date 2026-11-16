@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Deque.AxeCore.Playwright;
 using Microsoft.Playwright;
@@ -15,7 +16,8 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
     public async Task Calendar_navigation_accessibility_and_performance_contract(int width, int height)
     {
         await Page.SetViewportSizeAsync(width, height);
-        await Context.Tracing.StartAsync(new() { Screenshots = true, Snapshots = true, Sources = true });
+        await Context.Tracing.StartAsync(new() { Screenshots = false, Snapshots = false, Sources = true });
+        output.WriteLine("Performance trace: actions/network/sources enabled; continuous screenshots/DOM snapshots disabled; failure HTML/full-page PNG retained.");
         var consoleErrors = new List<string>();
         var pageErrors = new List<string>();
         Page.Console += (_, message) => { if (message.Type == "error") consoleErrors.Add(message.Text); };
@@ -23,6 +25,18 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
         await Page.AddInitScriptAsync("""
             window.__pcLongTasks = [];
             window.__pcCls = 0;
+            window.__pcWindowTransitions = [];
+            window.__pcMatchesWindow = expected => {
+                const day = document.querySelector('[data-testid="calendar-day"]');
+                if (!day || day.dataset.dayWindowPending !== 'false') return false;
+                const cards = [...day.querySelectorAll('[data-testid="premiere-card"]')];
+                return cards.length > 0 && cards.length <= 40
+                    && Number(day.dataset.dayWindowStart) === expected.start
+                    && Number(day.dataset.dayWindowEnd) === expected.end
+                    && Number(day.dataset.dayWindowTotal) === expected.total
+                    && cards.length === expected.ids.length
+                    && cards.every((card, index) => card.dataset.canonicalId === expected.ids[index]);
+            };
             new PerformanceObserver(list => { for (const e of list.getEntries()) window.__pcLongTasks.push(e.duration); }).observe({type:'longtask', buffered:true});
             new PerformanceObserver(list => { for (const e of list.getEntries()) if (!e.hadRecentInput) window.__pcCls += e.value; }).observe({type:'layout-shift', buffered:true});
             window.__pcObserveDaySwitch = () => {
@@ -100,25 +114,31 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
             output.WriteLine($"Day switch: {daySwitchMilliseconds:0} ms ({width}x{height}); document preserved.");
             Assert.True(daySwitchMilliseconds <= 750, $"Day switch took {daySwitchMilliseconds:0} ms.");
 
+            var selectedDay = DateOnly.ParseExact(targetDayId["premiere-day-".Length..], "yyyyMMdd", CultureInfo.InvariantCulture);
+            var orderedIds = ExpectedDefaultTitleOrder(selectedDay);
+            Assert.Equal(48, orderedIds.Length);
+            await Page.WaitForFunctionAsync("expected => window.__pcMatchesWindow(expected)",
+                Window(orderedIds, 0, 10), new() { Timeout = 5_000 });
+            // Establish enough items to require a trimmed window and Previous,
+            // independently of incidental viewport autoloading.
+            await MoveWindowAsync("more", orderedIds, 0, 20);
+            await Page.EvaluateAsync("window.__pcWindowTransitions = []");
+
             var rollingWindow = Stopwatch.StartNew();
-            for (var movement = 0; movement < 3; movement++)
-            {
-                var loadMore = Page.Locator("[data-day-load-more]").First;
-                if (await loadMore.IsVisibleAsync())
-                {
-                    await loadMore.ClickAsync(new() { Force = true });
-                    await WaitForUsableCardWindowAsync();
-                }
-            }
-            var loadPrevious = Page.Locator("[data-day-load-previous]").First;
-            if (await loadPrevious.IsVisibleAsync())
-            {
-                await loadPrevious.ClickAsync(new() { Force = true });
-                await WaitForUsableCardWindowAsync();
-            }
-            await WaitForUsableCardWindowAsync();
+            await MoveWindowAsync("more", orderedIds, 0, 30);
+            await MoveWindowAsync("more", orderedIds, 0, 40);
+            await MoveWindowAsync("more", orderedIds, 8, 48);
+            await MoveWindowAsync("previous", orderedIds, 0, 40);
             Assert.InRange(await Page.Locator("[data-testid='premiere-card']").CountAsync(), 1, 40);
+            rollingWindow.Stop();
+            output.WriteLine($"Committed window DOM-update wall: {rollingWindow.ElapsedMilliseconds} ms ({width}x{height}); required 3 forward + 1 previous completed.");
+            output.WriteLine(await Page.EvaluateAsync<string>("JSON.stringify(window.__pcWindowTransitions)"));
             Assert.True(rollingWindow.ElapsedMilliseconds <= 3_000, $"Rolling-window navigation took {rollingWindow.ElapsedMilliseconds} ms.");
+
+            // Exercise the real scroll/IntersectionObserver path separately from
+            // the four committed DOM updates above. No button or observer is
+            // invoked by the test during these two transitions.
+            await VerifyScrollAutoloadAsync(orderedIds);
 
             var initialWeek = await Page.Locator("[data-testid='week-range']").InnerTextAsync();
             await Page.GetByRole(AriaRole.Button, new() { Name = "Next week" }).ClickAsync();
@@ -167,9 +187,77 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
         }
     }
 
-    private async Task WaitForUsableCardWindowAsync() =>
-        await Page.WaitForFunctionAsync(
-            "document.querySelectorAll(\"[data-testid='premiere-card']\").length > 0 && document.querySelectorAll(\"[data-testid='premiere-card']\").length <= 40",
-            null,
-            new() { Timeout = 5_000 });
+    private async Task MoveWindowAsync(string direction, string[] orderedIds, int start, int end) =>
+        await Page.EvaluateAsync("""
+            request => new Promise((resolve, reject) => {
+                const day = document.querySelector('[data-testid="calendar-day"]');
+                const button = day?.querySelector(`[data-day-load-${request.direction}]`);
+                if (!(button instanceof HTMLButtonElement) || button.disabled || day.dataset.dayWindowPending !== 'false') {
+                    reject(new Error(`Required ${request.direction} control is unavailable or pending.`));
+                    return;
+                }
+                const transition = { direction: request.direction, start: request.start, end: request.end,
+                    ids: request.ids, dispatchMs: performance.now(), completedMs: null };
+                window.__pcWindowTransitions.push(transition);
+                const observer = new MutationObserver(check);
+                const timeout = setTimeout(() => {
+                    observer.disconnect();
+                    reject(new Error(`Window ${request.start}-${request.end} did not complete within 5000 ms.`));
+                }, 5000);
+                function check() {
+                    const count = day.querySelectorAll('[data-testid="premiere-card"]').length;
+                    if (count > 40) {
+                        clearTimeout(timeout);
+                        observer.disconnect();
+                        reject(new Error(`Window mounted ${count} cards.`));
+                    } else if (window.__pcMatchesWindow(request)) {
+                        transition.completedMs = performance.now();
+                        clearTimeout(timeout);
+                        observer.disconnect();
+                        resolve();
+                    }
+                }
+                observer.observe(day, { childList: true, subtree: true, attributes: true,
+                    attributeFilter: ['data-day-window-start', 'data-day-window-end', 'data-day-window-total', 'data-day-window-pending'] });
+                button.click();
+                check();
+            })
+            """, Window(orderedIds, start, end, direction));
+
+    private async Task VerifyScrollAutoloadAsync(string[] orderedIds)
+    {
+        var forwardSentinel = Page.Locator("[data-day-autoload-sentinel]");
+        await Expect(forwardSentinel).ToHaveAttributeAsync("data-autoload-observed", "true", new() { Timeout = 5_000 });
+        Assert.True(await Page.EvaluateAsync<bool>("window.premiereCalendarDayAutoloadObserver instanceof IntersectionObserver"));
+        var beforeScroll = await Page.EvaluateAsync<double>("window.scrollY");
+        await forwardSentinel.ScrollIntoViewIfNeededAsync(new() { Timeout = 5_000 });
+        await Page.WaitForFunctionAsync("expected => window.__pcMatchesWindow(expected)",
+            Window(orderedIds, 8, 48), new() { Timeout = 5_000 });
+        var forwardScroll = await Page.EvaluateAsync<double>("window.scrollY");
+        Assert.True(forwardScroll > beforeScroll, "Forward autoload must follow an actual downward page scroll.");
+
+        var previousSentinel = Page.Locator("[data-day-window-previous]");
+        await Expect(previousSentinel).ToHaveAttributeAsync("data-autoload-observed", "true", new() { Timeout = 5_000 });
+        await previousSentinel.ScrollIntoViewIfNeededAsync(new() { Timeout = 5_000 });
+        await Page.WaitForFunctionAsync("expected => window.__pcMatchesWindow(expected)",
+            Window(orderedIds, 0, 40), new() { Timeout = 5_000 });
+        var previousScroll = await Page.EvaluateAsync<double>("window.scrollY");
+        Assert.True(previousScroll < forwardScroll, "Previous restoration must follow an actual upward page scroll.");
+        output.WriteLine($"Real-scroll autoload: 1-40 -> 9-48 -> 1-40; ordered IDs verified, <=40 cards each; scrollY {beforeScroll:0} -> {forwardScroll:0} -> {previousScroll:0}.");
+    }
+
+    private static object Window(string[] orderedIds, int start, int end, string direction = "more") =>
+        new { start, end, total = orderedIds.Length, ids = orderedIds[start..end], direction };
+
+    private static string[] ExpectedDefaultTitleOrder(DateOnly day)
+    {
+        // The deterministic provider emits 72 items/day. Default filters retain
+        // movies and new-series premieres; title ordering uses ordinal comparison.
+        var dayOffset = day.DayNumber - PremiereCalendar.Models.CalendarFilters.StartOfWeek(day).DayNumber;
+        return Enumerable.Range(0, 72)
+            .Where(index => index % 3 == 0 || index % 2 == 0)
+            .OrderBy(index => $"Fixture {(index % 3 == 0 ? "Movie" : "Series")} {dayOffset * 72 + index + 1}", StringComparer.OrdinalIgnoreCase)
+            .Select(index => $"browser:{day:yyyyMMdd}:{index}")
+            .ToArray();
+    }
 }

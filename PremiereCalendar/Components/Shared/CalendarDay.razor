@@ -7,6 +7,11 @@
          role="tabpanel"
          aria-labelledby="@LabelledById"
          data-testid="calendar-day"
+         aria-busy="@_windowMovePending.ToString().ToLowerInvariant()"
+         data-day-window-pending="@_windowMovePending.ToString().ToLowerInvariant()"
+         data-day-window-start="@_windowStart"
+         data-day-window-end="@_visibleCount"
+         data-day-window-total="@Items.Count"
          data-day-animation-key="@Day.ToString("yyyyMMdd", CultureInfo.InvariantCulture)">
     <div class="day-scroll-prompt day-scroll-prompt-top" data-day-scroll-prompt="previous" aria-hidden="true">
         <span>Scroll to yesterday</span>
@@ -68,6 +73,7 @@
                 <button class="visually-hidden"
                         type="button"
                         data-day-load-previous
+                        disabled="@_windowMovePending"
                         @onclick="ShowPrevious">
                     Show previous items
                 </button>
@@ -120,6 +126,7 @@
                 <button class="tool-button"
                         type="button"
                         data-day-load-more
+                        disabled="@_windowMovePending"
                         title="@($"Show {NextBatchCount} more items")"
                         @onclick="ShowMore">
                     Show @NextBatchCount more
@@ -187,6 +194,9 @@
 
     private int _visibleCount;
     private int _windowStart;
+    private bool _windowMovePending;
+    private long _windowGeneration;
+    private (int Initial, int Batch, int Maximum) _windowConfiguration;
     private double _trimmedHeightPx;
     private readonly Stack<WindowSlice> _trimmedSlices = new();
     private ElementReference _dayElement;
@@ -257,6 +267,9 @@
 
     protected override void OnParametersSet()
     {
+        var configuration = (InitialVisibleCount, LoadBatchSize, MaxMountedItemCount);
+        var configurationChanged = configuration != _windowConfiguration;
+        _windowConfiguration = configuration;
         var canReuseItemsSignature = ReferenceEquals(Items, _lastItemsReference)
             && Items.Count == _lastItemsCount
             && !string.IsNullOrEmpty(_itemsSignature);
@@ -275,6 +288,10 @@
         {
             ResetWindow();
             itemsChanged = true;
+        }
+        else if (itemsChanged || configurationChanged)
+        {
+            InvalidateWindowMovement();
         }
 
         if (itemsChanged)
@@ -318,25 +335,49 @@
 
     private async Task ShowMore()
     {
-        var nextVisibleCount = Math.Min(Items.Count, _visibleCount + Math.Max(1, LoadBatchSize));
-        var maxMountedItems = Math.Max(Math.Max(1, LoadBatchSize), MaxMountedItemCount);
-        var trimCount = Math.Max(0, nextVisibleCount - _windowStart - maxMountedItems);
-        if (trimCount > 0)
+        if (_windowMovePending || HiddenItemCount == 0)
         {
-            var measuredHeight = await MeasureTrimHeightAsync(trimCount);
-            _trimmedSlices.Push(new WindowSlice(trimCount, measuredHeight));
-            _windowStart += trimCount;
-            _trimmedHeightPx += measuredHeight;
+            return;
         }
 
-        _visibleCount = nextVisibleCount;
-        RebuildVisiblePartitions();
+        var generation = _windowGeneration;
+        _windowMovePending = true;
         _shouldRender = true;
+        try
+        {
+            var nextVisibleCount = Math.Min(Items.Count, _visibleCount + Math.Max(1, LoadBatchSize));
+            var maxMountedItems = Math.Max(Math.Max(1, LoadBatchSize), MaxMountedItemCount);
+            var trimCount = Math.Max(0, nextVisibleCount - _windowStart - maxMountedItems);
+            var measuredHeight = trimCount > 0 ? await MeasureTrimHeightAsync(trimCount) : 0;
+            if (generation != _windowGeneration)
+            {
+                return;
+            }
+
+            if (trimCount > 0)
+            {
+                _trimmedSlices.Push(new WindowSlice(trimCount, measuredHeight));
+                _windowStart += trimCount;
+                _trimmedHeightPx += measuredHeight;
+            }
+
+            _visibleCount = nextVisibleCount;
+            RebuildVisiblePartitions();
+        }
+        finally
+        {
+            // A reset or parameter update may already own a newer movement.
+            if (generation == _windowGeneration)
+            {
+                _windowMovePending = false;
+                _shouldRender = true;
+            }
+        }
     }
 
     private void ShowPrevious()
     {
-        if (_trimmedSlices.Count == 0)
+        if (_windowMovePending || _trimmedSlices.Count == 0)
         {
             return;
         }
@@ -370,10 +411,17 @@
 
     private void ResetWindow()
     {
+        InvalidateWindowMovement();
         _visibleCount = 0;
         _windowStart = 0;
         _trimmedHeightPx = 0;
         _trimmedSlices.Clear();
+    }
+
+    private void InvalidateWindowMovement()
+    {
+        _windowGeneration++;
+        _windowMovePending = false;
     }
 
     private void RebuildItemCounts()
@@ -441,7 +489,7 @@
     {
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"{_itemsSignature}|{WindowScope}|{ScoreSource}|{ImageCacheVersion}|{InitialVisibleCount}|{LoadBatchSize}|{MaxMountedItemCount}|{_windowStart}|{_visibleCount}|{_trimmedHeightPx}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}|{Items.Count == 0 && IsUpdating}|{IsUpdating}|{IsEnriching}");
+            $"{_itemsSignature}|{WindowScope}|{ScoreSource}|{ImageCacheVersion}|{InitialVisibleCount}|{LoadBatchSize}|{MaxMountedItemCount}|{_windowStart}|{_visibleCount}|{_trimmedHeightPx}|{_windowMovePending}|{IntegrationSettings.Sonarr.Enabled}|{IntegrationSettings.Radarr.Enabled}|{IsArrActionBusy}|{Items.Count == 0 && IsUpdating}|{IsUpdating}|{IsEnriching}");
     }
 
     private string BuildItemsSignature()

@@ -4,9 +4,14 @@ PremiereCalendar is PostgreSQL-only and ships only as a Docker container. SQLite
 
 ## Local development
 
-Use the existing Ubuntu 24.04 WSL distribution with Docker Engine and the Compose plugin.
-The daemon must already be running; helpers do not install tools, start services,
-or keep WSL alive. `-Plan` previews commands without invoking WSL/Docker:
+Use an explicitly selected Ubuntu 24.04 WSL distribution with Docker Engine and the Compose plugin.
+The local helpers and canonical release test wrapper accept `-WslDistribution`
+(default `Ubuntu-24.04`); PC-MARC uses `-WslDistribution PC-MARC-Dev`.
+The distribution and daemon must already be running; helpers first query the
+running distribution list and refuse a stopped selection. This observes a running
+precondition; the listing and subsequent transport are not an atomic WSL lock.
+They do not install
+tools, start services or keep WSL alive. `-Plan` previews commands without invoking WSL/Docker:
 
 ```powershell
 pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 up
@@ -16,9 +21,51 @@ pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 logs
 pwsh -File D:\Projects\PremiereCalendar\eng\wsl-docker.ps1 down
 ```
 
-The first `up` or `build` creates the ignored development password file `.secrets/dev-postgres-password` (it is never overwritten and never printed). Other actions are `build` (rebuild the development image, which the test script needs), `check` (compile one project without PostgreSQL), `test` (forwards `-Project` and `-Filter` to `Test-WithPostgres.ps1`; it does not build the image) and `reset`.
+The first `up` creates the ignored development password file `.secrets/dev-postgres-password` (it is never overwritten and never printed). Image-only `build` creates no password. Other actions are `build` (rebuild the development image, which the test script needs), `check` (compile one project without PostgreSQL), `test` (forwards project/filter, distro, profile and scheduling options to `Test-WithPostgres.ps1`; it does not build the image) and `reset`.
 
-The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and for running the app outside the container (`dotnet run` or the `launchSettings.json` profiles use `appsettings.Development.json`, which points at that port and reads the password from `.secrets/dev-postgres-password`). The password remains in the ignored `.secrets` directory; worktrees do not copy credentials or databases. Worktrees get a path-derived Compose project name and separate named volumes; the primary checkout keeps `premierecalendar-dev`. Ports are unchanged, so only one stack can own them. Never stop/reset another stack to free a port without authorization. `reset` deletes that stack's named volumes and requires permission for that exact deletion. The existing PostgreSQL and application-data volumes are retained, while build/package bind mounts stay under this project. Obsolete package volumes and sibling output directories are preserved.
+The development app is available only on `127.0.0.1:5299`; PostgreSQL is exposed only on `127.0.0.1:55432` for debugging and for running the app outside the container (`dotnet run` or the `launchSettings.json` profiles use `appsettings.Development.json`, which points at that port and reads the password from `.secrets/dev-postgres-password`). The password remains in the ignored `.secrets` directory; worktrees do not copy credentials or databases. Worktrees get a path-derived Compose project name and separate application/database volumes; the primary checkout keeps `premierecalendar-dev`. Ports are unchanged, so only one stack can own them. Never stop/reset another stack to free a port without authorization. `reset` deletes that stack's application/database volumes and requires permission for that exact deletion. External build/package caches survive reset. Existing data volumes, old bind caches and obsolete output locations are never migrated or removed by the helpers.
+
+Source and reports stay in the native checkout. Writable Linux intermediates and
+packages default to deterministic named Docker volumes on the selected engine's
+ext4 storage. The canonical primary Git root defines the project namespace;
+the exact checkout defines the worktree namespace. Test/check outputs share the
+worktree's `linux-amd64-musl-async-check` profile; `-NoRuntimeAsync`, `-CacheFlavor
+glibc`, and the Compose watcher each select separate build state. Packages share
+one `linux-amd64-nuget` project volume, with every consumer using
+`NUGET_SCRATCH=/root/.nuget/packages/.scratch` inside that same mount.
+`NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache` retains HTTP metadata
+with normal NuGet expiration and revalidation; auditing remains enabled. The
+worktree `artifacts/check.lock` still excludes concurrent check/test writers.
+
+Independent request-release clones may select that same canonical primary cache
+through `BUILD_RELEASE_PROJECT_ROOT`. The helper validates the existing native
+primary, exact protocol owner marker/project/target/root, manifest-derived clone
+path and matching credential-free origin before using the hint. Invalid or linked
+paths are refused without fallback or writes. Only dependency caches share the
+primary namespace; build state still uses the exact execution checkout. Normal
+primary and linked worktrees keep their existing Git-common-root behavior.
+Git metadata subprocesses ignore inherited `GIT_*` overrides and disable optional
+locks/prompts; the caller environment and primary work in progress stay intact.
+
+`-BuildVolume` and `-NugetVolume` preserve explicit cache overrides. A custom
+prepared `-DevImage` for check/test requires explicit `-CacheFlavor musl|glibc`;
+choose its actual ABI so browser and service objects never mix. Test/check
+execution checks the local engine and each required local image for Linux/amd64,
+then runs the inspected image ID with pulls disabled. An inherited remote Docker
+context cannot redirect these operations: helpers pin the local Unix socket.
+Images and the daemon must already exist; `build`/`up` remain explicit image-build
+actions. This does not add a native SDK or macOS application execution backend.
+
+Test/check start with `-Cpus 2 -BuildMaxCpuCount 2` and tests with `-MaxThreads 2`;
+PostgreSQL has its separate two-CPU quota. `wsl-docker.ps1 test` forwards those
+budgets, distribution, image/ABI, runtime-async mode and volume overrides without
+changing the selected suites. Plans report the resolved storage/profile and
+budgets without querying WSL/Docker or creating files or volumes. For example:
+
+```powershell
+pwsh -File ./eng/wsl-docker.ps1 check -WslDistribution PC-MARC-Dev -Plan
+pwsh -File ./eng/Test-WithPostgres.ps1 -Project Browser -WslDistribution PC-MARC-Dev -DevImage prepared-browser:local -CacheFlavor glibc -Plan
+```
 
 Run the automated tests with `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` (or `wsl-docker.ps1 test`; add `-Plan` to preview), which starts a separate throwaway PostgreSQL server instead of using the development database (see [Testing](Testing.md)).
 

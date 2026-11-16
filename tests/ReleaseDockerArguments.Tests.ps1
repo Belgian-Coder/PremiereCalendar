@@ -11,6 +11,7 @@ $script:ReleaseDockerPrefix = @('-I', '-B', '-c', 'import json,sys; print(json.d
 $cfg = [pscustomobject]@{ sdkImage = 'fixture-sdk'; postgresImage = 'fixture-postgres' }
 $ctx = [pscustomobject]@{ BundleName = 'fixture-bundle' }
 $db = 'fixture-db'; $network = 'fixture-network'; $label = 'fixture-label'
+$networkTarget = $network; [string[]]$pullPolicy = @()
 $probeBuild = 'fixture-probe'; $probeRoot = Join-Path $root 'artifacts/fixture-probe'
 $app = 'fixture-app'; $image = [pscustomobject]@{ Id = 'fixture-image' }; $connection = 'fixture-connection'
 $expected = @{

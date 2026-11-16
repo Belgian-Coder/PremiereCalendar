@@ -46,9 +46,8 @@ the xUnit.net summary and the wall time of each suite and ends with a "Results:"
 suite fails or when no test ran (a filter that matches nothing). All requested suites run even when an earlier one
 fails.
 
-Incremental builds: the build output lives in this checkout's artifacts\build\linux (artifacts\build\linux-no-runtime-async
-with -NoRuntimeAsync), so worktrees never mix and runtime-async modes never share objects. Linux NuGet packages are
-shared through the primary project's artifacts\packages\linux. Use -FreshBuild to build from scratch into a throwaway
+Incremental builds use named Linux/amd64 Docker volumes isolated by worktree, ABI and runtime-async mode.
+Linux NuGet packages and extraction locks share a project volume. Use -FreshBuild to build from scratch into a throwaway
 container location, -NoBuild to run the last build unchanged, -NoRestore to skip the restore of an unchanged build.
 
 Plain `dotnet test` also works (global.json selects Microsoft Testing Platform), for example inside the dev container:
@@ -72,7 +71,7 @@ One or more xUnit.net query filters (see the link above), combined with OR. Cann
 Overrides the assembly parallelization mode: none, collections or all (see tests/*/AssemblyConfiguration.cs).
 
 .PARAMETER MaxThreads
-Overrides the maximum number of test threads: a number, default, unlimited or a multiplier such as 2x.
+Overrides the maximum number of test threads (default 2): a number, default, unlimited or a multiplier such as 2x.
 
 .PARAMETER RunnerArguments
 Extra arguments for the xUnit.net test executable (single-dash switches such as -longRunning 30 or -explicit on),
@@ -94,17 +93,23 @@ Skips the build and runs the output of the previous run of the same worktree and
 Builds from scratch in a throwaway container location instead of this checkout's build directory.
 
 .PARAMETER Cpus
-CPU limit of the test container (default 4); the PostgreSQL container gets 2.
+CPU limit of the test container (default 2); the PostgreSQL container gets 2.
 
 .PARAMETER BuildMaxCpuCount
 Maximum MSBuild worker count (default 2). Suites still build and run sequentially.
 
 .PARAMETER BuildVolume
-Legacy override: a Docker volume name used instead of this checkout's artifacts\build\linux. It must belong exclusively
+Override for the generated Docker build volume. It must belong exclusively
 to this worktree and runtime-async mode.
 
 .PARAMETER NugetVolume
-Legacy override: a Docker volume name used instead of the shared artifacts\packages\linux directory.
+Override for the generated shared Linux NuGet Docker volume.
+
+.PARAMETER WslDistribution
+Explicit WSL distribution (default Ubuntu-24.04); PC-MARC uses PC-MARC-Dev.
+
+.PARAMETER CacheFlavor
+Linux ABI for build isolation: musl (default image) or glibc. Required with a custom prepared -DevImage.
 
 .PARAMETER Plan
 Prints the plan (projects, build and runner arguments, storage, results folder, images) and returns without invoking
@@ -118,13 +123,13 @@ param(
     [string[]] $QueryFilter,
     [ValidateSet('none', 'collections', 'all')]
     [string] $Parallel,
-    [string] $MaxThreads,
+    [string] $MaxThreads = '2',
     [Alias('ExtraTestArguments')]
     [string[]] $RunnerArguments = @(),
     [ValidateSet('Release', 'Debug')]
     [string] $Configuration = 'Release',
     [ValidateRange(1, 64)]
-    [int] $Cpus = 4,
+    [int] $Cpus = 2,
     [ValidateRange(1, 64)]
     [int] $BuildMaxCpuCount = 2,
     [switch] $NoRuntimeAsync,
@@ -137,6 +142,10 @@ param(
     [string] $DevImage = 'premierecalendar-dev-app:latest',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')]
     [string] $NugetVolume,
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')]
+    [string] $WslDistribution = 'Ubuntu-24.04',
+    [ValidateSet('musl', 'glibc')]
+    [string] $CacheFlavor,
     [switch] $Plan
 )
 
@@ -144,6 +153,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Harness.Common.ps1')
 $context = Get-HarnessContext (Split-Path -Parent $PSScriptRoot)
+if (-not $CacheFlavor) {
+    if ($DevImage -ne 'premierecalendar-dev-app:latest') { throw 'A custom -DevImage requires explicit -CacheFlavor musl or glibc.' }
+    $CacheFlavor = 'musl'
+}
+if ($DevImage -eq 'premierecalendar-dev-app:latest' -and $CacheFlavor -ne 'musl') { throw 'The default development image requires -CacheFlavor musl.' }
+$storage = Get-HarnessStorage $context -CacheFlavor $CacheFlavor -NoRuntimeAsync:$NoRuntimeAsync -BuildVolume $BuildVolume -NugetVolume $NugetVolume
 
 # `pwsh -File script.ps1 -Project Unit,Component` delivers "Unit,Component" as ONE string; accept both forms.
 $Project = @($Project | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
@@ -175,7 +190,6 @@ if ($composeText -notmatch '(?m)^\s*image:\s*(postgres:\S+@sha256:[0-9a-f]{64})\
     throw 'Could not find the digest-pinned postgres image in compose.yaml.'
 }
 $postgresImage = $Matches[1]
-$buildRoot = if ($NoRuntimeAsync) { $context.BuildRoot + '-no-runtime-async' } else { $context.BuildRoot }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $resultsRelative = "artifacts/test-results/$stamp"
 $resultsHost = Join-Path $context.Root $resultsRelative
@@ -201,9 +215,12 @@ if ($Plan) {
         Build = -not $NoBuild
         BuildArguments = $buildArguments
         RunnerArguments = $runner.ToArray()
-        BuildStorage = if ($FreshBuild) { 'container-local (discarded)' } elseif ($BuildVolume) { $BuildVolume } else { $buildRoot }
-        PackageStorage = if ($NugetVolume) { $NugetVolume } else { $context.PackageRoot }
+        BuildStorage = if ($FreshBuild) { 'container-local (discarded)' } else { $storage.BuildVolume }
+        PackageStorage = $storage.NugetVolume
+        WslDistribution = $WslDistribution
+        CacheFlavor = $CacheFlavor
         NugetScratch = '/root/.nuget/packages/.scratch'
+        NugetHttpCache = '/root/.nuget/packages/.http-cache'
         Results = $resultsHost
         PostgreSqlImage = $postgresImage
         DevImage = $DevImage
@@ -213,12 +230,10 @@ if ($Plan) {
     return
 }
 
-$wslRoot = ConvertTo-WslPath $context.Root
-$wslBuild = if ($BuildVolume) { $BuildVolume } else { ConvertTo-WslPath $buildRoot }
-$wslPackages = if ($NugetVolume) { $NugetVolume } else { ConvertTo-WslPath $context.PackageRoot }
+$wslRoot = ConvertTo-WslPath $context.Root -WslDistribution $WslDistribution
+$wslBuild = $storage.BuildVolume
+$wslPackages = $storage.NugetVolume
 $bindDirectories = @("$wslRoot/artifacts")
-if (-not $BuildVolume -and -not $FreshBuild) { $bindDirectories += $wslBuild }
-if (-not $NugetVolume) { $bindDirectories += $wslPackages }
 $quotedDirectories = ($bindDirectories | ForEach-Object { ConvertTo-BashLiteral $_ }) -join ' '
 $buildMount = if ($FreshBuild) { '' } else { "-v $(ConvertTo-BashLiteral $wslBuild):/build" }
 $runId = [Guid]::NewGuid().ToString('N').Substring(0, 10)
@@ -276,8 +291,8 @@ cleanup() {
   docker rm -f '$server' >/dev/null 2>&1 || true
   docker network rm '$network' >/dev/null 2>&1 || true
 }
-docker info >/dev/null 2>&1 || { echo 'The Docker daemon in Ubuntu-24.04 is not running; helpers never start it. Start it yourself, then retry.' >&2; exit 25; }
-docker image inspect '$DevImage' >/dev/null 2>&1 || { echo 'Build the development SDK image first with eng/wsl-docker.ps1 build.' >&2; exit 20; }
+$(Get-HarnessPreflight -Image $DevImage)
+$(Get-HarnessPreflight -Image $postgresImage -ImageVariable 'postgres_image')
 command -v flock >/dev/null
 mkdir -p $quotedDirectories
 exec 9>$(ConvertTo-BashLiteral "$wslRoot/artifacts/check.lock")
@@ -292,26 +307,26 @@ for attempt in 0 1 2 3 4 5; do
   if docker network create --subnet "10.141.`$octet.0/24" '$network' >/dev/null 2>&1; then created=1; break; fi
 done
 [ "`$created" = 1 ] || { echo 'Could not create an isolated 10.141.x.0/24 network.' >&2; exit 22; }
-docker run -d --name '$server' --network '$network' --cpus=2 --tmpfs /var/lib/postgresql \
+docker run --pull=never -d --name '$server' --network '$network' --cpus=2 --tmpfs /var/lib/postgresql \
   -e POSTGRES_PASSWORD -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=postgres \
-  '$postgresImage' -c max_connections=300 >/dev/null
+  "`$postgres_image" -c max_connections=300 >/dev/null
 ready=0
 for i in `$(seq 1 90); do
   if docker exec -e PGPASSWORD '$server' psql -h 127.0.0.1 -U premierecalendar -d postgres -Atc 'select 1' >/dev/null 2>&1; then ready=1; break; fi
   sleep 2
 done
 [ "`$ready" = 1 ] || { echo 'Disposable PostgreSQL did not become ready.' >&2; docker logs --tail 40 '$server' >&2 || true; exit 24; }
-docker run --rm --name '$runnerName' --network '$network' --cpus=$Cpus -v $(ConvertTo-BashLiteral $wslRoot):/src \
+docker run --rm --pull=never --name '$runnerName' --network '$network' --cpus=$Cpus -v $(ConvertTo-BashLiteral $wslRoot):/src \
   -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -w /src \
-  -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+  -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
   -e PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE=/tmp/pc-test-postgres-password \
-  -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' '$DevImage' sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s' </dev/null
+  -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' "`$dev_image" sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s' </dev/null
 "@
 
 Write-Host "Results: $resultsHost"
 $started = Get-Date
-$exitCode = Invoke-HarnessWsl $script -ReturnExitCode
+$exitCode = Invoke-HarnessWsl $script -ReturnExitCode -WslDistribution $WslDistribution
 Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] ((Get-Date) - $started).TotalSeconds, $resultsHost)
 if ($exitCode -ne 0) { throw "Tests did not pass (exit code $exitCode; see the messages above)." }
 Write-Host "All requested test projects passed ($($suites -join ', '))."
