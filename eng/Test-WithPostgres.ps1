@@ -316,22 +316,22 @@ cleanup_resource() {
     cleanup_failed=1; return 0
   fi
   # Each inspect/removal is independently bounded, including timeout's kill
-  # grace: at most 12s for all three resources within the guest's 15s grace.
+  # grace: at most 36s for all three resources within the guest's 40s grace.
   case "`$id" in *[!0-9a-f]*|'') cleanup_failed=1; echo "PC_TEST_CLEANUP kind=`$kind name=`$name state=invalid-id" >&2; return 0 ;; esac
   if [ "`${#id}" != 64 ]; then cleanup_failed=1; echo "PC_TEST_CLEANUP kind=`$kind name=`$name state=invalid-id" >&2; return 0; fi
   format='{{.Id}}|{{index .Labels "premierecalendar.test"}}'
   if [ "`$kind" = container ]; then
     format='{{.Id}}|{{index .Config.Labels "premierecalendar.test"}}'
   fi
-  identity=`$(timeout --kill-after=1s 1s docker "`$kind" inspect --format "`$format" "`$id" 2>/dev/null)
+  identity=`$(timeout --kill-after=1s 5s docker "`$kind" inspect --format "`$format" "`$id" 2>/dev/null)
   if [ "`$identity" != "`$id|$runId" ]; then
     echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=unresolved-identity" >&2
     cleanup_failed=1; return 0
   fi
   if [ "`$kind" = container ]; then
-    timeout --kill-after=1s 1s docker container rm -f "`$id" >/dev/null 2>&1
+    timeout --kill-after=1s 5s docker container rm -f "`$id" >/dev/null 2>&1
   else
-    timeout --kill-after=1s 1s docker network rm "`$id" >/dev/null 2>&1
+    timeout --kill-after=1s 5s docker network rm "`$id" >/dev/null 2>&1
   fi
   if [ "`$?" = 0 ]; then echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=removed"
   else echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=unresolved-removal" >&2; cleanup_failed=1; fi
@@ -382,10 +382,11 @@ docker start --attach "`$runner_id" </dev/null
 Write-Host "Results: $resultsHost"
 Write-Host "Test run label: premierecalendar.test=$runId; resource names: $runnerName, $server, $network"
 $started = Get-Date
+$cleanupGraceSeconds = 40
 $remaining = [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds)
-if ($remaining -lt 26) { throw 'Insufficient total test deadline remains for execution, cleanup and drain.' }
+if ($remaining -lt ($cleanupGraceSeconds + 11)) { throw 'Insufficient total test deadline remains for execution, cleanup and drain.' }
 try {
-    $exitCode = Invoke-HarnessWsl $script -ReturnExitCode -WslDistribution $WslDistribution -TimeoutSeconds $remaining
+    $exitCode = Invoke-HarnessWsl $script -ReturnExitCode -WslDistribution $WslDistribution -TimeoutSeconds $remaining -CleanupGraceSeconds $cleanupGraceSeconds
 } catch {
     [Console]::Error.WriteLine("Test resources with label premierecalendar.test=$runId may remain: $runnerName, $server, $network. Guest cleanup is unconfirmed; inspect exact ownership before removal.")
     throw

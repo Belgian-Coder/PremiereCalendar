@@ -163,6 +163,7 @@ try {
     Assert-Harness ($global:HarnessCapturedArgv.Count -eq 8) 'Named-volume execution unexpectedly converts mutable host cache paths.'
     Assert-Harness (($global:HarnessCapturedArgv[1][0..4] -join '|') -eq '-d|Ubuntu-24.04|--|wslpath|-a' -and ($global:HarnessCapturedArgv[3][0..4] -join '|') -eq '-d|Ubuntu-24.04|--exec|timeout|--signal=TERM' -and ($global:HarnessCapturedArgv[3][-2..-1] -join '|') -eq 'bash|-s') 'Default distro/deadline did not reach the WSL argv boundary.'
     Assert-Harness (($global:HarnessCapturedArgv[5][0..4] -join '|') -eq '-d|PC-MARC-Dev|--|wslpath|-a' -and ($global:HarnessCapturedArgv[7][0..4] -join '|') -eq '-d|PC-MARC-Dev|--exec|timeout|--signal=TERM') 'Explicit distro did not reach both WSL operations.'
+    Assert-Harness ($global:HarnessCapturedArgv[3][5] -eq '--kill-after=15s' -and $global:HarnessCapturedArgv[7][5] -eq '--kill-after=40s') 'Test cleanup reserve changed another caller or did not reach the guest.'
     Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'Unit'; NoRuntimeAsync = $true; NoBuild = $true } 6>$null | Out-Null
     $alternateScript = $global:HarnessCapturedScripts[2]
     foreach ($laneScript in @($checkScript, $testScript, $alternateScript)) {
@@ -313,7 +314,7 @@ flock() { return 0; }
 # Intercept timeout as well as Docker: never let a shell function double fall
 # through to a real Docker executable via timeout's child-process lookup.
 timeout() {
-  [ "`$1" = --kill-after=1s ] && [ "`$2" = 1s ] || return 99
+  [ "`$1" = --kill-after=1s ] && [ "`$2" = 5s ] || return 99
   shift 2
   if [ '$($case.Cleanup)' = timeout ] && [ "`$3" = inspect ]; then return 124; fi
   "`$@"
@@ -350,6 +351,59 @@ docker() {
             }
             # The sandbox is this test's own: remove it so repeated runs leave nothing behind.
             if ($sandbox.StartsWith((Join-Path $root 'artifacts/harness-tests') + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $sandbox -Recurse -Force }
+        }
+        # Real GNU timeout must execute an external fake Docker, rather than a
+        # shell-function double that bypasses child startup/connection latency.
+        $cleanupStart = $testScript.IndexOf('cleanup() {')
+        $cleanupEnd = $testScript.IndexOf("runner_id=''")
+        $cleanupFunctions = $testScript.Substring($cleanupStart, $cleanupEnd - $cleanupStart)
+        foreach ($case in @(
+            @{ Profile = 'current'; Mode = 'slow'; Expected = 0; Removals = 3 },
+            @{ Profile = 'old-1s'; Mode = 'slow'; Expected = 75; Removals = 0 },
+            @{ Profile = 'current'; Mode = 'foreign'; Expected = 75; Removals = 0 }
+        )) {
+            $sandbox = Join-Path $root ('artifacts/harness-tests/real-timeout-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path (Join-Path $sandbox 'bin') -Force | Out-Null
+            $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
+            $fakeDocker = @'
+#!/bin/sh
+printf '%s %s\n' "$1" "$2" >> "$PC_FAKE_LOG"
+if [ "$2" = inspect ]; then
+  sleep 2
+  for id do :; done
+  label="$PC_FAKE_LABEL"
+  [ "$PC_FAKE_MODE" != foreign ] || label=foreign-run
+  printf '%s|%s\n' "$id" "$label"
+  exit 0
+fi
+[ "$2" = rm ] && exit 0
+exit 99
+'@
+            [IO.File]::WriteAllText((Join-Path $sandbox 'bin/docker'), ($fakeDocker -replace "`r`n", "`n"), [Text.UTF8Encoding]::new($false))
+            $functions = if ($case.Profile -eq 'old-1s') { $cleanupFunctions.Replace('--kill-after=1s 5s docker', '--kill-after=1s 1s docker') } else { $cleanupFunctions }
+            $fixtureScript = @"
+set -eu
+# Limit PATH to the fake and Git Bash/POSIX tools; a failed fake cannot select a host Docker executable.
+export PATH='$linuxSandbox/bin:/usr/bin:/bin'
+timeout --version | grep 'GNU coreutils' >/dev/null
+chmod +x '$linuxSandbox/bin/docker'
+export PC_FAKE_LOG='$linuxSandbox/calls.txt' PC_FAKE_LABEL='$label' PC_FAKE_MODE='$($case.Mode)'
+$functions
+runner_id='$runnerId'; server_id='$serverId'; network_id='$networkId'
+runner_attempted=1; server_attempted=1; network_attempted=1
+trap cleanup EXIT
+exit 0
+"@
+            try {
+                $observed = ($fixtureScript -replace "`r`n", "`n") | & $bash -s 2>&1
+                Assert-Harness ($LASTEXITCODE -eq $case.Expected) "Real timeout changed cleanup disposition: $($case.Profile), $($case.Mode)."
+                $calls = Get-Content -LiteralPath (Join-Path $sandbox 'calls.txt')
+                Assert-Harness (@($calls | Where-Object { $_ -match ' rm$' }).Count -eq $case.Removals) 'Real timeout cleanup removed an unverified resource or retained a verified resource.'
+            } finally {
+                $resolved = [IO.Path]::GetFullPath($sandbox)
+                if (-not $resolved.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'artifacts/harness-tests')) + [IO.Path]::DirectorySeparatorChar) -or (Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Preserving unexpected timeout fixture path.' }
+                Remove-Item -LiteralPath $resolved -Recurse
+            }
         }
         # Exercise the emitted preflight, rather than matching its implementation.
         # Every rejected platform/identity must fail before ANY project resource.

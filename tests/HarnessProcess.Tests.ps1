@@ -83,5 +83,28 @@ $failure = & {
     try { Invoke-HarnessWsl -Script $secret -TimeoutSeconds 30; '' } catch { $_.Exception.Message }
 }
 Assert-Process ($failure -match 'exit 7' -and -not $failure.Contains($secret)) 'Default failure behavior or secret-safe diagnostic changed.'
+foreach ($grace in @(15, 40)) {
+    $budget = & {
+        param($grace)
+        function Assert-HarnessWslRunning { }
+        function New-HarnessWslStartInfo([string[]] $Arguments) { [pscustomobject]@{ Arguments = $Arguments } }
+        function Invoke-HarnessWslClient($StartInfo, $InputText, $TimeoutSeconds) {
+            $script:budgetArguments = $StartInfo.Arguments
+            $script:budgetTotal = $TimeoutSeconds
+            [pscustomobject]@{ ExitCode = 0; TimedOut = $false; InputFailed = $false; OutputDrained = $true }
+        }
+        $code = Invoke-HarnessWsl -Script 'true' -ReturnExitCode -TimeoutSeconds 60 -CleanupGraceSeconds $grace
+        [pscustomobject]@{ Code = $code; Arguments = $script:budgetArguments; Total = $script:budgetTotal }
+    } $grace
+    $guestSeconds = [int] $budget.Arguments[6].TrimEnd('s')
+    Assert-Process ($budget.Code -eq 0 -and $budget.Arguments[5] -eq "--kill-after=${grace}s") 'Selected cleanup reserve did not reach the guest timeout.'
+    Assert-Process ($guestSeconds -gt 0 -and ($guestSeconds + $grace + 5) -le $budget.Total -and $budget.Total -le 60) 'Cleanup or final five-second drain escaped the same total deadline.'
+}
+$failure = & {
+    function Assert-HarnessWslRunning { }
+    function New-HarnessWslStartInfo { throw 'A guest was launched without its cleanup reserve.' }
+    try { Invoke-HarnessWsl -Script 'true' -TimeoutSeconds 30 -CleanupGraceSeconds 40; '' } catch { $_.Exception.Message }
+}
+Assert-Process ($failure -match 'Insufficient total deadline') 'Insufficient execution/cleanup/drain budget reached the guest.'
 [ordered]@{ checks = $count; state = 'passed'; noWslOrDocker = $true; secretExposed = $false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $folder 'summary.json')
 Write-Host "$count native harness process checks passed. Evidence: $folder"

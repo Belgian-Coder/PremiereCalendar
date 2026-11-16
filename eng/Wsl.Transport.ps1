@@ -128,18 +128,20 @@ function Assert-HarnessWslRunning([string] $WslDistribution, [double] $TimeoutSe
 
 function Invoke-HarnessWsl([string] $Script, [switch] $ReturnExitCode,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $WslDistribution = 'Ubuntu-24.04',
-    [ValidateRange(26, 86400)][int] $TimeoutSeconds = 1800) {
+    [ValidateRange(26, 86400)][int] $TimeoutSeconds = 1800,
+    [ValidateRange(15, 120)][int] $CleanupGraceSeconds = 15) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     Assert-HarnessWslRunning $WslDistribution -TimeoutSeconds ([Math]::Min(5, $TimeoutSeconds))
     # stdin avoids the Windows -> bash command-line quoting layer.
     # An inherited Docker context must never redirect local checks to the NAS.
     $localEngine = "unset DOCKER_CONTEXT; export DOCKER_HOST=unix:///var/run/docker.sock`n"
-    # Guest execution, TERM cleanup (15s), and final pipe drain (5s) all fit
+    # Guest execution, the selected TERM cleanup grace, and final pipe drain (5s) fit
     # inside the caller's total; a killed Windows client proves no guest cleanup.
     $remaining = $TimeoutSeconds - $clock.Elapsed.TotalSeconds
-    if ($remaining -lt 21) { throw 'Insufficient total deadline remains for guest execution, cleanup and drain.' }
-    $guestSeconds = [Math]::Floor($remaining) - 20
-    $wslArguments = @('-d', $WslDistribution, '--exec', 'timeout', '--signal=TERM', '--kill-after=15s', "${guestSeconds}s", 'bash', '-s')
+    $cleanupAndDrainSeconds = $CleanupGraceSeconds + 5
+    if ($remaining -lt ($cleanupAndDrainSeconds + 1)) { throw 'Insufficient total deadline remains for guest execution, cleanup and drain.' }
+    $guestSeconds = [Math]::Floor($remaining) - $cleanupAndDrainSeconds
+    $wslArguments = @('-d', $WslDistribution, '--exec', 'timeout', '--signal=TERM', "--kill-after=${CleanupGraceSeconds}s", "${guestSeconds}s", 'bash', '-s')
     $inputText = (($localEngine + $Script -replace "`r`n", "`n").TrimEnd() + "`n# end of script`n")
     $result = Invoke-HarnessWslClient (New-HarnessWslStartInfo $wslArguments) -InputText $inputText -TimeoutSeconds $remaining
     Assert-WslTransportCompletion $result $TimeoutSeconds
