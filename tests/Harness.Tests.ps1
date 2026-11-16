@@ -17,15 +17,18 @@ foreach ($script in Get-ChildItem (Join-Path $root 'eng') -Filter '*.ps1') {
     Assert-Harness ($parseErrors.Count -eq 0) "PowerShell parse failure: $($script.Name)"
 }
 $context = Get-HarnessContext $root
-Assert-Harness ($context.BuildRoot.StartsWith($root + [IO.Path]::DirectorySeparatorChar)) 'Build state escaped the current checkout.'
+Assert-Harness ($context.BuildRoot -match '^premierecalendar-linux-[0-9a-f]{10}-build$') 'Linux build state is not in a checkout-specific named volume.'
 $common = & git -C $root rev-parse --path-format=absolute --git-common-dir
 $primary = Split-Path -Parent $common
-Assert-Harness ($context.PackageRoot -eq (Join-Path $primary 'artifacts/packages/linux')) 'Package cache is not shared through the primary project.'
+Assert-Harness ($context.PackageRoot -match '^premierecalendar-linux-[0-9a-f]{10}-nuget$') 'Linux dependencies are not in a checkout-specific named volume.'
+Assert-Harness ($context.WatchRoot -ne $context.BuildRoot) 'Watcher and checks share mutable build state.'
+Assert-Harness ($context.CacheRoot -match '^premierecalendar-linux-[0-9a-f]{10}-sdk-cache$') 'SDK caches are not persistent Linux storage.'
 $primaryContext = Get-HarnessContext $primary
 Assert-Harness ($primaryContext.ComposeProject -eq 'premierecalendar-dev') 'Primary Compose identity changed.'
 if ($root -ne $primary) {
     Assert-Harness ($context.ComposeProject -ne $primaryContext.ComposeProject) 'Worktree Compose identity collided.'
     Assert-Harness ($context.BuildRoot -ne $primaryContext.BuildRoot) 'Worktrees share mutable build state.'
+    Assert-Harness ($context.PackageRoot -ne $primaryContext.PackageRoot) 'Worktrees share writable dependency state.'
 }
 Assert-Harness ((ConvertTo-BashLiteral "a'b") -eq "'a'\''b'") 'Bash single-quote escaping regressed.'
 
@@ -68,7 +71,7 @@ try {
     Assert-Harness (@($query.RunnerArguments) -join ' ' -eq '-filter /*/*/PostgresResponseCacheTests/* -longRunning 30') 'Query filter / runner arguments changed.'
     Assert-Harness ($query.BuildArguments -contains '--no-restore' -and $query.BuildStorage -like 'container-local*') '-NoRestore / -FreshBuild regressed.'
     Assert-Harness ($viaDocker.Projects.Count -eq 1 -and $viaDocker.Projects[0] -eq 'UnitTests' -and $viaDocker.RunnerArguments -contains '*ViewSync*') 'wsl-docker test no longer forwards -Project/-Filter.'
-    Assert-Harness ($plan.BuildStorage -eq $context.BuildRoot) 'Check build state left artifacts/build/linux.'
+    Assert-Harness ($plan.BuildStorage -eq $context.BuildRoot) 'Test build storage differs from the check storage lane.'
     $rejected = $false
     try { & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Filter 'FullyQualifiedName~A&Name~B' -Plan | Out-Null } catch { $rejected = $true }
     Assert-Harness $rejected 'VSTest filter expressions are silently accepted.'
@@ -76,9 +79,11 @@ try {
     Assert-Harness ($check.Command -match 'dotnet build PremiereCalendar/PremiereCalendar.csproj') 'App check expands to the full solution.'
     & (Join-Path $root 'eng/wsl-docker.ps1') check
     & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project ComponentTests -Filter $filter 6>$null | Out-Null
-    Assert-Harness ($global:HarnessCapturedScripts.Count -eq 2) 'Expected two intercepted bash scripts.'
+    & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -NoRuntimeAsync -NoBuild 6>$null | Out-Null
+    Assert-Harness ($global:HarnessCapturedScripts.Count -eq 3) 'Expected three intercepted bash scripts.'
     $checkScript = $global:HarnessCapturedScripts[0]
     $testScript = $global:HarnessCapturedScripts[1]
+    $alternateScript = $global:HarnessCapturedScripts[2]
     Assert-Harness ($checkScript -match 'flock -n 9' -and $testScript -match 'flock -n 9') 'Check/test output locking is missing.'
     Assert-Harness ($testScript -match 'trap cleanup EXIT') 'Disposable resource cleanup is missing.'
     Assert-Harness ($testScript -notmatch '/tmp/pcpg-env') 'Test credentials escaped into WSL host temp files.'
@@ -87,7 +92,14 @@ try {
     Assert-Harness ($inner.Contains((ConvertTo-BashLiteral $runnerFilter))) 'Shell filter quoting changed.'
     Assert-Harness ($inner.Contains('exe="/build/bin/$name/release/$name"') -and $inner.Contains('for suite in Component; do') -and $inner.Contains('-result-ctrf')) 'Test executables are not run directly with TRX/CTRF results.'
     Assert-Harness ($inner.Contains('NO TESTS RAN')) 'A filter that matches no test is reported as a pass.'
-    Assert-Harness ($testScript -match 'artifacts/build/linux' -and $testScript -match 'ArtifactsPath=/build') 'Container build state is not this checkout''s artifacts/build/linux.'
+    Assert-Harness ($testScript.Contains("'$($context.BuildRoot)':/build") -and $checkScript.Contains("$($context.BuildRoot):/build")) 'Build/test do not use the same persistent Linux build volume.'
+    Assert-Harness ($testScript.Contains("$($context.CacheRoot):/cache") -and $checkScript.Contains("$($context.CacheRoot):/cache")) 'SDK cache mount is missing.'
+    foreach ($laneScript in @($checkScript, $testScript, $alternateScript)) {
+        Assert-Harness ($laneScript.Contains('NUGET_SCRATCH=/cache/nuget-scratch') -and $laneScript.Contains("$($context.CacheRoot):/cache")) 'Restore lanes do not share NuGet scratch locks with their package cache.'
+    }
+    $composeDev = Get-Content (Join-Path $root 'compose.dev.yaml') -Raw
+    Assert-Harness ($composeDev -match 'NUGET_SCRATCH: /cache/nuget-scratch' -and $composeDev -match 'linux-sdk-cache:/cache' -and $composeDev -match 'name: \$\{PREMIERECALENDAR_SDK_CACHE:') 'Watcher NuGet scratch locks do not use the helper-provided SDK cache volume.'
+    Assert-Harness ($testScript -notmatch 'docker (volume rm|volume prune|system prune)' -and $checkScript -notmatch 'docker (volume rm|volume prune|system prune)') 'Ordinary checks discard reusable caches.'
     $bash = Join-Path $env:ProgramFiles 'Git/bin/bash.exe'
     if (Test-Path -LiteralPath $bash) {
         foreach ($shellScript in @($checkScript, $testScript, $inner)) {
@@ -101,8 +113,7 @@ try {
             New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
             $linuxSandbox = '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/')
             $linuxRoot = '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/')
-            $linuxPackages = '/mnt/' + $context.PackageRoot.Substring(0, 1).ToLowerInvariant() + '/' + ($context.PackageRoot.Substring(3) -replace '\\', '/')
-            $simulation = $testScript.Replace($linuxPackages, "$linuxSandbox/packages").Replace($linuxRoot, $linuxSandbox)
+            $simulation = $testScript.Replace($linuxRoot, $linuxSandbox)
             $dockerDouble = @"
 flock() { return 0; }
 docker() {

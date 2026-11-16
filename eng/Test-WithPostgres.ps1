@@ -46,10 +46,10 @@ the xUnit.net summary and the wall time of each suite and ends with a "Results:"
 suite fails or when no test ran (a filter that matches nothing). All requested suites run even when an earlier one
 fails.
 
-Incremental builds: the build output lives in this checkout's artifacts\build\linux (artifacts\build\linux-no-runtime-async
-with -NoRuntimeAsync), so worktrees never mix and runtime-async modes never share objects. Linux NuGet packages are
-shared through the primary project's artifacts\packages\linux. Use -FreshBuild to build from scratch into a throwaway
-container location, -NoBuild to run the last build unchanged, -NoRestore to skip the restore of an unchanged build.
+Incremental builds: output, Linux NuGet packages and SDK caches live in persistent checkout-specific Docker volumes
+on WSL ext4. The watcher and -NoRuntimeAsync use separate output lanes. Source and results remain on the Windows
+drive. Use -FreshBuild to build from scratch into a throwaway container location (keeping dependency caches),
+-NoBuild to run the last build unchanged, -NoRestore to skip the restore of an unchanged build.
 
 Plain `dotnet test` also works (global.json selects Microsoft Testing Platform), for example inside the dev container:
   dotnet test tests/PremiereCalendar.UnitTests/PremiereCalendar.UnitTests.csproj -c Release --filter-class '*ViewSync*'
@@ -97,11 +97,11 @@ Builds from scratch in a throwaway container location instead of this checkout's
 CPU limit of the test container (default 4); the PostgreSQL container gets 2.
 
 .PARAMETER BuildVolume
-Legacy override: a Docker volume name used instead of this checkout's artifacts\build\linux. It must belong exclusively
+Override: a Docker volume name used instead of this checkout's default build volume. It must belong exclusively
 to this worktree and runtime-async mode.
 
 .PARAMETER NugetVolume
-Legacy override: a Docker volume name used instead of the shared artifacts\packages\linux directory.
+Override: a Docker volume name used instead of this checkout's default Linux package volume.
 
 .PARAMETER Plan
 Prints the plan (projects, build and runner arguments, storage, results folder, images) and returns without invoking
@@ -198,6 +198,7 @@ if ($Plan) {
         RunnerArguments = $runner.ToArray()
         BuildStorage = if ($FreshBuild) { 'container-local (discarded)' } elseif ($BuildVolume) { $BuildVolume } else { $buildRoot }
         PackageStorage = if ($NugetVolume) { $NugetVolume } else { $context.PackageRoot }
+        SdkCacheStorage = $context.CacheRoot
         Results = $resultsHost
         PostgreSqlImage = $postgresImage
         DevImage = $DevImage
@@ -206,11 +207,9 @@ if ($Plan) {
 }
 
 $wslRoot = ConvertTo-WslPath $context.Root
-$wslBuild = if ($BuildVolume) { $BuildVolume } else { ConvertTo-WslPath $buildRoot }
-$wslPackages = if ($NugetVolume) { $NugetVolume } else { ConvertTo-WslPath $context.PackageRoot }
+$wslBuild = if ($BuildVolume) { $BuildVolume } else { $buildRoot }
+$wslPackages = if ($NugetVolume) { $NugetVolume } else { $context.PackageRoot }
 $bindDirectories = @("$wslRoot/artifacts")
-if (-not $BuildVolume -and -not $FreshBuild) { $bindDirectories += $wslBuild }
-if (-not $NugetVolume) { $bindDirectories += $wslPackages }
 $quotedDirectories = ($bindDirectories | ForEach-Object { ConvertTo-BashLiteral $_ }) -join ' '
 $buildMount = if ($FreshBuild) { '' } else { "-v $(ConvertTo-BashLiteral $wslBuild):/build" }
 $runId = [Guid]::NewGuid().ToString('N').Substring(0, 10)
@@ -294,8 +293,9 @@ for i in `$(seq 1 90); do
 done
 [ "`$ready" = 1 ] || { echo 'Disposable PostgreSQL did not become ready.' >&2; docker logs --tail 40 '$server' >&2 || true; exit 24; }
 docker run --rm --name '$runnerName' --network '$network' --cpus=$Cpus -v $(ConvertTo-BashLiteral $wslRoot):/src \
-  -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -w /src \
-  -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+  -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -v $($context.CacheRoot):/cache -w /src \
+  -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e DOTNET_CLI_HOME=/cache/dotnet \
+  -e NUGET_HTTP_CACHE_PATH=/cache/nuget-http -e NUGET_PLUGINS_CACHE_PATH=/cache/nuget-plugins -e NUGET_SCRATCH=/cache/nuget-scratch -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
   -e PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE=/tmp/pc-test-postgres-password \
   -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' '$DevImage' sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s' </dev/null

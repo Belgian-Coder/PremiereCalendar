@@ -11,10 +11,15 @@ function Get-HarnessContext([string] $Root) {
     $primaryRoot = Split-Path -Parent $commonPath
     $suffix = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
         [Text.Encoding]::UTF8.GetBytes($rootPath.ToLowerInvariant()))).Substring(0, 10).ToLowerInvariant()
+    # Named volumes live in the WSL Docker engine's Linux filesystem. Include
+    # the checkout identity and OS so worktrees/native builds never share writes.
+    $storagePrefix = "premierecalendar-linux-$suffix"
     [pscustomobject]@{
         Root = $rootPath
-        BuildRoot = Join-Path $rootPath 'artifacts/build/linux'
-        PackageRoot = Join-Path $primaryRoot 'artifacts/packages/linux'
+        BuildRoot = "$storagePrefix-build"
+        WatchRoot = "$storagePrefix-watch"
+        PackageRoot = "$storagePrefix-nuget"
+        CacheRoot = "$storagePrefix-sdk-cache"
         ComposeProject = if ($rootPath -eq $primaryRoot) { 'premierecalendar-dev' } else { "premierecalendar-dev-$suffix" }
     }
 }

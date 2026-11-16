@@ -40,6 +40,10 @@ services:
       Urls: http://0.0.0.0:8080
       ArtifactsPath: /build
       NUGET_PACKAGES: /root/.nuget/packages
+      DOTNET_CLI_HOME: /cache/dotnet
+      NUGET_HTTP_CACHE_PATH: /cache/nuget-http
+      NUGET_PLUGINS_CACHE_PATH: /cache/nuget-plugins
+      NUGET_SCRATCH: /cache/nuget-scratch
       CalendarCache__Directory: /src/PremiereCalendar/App_Data/cache/calendar
       ImageCache__Directory: /src/PremiereCalendar/App_Data/cache/images
       Telemetry__LogDirectory: /src/PremiereCalendar/App_Data/logs
@@ -47,8 +51,9 @@ services:
       - postgres_password
     volumes:
       - ./:/src
-      - ${PREMIERECALENDAR_NUGET_CACHE:-./artifacts/packages/linux}:/root/.nuget/packages
-      - ./artifacts/build/linux-dev:/build
+      - linux-nuget:/root/.nuget/packages
+      - linux-build:/build
+      - linux-sdk-cache:/cache
       - app-data:/src/PremiereCalendar/App_Data
     ports:
       - "127.0.0.1:5299:8080"
@@ -64,6 +69,17 @@ secrets:
 volumes:
   postgres-data:
   app-data:
+  # External caches survive compose down/reset; helpers supply checkout-specific
+  # identities and create them before up. Direct Compose use must supply names.
+  linux-nuget:
+    external: true
+    name: ${PREMIERECALENDAR_NUGET_CACHE:?Use eng/wsl-docker.ps1}
+  linux-build:
+    external: true
+    name: ${PREMIERECALENDAR_BUILD_CACHE:?Use eng/wsl-docker.ps1}
+  linux-sdk-cache:
+    external: true
+    name: ${PREMIERECALENDAR_SDK_CACHE:?Use eng/wsl-docker.ps1}
 
 networks:
   backend:

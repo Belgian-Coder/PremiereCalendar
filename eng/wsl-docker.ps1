@@ -61,7 +61,7 @@ $commands = @{
     up = "$compose up --build -d --wait"
     down = "$compose down"
     build = "$compose build"
-    check = "docker run --rm --cpus=4 -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages premierecalendar-dev-app:latest dotnet build $projectPath -c Release --nologo"
+    check = "docker run --rm --cpus=4 -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -v __CACHE__:/cache -w /src -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e DOTNET_CLI_HOME=/cache/dotnet -e NUGET_HTTP_CACHE_PATH=/cache/nuget-http -e NUGET_PLUGINS_CACHE_PATH=/cache/nuget-plugins -e NUGET_SCRATCH=/cache/nuget-scratch premierecalendar-dev-app:latest dotnet build $projectPath -c Release --nologo"
     logs = "$compose logs --tail=200 app database"
     reset = "$compose down --volumes --remove-orphans"
 }
@@ -82,19 +82,23 @@ if ($Action -in 'up', 'build') {
     }
 }
 $wslRoot = ConvertTo-WslPath $context.Root
-$wslBuild = ConvertTo-WslPath $context.BuildRoot
-$wslPackages = ConvertTo-WslPath $context.PackageRoot
 $command = $commands[$Action].Replace('__ROOT__', (ConvertTo-BashLiteral $wslRoot)).
-    Replace('__BUILD__', (ConvertTo-BashLiteral $wslBuild)).Replace('__PACKAGES__', (ConvertTo-BashLiteral $wslPackages))
+    Replace('__BUILD__', $context.BuildRoot).Replace('__PACKAGES__', $context.PackageRoot).Replace('__CACHE__', $context.CacheRoot)
 $lock = if ($Action -eq 'check') {
     "mkdir -p artifacts; exec 9>artifacts/check.lock; flock -n 9 || { echo 'Another check owns this worktree.' >&2; exit 21; }"
+} else { '' }
+$prepareCaches = if ($Action -eq 'up') {
+    "docker volume create $($context.PackageRoot) >/dev/null; docker volume create $($context.WatchRoot) >/dev/null; docker volume create $($context.CacheRoot) >/dev/null"
 } else { '' }
 $script = @"
 set -eu
 cd $(ConvertTo-BashLiteral $wslRoot)
 docker info >/dev/null
-export PREMIERECALENDAR_NUGET_CACHE=$(ConvertTo-BashLiteral $wslPackages)
+export PREMIERECALENDAR_NUGET_CACHE=$($context.PackageRoot)
+export PREMIERECALENDAR_BUILD_CACHE=$($context.WatchRoot)
+export PREMIERECALENDAR_SDK_CACHE=$($context.CacheRoot)
 $lock
+$prepareCaches
 $command
 "@
 Invoke-HarnessWsl $script

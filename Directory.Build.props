@@ -8,7 +8,7 @@
          methods instead of state machines. Opt out with UseRuntimeAsync=false. -->
     <Features Condition="'$(UseRuntimeAsync)' != 'false'">$(Features);runtime-async=on</Features>
     <!-- Each checkout owns its mutable build state. Container helpers override
-         this with /build, bound to this checkout's artifacts/build/linux. -->
+         this with /build, backed by a checkout-specific WSL Docker volume. -->
     <UseArtifactsOutput Condition="'$(UseArtifactsOutput)' == '' and '$(CI)' != 'true'">true</UseArtifactsOutput>
     <ArtifactsPath Condition="'$(ArtifactsPath)' == '' and '$(CI)' != 'true'">$(MSBuildThisFileDirectory)artifacts/build/host</ArtifactsPath>
     <RestorePackagesPath Condition="'$(RestorePackagesPath)' == '' and '$(NUGET_PACKAGES)' == '' and '$(CI)' != 'true'">$(MSBuildThisFileDirectory)artifacts/packages/host</RestorePackagesPath>

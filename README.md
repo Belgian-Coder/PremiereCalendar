@@ -186,8 +186,8 @@ More help: [Troubleshooting](docs/Troubleshooting.md).
 The Windows host has no .NET SDK that matches `global.json` (11.0.100), so build and test
 always run inside Linux containers in WSL. Every test runs against PostgreSQL; none are
 skipped when it is missing. The script starts a throwaway PostgreSQL container, runs the
-unit, component and integration tests in the development image, and removes everything
-afterwards (build the development image once with `wsl-docker.ps1 build`):
+unit, component and integration tests in the development image, and removes its
+disposable database/containers/network afterwards (build the development image once with `wsl-docker.ps1 build`):
 
 ```powershell
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1
@@ -199,9 +199,9 @@ to narrow it. Results (TRX, CTRF and a console log per suite) land in this check
 `artifacts\test-results\<timestamp>` folder. See [Testing](docs/Testing.md) for the environment variables and details.
 Tests use fake providers. They must not call live external services.
 
-Builds and test reports stay under this checkout's ignored `artifacts/`.
-Container checks retain incremental build outputs across runs; Linux packages
-are shared with worktrees through this project's primary `artifacts/packages/linux`.
+Native builds and test reports stay under this checkout's ignored `artifacts/`.
+Container checks retain incremental outputs, Linux packages and SDK caches in
+checkout-specific Docker volumes on WSL ext4; source and test reports stay on D:.
 Native Development caches/logs stay in `.local-data/`; Compose preserves its
 named application-data and PostgreSQL volumes. Previous sibling build/data
 directories are untouched. Scratch worktrees belong inside the checkout under
@@ -217,7 +217,7 @@ pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Chec
 pwsh -File D:\Projects\PremiereCalendar\eng\Workspace-Maintenance.ps1 -Mode Clean -WhatIf
 ```
 
-After every commit and release, follow the [bounded cleanup checkpoint](AGENTS.md#cleanup-checkpoint).
+After every commit and release, follow the [bounded cleanup guidance](AGENTS.md#development-workflow).
 It preserves warm caches and evidence; the separate `Clean` reset above is not
 the checkpoint's default action.
 

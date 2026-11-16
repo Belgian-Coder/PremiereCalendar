@@ -31,10 +31,11 @@
 - Use the smallest relevant project/filter for feedback. Razor/UI changes need
   component checks; navigation, layout or JS changes also need browser checks.
   This Blazor project has no separate npm frontend build.
-- Keep output, reports and temporary files in this checkout's ignored
-  `artifacts/`; native Development data belongs in `.local-data/`. Mutable build
-  state is per worktree. Linux packages may be shared through the primary
-  project's `artifacts/packages/linux`; do not mix Linux/Windows package caches.
+- Keep reports and task temporary files in this checkout's ignored `artifacts/`;
+  native Development data belongs in `.local-data/`. Linux build output,
+  dependencies and SDK caches use persistent checkout-specific Docker volumes
+  on WSL ext4; native outputs/packages stay under `artifacts/`. Preserve warm
+  caches and do not mix worktree build state or Linux/Windows packages.
 - Do not run build/test checks simultaneously in one worktree. The supplied
   helpers lock their shared check outputs; the development watcher has a
   separate build directory. Only one development stack can bind the default
