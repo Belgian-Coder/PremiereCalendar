@@ -65,8 +65,14 @@ public static class PremiereFilter
             max *= 10;
         }
 
-        return score >= min && score <= max;
+        // Scores are published with one decimal (or as whole percentages), but a
+        // score cached before IMDb ratings were widened exactly can still hold
+        // 7.599999904632568 for 7.6. Compare with a tolerance far below the
+        // 0.1 display step so such a value still meets ">= 7.6" and "<= 7.6".
+        return score >= min - ScoreTolerance && score <= max + ScoreTolerance;
     }
+
+    internal const double ScoreTolerance = 1e-4;
 
     public static double? ScoreFor(PremiereItem item, ScoreSource source)
     {

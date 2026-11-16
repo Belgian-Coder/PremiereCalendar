@@ -197,9 +197,29 @@ public sealed class ImdbRatingsStore : IImdbRatingsStore
     {
         return new ImdbRatingRecord(
             reader.GetString(0),
-            reader.GetDouble(1),
+            ReadAverageRating(reader, 1),
             reader.GetInt32(2),
             DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+    }
+
+    // ImdbRatings.AverageRating is a PostgreSQL REAL (4-byte float). Widening it
+    // directly turns a stored 7.6 into 7.599999904632568, so a ">= 7.6" score
+    // filter would miss it. Read the float and widen its shortest round-trip
+    // decimal form instead: every value the dataset holds (one decimal for IMDb,
+    // and anything else a float can represent) comes back as the double it was
+    // written from. Schema version 4 keeps the column type unchanged.
+    internal static double ReadAverageRating(DbDataReader reader, int ordinal)
+    {
+        return WidenStoredRating(reader.GetFieldValue<float>(ordinal));
+    }
+
+    internal static double WidenStoredRating(float value)
+    {
+        if (!float.IsFinite(value)) return value;
+        Span<char> buffer = stackalloc char[32];
+        return value.TryFormat(buffer, out var written, "R", CultureInfo.InvariantCulture)
+            ? double.Parse(buffer[..written], NumberStyles.Float, CultureInfo.InvariantCulture)
+            : value;
     }
 
     private static async IAsyncEnumerable<ImdbRatingRecord> ToAsyncEnumerable(
