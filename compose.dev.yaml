@@ -30,7 +30,7 @@ services:
     build:
       context: .
       target: development
-    command: ["dotnet", "watch", "--project", "PremiereCalendar/PremiereCalendar.csproj", "run", "--no-launch-profile"]
+    command: ["sh", "/src/eng/run-with-sdk-cache.sh", "dotnet", "watch", "--project", "PremiereCalendar/PremiereCalendar.csproj", "run", "--no-launch-profile"]
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       AppDatabase__Provider: PostgreSql
@@ -42,6 +42,10 @@ services:
       Urls: http://0.0.0.0:8080
       ArtifactsPath: /build
       NUGET_PACKAGES: /root/.nuget/packages
+      DOTNET_CLI_HOME: /build/.sdk-cache/dotnet
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: "false"
+      NUGET_PLUGINS_CACHE_PATH: /build/.sdk-cache/nuget-plugins
+      PC_SDK_CACHE_OWNER: ${PREMIERECALENDAR_BUILD_VOLUME:?Use eng/wsl-docker.ps1 for the worktree build identity}
       NUGET_SCRATCH: /root/.nuget/packages/.scratch
       NUGET_HTTP_CACHE_PATH: /root/.nuget/packages/.http-cache
       CalendarCache__Directory: /src/PremiereCalendar/App_Data/cache/calendar

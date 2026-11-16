@@ -199,9 +199,11 @@ to narrow it. Results (TRX, CTRF and a console log per suite) land in this check
 `artifacts\test-results\<timestamp>` folder. See [Testing](docs/Testing.md) for the environment variables and details.
 Tests use fake providers. They must not call live external services.
 
-Builds and test reports stay under this checkout's ignored `artifacts/`.
-Container checks retain incremental build outputs across runs; Linux packages
-are shared with worktrees through this project's primary `artifacts/packages/linux`.
+Source and test reports stay under this checkout's ignored `artifacts/`.
+Container checks retain build output and marked SDK CLI/plugin state in isolated
+Linux/amd64 Docker build volumes per checkout, ABI, runtime mode and watcher/check
+lane. Owner-validated project volumes share pure Linux packages and their scratch
+locks/HTTP cache. Existing main/feature volumes and old bind caches are preserved.
 Native Development caches/logs stay in `.local-data/`; Compose preserves its
 named application-data and PostgreSQL volumes. Previous sibling build/data
 directories are untouched. Scratch worktrees belong inside the checkout under
@@ -237,10 +239,12 @@ pwsh -NoProfile -File D:\Projects\PremiereCalendar\tests\Harness.Tests.ps1
 
 ## Build And Release
 
-Builds, tests, vulnerability scans, SBOM generation and container publication run
-locally. GitHub Actions and hosted CI must not be used, including manual
-dispatches; both hosted workflows stay disabled. GitHub may host source and published
-artifacts without running CI. The scripted end-to-end release (fresh NAS backup,
+Validation, tests, builds, CI, vulnerability scans, SBOM generation and release
+packaging run locally on the supported PC-MARC, WINDOWS11-VM or Mac ARM lane.
+GitHub Actions must never execute or orchestrate these jobs, including self-hosted
+runners and manual dispatches. The former workflow entrypoints are removed.
+GitHub may host source and artifacts uploaded from the local builder without
+running CI. Canonical commands are in [local-only execution](docs/Testing.md#local-only-execution). The scripted end-to-end release (fresh NAS backup,
 isolated restore check, build, NuGet audit, scan and SBOM, tests, smoke test, image
 load, deployment by digest through Portainer, verification, closure) is in
 `eng/release` and described in [Releasing](docs/Releasing.md).

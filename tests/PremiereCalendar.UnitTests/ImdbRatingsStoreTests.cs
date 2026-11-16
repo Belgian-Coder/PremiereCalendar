@@ -1,3 +1,4 @@
+using PremiereCalendar.Models;
 using PremiereCalendar.Services;
 
 namespace PremiereCalendar.UnitTests;
@@ -22,8 +23,7 @@ public sealed class ImdbRatingsStoreTests : IDisposable
         var state = await store.GetStateAsync(CancellationToken.None);
 
         Assert.NotNull(rating);
-        // ImdbRatings.AverageRating is a PostgreSQL REAL (4-byte float), so a stored 7.6 reads back as 7.5999999...
-        Assert.Equal(7.6, rating.AverageRating, precision: 5);
+        Assert.Equal(7.6, rating.AverageRating);
         Assert.Equal(12345, rating.VoteCount);
         Assert.Null(missing);
         Assert.Equal(importedAt, state.LastImportedUtc);
@@ -72,8 +72,7 @@ public sealed class ImdbRatingsStoreTests : IDisposable
         var rating = await store.GetByImdbIdAsync("tt0000002", CancellationToken.None);
 
         Assert.NotNull(rating);
-        // ImdbRatings.AverageRating is a PostgreSQL REAL (4-byte float), so a stored 7.6 reads back as 7.5999999...
-        Assert.Equal(8.2, rating.AverageRating, precision: 5);
+        Assert.Equal(8.2, rating.AverageRating);
         Assert.Equal(11, rating.VoteCount);
     }
 
@@ -200,8 +199,7 @@ public sealed class ImdbRatingsStoreTests : IDisposable
         var fractional = await store.GetByImdbIdAsync("tt0001234", CancellationToken.None);
         Assert.NotNull(fractional);
         Assert.Equal("tt0001234", fractional.ImdbId);
-        // REAL is a 4-byte float on PostgreSQL: 123.4 reads back as 123.4000015...
-        Assert.Equal(123.4, fractional.AverageRating, precision: 4);
+        Assert.Equal(123.4, fractional.AverageRating);
         Assert.Equal(1234, fractional.VoteCount);
         Assert.Equal(importedAt, fractional.ImportedAtUtc);
         Assert.Equal(rows + 1, (await store.GetStateAsync(CancellationToken.None)).RatingCount);
@@ -216,6 +214,71 @@ public sealed class ImdbRatingsStoreTests : IDisposable
         entered.TrySetResult();
         await release.Task;
         yield return new ImdbRatingRecord("tt-new", 9, 200, importedAt);
+    }
+
+    [Fact]
+    public async Task ImdbRatingsStore_ReadsExactlyTheOneDecimalRatingThatWasStored()
+    {
+        // AverageRating is a PostgreSQL REAL; widening the float directly would
+        // read 7.6 back as 7.599999904632568 and miss a ">= 7.6" filter.
+        var store = CreateStore();
+        var importedAt = DateTimeOffset.Parse("2026-05-09T10:00:00Z");
+        double[] values = [0.0, 0.1, 1.0, 5.5, 7.5, 7.6, 7.7, 8.1, 8.2, 9.9, 10.0];
+        var records = values
+            .Select((value, index) => new ImdbRatingRecord($"tt{index + 1:D7}", value, index + 1, importedAt))
+            .ToArray();
+        await store.ReplaceAllAsync(records, importedAt, CancellationToken.None);
+
+        var single = await store.GetByImdbIdAsync("tt0000006", CancellationToken.None);
+        var batch = await store.GetByImdbIdsAsync(records.Select(record => record.ImdbId).ToArray(), CancellationToken.None);
+
+        Assert.NotNull(single);
+        Assert.Equal(7.6, single.AverageRating);
+        Assert.Equal(new ImdbRatingRecord("tt0000006", 7.6, 6, importedAt), single);
+        foreach (var record in records)
+        {
+            Assert.Equal(record, batch[record.ImdbId]);
+        }
+
+        var atLeast76 = new CalendarFilters { ScoreSource = ScoreSource.Imdb, MinScore = 7.6, MaxScore = 10, IncludeUnknownScores = false };
+        var atMost76 = new CalendarFilters { ScoreSource = ScoreSource.Imdb, MinScore = 0, MaxScore = 7.6, IncludeUnknownScores = false };
+        var exactly76 = new CalendarFilters { ScoreSource = ScoreSource.Imdb, MinScore = 7.6, MaxScore = 7.6, IncludeUnknownScores = false };
+        Assert.Equal([7.6, 7.7, 8.1, 8.2, 9.9, 10.0], PassingScores(batch.Values, atLeast76));
+        Assert.Equal([0.0, 0.1, 1.0, 5.5, 7.5, 7.6], PassingScores(batch.Values, atMost76));
+        Assert.Equal([7.6], PassingScores(batch.Values, exactly76));
+    }
+
+    [Fact]
+    public void WidenStoredRating_ReturnsEveryOneDecimalRatingExactly()
+    {
+        for (var tenths = 0; tenths <= 100; tenths++)
+        {
+            var rating = tenths / 10d;
+            Assert.Equal(rating, ImdbRatingsStore.WidenStoredRating((float)rating));
+        }
+
+        Assert.Equal(7.25, ImdbRatingsStore.WidenStoredRating(7.25f));
+        Assert.Equal(123.4, ImdbRatingsStore.WidenStoredRating(123.4f));
+        Assert.Equal(99.5, ImdbRatingsStore.WidenStoredRating(99.5f));
+        Assert.Equal(7.6, ImdbRatingsStore.WidenStoredRating((float)7.599999904632568));
+    }
+
+    private static double[] PassingScores(IEnumerable<ImdbRatingRecord> ratings, CalendarFilters filters)
+    {
+        return ratings
+            .Select(rating => new PremiereItem
+            {
+                CanonicalId = rating.ImdbId,
+                Title = rating.ImdbId,
+                MediaType = PremiereMediaType.Movie,
+                TmdbId = 1,
+                PremiereDate = new DateOnly(2026, 5, 4),
+                ImdbScore = rating.AverageRating
+            })
+            .Where(item => PremiereFilter.PassesScoreFilter(item, filters))
+            .Select(item => item.ImdbScore!.Value)
+            .Order()
+            .ToArray();
     }
 
     public void Dispose() => _database.Dispose();

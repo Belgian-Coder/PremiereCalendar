@@ -17,10 +17,10 @@ foreach ($script in Get-ChildItem (Join-Path $root 'eng') -Filter '*.ps1') {
     Assert-Harness ($parseErrors.Count -eq 0) "PowerShell parse failure: $($script.Name)"
 }
 $context = Get-HarnessContext $root
-Assert-Harness ($context.BuildRoot.StartsWith($root + [IO.Path]::DirectorySeparatorChar)) 'Build state escaped the current checkout.'
+Assert-Harness ((Get-HarnessStorage $context).BuildVolume -match '^pc-[0-9a-f]{10}-[0-9a-f]{10}-linux-amd64-musl-async-check$') 'Build storage lost its owned checkout/ABI/mode/lane identity.'
 $common = & git -C $root rev-parse --path-format=absolute --git-common-dir
 $primary = Split-Path -Parent $common
-Assert-Harness ($context.PackageRoot -eq (Join-Path $primary 'artifacts/packages/linux')) 'Package cache is not shared through the primary project.'
+Assert-Harness ((Get-HarnessStorage $context).NugetVolume -eq (Get-HarnessStorage (Get-HarnessContext $primary)).NugetVolume) 'Pure package storage is not shared through the validated primary.'
 $primaryContext = Get-HarnessContext $primary
 Assert-Harness ($primaryContext.ComposeProject -eq 'premierecalendar-dev') 'Primary Compose identity changed.'
 if ($root -ne $primary) {
@@ -163,6 +163,19 @@ try {
     Assert-Harness ($global:HarnessCapturedArgv.Count -eq 8) 'Named-volume execution unexpectedly converts mutable host cache paths.'
     Assert-Harness (($global:HarnessCapturedArgv[1][0..4] -join '|') -eq '-d|Ubuntu-24.04|--|wslpath|-a' -and ($global:HarnessCapturedArgv[3][0..4] -join '|') -eq '-d|Ubuntu-24.04|--exec|timeout|--signal=TERM' -and ($global:HarnessCapturedArgv[3][-2..-1] -join '|') -eq 'bash|-s') 'Default distro/deadline did not reach the WSL argv boundary.'
     Assert-Harness (($global:HarnessCapturedArgv[5][0..4] -join '|') -eq '-d|PC-MARC-Dev|--|wslpath|-a' -and ($global:HarnessCapturedArgv[7][0..4] -join '|') -eq '-d|PC-MARC-Dev|--exec|timeout|--signal=TERM') 'Explicit distro did not reach both WSL operations.'
+    Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'Unit'; NoRuntimeAsync = $true; NoBuild = $true } 6>$null | Out-Null
+    $alternateScript = $global:HarnessCapturedScripts[2]
+    foreach ($laneScript in @($checkScript, $testScript, $alternateScript)) {
+        Assert-Harness ($laneScript.Contains('DOTNET_CLI_HOME=/build/.sdk-cache/dotnet') -and $laneScript.Contains('NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins')) 'SDK CLI/plugin state escaped isolated build storage.'
+        Assert-Harness ($laneScript.Contains('DOTNET_GENERATE_ASPNET_CERTIFICATE=false')) 'A fresh SDK home may generate an HTTPS identity.'
+        Assert-Harness ($laneScript.Contains('NUGET_SCRATCH=/root/.nuget/packages/.scratch') -and $laneScript.Contains('NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache')) 'Same-package consumers lost shared scratch/HTTP state.'
+        Assert-Harness ($laneScript.Contains('sh /src/eng/run-with-sdk-cache.sh') -and $laneScript.Contains('PC_SDK_CACHE_OWNER=')) 'An SDK execution bypasses its marked build-cache guard.'
+        Assert-Harness ($laneScript -notmatch 'docker (volume rm|volume prune|system prune)') 'Ordinary helpers remove persistent caches.'
+    }
+    Assert-Harness ($alternateScript.Contains("'$($alternate.BuildStorage)':/build") -and $alternate.SdkCacheStorage.BuildStorage -eq $alternate.BuildStorage -and $alternate.SdkCacheStorage.Subdirectory -eq '.sdk-cache') 'Runtime modes share SDK state or report a standalone cache volume.'
+    Assert-Harness ($plan.SdkCacheStorage.BuildStorage -eq $plan.BuildStorage -and $query.SdkCacheStorage.BuildStorage -eq 'container-local (discarded)') 'SDK cache view does not follow normal/FreshBuild storage.'
+    Assert-Harness ($portable.SdkCacheStorage.BuildStorage -eq $portable.BuildStorage -and $portable.BuildStorage -ne $plan.BuildStorage) 'Browser ABI shares mutable SDK state with musl.'
+    Assert-Harness ($watch.SdkCacheStorage.BuildStorage -eq $watch.BuildStorage -and $watch.BuildStorage -ne $check.BuildStorage) 'Watcher shares mutable SDK state with checks.'
     $callsBeforeStopped = $global:HarnessWslCalls
     $global:HarnessRunningDistros = @()
     foreach ($operation in @('path', 'bash')) {
@@ -191,6 +204,8 @@ try {
     }
     $compose = Get-Content -LiteralPath (Join-Path $root 'compose.dev.yaml') -Raw
     Assert-Harness ($compose -match 'NUGET_SCRATCH: /root/\.nuget/packages/\.scratch') 'Development restores do not share the package-cache lock namespace.'
+    Assert-Harness ($compose.Contains('DOTNET_CLI_HOME: /build/.sdk-cache/dotnet') -and $compose.Contains('NUGET_PLUGINS_CACHE_PATH: /build/.sdk-cache/nuget-plugins') -and $compose.Contains('PC_SDK_CACHE_OWNER: ${PREMIERECALENDAR_BUILD_VOLUME:') -and $compose.Contains('/src/eng/run-with-sdk-cache.sh')) 'Watcher bypasses the build-owned SDK cache guard.'
+    Assert-Harness ($compose.Contains('DOTNET_GENERATE_ASPNET_CERTIFICATE: "false"')) 'Watcher first-use may generate an HTTPS identity.'
     Assert-Harness ($compose -match 'NUGET_HTTP_CACHE_PATH: /root/\.nuget/packages/\.http-cache') 'Watcher restores do not share the NuGet HTTP cache.'
     Assert-Harness ($compose -match '(?s)nuget-cache:\s+external: true\s+name: \$\{PREMIERECALENDAR_NUGET_VOLUME:' -and $compose -match '(?s)watch-build:\s+external: true\s+name: \$\{PREMIERECALENDAR_BUILD_VOLUME:') 'Compose cache mapping/reset no longer preserves external shared caches.'
     Assert-Harness ($checkScript -match 'flock -n 9' -and $testScript -match 'flock -n 9') 'Check/test output locking is missing.'
@@ -205,7 +220,7 @@ try {
     Assert-Harness ($inner.Contains('exe="/build/bin/$name/release/$name"') -and $inner.Contains('for suite in Component; do') -and $inner.Contains('-result-ctrf')) 'Test executables are not run directly with TRX/CTRF results.'
     Assert-Harness ($inner.Contains('NO TESTS RAN')) 'A filter that matches no test is reported as a pass.'
     Assert-Harness ($testScript.Contains("'$($plan.BuildStorage)':/build") -and $testScript.Contains("'$($plan.PackageStorage)':/root/.nuget/packages") -and $testScript -notmatch '/artifacts/(build|packages)/linux') 'Default mutable Linux caches are not named volume mounts.'
-    Assert-Harness ($testScript.Contains('"$dev_image" sh -c') -and $testScript.Contains('"$postgres_image" -c') -and $checkScript.Contains('"$dev_image" dotnet build')) 'An inspected image identity is not pinned for execution.'
+    Assert-Harness ($testScript.Contains('"$dev_image" sh /src/eng/run-with-sdk-cache.sh sh -c') -and $testScript.Contains('"$postgres_image" -c') -and $checkScript.Contains('"$dev_image" sh /src/eng/run-with-sdk-cache.sh dotnet build')) 'An inspected image identity is not pinned for execution.'
     Assert-Harness ($testScript.Contains('--pull=never') -and $checkScript.Contains('--pull=never')) 'Execution may implicitly pull an image.'
     # Invoke the canonical wrapper's actual child-launch function with only the
     # child executable intercepted. Release/NAS transports are never loaded.
@@ -289,8 +304,7 @@ try {
             New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
             $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
             $linuxRoot = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }
-            $linuxPackages = if ($IsWindows) { '/mnt/' + $context.PackageRoot.Substring(0, 1).ToLowerInvariant() + '/' + ($context.PackageRoot.Substring(3) -replace '\\', '/') } else { $context.PackageRoot }
-            $simulation = $testScript.Replace($linuxPackages, "$linuxSandbox/packages").Replace($linuxRoot, $linuxSandbox)
+            $simulation = $testScript.Replace($linuxRoot, $linuxSandbox)
             Assert-Harness ($simulation -match 'premierecalendar.test=([0-9a-f]{10})') 'Test run label missing.'
             $label = $Matches[1]
             $runnerId = 'a' * 64; $serverId = 'b' * 64; $networkId = 'c' * 64

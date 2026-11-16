@@ -121,7 +121,7 @@ def render(v):
     recorded = f"Documentation recorded {text(v.get('documentationRecordedDate'))} from the closed release evidence; no NAS runtime change accompanies this record."
     identity = (f"Source `{text(v.get('sourceCommit'))}`; image `{text(v.get('imageConfigurationDigest'))}`. "
                 f"Archive `releases/{v['bundleName']}/{text(v.get('archiveFileName'))}`: {text(v.get('archiveBytes'))} bytes; SHA-256 `{text(v.get('archiveSha256'))}`.")
-    policy = ("Builds, tests, vulnerability checks and SBOM generation run locally; hosted workflows remain disabled. "
+    policy = ("Validation, tests, builds, CI, vulnerability checks, SBOM generation and packaging run locally; never use GitHub Actions, including self-hosted runners or manual dispatches. Upload accepted artifacts from the local builder. "
               f"Activation changes only the app image pin, from revision {v['previousStackRevision']} to revision {rev}. Keep pulling and pruning disabled. "
               "Preserve PostgreSQL, backups, application data, networks, hardening, saved filters, settings and credentials. "
               "Keep raw database/configuration payloads, credentials and restricted backup paths out of public documentation.")

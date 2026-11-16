@@ -1,5 +1,41 @@
 # Testing
 
+## Local-only execution
+
+Validation, tests, builds and CI run locally on PC-MARC, WINDOWS11-VM or Mac ARM
+where the lane is supported. Never execute or orchestrate them with GitHub Actions,
+including self-hosted runners or manual dispatches. The former workflow
+entrypoints are removed; source pushes do not request remote validation.
+
+From a PowerShell 7 session in the native checkout, run source checks with:
+
+```powershell
+pwsh -NoProfile -File ./eng/Test-ScriptSyntax.ps1
+pwsh -NoProfile -File ./eng/Test-Docs.ps1
+pwsh -NoProfile -File ./tests/Harness.Tests.ps1
+```
+
+Pass `-PythonExecutable` to the syntax checker when the existing Python is not on
+PATH. The portable-static lane below applies to Mac ARM; application acceptance
+still requires the supported local Windows/WSL Linux/amd64 builder. Select the
+already running distribution (`PC-MARC-Dev` on PC-MARC, `Ubuntu-24.04` on
+WINDOWS11-VM). Preview first, then run the service suites and all browser cases
+sequentially when execution is allocated:
+
+```powershell
+$distro = 'PC-MARC-Dev'
+& ./eng/wsl-docker.ps1 check -Project App -WslDistribution $distro -Plan
+& ./eng/Test-WithPostgres.ps1 -Project Unit,Component,Integration -WslDistribution $distro -Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2 -TimeoutSeconds 1800
+# Set $browserImage to the approved, already prepared local Linux/amd64 browser image.
+& ./eng/Test-WithPostgres.ps1 -Project Browser -WslDistribution $distro -DevImage $browserImage -CacheFlavor glibc -Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2 -TimeoutSeconds 2400
+```
+
+Both test commands retain restore/build validation, isolated PostgreSQL, TRX,
+CTRF, logs and browser failure evidence under this checkout's artifacts. They do
+not install a host SDK or Chromium. The prepared browser image supplies the
+browser tooling. Filters, old-source results and static checks never substitute
+for the complete source-bound release gates in [Releasing](Releasing.md).
+
 Normal automated tests must not call live external providers. TMDb, OMDb, TVmaze, Fanart.tv, Trakt, Watchmode, SIMKL, TheTVDB, Wikimedia, Sonarr, and Radarr behavior must be covered with fake HTTP handlers, test doubles, and JSON fixtures.
 
 Supported application acceptance uses the SDK pinned by `global.json` in the Linux development image inside Ubuntu 24.04 on WSL, through the script described under [Run](#run). An installed native SDK does not replace that container qualification. The runner is xUnit.net 4.0.3 (package `xunit.v3`) on Microsoft.Testing.Platform v2; the test projects are executables and `Microsoft.NET.Test.Sdk` and `coverlet.collector` are no longer used (Playwright uses `Microsoft.Playwright.Xunit.v3`). For acceptance that includes browser timing budgets, run the suites one at a time; running the memory/CPU-intensive service fixtures concurrently with Playwright can distort those timings. Keep all existing assertions unchanged. See [speed and reliability validation](SpeedReliabilityValidation.md) for the measured workload, PostgreSQL and container evidence, and review results.
@@ -215,6 +251,8 @@ and old WSL prototype remain in place.
 ```powershell
 # Check the harness itself without SDK, PostgreSQL, Docker or WSL.
 pwsh -NoProfile -File D:\Projects\PremiereCalendar\tests\Harness.Tests.ps1
+# Verify marked CLI/plugin cache reuse and refusal of unknown state without an SDK.
+pwsh -NoProfile -File D:\Projects\PremiereCalendar\tests\SdkCache.Tests.ps1
 # Run only the behavior under development, then its complete affected suite.
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit -Filter ViewSync
 pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit
@@ -237,6 +275,24 @@ any cache use. Invalid hints fail without fallback. The canonical primary select
 the shared package/HTTP/SCRATCH namespace; mutable build state remains per clone.
 `HarnessCacheRoot.Tests.ps1` exercises real independent and linked Git fixtures,
 refuses foreign/linked/malformed bindings, and checks primary WIP preservation.
+
+SDK CLI state and NuGet plugin metadata persist at
+`/build/.sdk-cache/dotnet` and `/build/.sdk-cache/nuget-plugins` inside that same
+isolated build storage. `SdkCacheStorage` reports its `BuildStorage` and
+`.sdk-cache` subdirectory; it is a view of the build volume, not another volume
+or a fallback. `-FreshBuild` keeps all three paths container-local. The shared
+launcher requires its exact build-storage owner marker and refuses unknown,
+unmarked or linked existing SDK cache state without changing it. Preserve that
+state for review; do not copy credentials, log in to plugins, or adopt a legacy
+`premierecalendar-linux-*-sdk-cache` volume. Public restores stay noninteractive,
+with automatic HTTPS certificate generation disabled. Ordinary temporary state
+stays in each owned container, outside the shared package mount.
+
+The earlier main layout remains historical evidence; its
+`premierecalendar-linux-*` build/package/SDK volumes stay untouched. They are
+never automatically adopted by the profiles above.
+
+Storage verification on 15 November 2026: Compose configuration validated; an App check passed with zero build warnings/errors in 102.43 seconds wall time (88.66 seconds SDK build). The primary checkout used `premierecalendar-linux-0f087d370a-{build,nuget,sdk-cache}` volumes, whose mountpoints all resolved to `/var/lib/docker` on ext4. These populated volumes retained their identities across the WSL virtual-disk move. Afterwards, two identical normal `-Project Unit -Filter ViewSync` runs passed all 17 selected tests: first 77.54 seconds wall/49.14 seconds build, repeat 44.41 seconds wall/18.72 seconds build. Both kept restore validation and incremental compilation enabled; reports are in `artifacts/test-results/20261115-160712` and `artifacts/test-results/20261115-160837`. This demonstrates cache persistence and warm reuse, not a controlled comparison against the previous Windows-mounted layout. The current VirtioFS source mount emitted `mmap(/src/global.json) ... No such device` before each successful build; the existing SDK image still built and ran the checks, but that source-mount diagnostic remains unresolved. After adding shared NuGet scratch locks, 53 host-only harness checks and documentation/reference checks passed; the app/test runs were not repeated for that lock-path configuration change. Full suites, browser checks and development-stack activation were not run for this storage change.
 
 `-NoRestore` and `-NoBuild` are explicit rerun options only after a successful matching restore/build of the same worktree, configuration, image ABI and runtime-async mode. Normal runs keep restore validation and incremental compilation enabled; `-FreshBuild` builds from scratch in a throwaway container location. `-BuildVolume`/`-NugetVolume` preserve explicit Docker cache overrides; a build-volume override must belong exclusively to that worktree/ABI/mode. A custom prepared `-DevImage` requires explicit `-CacheFlavor musl|glibc`, and the browser lane uses `glibc`. Execution checks the local image's Linux/amd64 identity and runs its immutable ID with pulls disabled. A filtered run is feedback, never proof that the complete regression suite passed.
 
@@ -355,7 +411,7 @@ Historical automated validation on 2026-05-31 after data-trust diagnostics (run 
 - Browser validation reported no console warnings or errors, no horizontal overflow, no visible command clipping, filter panes within the viewport, and two-column desktop card grids.
 
 
-## Cold discovery and OMDb retry validation — 7 November 2026
+## Cold discovery and OMDb retry validation â€” 7 November 2026
 
 1,905 tests pass: 1,118 unit, 195 component and 592 integration, with one expected
 Linux file-lock skip. PostgreSQL coverage executes in isolated databases.

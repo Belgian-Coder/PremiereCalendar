@@ -15,7 +15,7 @@ import pathlib
 import subprocess
 import sys
 
-SUFFIXES = {'.cs', '.razor', '.json', '.csproj', '.props', '.targets', '.sql', '.resx', '.css', '.js', '.ps1', '.py'}
+SUFFIXES = {'.cs', '.razor', '.json', '.csproj', '.props', '.targets', '.sql', '.resx', '.css', '.js', '.ps1', '.py', '.sh'}
 SPECIAL_NAMES = {'Dockerfile', 'PremiereCalendar.slnx', 'compose.yaml', 'compose.dev.yaml', '.dockerignore', '.gitattributes'}
 
 

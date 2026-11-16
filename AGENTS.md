@@ -1,11 +1,22 @@
 # Build and release policy
 
-- Do not use GitHub Actions or hosted GitHub CI/CD, including manual workflow dispatches.
-- Run builds, tests, vulnerability scans, SBOM generation and container publication locally.
-- Keep the GitHub CI and Container workflows disabled. Do not enable or dispatch them.
+- Run validation, tests, builds, CI, vulnerability scans, SBOM generation and
+  release packaging locally on PC-MARC, WINDOWS11-VM or Mac ARM where the lane is
+  supported. Never use GitHub Actions, including self-hosted runners or manual
+  dispatches, to execute or orchestrate these jobs.
+- Build release artifacts locally and upload them from the local builder only
+  after the existing acceptance gates and separate publication authorization.
+  GitHub may host source and artifacts; it must not execute the work.
+- The former CI and Container workflow entrypoints are removed. Do not recreate
+  build, test, validation or release workflows, including dispatch-only wrappers.
 - Preserve vulnerability checks and runtime verification when publishing locally.
 - Deploy digest-pinned images and preserve PostgreSQL, application data and backups.
 - The scripted local release (backup, build, scans, tests, smoke, load, deploy, verify, close) is in `eng/release` and documented in `docs/Releasing.md`.
+
+Canonical source checks are `pwsh -NoProfile -File ./eng/Test-ScriptSyntax.ps1`
+and `pwsh -NoProfile -File ./eng/Test-Docs.ps1`. Preview application work with
+`pwsh -NoProfile -File ./eng/wsl-docker.ps1 check -Project App -Plan`; the full
+service/browser commands are in [Testing](docs/Testing.md#local-only-execution).
 
 # Local agent workflow
 
@@ -39,6 +50,9 @@
   Linux/amd64 volume; do not mix Linux/Windows package caches. Preserve old bind caches.
   Shared package consumers also share `NUGET_SCRATCH` within that package mount;
   keep ordinary temporary/build state isolated and preserve warm caches.
+  Persistent SDK CLI/plugin state is a marked `.sdk-cache` subdirectory inside
+  that same isolated build storage, never another shared volume. Preserve and
+  report an unmarked/foreign existing SDK cache instead of adopting it.
 - Do not run build/test checks simultaneously in one worktree. The supplied
   helpers lock their shared check outputs; the development watcher has a
   separate build directory. Only one development stack can bind the default

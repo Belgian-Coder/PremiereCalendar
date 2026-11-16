@@ -1,8 +1,33 @@
 # Releasing
 
-A release is built, tested, scanned and deployed **locally**. There is no hosted CI: do not use GitHub Actions, including manual workflow dispatches, and keep the CI and Container workflows disabled (see `AGENTS.md`). Production is the Docker stack on the NAS (Portainer stack 20, endpoint 2: the app, PostgreSQL and a backup service) and a release changes exactly one thing there: the app image digest. PostgreSQL, application data and backups are preserved.
+A release is built, tested, scanned and packaged **locally**, then uploaded from the local builder. Never run or orchestrate validation, tests, builds or CI with GitHub Actions, including self-hosted runners or manual dispatches. The former CI and Container entrypoints are removed (see `AGENTS.md`). GitHub may host source and uploaded artifacts only. The supported release builder is Windows x64 with its local WSL Linux/amd64 engine; Mac ARM remains a static-check lane. Production is the Docker stack on the NAS (Portainer stack 20, endpoint 2: the app, PostgreSQL and a backup service) and a release changes exactly one thing there: the app image digest. PostgreSQL, application data and backups are preserved.
 
 The scripts live in `D:\Projects\PremiereCalendar\eng\release`. They are plain PowerShell 7 and Python 3 and replace the former helper folders that sat outside the repository. This page is the runbook for the whole release; each script also has built-in help (`Get-Help <script> -Full`).
+
+## Local replacements for removed workflows
+
+The retired workflow files remain in Git history. Their useful work belongs to
+the canonical local scripts below; no workflow dispatcher or self-hosted runner
+is required. Former host SDK setup, hosted Chromium setup and automatic registry
+login are obsolete and are not copied into the local path.
+
+| Former job recipe | Canonical local replacement and retained evidence |
+| --- | --- |
+| Restore, build and all service tests, including PostgreSQL migration/persistence | `eng/Test-WithPostgres.ps1` or release `Invoke-ReleaseTests.ps1`; pinned Linux SDK, isolated PostgreSQL, source fingerprints, TRX/CTRF/logs |
+| Browser, performance and accessibility tests | All Browser cases with the prepared Linux/amd64 image and glibc profile in [Testing](Testing.md#local-only-execution); preserve failure traces and screenshots locally |
+| Version/source/build metadata, exact-image build and export | `Build-Image.ps1`; verified committed source archive, immutable image ID, labels and Docker archive SHA-256 |
+| NuGet/image security and CycloneDX SBOM | `Invoke-NuGetAudit.ps1` and `Invoke-Scans.ps1`; raw findings, policy summary, Syft SBOM and archive audit; normal vulnerability policy is unchanged |
+| UI asset, non-root and readiness checks | `Invoke-Smoke.ps1` and `Test-BackupCompatibility.ps1`; the exact image, hardened runtime and same fresh restored backup |
+| Evidence retention and artifact upload | Local bundle/private evidence boundaries; `Load-Image.ps1` uploads the accepted local archive with all gates and explicit `-AllowMutation`; `Close-Release.ps1` retains the release record |
+
+The exact local commands are the numbered steps below. Source-only checks and
+full service/browser commands are in [Testing](Testing.md#local-only-execution).
+The candidate adapter still does not publish or upload: feature candidates are
+not production artifacts. The removed registry login/push recipe does not
+authorize a new destination, token, login or upload; optional registry publication
+must originate on the local builder after the same gates and a separately
+approved destination. Committing or pushing source implies no publication or
+deployment.
 
 ## The eleven steps
 

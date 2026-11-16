@@ -222,6 +222,9 @@ if ($Plan) {
         RunnerArguments = $runner.ToArray()
         BuildStorage = if ($FreshBuild) { 'container-local (discarded)' } else { $storage.BuildVolume }
         PackageStorage = $storage.NugetVolume
+        SdkCacheStorage = [pscustomobject]@{ BuildStorage = if ($FreshBuild) { 'container-local (discarded)' } else { $storage.BuildVolume }; Subdirectory = $storage.SdkCacheSubdirectory }
+        DotnetCliHome = $storage.DotnetCliHome
+        NugetPluginsCache = $storage.NugetPluginsCache
         WslDistribution = $WslDistribution
         CacheFlavor = $CacheFlavor
         NugetScratch = '/root/.nuget/packages/.scratch'
@@ -244,6 +247,7 @@ $bindDirectories = @("$wslRoot/artifacts")
 $quotedDirectories = ($bindDirectories | ForEach-Object { ConvertTo-BashLiteral $_ }) -join ' '
 $buildMount = if ($FreshBuild) { '' } else { "-v $(ConvertTo-BashLiteral $wslBuild):/build" }
 $runId = [Guid]::NewGuid().ToString('N').Substring(0, 10)
+$sdkCacheOwner = if ($FreshBuild) { 'container-local' } else { $storage.BuildVolume }
 $network = "pcpg-net-$runId"
 $server = "pcpg-db-$runId"
 $runnerName = "pcpg-test-$runId"
@@ -365,10 +369,10 @@ done
 runner_attempted=1
 runner_id=`$(docker create --pull=never --name '$runnerName' --label premierecalendar.test=$runId --network '$network' --cpus=$Cpus -v $(ConvertTo-BashLiteral $wslRoot):/src \
   -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -w /src \
-  -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+  -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=$(ConvertTo-BashLiteral $sdkCacheOwner) -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
   -e PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE=/tmp/pc-test-postgres-password \
-  -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' "`$dev_image" sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s')
+  -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' "`$dev_image" sh /src/eng/run-with-sdk-cache.sh sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s')
 case "`$runner_id`$server_id`$network_id" in *[!0-9a-f]*|'') echo 'Invalid immutable test resource identity.' >&2; exit 28 ;; esac
 [ "`${#runner_id}" = 64 ] && [ "`${#server_id}" = 64 ] && [ "`${#network_id}" = 64 ] || exit 28
 echo "PC_TEST_RESOURCES runner=`$runner_id server=`$server_id network=`$network_id label=$runId"

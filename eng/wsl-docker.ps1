@@ -88,14 +88,16 @@ $commands = @{
     up = "$compose up --build --pull never -d --wait"
     down = "$compose down"
     build = "$compose build"
-    check = "docker run --rm --pull=never --cpus=$Cpus -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache `"`$dev_image`" dotnet build $projectPath -c Release --nologo -maxcpucount:$BuildMaxCpuCount$runtimeArgument"
+    check = "docker run --rm --pull=never --cpus=$Cpus -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=__BUILD__ -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache `"`$dev_image`" sh /src/eng/run-with-sdk-cache.sh dotnet build $projectPath -c Release --nologo -maxcpucount:$BuildMaxCpuCount$runtimeArgument"
     logs = "$compose logs --tail=200 app database"
     reset = "$compose down --volumes --remove-orphans"
 }
 if ($Plan) {
     [pscustomobject]@{ Action = $Action; Project = $Project; Context = $context; Command = $commands[$Action];
         WslDistribution = $WslDistribution; CacheFlavor = $CacheFlavor; DevImage = $DevImage;
-        BuildStorage = $storage.BuildVolume; PackageStorage = $storage.NugetVolume; Cpus = $Cpus; BuildMaxCpuCount = $BuildMaxCpuCount;
+        BuildStorage = $storage.BuildVolume; PackageStorage = $storage.NugetVolume;
+        SdkCacheStorage = [pscustomobject]@{ BuildStorage = $storage.BuildVolume; Subdirectory = $storage.SdkCacheSubdirectory };
+        DotnetCliHome = $storage.DotnetCliHome; NugetPluginsCache = $storage.NugetPluginsCache; Cpus = $Cpus; BuildMaxCpuCount = $BuildMaxCpuCount;
         NugetHttpCache = '/root/.nuget/packages/.http-cache'; TimeoutSeconds = $TimeoutSeconds }
     return
 }

@@ -58,7 +58,7 @@ public sealed partial class PostgresPersistenceTests : IDisposable
             CancellationToken.None);
         var storedRating = await ratings.GetByImdbIdAsync("tt0000001", CancellationToken.None);
         Assert.NotNull(storedRating);
-        Assert.Equal(7.25, storedRating.AverageRating, precision: 2);
+        Assert.Equal(7.25, storedRating.AverageRating);
 
         var enrichmentKey = new ItemEnrichmentIdentity(PremiereMediaType.Series, 123);
         var enrichments = new ItemEnrichmentStore(database.Options);

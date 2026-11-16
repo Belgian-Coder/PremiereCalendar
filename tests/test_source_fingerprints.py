@@ -72,6 +72,20 @@ class Functional(unittest.TestCase):
         self.a.write_bytes(b'class Changed {}\n')
         self.reject()
 
+    def test_shell_launcher_bytes_frozen_and_verified(self):
+        launcher = self.root / 'src/launcher.sh'
+        launcher.write_bytes(b'#!/bin/sh\nexit 0\n')
+        self.git('add', '--', 'src/launcher.sh')
+        self.git('commit', '--quiet', '-m', 'shell fixture')
+        self.sha = self.git('rev-parse', 'HEAD').strip()
+        p = self.run_checker(freeze=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.map = json.loads((self.root / 'frozen.json').read_text())
+        self.assertEqual(self.map['src/launcher.sh'], hashlib.sha256(launcher.read_bytes()).hexdigest())
+        self.write()
+        launcher.write_bytes(b'#!/bin/sh\nexit 1\n')
+        self.reject()
+
     def test_rewritten_hash_still_rejects_uncommitted_blob(self):
         self.a.write_bytes(b'class Changed {}\n')
         self.map[str(self.a.relative_to(self.root)).replace('\\', '/')] = hashlib.sha256(self.a.read_bytes()).hexdigest()

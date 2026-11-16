@@ -151,6 +151,43 @@ public sealed class PremiereFilterTests
         Assert.Equal("IMDb Qualified", item.Title);
     }
 
+    [Theory]
+    // A score cached from the REAL column before exact widening.
+    [InlineData(7.599999904632568, 7.6, 10, true)]
+    [InlineData(7.599999904632568, 0, 7.6, true)]
+    [InlineData(7.599999904632568, 7.6, 7.6, true)]
+    [InlineData(7.6, 7.6, 10, true)]
+    [InlineData(7.6, 0, 7.6, true)]
+    [InlineData(7.6, 7.6, 7.6, true)]
+    [InlineData(8.100000381469727, 0, 8.1, true)]
+    [InlineData(10, 10, 10, true)]
+    [InlineData(0, 0, 0, true)]
+    [InlineData(7.5, 7.6, 10, false)]
+    [InlineData(7.7, 0, 7.6, false)]
+    [InlineData(7.59, 7.6, 10, false)]
+    [InlineData(7.61, 0, 7.6, false)]
+    public void PassesScoreFilter_TreatsOneDecimalImdbBoundariesAsInclusive(double score, double min, double max, bool expected)
+    {
+        var item = new PremiereItem
+        {
+            CanonicalId = "movie:1",
+            Title = "Boundary",
+            MediaType = PremiereMediaType.Movie,
+            TmdbId = 1,
+            PremiereDate = new DateOnly(2026, 5, 4),
+            ImdbScore = score
+        };
+        var filters = new CalendarFilters
+        {
+            ScoreSource = ScoreSource.Imdb,
+            MinScore = min,
+            MaxScore = max,
+            IncludeUnknownScores = false
+        };
+
+        Assert.Equal(expected, PremiereFilter.PassesScoreFilter(item, filters));
+    }
+
     [Fact]
     public void Apply_UsesPercentScaleForRottenTomatoesAndMetacriticScores()
     {

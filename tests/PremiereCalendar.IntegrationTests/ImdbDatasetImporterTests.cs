@@ -33,8 +33,7 @@ public sealed class ImdbDatasetImporterTests : IDisposable
         Assert.Equal(2, imported);
         var rating = await store.GetByImdbIdAsync("tt0000002", CancellationToken.None);
         Assert.NotNull(rating);
-        // ImdbRatings.AverageRating is a PostgreSQL REAL (4-byte float), so a stored 8.1 reads back as 8.1000003...
-        Assert.Equal(8.1, rating.AverageRating, precision: 5);
+        Assert.Equal(8.1, rating.AverageRating);
         Assert.Equal(23456, rating.VoteCount);
     }
 

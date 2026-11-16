@@ -37,6 +37,18 @@ one `linux-amd64-nuget` project volume, with every consumer using
 with normal NuGet expiration and revalidation; auditing remains enabled. The
 worktree `artifacts/check.lock` still excludes concurrent check/test writers.
 
+SDK CLI state and NuGet plugin metadata persist at
+`/build/.sdk-cache/dotnet` and `/build/.sdk-cache/nuget-plugins` inside that same
+isolated build storage. `SdkCacheStorage` reports its `BuildStorage` and
+`.sdk-cache` subdirectory; it is a view of the build volume, not another volume
+or a fallback. `-FreshBuild` keeps all three paths container-local. The shared
+launcher requires its exact build-storage owner marker and refuses unknown,
+unmarked or linked existing SDK cache state without changing it. Preserve that
+state for review; do not copy credentials, log in to plugins, or adopt a legacy
+`premierecalendar-linux-*-sdk-cache` volume. Public restores stay noninteractive,
+with automatic HTTPS certificate generation disabled. Ordinary temporary state
+stays in each owned container, outside the shared package mount.
+
 Independent request-release clones may select that same canonical primary cache
 through `BUILD_RELEASE_PROJECT_ROOT`. The helper validates the existing native
 primary, exact protocol owner marker/project/target/root, manifest-derived clone
@@ -71,7 +83,7 @@ Run the automated tests with `D:\Projects\PremiereCalendar\eng\Test-WithPostgres
 
 ## Production container
 
-The household installation is a Portainer stack on the NAS (stack 20, endpoint 2) made of the application, PostgreSQL and a backup service. Do not use GitHub Actions, including manual workflow dispatches (the CI and Container workflows are disabled). Builds, tests, vulnerability scans, SBOM generation and container publication run locally. The scripted release process in [Releasing](Releasing.md) builds the runtime image once from the committed source archive, launches that exact image to prove readiness, non-root identity, root HTML and the Blazor boot asset, rejects any vulnerability, secret or misconfiguration finding, retains a CycloneDX SBOM and scan report, exports the scanned image as a Docker archive, loads that archive onto the NAS engine and activates it by pinning the image configuration digest in the stack (pulling and pruning stay disabled). Publishing the same scanned image to a registry is optional and is also done locally; registry hosting does not require hosted CI.
+The household installation is a Portainer stack on the NAS (stack 20, endpoint 2) made of the application, PostgreSQL and a backup service. Never use GitHub Actions, including self-hosted runners or manual dispatches, to execute or orchestrate validation, builds, tests or CI. The former workflow entrypoints are removed. Release artifacts are built, tested, scanned and packaged locally and uploaded from the local builder. The scripted release process in [Releasing](Releasing.md) builds the runtime image once from the committed source archive, launches that exact image to prove readiness, non-root identity, root HTML and the Blazor boot asset, rejects any vulnerability, secret or misconfiguration finding, retains a CycloneDX SBOM and scan report, exports the scanned image as a Docker archive, loads that archive onto the NAS engine and activates it by pinning the image configuration digest in the stack (pulling and pruning stay disabled). Publishing the same scanned image to a registry is optional and is also done locally; registry hosting does not require hosted CI.
 
 Keep release work under the releasing checkout's ignored `artifacts/release/<bundle>` (see [Releasing](Releasing.md)).
 Use normal Docker layer caching: the Dockerfile restores the app project before

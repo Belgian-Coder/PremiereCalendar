@@ -131,6 +131,9 @@ function Get-HarnessStorage($Context, [ValidateSet('musl', 'glibc')][string] $Ca
     $lane = if ($Watcher) { 'watch' } else { 'check' }
     [pscustomobject]@{
         BuildVolume = if ($BuildVolume) { $BuildVolume } else { "$($Context.ProjectNamespace)-$($Context.WorktreeNamespace)-linux-amd64-$CacheFlavor-$mode-$lane" }
+        SdkCacheSubdirectory = '.sdk-cache'
+        DotnetCliHome = '/build/.sdk-cache/dotnet'
+        NugetPluginsCache = '/build/.sdk-cache/nuget-plugins'
         NugetVolume = if ($NugetVolume) { $NugetVolume } else { "$($Context.ProjectNamespace)-linux-amd64-nuget" }
     }
 }
