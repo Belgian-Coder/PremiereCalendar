@@ -13,6 +13,22 @@ import re
 import subprocess
 
 
+def tree_blobs(data):
+    blobs = {}
+    for row in data.split(b'\0'):
+        if not row:
+            continue
+        metadata, name = row.split(b'\t', 1)
+        mode, kind, oid = metadata.split()
+        if kind != b'blob' or mode not in (b'100644', b'100755') or not re.fullmatch(b'[0-9a-f]{40}', oid):
+            raise SystemExit('Unsupported committed source entry')
+        name = name.decode('utf-8')
+        if not name or name in blobs:
+            raise SystemExit('Blob inventory is inconsistent')
+        blobs[name] = oid.decode('ascii')
+    return blobs
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', required=True)
@@ -33,16 +49,15 @@ def main():
         if (bundle / name).exists():
             raise SystemExit(f'Refusing to overwrite existing review input: {name}')
     diff = git('diff', '--no-ext-diff', '--no-textconv', '--no-color', args.base, args.revision, '--')
-    names = sorted(n for n in git('ls-tree', '-r', '-z', '--name-only', '--full-tree', args.revision).decode().split('\0') if n)
-    blobs = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', *[f'{args.revision}:{n}' for n in names]]).decode().split()
-    if len(names) != len(blobs):
-        raise SystemExit('Blob inventory is inconsistent')
+    # Read names and IDs together; expanding every path into argv exceeds Windows' command-line limit.
+    blobs = tree_blobs(git('ls-tree', '-r', '-z', '--full-tree', args.revision))
+    names = sorted(blobs)
     fingerprints = bundle / 'tested-source-fingerprints.json'
     manifest = {
         'createdUtc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'baseCommit': args.base, 'sourceCommit': args.revision,
         'workingDiffSha256': hashlib.sha256(diff).hexdigest(),
-        'repoInventory': names, 'repositoryBlobIds': dict(zip(names, blobs)),
+        'repoInventory': names, 'repositoryBlobIds': {name: blobs[name] for name in names},
         'testedSourceFingerprintSha256': hashlib.sha256(fingerprints.read_bytes()).hexdigest() if fingerprints.exists() else None,
         'policy': 'Frozen exact base-to-commit diff and committed blob IDs; verify_reviewed_source.py binds them to the release commit.'}
     with (bundle / 'review-source.patch').open('xb') as stream:
