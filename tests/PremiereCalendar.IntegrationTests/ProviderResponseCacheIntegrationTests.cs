@@ -169,17 +169,18 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
     [Fact]
     public async Task RestartedMemory_UsesRemainingLifetime_NotFreshTwelveHours()
     {
+        var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
         var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json("{\"id\":42}"));
-        using var initialMemory = new MemoryCache(new MemoryCacheOptions());
-        await Details(Tmdb(handler, initialMemory, Cache(CreateStore())), false);
+        using var initialMemory = new MemoryCache(new MemoryCacheOptions { Clock = clock });
+        await Details(Tmdb(handler, initialMemory, Cache(CreateStore(), clock)), false);
         var store = CreateStore();
         var row = Assert.Single(await store.GetByProviderAsync("responsecache-tmdb", 100, CancellationToken.None));
-        await store.SaveAsync(row with { LastCheckedUtc = DateTimeOffset.UtcNow.AddHours(-12).AddSeconds(1) }, CancellationToken.None);
-        using var restartedMemory = new MemoryCache(new MemoryCacheOptions());
-        var restarted = Tmdb(handler, restartedMemory, Cache(CreateStore()));
+        await store.SaveAsync(row with { LastCheckedUtc = clock.Now.AddHours(-12).AddSeconds(1) }, CancellationToken.None);
+        using var restartedMemory = new MemoryCache(new MemoryCacheOptions { Clock = clock });
+        var restarted = Tmdb(handler, restartedMemory, Cache(CreateStore(), clock));
         await Details(restarted, false);
         Assert.Single(handler.Requests);
-        await Task.Delay(TimeSpan.FromMilliseconds(1200), TestContext.Current.CancellationToken);
+        clock.Now = clock.Now.AddSeconds(2);
         await Details(restarted, false);
         Assert.Equal(2, handler.Requests.Count);
     }
@@ -673,10 +674,11 @@ public sealed class ProviderResponseCacheIntegrationTests : IDisposable
 
     public void Dispose() => _database.Dispose();
 
-    private sealed class TestTimeProvider(DateTimeOffset now) : TimeProvider
+    private sealed class TestTimeProvider(DateTimeOffset now) : TimeProvider, Microsoft.Extensions.Internal.ISystemClock
     {
         public DateTimeOffset Now { get; set; } = now;
         public override DateTimeOffset GetUtcNow() => Now;
+        public DateTimeOffset UtcNow => Now;
     }
 
     private sealed class AsyncHttpMessageHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
