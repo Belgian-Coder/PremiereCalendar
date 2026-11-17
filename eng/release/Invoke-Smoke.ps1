@@ -97,7 +97,8 @@ if ($assetInfo.Count -lt 2 -or [long]$assetInfo[1] -le 0) { throw 'The Blazor bo
 Write-NewJson -Path (Join-Path $ctx.Bundle 'smoke-assets.json') -Object ([ordered]@{ rootHtmlBytes = $root.Length; blazorWebJsSha256 = $assetInfo[0]; blazorWebJsBytes = [long]$assetInfo[1] })
 
 Write-NewText -Path (Join-Path $ctx.Bundle 'smoke-zoneinfo.log') -Text ((@(Invoke-LocalDocker exec $app sh -ec 'test -f /usr/share/zoneinfo/Europe/Brussels && stat -c %n:%s /usr/share/zoneinfo/Europe/Brussels') -join "`n") + "`n")
-$probeLog = (@(Invoke-LocalDocker exec $app dotnet /probe/TimezoneProbe.dll) -join "`n")
+# .NET memory-maps its runtime files; stage the read-only host bind on container-local scratch.
+$probeLog = (@(Invoke-LocalDocker exec $app sh -ec 'mkdir /tmp/timezone-probe && cp /probe/TimezoneProbe.dll /probe/TimezoneProbe.deps.json /probe/TimezoneProbe.runtimeconfig.json /probe/TimezoneProbe.pdb /tmp/timezone-probe/ && dotnet /tmp/timezone-probe/TimezoneProbe.dll') -join "`n")
 Write-NewText -Path (Join-Path $ctx.Bundle 'smoke-timezone-probe.log') -Text ($probeLog + "`n")
 if ($probeLog -notmatch 'RESULT=PASS') { throw 'The time-zone probe did not pass.' }
 
