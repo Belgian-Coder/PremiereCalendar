@@ -12,6 +12,16 @@
 - Preserve vulnerability checks and runtime verification when publishing locally.
 - Deploy digest-pinned images and preserve PostgreSQL, application data and backups.
 - The scripted local release (backup, build, scans, tests, smoke, load, deploy, verify, close) is in `eng/release` and documented in `docs/Releasing.md`.
+  Release flow: run it from a clean detached worktree `.wt/release-<version>` at the
+  release commit (the primary checkout may hold untracked files the source gate
+  refuses); `Initialize-Release` -> `Prepare-Release -AllowMutation` (fresh backup)
+  -> `Freeze-ReviewInputs` -> `Invoke-LocalGates` (steps 2-7) -> Browser suite on the
+  exact commit, copied into the bundle -> independent reviews recorded in
+  `source-review.json` -> `Load-Image`, `Deploy-Release`, `Verify-Release`
+  (all `-AllowMutation`) -> installed browser check -> `Close-Release -AllowNasWrite`
+  -> closure commit and tag the build commit. A failed step that wrote evidence
+  needs a new bundle (`<version>-candidateN`) and a fresh backup. Updating the
+  canonical NAS docs (`eng/release/nas-docs`) needs the owner's explicit approval.
 
 Normal flow: `pwsh -NoProfile -File ./eng/Invoke-Validation.ps1 -Changed` runs the
 static checks that cover what changed and lists (or, with `-Run` on the Windows
@@ -89,7 +99,8 @@ service/browser commands are in [Testing](docs/Testing.md#local-only-execution).
   already running WSL distribution and local Linux/amd64 engine. They pin the local Docker socket, ignoring an
   inherited remote context. Never replace container acceptance with native SDK
   compilation, even when a host has the exact SDK.
-- macOS ARM64 currently supports the static lane only. The WSL helpers and NAS
+- macOS ARM64 currently supports the static lane only (`eng/Invoke-StaticChecks.ps1`,
+  verified natively on 22 Nov 2026; PowerShell 7 and Python 3.10+ are prerequisites). The WSL helpers and NAS
   release scripts are not a Mac execution backend; do not invent ARM64 release,
   signing or browser acceptance. Use an approved Windows builder for the
   existing linux/amd64 release artifact.
