@@ -14,7 +14,12 @@ $folder = Join-Path $root ('artifacts/harness-process-tests/' + [guid]::NewGuid(
 [void] (New-Item -ItemType Directory -Path $folder)
 $count = 0
 function Assert-Process([bool] $Condition, [string] $Message) {
-    if (-not $Condition) { throw $Message }
+    if (-not $Condition) {
+        # Load-dependent fixtures fail rarely; carry the last fixture result so the failure is diagnosable.
+        $last = Get-Variable -Name run -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+        $detail = if ($last -and $last.PSObject.Properties['Result']) { ' | last fixture: ' + ($last.Result | ConvertTo-Json -Compress -Depth 3) + ' seconds=' + [math]::Round([double]$last.Seconds, 2) } else { '' }
+        throw ($Message + $detail)
+    }
     $script:count++
 }
 function New-FixtureStart([string] $Mode, [string[]] $Extra = @()) {
