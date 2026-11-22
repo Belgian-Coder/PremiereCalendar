@@ -31,6 +31,11 @@ deployment.
 
 ## The eleven steps
 
+Normal flow: run step 0 and step 1, then steps 2-7 in one command with
+`eng\release\Invoke-LocalGates.ps1` (see "Local gates in one command": safe
+concurrency, bound resume and per-step timings in the bundle), then steps 8-11. The
+individual step commands below remain the reference and the manual fallback.
+
 | # | Step | Script(s) | Touches |
 | --- | --- | --- | --- |
 | 0 | Create the evidence bundle and record every parameter | `Initialize-Release.ps1` | local files only |
@@ -103,7 +108,9 @@ declared public candidate archive and identity manifests are eligible for
 collection; private evidence and credentials stay on their owner host.
 
 The shared client's `--jobs` reaches the adapter's `-Jobs`, then the release
-runner's `-Cpus`, `-MaxThreads` and `-BuildMaxCpuCount` (two by default).
+runner's `-Cpus`, `-MaxThreads` and `-BuildMaxCpuCount` (`auto` when the adapter
+is called without `-Jobs`; the vendored request client always sends its `--jobs`,
+two by default).
 The same-request binding includes the budget so a package cannot silently reuse
 evidence from a request with different scheduling parameters. These limits do
 not select or omit tests; complete regression and separate browser checks remain.

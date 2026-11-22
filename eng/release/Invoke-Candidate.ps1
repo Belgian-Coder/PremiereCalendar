@@ -24,7 +24,8 @@ param(
     [ValidatePattern('^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$')][string] $ExpectedOldVersion,
     [ValidatePattern('^sha256:[0-9a-f]{64}$')][string] $ExpectedOldDigest,
     [ValidateRange(0, 1000000)][int] $ExpectedStackRevision = 0,
-    [ValidateRange(1, 16)][int] $Jobs = 2
+    # auto (default) = the release runner's engine-derived budget (half the engine's CPUs, at least 2); 1-16 pins it.
+    [ValidatePattern('^(auto|[1-9]|1[0-6])$')][string] $Jobs = 'auto'
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

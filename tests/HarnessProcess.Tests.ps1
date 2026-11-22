@@ -52,9 +52,10 @@ Assert-Process ($run.Result.TimedOut -and -not $run.Result.OutputDrained -and $r
 Assert-Process (-not (Get-Process -Id $run.Result.ClientPid -ErrorAction SilentlyContinue)) 'Owned timed-out client remains live.'
 
 $pidFile = Join-Path $folder 'child.pid'
-$run = Invoke-CapturedFixture (New-FixtureStart inherited_pipe @($pidFile)) '' 2
-# Deadline covers two interpreter starts on a loaded host; the descendant holds the pipe for 15 s, so a bypass would take far longer than 6 s.
-Assert-Process ($run.Result.ExitCode -eq 0 -and $run.Result.TimedOut -and -not $run.Result.OutputDrained -and $run.Seconds -lt 6) 'An inherited pipe handle bypassed the drain deadline.'
+$run = Invoke-CapturedFixture (New-FixtureStart inherited_pipe @($pidFile)) '' 4
+# Deadline covers two interpreter starts inside a fully parallel static lane; the descendant holds the pipe for 15 s, so a
+# bypass would take far longer than 10 s.
+Assert-Process ($run.Result.ExitCode -eq 0 -and $run.Result.TimedOut -and -not $run.Result.OutputDrained -and $run.Seconds -lt 10) "An inherited pipe handle bypassed the drain deadline (exit $($run.Result.ExitCode), timedOut $($run.Result.TimedOut), drained $($run.Result.OutputDrained), $([math]::Round($run.Seconds, 1)) s)."
 Assert-Process ($run.Out -eq "PARENT_END`n") 'Parent output was not preserved before drain timeout.'
 $childId = [int] (Get-Content -LiteralPath $pidFile -Raw)
 Assert-Process ([bool] (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'Client ownership killed an unrelated descendant tree.'

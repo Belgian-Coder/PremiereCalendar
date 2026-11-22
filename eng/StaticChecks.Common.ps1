@@ -231,7 +231,9 @@ function Get-ChangeClassification([string[]] $Paths, $Table = (Get-StaticCheckTa
 # Builder commands (Windows/WSL) for an application change; never part of the portable static lane.
 function Get-AppFollowUpCommands($Classification, [string] $Root) {
     $commands = [Collections.Generic.List[object]]::new()
-    if ($Classification.BuildApp) {
+    # Every service test project references the application, so the test run's single MSBuild pass already
+    # compiles it in the same configuration; a separate App check is only needed when no suite runs.
+    if ($Classification.BuildApp -and $Classification.Suites.Count -eq 0) {
         $commands.Add([pscustomobject]@{ Label = 'App build/check'; File = (Join-Path $Root 'eng/wsl-docker.ps1'); Arguments = @('check', '-Project', 'App') })
     }
     if ($Classification.Suites.Count -gt 0) {

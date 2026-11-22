@@ -144,7 +144,10 @@ try {
     $none = Get-ChangeClassification @()
     Assert-Static ((-not $none.DocsOnly) -and $none.StaticNames.Count -eq 1 -and $none.StaticNames[0] -eq 'GitDiffCheck') 'An empty change list must only keep git diff --check.'
     $commands = @(Get-AppFollowUpCommands $mixed $root)
-    Assert-Static ($commands.Count -eq 2 -and (($commands[0].Arguments -join ' ') -eq 'check -Project App') -and ($commands[1].Arguments -join ' ') -eq '-Project Component,Integration') 'Builder follow-up commands are wrong.'
+    Assert-Static ($commands.Count -eq 1 -and ($commands[0].Arguments -join ' ') -eq '-Project Component,Integration') 'Builder follow-up commands are wrong (the test build already compiles the app).'
+    $appOnly = [pscustomobject]@{ BuildApp = $true; Suites = @() }
+    $appCommands = @(Get-AppFollowUpCommands $appOnly $root)
+    Assert-Static ($appCommands.Count -eq 1 -and ($appCommands[0].Arguments -join ' ') -eq 'check -Project App') 'An app change without suites lost its App check.'
     Assert-Static (@(Get-AppFollowUpCommands $docs $root).Count -eq 0) 'Docs-only changes produced builder commands.'
 } finally {
     if (Test-Path -LiteralPath $sandbox) {

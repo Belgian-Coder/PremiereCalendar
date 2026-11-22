@@ -228,14 +228,15 @@ over 1.5 GB, or native Development data over 512 MB. Cleanup preserves package
 caches, SDKs, credentials, sibling paths and other worktrees. A deliberate native
 local-data reset additionally requires `-RemoveDevelopmentData`.
 
-Before committing documentation or script changes, check that every relative link and
-referenced script path exists and that every PowerShell and Python script parses:
+Before committing, run the checks that cover what changed (documentation links,
+script syntax, harness and release-script tests, all in parallel); add `-Run` on
+the Windows builder to continue with the scoped build and test commands it lists:
 
 ```powershell
-pwsh -File D:\Projects\PremiereCalendar\eng\Test-Docs.ps1
-pwsh -File D:\Projects\PremiereCalendar\eng\Test-ScriptSyntax.ps1
-pwsh -NoProfile -File D:\Projects\PremiereCalendar\tests\Harness.Tests.ps1
+pwsh -NoProfile -File D:\Projects\PremiereCalendar\eng\Invoke-Validation.ps1 -Changed
 ```
+
+`eng\Invoke-StaticChecks.ps1` runs the whole portable static lane (Windows and macOS).
 
 ## Build And Release
 

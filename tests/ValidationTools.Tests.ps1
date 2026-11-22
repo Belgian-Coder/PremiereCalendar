@@ -118,6 +118,12 @@ try {
     $count++
     Assert-Rejected { & $candidate -Target linux-amd64 -Mode upload -Revision $revision -Output $candidateOutput } '*Candidate upload is unsupported*'
     Assert-Rejected { & $candidate -Target linux-amd64 -Mode package -Revision $revision -Output $root } '*Output must stay*'
+    $defaultPlan = & $candidate -Target linux-amd64 -Mode plan -Revision $revision -Output $candidateOutput
+    foreach ($parameter in @('-Cpus', '-MaxThreads', '-BuildMaxCpuCount')) {
+        $argv = $defaultPlan.Commands.validate
+        if ($argv[[array]::IndexOf($argv, $parameter) + 1] -ne 'auto') { throw "Candidate default budget is not auto for $parameter." }
+    }
+    $count++
     $boundedPlan = & $candidate -Target linux-amd64 -Mode plan -Revision $revision -Output $candidateOutput -Jobs 3
     foreach ($parameter in @('-Cpus', '-MaxThreads', '-BuildMaxCpuCount')) {
         $argv = $boundedPlan.Commands.validate

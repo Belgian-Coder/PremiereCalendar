@@ -188,14 +188,15 @@ $clock.Restart(); $refused = $false
 try { Wait-LocalCondition -Attempts 10 -DelaySeconds 0 -Message 'fixture wait' -Condition { Test-LocalDocker container inspect unknown } } catch { $refused = $_.Exception.Message.Contains('unconfirmed') }
 Assert-ReleaseTransport ($refused -and $script:LastClientBudget -le 10 -and $clock.Elapsed.TotalSeconds -lt 2 -and $script:ReleaseLoopBudget -eq $null) 'Loop budget did not cap native calls or restore caller state.'
 
-# Deadline covers two interpreter starts on a loaded host; the descendant holds the pipe for 15 s.
-$script:FixtureMode = 'inherited_pipe'; $script:FixtureDeadline = 2; $script:FixtureExtra = @((Join-Path $folder 'retained.pid'))
+# Deadline covers two interpreter starts inside a fully parallel static lane; the descendant holds the pipe for 15 s,
+# so a drain that waited for it would take far longer than the 10 s bound below.
+$script:FixtureMode = 'inherited_pipe'; $script:FixtureDeadline = 4; $script:FixtureExtra = @((Join-Path $folder 'retained.pid'))
 $clock.Restart(); $refused = $false
 try { Test-LocalDocker container inspect unknown | Out-Null } catch { $refused = $_.Exception.Message.Contains('unconfirmed') }
-Assert-ReleaseTransport ($refused -and $clock.Elapsed.TotalSeconds -lt 6) 'Inherited drain timeout was treated as absence.'
+Assert-ReleaseTransport ($refused -and $clock.Elapsed.TotalSeconds -lt 10) "Inherited drain timeout was treated as absence (refused $refused, $([math]::Round($clock.Elapsed.TotalSeconds, 1)) s)."
 # The fixture can still be starting under host load when the bounded drain gives up; wait for its pid file.
 $clock.Restart()
-while (-not (Test-Path -LiteralPath $script:FixtureExtra[0]) -and $clock.Elapsed.TotalSeconds -lt 5) { Start-Sleep -Milliseconds 25 }
+while (-not (Test-Path -LiteralPath $script:FixtureExtra[0]) -and $clock.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 25 }
 $childId = [int] (Get-Content -LiteralPath $script:FixtureExtra[0] -Raw)
 Assert-ReleaseTransport ([bool] (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'A descendant tree was killed.'
 # Fixture cleanup: stop only the descendant this test started (it would self-exit after its 15 s hold).

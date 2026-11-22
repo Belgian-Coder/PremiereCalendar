@@ -10,13 +10,15 @@ entrypoints are removed; source pushes do not request remote validation.
 From a PowerShell 7 session in the native checkout, run source checks with:
 
 ```powershell
-pwsh -NoProfile -File ./eng/Test-ScriptSyntax.ps1
-pwsh -NoProfile -File ./eng/Test-Docs.ps1
-pwsh -NoProfile -File ./tests/Harness.Tests.ps1
+# What changed since origin/main: the covering static checks, then the builder commands (add -Run on Windows)
+pwsh -NoProfile -File ./eng/Invoke-Validation.ps1 -Changed
+# The whole portable static lane in parallel (Windows and macOS)
+pwsh -NoProfile -File ./eng/Invoke-StaticChecks.ps1
 ```
 
-Pass `-PythonExecutable` to the syntax checker when the existing Python is not on
-PATH. The portable-static lane below applies to Mac ARM; application acceptance
+Both find a Python 3.10+ interpreter themselves; pass `-PythonExecutable` only to
+choose another one. Individual checks (for example `eng/Test-Docs.ps1`) still run
+on their own; see [Portable static checks](#portable-static-checks). The portable-static lane below applies to Mac ARM; application acceptance
 still requires the supported local Windows/WSL Linux/amd64 builder. Select the
 already running distribution (`PC-MARC-Dev` on PC-MARC, `Ubuntu-24.04` on
 WINDOWS11-VM). Preview first, then run the service suites and all browser cases
@@ -238,10 +240,10 @@ and untracked files, following the table in "Scoped application checks":
 | --- | --- | --- |
 | Documentation only (`*.md`, `docs/**`) | `Docs` and `GitDiffCheck` | none |
 | `eng/**`, `tests/*.ps1`, `tests/*.py`, `tests/fixtures/**` | the checks whose table row covers those files (for example `eng/run-with-sdk-cache.sh` runs `SdkCache` and `ScriptSyntax`); all checks for a file no row covers | none |
-| `PremiereCalendar/**` C#/project files | applicable rows plus `GitDiffCheck` | `eng/wsl-docker.ps1 check -Project App`, then `eng/Test-WithPostgres.ps1 -Project Unit,Component,Integration` |
-| `*.razor`, `*.css`, `*.js` | same | App check, then `-Project Component`; Browser checks are required before release |
+| `PremiereCalendar/**` C#/project files | applicable rows plus `GitDiffCheck` | `eng/Test-WithPostgres.ps1 -Project Unit,Component,Integration` (one build pass that also compiles the app) |
+| `*.razor`, `*.css`, `*.js` | same | `-Project Component` (its build compiles the app); Browser checks are required before release |
 | `tests/PremiereCalendar.<X>Tests/**` | same | `-Project <X>` (Browser tests are only flagged: they need the prepared browser image) |
-| `Dockerfile`, `compose*.yaml`, `global.json`, `Directory.Build.props`, `PremiereCalendar.slnx`, `tests/Shared/**` | same | App check and all three service suites |
+| `Dockerfile`, `compose*.yaml`, `global.json`, `Directory.Build.props`, `PremiereCalendar.slnx`, `tests/Shared/**` | same | all three service suites (their single build compiles the app; a separate App check runs only when no suite is selected) |
 
 On Windows, `-Run` executes the builder commands after the static checks passed,
 one after another (never concurrently in one worktree); without `-Run`, and on
