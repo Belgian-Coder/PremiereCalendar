@@ -10,6 +10,8 @@ untracked files are classified following docs/Testing.md "Scoped application che
   eng/**, tests/*.ps1|*.py        -> the static checks that cover those files (all of them when unsure)
   C#/Razor/csproj/Dockerfile/...  -> applicable static checks plus the builder commands
                                      (eng/wsl-docker.ps1 check -Project App, eng/Test-WithPostgres.ps1 -Project <suites>)
+Test impact selection (eng/StaticChecks.Common.ps1 Get-TestImpact) narrows the service suites to the test classes that reference
+the changed types (plus one hop of consumers) and falls back to whole suites with a printed reason; -FullSuites disables it.
 -All runs the complete static lane. -Plan prints the classification and commands and runs nothing.
 Builder commands run only on Windows with -Run, after the static checks passed, one after another (never
 concurrently in one worktree). Without -Run, or on macOS, they are printed as the required builder follow-up.
@@ -24,6 +26,7 @@ param(
     [string] $Base = 'origin/main',
     [switch] $All,
     [switch] $Run,
+    [switch] $FullSuites,
     [switch] $Plan,
     [ValidateRange(1, 256)][int] $ThrottleLimit = [Environment]::ProcessorCount,
     [string] $PythonExecutable,
@@ -43,13 +46,23 @@ if ($All) {
                 elseif ($classification.RunAll) { @($table) }
                 else { @($table | Where-Object { $classification.StaticNames -contains $_.Name }) }
     $followUp = @(Get-AppFollowUpCommands $classification $root)
+    if ($classification.Suites.Count -gt 0 -and -not $FullSuites) {
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $impact = Get-TestImpact $root $classification.Paths (Get-TestCountIndex (Get-TestResultRoots $root))
+        $clock.Stop()
+        Write-Host ("Test impact selection ({0:N1} s):" -f $clock.Elapsed.TotalSeconds)
+        Write-TestImpactReport $impact
+        $narrowed = @(Get-TestImpactCommands $impact $root)
+        if ($narrowed.Count -gt 0) { $followUp = $narrowed }
+        Write-Host 'Narrowed runs are feedback only: the complete suites run once per release candidate (release step 6). Add -FullSuites to run whole suites now.'
+    } elseif ($FullSuites -and $classification.Suites.Count -gt 0) { Write-Host '-FullSuites: whole suites, no test impact selection.' }
     Write-Host "Changed paths: $($classification.Paths.Count) (base $Base)."
     $classification.Reasons | Select-Object -First 25 | ForEach-Object { Write-Host "  $_" }
     if ($classification.Reasons.Count -gt 25) { Write-Host "  ... $($classification.Reasons.Count - 25) more" }
     if ($classification.DocsOnly) { Write-Host 'Documentation only: Test-Docs and git diff --check.' }
 }
 Write-Host ("Static checks: {0}" -f (($selected.Name) -join ', '))
-foreach ($c in $followUp) { Write-Host ("Builder step: pwsh -NoProfile -File {0} {1}" -f $c.File, ($c.Arguments -join ' ')) }
+foreach ($c in $followUp) { Write-Host ("Builder step: pwsh -NoProfile -File {0} {1}" -f $c.File, (($c.Arguments | ForEach-Object { if ($_ -match '[,\s]') { "'$_'" } else { $_ } }) -join ' ')) }
 if ($classification -and $classification.BrowserNeeded) {
     Write-Host 'Browser checks (prepared glibc browser image, run after the service suites) are required before release for these UI/browser changes.'
 }

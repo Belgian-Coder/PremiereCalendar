@@ -149,6 +149,81 @@ try {
     $appCommands = @(Get-AppFollowUpCommands $appOnly $root)
     Assert-Static ($appCommands.Count -eq 1 -and ($appCommands[0].Arguments -join ' ') -eq 'check -Project App') 'An app change without suites lost its App check.'
     Assert-Static (@(Get-AppFollowUpCommands $docs $root).Count -eq 0) 'Docs-only changes produced builder commands.'
+
+    # --- test impact selection on a small fixture tree ----------------------------------------------------------
+    $fx = Join-Path $sandbox 'impact'
+    function Add-Fixture([string] $Relative, [string] $Text) {
+        $target = Join-Path $fx $Relative
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+        [IO.File]::WriteAllText($target, $Text)
+    }
+    $unitDir = 'tests/PremiereCalendar.UnitTests'
+    Add-Fixture 'PremiereCalendar/Services/IWidget.cs' "namespace PremiereCalendar.Services;`npublic interface IWidget { }`n"
+    Add-Fixture 'PremiereCalendar/Services/Widget.cs' "namespace PremiereCalendar.Services;`npublic sealed class Widget : IWidget { }`n"
+    Add-Fixture 'PremiereCalendar/Services/WidgetBar.cs' "namespace PremiereCalendar.Services;`npublic sealed class WidgetBar { }`n"
+    Add-Fixture 'PremiereCalendar/Services/WidgetConsumer.cs' "namespace PremiereCalendar.Services;`npublic sealed class WidgetConsumer { private readonly Widget _foo = new(); }`n"
+    Add-Fixture 'PremiereCalendar/Services/Lonely.cs' "namespace PremiereCalendar.Services;`npublic sealed class LonelyThing { }`n"
+    Add-Fixture 'PremiereCalendar/Services/Options.cs' "namespace PremiereCalendar.Services;`npublic sealed class Options { }`n"
+    Add-Fixture 'PremiereCalendar/Services/Popular.cs' "namespace PremiereCalendar.Services;`npublic sealed class PopularService { }`n"
+    Add-Fixture 'PremiereCalendar/Components/Shared/WeatherCard.razor' "<div>@Title</div>`n@code { [Parameter] public string Title { get; set; } }`n"
+    Add-Fixture 'PremiereCalendar/Hosting/Wiring.cs' "namespace PremiereCalendar.Hosting;`npublic static class Wiring { }`n"
+    Add-Fixture 'PremiereCalendar/Program.cs' "var app = 1;`n"
+    $test = { param($Name, $Body) "namespace PremiereCalendar.UnitTests;`npublic sealed class $Name`n{`n    [Fact]`n    public void Works() { $Body }`n}`n" }
+    Add-Fixture "$unitDir/WidgetTests.cs" (& $test 'WidgetTests' 'new Widget();')
+    Add-Fixture "$unitDir/WidgetBarTests.cs" (& $test 'WidgetBarTests' 'new WidgetBar();')
+    Add-Fixture "$unitDir/WidgetConsumerTests.cs" (& $test 'WidgetConsumerTests' 'new WidgetConsumer();')
+    Add-Fixture "$unitDir/IWidgetUserTests.cs" (& $test 'IWidgetUserTests' 'IWidget x = null;')
+    Add-Fixture "$unitDir/OtherTests.cs" (& $test 'OtherTests' 'var x = 1;')
+    foreach ($n in 1..30) { Add-Fixture "$unitDir/Popular${n}Tests.cs" (& $test "Popular${n}Tests" 'new PopularService();') }
+    Add-Fixture 'tests/PremiereCalendar.ComponentTests/WeatherCardTests.cs' "namespace PremiereCalendar.ComponentTests;`npublic sealed class WeatherCardTests`n{`n    [Fact]`n    public void Renders() { Render<WeatherCard>(); }`n}`n"
+    Add-Fixture 'tests/PremiereCalendar.IntegrationTests/WidgetIntegrationTests.cs' "namespace PremiereCalendar.IntegrationTests;`npublic sealed class WidgetIntegrationTests`n{`n    [Fact]`n    public void Runs() { new Widget(); }`n}`n"
+    $index = New-TestImpactIndex $fx
+    function Get-Impact([string[]] $Paths) { Get-TestImpact $fx $Paths @{} 40 60 $index }
+    function Get-Row($Impact, [string] $Suite) { $Impact.Suites | Where-Object Suite -eq $Suite | Select-Object -First 1 }
+
+    $direct = Get-Impact @('PremiereCalendar/Services/WidgetBar.cs')
+    $row = Get-Row $direct 'Unit'
+    Assert-Static ($row.Mode -eq 'Classes' -and ($row.Classes -join ',') -eq 'WidgetBarTests') 'A direct reference must select exactly the test class naming the type (WidgetBar must not pull WidgetTests).'
+    Assert-Static ($null -eq (Get-Row $direct 'Component') -and $null -eq (Get-Row $direct 'Integration')) 'Suites without a reference must not run.'
+    $hop = Get-Row (Get-Impact @('PremiereCalendar/Services/Widget.cs')) 'Unit'
+    Assert-Static ((($hop.Classes | Sort-Object) -join ',') -eq 'IWidgetUserTests,WidgetConsumerTests,WidgetTests') 'Widget must reach its own tests, its interface users and (one hop) its consumers tests.'
+    $both = Get-Impact @('PremiereCalendar/Services/Widget.cs')
+    Assert-Static ((Get-Row $both 'Integration').Classes -contains 'WidgetIntegrationTests') 'The same change must select classes in every suite that references it.'
+    $iface = Get-Row (Get-Impact @('PremiereCalendar/Services/IWidget.cs')) 'Unit'
+    Assert-Static ($iface.Classes -contains 'IWidgetUserTests' -and $iface.Classes -contains 'WidgetTests' -and $iface.Classes -notcontains 'WidgetConsumerTests' -and $iface.Classes -notcontains 'OtherTests') 'An interface change must reach the tests of the implementation through the one hop (and not a second hop).'
+    $changedTest = Get-Row (Get-Impact @("$unitDir/OtherTests.cs")) 'Unit'
+    Assert-Static ($changedTest.Mode -eq 'Classes' -and ($changedTest.Classes -join ',') -eq 'OtherTests') 'A changed test file must select its own test classes.'
+    $razor = Get-Impact @('PremiereCalendar/Components/Shared/WeatherCard.razor')
+    Assert-Static ((Get-Row $razor 'Component').Classes -contains 'WeatherCardTests' -and $null -eq (Get-Row $razor 'Unit')) 'A Razor component must map by its file name to the component tests.'
+    $shared = Get-Impact @('PremiereCalendar/Program.cs', 'PremiereCalendar/Services/WidgetBar.cs')
+    Assert-Static ((Get-Row $shared 'Unit').Mode -eq 'Full' -and (Get-Row $shared 'Component').Mode -eq 'Full' -and (Get-Row $shared 'Integration').Mode -eq 'Full' -and ((Get-Row $shared 'Unit').Reasons -join ' ') -match 'Program\.cs: shared infrastructure') 'Shared infrastructure must fall back to the whole suites with a reason.'
+    $wiring = Get-Impact @('PremiereCalendar/Hosting/Wiring.cs')
+    Assert-Static ((Get-Row $wiring 'Unit').Mode -eq 'Full') 'DI/hosting wiring must fall back to whole suites.'
+    $csproj = Get-Impact @('PremiereCalendar/PremiereCalendar.csproj', 'tests/Shared/Helper.cs')
+    Assert-Static ((Get-Row $csproj 'Integration').Mode -eq 'Full') 'A project file or shared test helper must fall back to whole suites.'
+    $crowd = Get-Row (Get-Impact @('PremiereCalendar/Services/Popular.cs')) 'Unit'
+    Assert-Static ($crowd.Mode -eq 'Full' -and ($crowd.Reasons -join ' ') -match '30 of 35 Unit test classes') 'A selection above the threshold must fall back to the whole suite with the counts.'
+    $generic = Get-Impact @('PremiereCalendar/Services/Options.cs')
+    Assert-Static ((Get-Row $generic 'Unit').Mode -eq 'Full' -and ((Get-Row $generic 'Unit').Reasons -join ' ') -match "'Options' is too generic") 'A generic type name must fall back instead of matching words.'
+    $lonely = Get-Impact @('PremiereCalendar/Services/Lonely.cs')
+    Assert-Static ((Get-Row $lonely 'Unit').Mode -eq 'Full' -and (Get-Row $lonely 'Integration').Mode -eq 'Full' -and ((Get-Row $lonely 'Unit').Reasons -join ' ') -match 'no test references') 'A change nobody references must fall back to the whole suites.'
+    $browserOnly = Get-Impact @('tests/PremiereCalendar.BrowserTests/Thing.cs')
+    Assert-Static ($browserOnly.Suites.Count -eq 0) 'Browser tests are not selected by the service-suite impact analysis.'
+
+    $heavy = Get-TestImpact $fx @('PremiereCalendar/Services/Widget.cs') @{ 'Unit|WidgetTests' = 90; 'Unit|OtherTests' = 10 } 40 60 $index
+    Assert-Static ((Get-Row $heavy 'Unit').Mode -eq 'Full' -and ((Get-Row $heavy 'Unit').Reasons -join ' ') -match 'narrowing saves too little') 'A selection holding most of the known tests must fall back to the whole suite.'
+    $light = Get-TestImpact $fx @('PremiereCalendar/Services/Widget.cs') @{ 'Unit|WidgetTests' = 5; 'Unit|OtherTests' = 95 } 40 60 $index
+    Assert-Static ((Get-Row $light 'Unit').Mode -eq 'Classes' -and (Get-Row $light 'Unit').EstimatedTests -eq 5 -and (Get-Row $light 'Unit').FullTests -eq 100) 'The estimated test count of a narrowed selection is wrong.'
+    # Filters: '.Class.' matches the fully-qualified name Namespace.Class.Method and nothing else (WidgetTests vs WidgetBarTests).
+    $names = @('PremiereCalendar.UnitTests.WidgetTests.Works', 'PremiereCalendar.UnitTests.WidgetBarTests.Works', 'PremiereCalendar.UnitTests.MyWidgetTests.Works', 'PremiereCalendar.UnitTests.WidgetTestsExtra.Works')
+    $matched = @($names | Where-Object { $_ -like ('*' + (ConvertTo-TestClassFilter 'WidgetTests') + '*') })
+    Assert-Static ($matched.Count -eq 1 -and $matched[0] -like '*.WidgetTests.Works') 'The class filter matched another class whose name contains it.'
+    $impactCommands = @(Get-TestImpactCommands (Get-Impact @('PremiereCalendar/Services/Widget.cs')) 'C:/repo')
+    Assert-Static ($impactCommands.Count -eq 1 -and ($impactCommands[0].Arguments -join ' ') -match '^-Project Unit,Integration -Filter \.IWidgetUserTests\.,\.WidgetConsumerTests\.,\.WidgetTests\.,\.WidgetIntegrationTests\.$') 'The narrowed command must list the suites and the collision-safe class filters.'
+    $mixedCommands = @(Get-TestImpactCommands (Get-Impact @('PremiereCalendar/Services/Popular.cs', 'PremiereCalendar/Components/Shared/WeatherCard.razor')) 'C:/repo')
+    Assert-Static ($mixedCommands.Count -eq 2 -and ($mixedCommands[0].Arguments -join ' ') -eq '-Project Unit' -and ($mixedCommands[1].Arguments -join ' ') -match '^-Project Component -Filter \.WeatherCardTests\.$') 'Whole-suite and narrowed suites must be separate commands.'
+    $runner = & $pwsh -NoProfile -File (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -Filter $impactCommands[0].Arguments[-1] -Plan 2>&1 | Out-String
+    Assert-Static ($runner -match '-method, \*\.IWidgetUserTests\.\*' -and $LASTEXITCODE -eq 0) 'The runner did not accept the generated filter in -Plan.'
 } finally {
     if (Test-Path -LiteralPath $sandbox) {
         $resolved = [IO.Path]::GetFullPath($sandbox)

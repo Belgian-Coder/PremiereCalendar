@@ -252,3 +252,233 @@ function Get-ChangedPaths([string] $Root, [string] $Base = 'origin/main') {
     if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed.' }
     @($tracked + $untracked | Where-Object { $_ } | Sort-Object -Unique)
 }
+
+# ---------------------------------------------------------------- test impact selection
+# Narrows the service-suite feedback run to the test classes a change can reach. Pure text analysis (no SDK, no build):
+#   1. declared types of every changed C#/Razor file (Razor: the component name from the file name, plus the base types
+#      and interfaces it declares, so an interface/implementation change reaches the consumers of the other side);
+#   2. one bounded hop: application/helper files that reference those types contribute their own declared types;
+#   3. test classes (top-level types of files with [Fact]/[Theory]) whose text mentions any of those names as a whole word.
+# Anything unmappable falls back to the whole affected suite, and every fallback names its reason.
+# It over-selects by design (strings, comments and generic overlaps count as references) and never under-selects on purpose.
+function Get-TestImpactSuites { @('Unit', 'Component', 'Integration') }
+
+# Names too common to identify a type reliably; a changed declaration with one of these falls back to the suites.
+function Get-GenericTypeNames {
+    @('Options', 'Option', 'Result', 'Results', 'Item', 'Items', 'Entry', 'Entries', 'Context', 'Settings', 'Service', 'Helper', 'Helpers',
+        'Utils', 'Util', 'Extensions', 'Constants', 'Program', 'Startup', 'Model', 'Models', 'Request', 'Response', 'Client', 'Handler',
+        'Provider', 'Factory', 'Store', 'Cache', 'Manager', 'Base', 'Node', 'Key', 'Value', 'State', 'Status', 'Kind', 'Type', 'Data',
+        'Info', 'Layout', 'App', 'Routes', 'Index', 'Home', 'Page', 'Main', 'Error', 'Count', 'Name', 'Id', 'Text', 'Path', 'Task')
+}
+
+# Files whose change can reach everything (wiring, project/props, global usings, assembly attributes, imports).
+function Test-TestImpactInfrastructurePath([string] $Path) {
+    $Path -match '^PremiereCalendar/(Program\.cs$|Hosting/|Properties/|.*\.csproj$|appsettings.*\.json$|Components/(_Imports|App|Routes)\.razor$|.*GlobalUsings.*\.cs$)' -or
+    $Path -match '^tests/PremiereCalendar\.\w+Tests/(AssemblyConfiguration\.cs$|.*\.csproj$|.*GlobalUsings.*\.cs$|.*\.json$)' -or
+    $Path -match '^tests/Shared/'
+}
+
+function Read-TypeDeclarations([string] $Text) {
+    $decl = [regex]::new('(?m)^([ \t]*)(?:(?:public|internal|private|protected|file|sealed|static|abstract|partial|readonly|ref|unsafe|new)\s+)*(?:record\s+struct|record\s+class|record|class|struct|interface|enum)\s+([A-Za-z_]\w*)([^\r\n{;=]*)')
+    foreach ($m in $decl.Matches($Text)) {
+        [pscustomobject]@{ Name = $m.Groups[2].Value; TopLevel = ($m.Groups[1].Value.Length -eq 0); Rest = $m.Groups[3].Value }
+    }
+}
+
+# Reads and tokenizes every candidate source once: Path, Kind (app|test), Suite, Types, TopTypes, Tokens, HasTests, Rest.
+function New-TestImpactIndex([string] $Root) {
+    $files = [Collections.Generic.List[object]]::new()
+    $sources = @()
+    $app = Join-Path $Root 'PremiereCalendar'
+    if (Test-Path -LiteralPath $app) { $sources += @(Get-ChildItem -LiteralPath $app -Recurse -File | Where-Object { $_.Extension -in '.cs', '.razor' -and $_.FullName -notmatch '[\\/](obj|bin)[\\/]' } | ForEach-Object { , @($_, 'app', '') }) }
+    foreach ($suite in (Get-TestImpactSuites)) {
+        $dir = Join-Path $Root "tests/PremiereCalendar.${suite}Tests"
+        if (Test-Path -LiteralPath $dir) { $sources += @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter *.cs | Where-Object { $_.FullName -notmatch '[\\/](obj|bin)[\\/]' } | ForEach-Object { , @($_, 'test', $suite) }) }
+    }
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    foreach ($s in $sources) {
+        $file = $s[0]
+        $text = [IO.File]::ReadAllText($file.FullName)
+        $relative = $file.FullName.Substring($rootFull.Length + 1).Replace('\', '/')
+        $declarations = @(Read-TypeDeclarations $text)
+        $types = [Collections.Generic.List[string]]::new()
+        if ($file.Extension -eq '.razor') { $types.Add($file.Name.Substring(0, $file.Name.Length - $file.Extension.Length)) }
+        foreach ($d in $declarations) { $types.Add($d.Name) }
+        # One native split and a bulk set constructor: orders of magnitude faster than adding regex matches one by one.
+        $tokens = [Collections.Generic.HashSet[string]]::new([string[]]($text -split '\W+'), [StringComparer]::Ordinal)
+        $files.Add([pscustomobject]@{
+            Path = $relative; Kind = $s[1]; Suite = $s[2]
+            Types = @($types | Select-Object -Unique)
+            TopTypes = @($declarations | Where-Object TopLevel | ForEach-Object Name | Select-Object -Unique)
+            Tokens = $tokens
+            HasTests = ($s[1] -eq 'test' -and $text -match '(?m)^\s*\[(\w*Fact|\w*Theory)\b')
+            Rest = (@($declarations | ForEach-Object { $_.Rest }) -join ' ')
+        })
+    }
+    , $files.ToArray()
+}
+
+# Test counts per class from the newest CTRF of each suite below the given results folders; {} when none exist.
+function Get-TestCountIndex([string[]] $ResultRoots) {
+    $counts = @{}
+    foreach ($suite in (Get-TestImpactSuites)) {
+        $newest = @($ResultRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory } |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "$suite.ctrf.json") } | Sort-Object Name -Descending | Select-Object -First 1)
+        if (-not $newest) { continue }
+        try { $ctrf = Get-Content -LiteralPath (Join-Path $newest[0].FullName "$suite.ctrf.json") -Raw | ConvertFrom-Json } catch { continue }
+        foreach ($t in $ctrf.results.tests) {
+            $type = [string]$t.extra.type
+            if ($type) { $key = "$suite|" + $type.Substring($type.LastIndexOf('.') + 1); $counts[$key] = 1 + [int]$counts[$key] }
+        }
+    }
+    $counts
+}
+
+# Select tests for a change. $ChangedPaths are repo-relative. Returns
+#   Suites: ordered rows {Suite, Mode (Classes|Full), Classes, TotalClasses, Reasons, EstimatedTests, FullTests}
+#   Notes: per-file explanations; Selected: suites with work to do.
+function Get-TestImpact([string] $Root, [string[]] $ChangedPaths, $TestCounts = @{}, [int] $MaxPercent = 40, [int] $MaxClasses = 60, $Index = $null, [int] $MinClassesForPercent = 10, [int] $MaxTestPercent = 60) {
+    $suites = Get-TestImpactSuites
+    $generic = [Collections.Generic.HashSet[string]]::new([string[]](Get-GenericTypeNames), [StringComparer]::Ordinal)
+    $paths = @($ChangedPaths | Where-Object { $_ } | ForEach-Object { $_.Replace('\', '/') } | Sort-Object -Unique)
+    $full = @{}; $classes = @{}; $notes = [Collections.Generic.List[string]]::new()
+    foreach ($s in $suites) { $full[$s] = [Collections.Generic.List[string]]::new(); $classes[$s] = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
+    function Add-Full([string[]] $Which, [string] $Reason) { foreach ($s in $Which) { $full[$s].Add($Reason) } }
+    $needIndex = $false
+    $work = [Collections.Generic.List[object]]::new()
+    foreach ($path in $paths) {
+        if ($path -match '^PremiereCalendar/') {
+            if (Test-TestImpactInfrastructurePath $path) { Add-Full $suites "${path}: shared infrastructure/wiring"; continue }
+            if ($path -match '\.(cs|razor)$') { $needIndex = $true; $work.Add(@($path, 'app', '')); continue }
+            if ($path -match (Get-UiPathPattern)) { Add-Full @('Component') "${path}: UI asset has no type to follow"; continue }
+            Add-Full $suites "${path}: not a mappable source file"; continue
+        }
+        if ($path -match '^tests/PremiereCalendar\.(Unit|Component|Integration)Tests/') {
+            $suite = $Matches[1]
+            if (Test-TestImpactInfrastructurePath $path) { Add-Full @($suite) "${path}: shared test-project infrastructure"; continue }
+            if ($path -match '\.cs$') { $needIndex = $true; $work.Add(@($path, 'test', $suite)); continue }
+            Add-Full @($suite) "${path}: test data/project file"; continue
+        }
+        if ($path -match '^tests/PremiereCalendar\.BrowserTests/') { continue }  # flagged by the classifier, needs the browser image
+        if ((Test-TestImpactInfrastructurePath $path) -or $path -match '^(Dockerfile|compose\.yaml|compose\.dev\.yaml|global\.json|Directory\.Build\.props|\.dockerignore|PremiereCalendar\.slnx)$|^tests/Directory\.Build\.props$') {
+            Add-Full $suites "${path}: container/dependency/cross-cutting file"; continue
+        }
+    }
+    if ($needIndex) {
+        if (-not $Index) { $Index = New-TestImpactIndex $Root }
+        $known = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($f in $Index) { foreach ($t in $f.Types) { [void]$known.Add($t) } }
+        $testFiles = @($Index | Where-Object HasTests)
+        $suiteTotals = @{}; foreach ($s in $suites) { $suiteTotals[$s] = @($testFiles | Where-Object Suite -eq $s | ForEach-Object { $_.TopTypes } | Select-Object -Unique).Count }
+        foreach ($w in $work) {
+            $path = $w[0]; $kind = $w[1]; $own = $w[2]
+            $entry = $Index | Where-Object Path -eq $path | Select-Object -First 1
+            $fallbackSuites = if ($kind -eq 'test') { @($own) } elseif ($path -match (Get-UiPathPattern) -or $path -match '\.razor$') { @('Component') } else { $suites }
+            if (-not $entry) { Add-Full $fallbackSuites "${path}: file not found in the index (deleted or renamed)"; continue }
+            if ($entry.Types.Count -eq 0) { Add-Full $fallbackSuites "${path}: declares no type"; continue }
+            $badName = @($entry.Types | Where-Object { $generic.Contains($_) -or $_.Length -lt 4 }) | Select-Object -First 1
+            if ($badName) { Add-Full $fallbackSuites "${path}: type name '$badName' is too generic to match reliably"; continue }
+            $direct = [Collections.Generic.List[object]]::new()
+            if ($entry.HasTests) { foreach ($t in $entry.TopTypes) { $direct.Add([pscustomobject]@{ Suite = $entry.Suite; Class = $t }) } }
+            $t0 = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($t in $entry.Types) { [void]$t0.Add($t) }
+            # Base types/interfaces and primary-constructor types the changed file declares count as changed too.
+            foreach ($m in [regex]::Matches($entry.Rest, '[A-Za-z_]\w*')) { if ($known.Contains($m.Value) -and $m.Value -ne $entry.Types[0] -and -not $generic.Contains($m.Value) -and $m.Value.Length -ge 4) { [void]$t0.Add($m.Value) } }
+            # One hop: unchanged app/helper files (not DI wiring) that use a changed type contribute their own types.
+            $t1 = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            $skippedHop = [Collections.Generic.List[string]]::new()
+            foreach ($f in $Index) {
+                if ($f.Path -eq $path -or $f.HasTests) { continue }
+                if (Test-TestImpactInfrastructurePath $f.Path) { continue }
+                $uses = $false; foreach ($t in $t0) { if ($f.Tokens.Contains($t)) { $uses = $true; break } }
+                if (-not $uses) { continue }
+                foreach ($t in $f.Types) {
+                    if ($t0.Contains($t)) { continue }
+                    if ($generic.Contains($t) -or $t.Length -lt 4) { $skippedHop.Add("$($f.Path): '$t'"); continue }
+                    [void]$t1.Add($t)
+                }
+            }
+            $names = @($t0) + @($t1)
+            $hits = [Collections.Generic.List[object]]::new()
+            foreach ($f in $testFiles) {
+                if ($f.Path -eq $path) { continue }
+                foreach ($t in $names) { if ($f.Tokens.Contains($t)) { foreach ($c in $f.TopTypes) { $hits.Add([pscustomobject]@{ Suite = $f.Suite; Class = $c }) }; break } }
+            }
+            $all = @($direct) + @($hits)
+            if ($all.Count -eq 0) { Add-Full $fallbackSuites "${path}: no test references $((@($t0) | Select-Object -First 3) -join ', ') or its direct consumers"; continue }
+            foreach ($h in $all) { [void]$classes[$h.Suite].Add($h.Class) }
+            $notes.Add("${path}: types $((@($t0) | Select-Object -First 4) -join ', '); +$($t1.Count) consumer type(s); $(@($all | Select-Object -Property Suite, Class -Unique).Count) test class(es)")
+            if ($skippedHop.Count -gt 0) { $notes.Add("${path}: one-hop search skipped generic consumer type(s): $(($skippedHop | Select-Object -First 3) -join '; ')") }
+        }
+        # Threshold fallback per suite
+        foreach ($s in $suites) {
+            $total = [int]$suiteTotals[$s]
+            if ($classes[$s].Count -gt 0 -and $total -gt 0 -and ($classes[$s].Count -gt $MaxClasses -or (($classes[$s].Count * 100 / $total) -gt $MaxPercent -and $classes[$s].Count -gt $MinClassesForPercent))) {
+                Add-Full @($s) "$($classes[$s].Count) of $total $s test classes selected (limit $MaxClasses classes, or $MaxPercent% above $MinClassesForPercent classes)"
+            }
+            # A selection that still holds most of the tests saves too little to justify a filtered run.
+            if ($classes[$s].Count -gt 0 -and $full[$s].Count -eq 0) {
+                $suiteTests = 0; $selectedTests = 0
+                foreach ($k in $TestCounts.Keys) { if ($k -like "$s|*") { $suiteTests += $TestCounts[$k] } }
+                foreach ($c in $classes[$s]) { $selectedTests += [int]$TestCounts["$s|$c"] }
+                if ($suiteTests -gt 0 -and ($selectedTests * 100 / $suiteTests) -gt $MaxTestPercent) {
+                    Add-Full @($s) "selected classes hold ~$selectedTests of ~$suiteTests $s tests (limit $MaxTestPercent%), narrowing saves too little"
+                }
+            }
+        }
+    }
+    $rows = foreach ($s in $suites) {
+        $isFull = $full[$s].Count -gt 0
+        $total = if ($needIndex) { [int]$suiteTotals[$s] } else { 0 }
+        $selected = @($classes[$s] | Sort-Object)
+        if (-not $isFull -and $selected.Count -eq 0) { continue }
+        $est = 0; $fullEst = 0; $haveCounts = $false
+        foreach ($k in $TestCounts.Keys) { if ($k -like "$s|*") { $fullEst += $TestCounts[$k]; $haveCounts = $true } }
+        if ($haveCounts) { foreach ($c in $selected) { $est += [int]$TestCounts["$s|$c"] } }
+        [pscustomobject]@{
+            Suite = $s; Mode = if ($isFull) { 'Full' } else { 'Classes' }; Classes = if ($isFull) { @() } else { $selected }
+            TotalClasses = $total; Reasons = @($full[$s]); EstimatedTests = if ($isFull) { $fullEst } else { $est }; FullTests = $fullEst; CountsKnown = $haveCounts
+        }
+    }
+    [pscustomobject]@{ Suites = @($rows); Notes = @($notes) }
+}
+
+# Filter value for one class: fully-qualified test names are Namespace.Class.Method, so '.Class.' cannot hit Class2 or XClass.
+function ConvertTo-TestClassFilter([string] $ClassName) { ".$ClassName." }
+
+function Get-TestImpactCommands($Impact, [string] $Root) {
+    $script = Join-Path $Root 'eng/Test-WithPostgres.ps1'
+    $commands = [Collections.Generic.List[object]]::new()
+    $fullNames = @($Impact.Suites | Where-Object Mode -eq 'Full' | ForEach-Object Suite)
+    $narrow = @($Impact.Suites | Where-Object Mode -eq 'Classes')
+    if ($fullNames.Count -gt 0) { $commands.Add([pscustomobject]@{ Label = "Tests: $($fullNames -join ', ') (whole suites)"; File = $script; Arguments = @('-Project', ($fullNames -join ',')) }) }
+    if ($narrow.Count -gt 0) {
+        $filter = @($narrow | ForEach-Object { $_.Classes } | Select-Object -Unique | ForEach-Object { ConvertTo-TestClassFilter $_ })
+        $commands.Add([pscustomobject]@{ Label = "Tests: $((@($narrow.Suite)) -join ', ') (selected classes)"; File = $script; Arguments = @('-Project', (@($narrow.Suite) -join ','), '-Filter', ($filter -join ',')) })
+    }
+    $commands.ToArray()
+}
+
+function Write-TestImpactReport($Impact) {
+    foreach ($r in $Impact.Suites) {
+        $est = if ($r.CountsKnown) { if ($r.Mode -eq 'Full') { "~$($r.FullTests) tests" } else { "~$($r.EstimatedTests) of ~$($r.FullTests) tests" } } else { 'test count unknown (no earlier CTRF)' }
+        if ($r.Mode -eq 'Full') { Write-Host "  $($r.Suite): WHOLE SUITE, $est" }
+        else { Write-Host "  $($r.Suite): $($r.Classes.Count) of $($r.TotalClasses) test classes, ${est}: $($r.Classes -join ', ')" }
+        foreach ($why in $r.Reasons | Select-Object -First 6) { Write-Host "      fallback: $why" }
+        if ($r.Reasons.Count -gt 6) { Write-Host "      fallback: ... $($r.Reasons.Count - 6) more" }
+    }
+    foreach ($n in $Impact.Notes | Select-Object -First 12) { Write-Host "  selection: $n" }
+}
+
+# Result folders that may hold earlier CTRF files: this checkout's and, in a worktree, the primary checkout's.
+function Get-TestResultRoots([string] $Root) {
+    $roots = [Collections.Generic.List[string]]::new()
+    $roots.Add((Join-Path $Root 'artifacts/test-results'))
+    $common = (& git -C $Root rev-parse --git-common-dir 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $common) {
+        $gitDir = ([string]$common).Trim(); if (-not [IO.Path]::IsPathRooted($gitDir)) { $gitDir = Join-Path $Root $gitDir }
+        $primary = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($gitDir).TrimEnd('\', '/'))
+        $roots.Add((Join-Path $primary 'artifacts/test-results'))
+    }
+    $roots.ToArray()
+}
