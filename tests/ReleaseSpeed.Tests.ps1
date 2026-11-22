@@ -68,8 +68,8 @@ function New-ScanFixture([string] $Name, $ScannersJson, [switch] $Vulnerable) {
     if ($null -ne $ScannersJson) { Set-Content -LiteralPath (Join-Path $dir 'release-9.9.9-scanners.json') -Value $ScannersJson }
     $dir
 }
-function New-ScannersJson([string] $UpdatedAt, [string] $CheckedAt = '2026-11-22T12:00:00Z') {
-    $raw = (@{ Version = 2; UpdatedAt = $UpdatedAt; NextUpdate = '2026-11-23T00:00:00Z'; DownloadedAt = '2026-11-21T00:00:00Z' } | ConvertTo-Json -Compress)
+function New-ScannersJson([string] $UpdatedAt, [string] $CheckedAt = '2026-11-22T12:00:00Z', [string] $DownloadedAt = '2026-11-22T09:00:00Z') {
+    $raw = (@{ Version = 2; UpdatedAt = $UpdatedAt; NextUpdate = '2026-11-23T00:00:00Z'; DownloadedAt = $DownloadedAt } | ConvertTo-Json -Compress)
     @{ trivyDbMetadataRaw = $raw; trivyDbCheckedAtUtc = $CheckedAt } | ConvertTo-Json
 }
 function Invoke-Summary([string] $Dir) {
@@ -78,6 +78,8 @@ function Invoke-Summary([string] $Dir) {
 }
 $fresh = Invoke-Summary (New-ScanFixture 'fresh' (New-ScannersJson '2026-11-21T20:00:00.123456789Z'))
 Assert-Speed ($fresh.Exit -eq 0 -and $fresh.Report -match '"trivyDbFresh": true' -and $fresh.Report -match '"ageHours": 16.0') 'A 16 hour old Trivy DB did not pass with its age recorded.'
+$oldDownload = Invoke-Summary (New-ScanFixture 'old-download' (New-ScannersJson '2026-11-21T20:00:00Z' -DownloadedAt '2026-11-22T05:30:00Z'))
+Assert-Speed ($oldDownload.Exit -eq 1 -and $oldDownload.Report -match '"trivyDbFresh": false' -and $oldDownload.Report -match '"downloadAgeHours": 6.5') 'A cached DB downloaded more than 6 hours before the scan was accepted.'
 $stale = Invoke-Summary (New-ScanFixture 'stale' (New-ScannersJson '2026-11-19T11:59:00Z'))
 Assert-Speed ($stale.Exit -eq 1 -and $stale.Report -match '"trivyDbFresh": false') 'A Trivy DB older than 48 hours did not fail the scan summary.'
 $unreadable = Invoke-Summary (New-ScanFixture 'unreadable' (@{ trivyDbMetadataRaw = 'not json'; trivyDbCheckedAtUtc = '2026-11-22T12:00:00Z' } | ConvertTo-Json))

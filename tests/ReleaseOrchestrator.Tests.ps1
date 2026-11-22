@@ -84,6 +84,7 @@ try {
     Assert-That (-not (Test-Overlap $tests $smoke) -and -not (Test-Overlap $tests $compat)) 'the CPU-heavy test lane never overlaps smoke or backup-compat'
     Assert-That ($smoke.Start -ge $tests.Done -and $compat.Start -ge $tests.Done) 'timing-sensitive steps start after the tests finished'
     Assert-That (-not (Test-Overlap $smoke $compat)) 'smoke and backup-compat do not overlap by default'
+    foreach ($heavy in 'scans', 'restore') { foreach ($timing in $smoke, $compat) { Assert-That (-not (Test-Overlap (Get-Call $heavy) $timing)) "$($timing.Id) never overlaps $heavy" } }
     Assert-That ((Get-MaxConcurrency) -le 3 -and (Get-MaxConcurrency) -ge 2) "concurrency stays within the default cap (max $(Get-MaxConcurrency))"
     $t = Get-Content -LiteralPath $r.Timings[0].FullName -Raw | ConvertFrom-Json
     Assert-That ($r.Timings.Count -eq 1 -and $r.Timings[0].Name -eq 'stage-timings.json') 'stage-timings.json is written once'
@@ -142,6 +143,20 @@ try {
         $t = Get-Content -LiteralPath $r.Timings[0].FullName -Raw | ConvertFrom-Json
         Assert-That ((@($t.steps | Where-Object { $_.id -eq 'build' }).status) -eq 'skipped' -and (@($t.steps | Where-Object { $_.id -eq 'tests' }).status) -eq 'skipped' -and $t.succeeded -eq $true) 'skipped steps are recorded and the run still succeeds'
     } else { Assert-That $false 'the resumed run wrote no timings' }
+
+    # 5a. complete-looking evidence of a step this orchestrator saw fail is refused; a completed restore skips restore-init
+    $bundle = New-Bundle
+    Write-BoundEvidence $bundle $revision
+    $null = New-Item -ItemType Directory -Path (Join-Path $bundle 'gates') -Force
+    [IO.File]::WriteAllText((Join-Path $bundle 'gates/nuget-audit.result.json'), '{"exitCode":1}')
+    $r = Invoke-Gates $bundle
+    Assert-That ($r.Exit -eq 2 -and $global:Calls.Count -eq 0 -and $r.Text -match 'an earlier run of this step failed') "evidence of a failed run is refused`n$($r.Text)"
+    $global:Scenario = & $happy
+    $bundle = New-Bundle
+    [IO.File]::WriteAllText((Join-Path $bundle 'backup-restore.json'), '{"restoreExitCode":0,"timedOut":false,"inputPipeFailed":false}')
+    [IO.File]::WriteAllText((Join-Path "$bundle.private" 'backup-restore.json'), '{}')
+    $r = Invoke-Gates $bundle
+    Assert-That ($r.Exit -eq 0 -and $null -eq (Get-Call 'restore-init') -and $null -eq (Get-Call 'restore')) "a completed restore also skips restore-init`n$($r.Text)"
 
     # 5b. resume refuses evidence of another revision and a build that is not bound to the tested fingerprints
     foreach ($case in @(@{ Name = 'other revision'; Revision = 'fedcba9876543210fedcba9876543210fedcba98'; Unbound = $false; Text = 'another source revision' },

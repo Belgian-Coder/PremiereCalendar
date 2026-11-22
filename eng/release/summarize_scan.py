@@ -14,6 +14,9 @@ import pathlib
 import re
 
 MAX_TRIVY_DB_AGE_HOURS = 48
+# The persistent cache must not make the DB older than a fresh download would be: Invoke-Scans discards a copy
+# downloaded more than 5 hours ago, and the report fails when the DB used was downloaded more than 6 hours earlier.
+MAX_TRIVY_DB_DOWNLOAD_AGE_HOURS = 6
 
 
 def parse_utc(text):
@@ -33,13 +36,19 @@ def trivy_db_status(scanners, max_age_hours=MAX_TRIVY_DB_AGE_HOURS):
     except (ValueError, AttributeError):
         metadata = {}
     updated = parse_utc(metadata.get('UpdatedAt')) if isinstance(metadata, dict) else None
+    downloaded = parse_utc(metadata.get('DownloadedAt')) if isinstance(metadata, dict) else None
     checked = parse_utc(scanners.get('trivyDbCheckedAtUtc'))
     age = None if updated is None or checked is None else (checked - updated).total_seconds() / 3600
+    download_age = None if downloaded is None or checked is None else (checked - downloaded).total_seconds() / 3600
     return {'updatedAt': metadata.get('UpdatedAt') if isinstance(metadata, dict) else None,
             'nextUpdate': metadata.get('NextUpdate') if isinstance(metadata, dict) else None,
             'downloadedAt': metadata.get('DownloadedAt') if isinstance(metadata, dict) else None,
             'checkedAtUtc': scanners.get('trivyDbCheckedAtUtc'), 'ageHours': None if age is None else round(age, 2),
-            'maxAgeHours': max_age_hours, 'fresh': age is not None and -0.1 <= age <= max_age_hours}
+            'maxAgeHours': max_age_hours,
+            'downloadAgeHours': None if download_age is None else round(download_age, 2),
+            'maxDownloadAgeHours': MAX_TRIVY_DB_DOWNLOAD_AGE_HOURS,
+            'fresh': age is not None and -0.1 <= age <= max_age_hours
+            and download_age is not None and -0.1 <= download_age <= MAX_TRIVY_DB_DOWNLOAD_AGE_HOURS}
 
 
 def main():

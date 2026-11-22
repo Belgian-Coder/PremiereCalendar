@@ -48,6 +48,8 @@ function Get-ReleaseRemainingSeconds([double] $CallLimit = 0) {
 function ConvertTo-WslPath {
     param([Parameter(Mandatory)][string] $Path)
     $full = [IO.Path]::GetFullPath($Path)
+    # macOS/Linux run only plans (-WhatIf) of the release scripts; their paths are already POSIX.
+    if (-not $IsWindows -and $full.StartsWith('/')) { return $full }
     if ($full -notmatch '^([A-Za-z]):\\(.*)$') { throw "Only local drive paths can be used inside WSL: $Path" }
     '/mnt/' + $Matches[1].ToLowerInvariant() + '/' + ($Matches[2] -replace '\\', '/')
 }

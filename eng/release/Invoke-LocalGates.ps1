@@ -212,6 +212,10 @@ function Get-StepEvidence($Step) {
     if ($present.Count -eq 0) { return [pscustomobject]@{ State = 'none'; Present = @(); Missing = $missing; Problem = $null } }
     if ($missing.Count -gt 0) { return [pscustomobject]@{ State = 'partial'; Present = $present; Missing = $missing; Problem = 'some evidence files are missing' } }
     $problem = if ($Step.Validate) { & $Step.Validate } else { $null }
+    # Defence in depth: complete-looking evidence of a step that this orchestrator saw fail is never reused.
+    if (-not $problem -and @(Get-ResultMarkers $Step.Id | Where-Object { (Get-JsonOrNull $_.FullName).exitCode -ne 0 }).Count -gt 0) {
+        $problem = 'an earlier run of this step failed (gates/*.result.json)'
+    }
     if ($problem) { return [pscustomobject]@{ State = 'invalid'; Present = $present; Missing = @(); Problem = [string]$problem } }
     [pscustomobject]@{ State = 'complete'; Present = $present; Missing = @(); Problem = $null }
 }
@@ -297,6 +301,10 @@ $limit = if ($Serial) { 1 } else { $MaxParallel }
 
 foreach ($s in $steps) {
     $s.Evidence = Get-StepEvidence $s
+    # A restore completed outside this graph implies its isolated database already exists; never create it again.
+    if ($s.Id -eq 'restore-init' -and $s.Evidence.State -eq 'none' -and (Get-StepEvidence $byId['restore']).State -eq 'complete') {
+        $s.Evidence = [pscustomobject]@{ State = 'complete'; Present = @(); Missing = @(); Problem = $null }
+    }
     switch ($s.Evidence.State) {
         'complete' { $s.Status = 'skipped'; $s.Note = 'complete evidence already exists' }
         'none' { $s.Status = 'pending' }
@@ -404,8 +412,10 @@ function Test-CanStart($Step, [object[]] $Running) {
         'timing' {
             if ($classes -contains 'cpu') { return $false }
             if (-not $ParallelRuntimeChecks -and $classes -contains 'timing') { return $false }
-            # Never start a timing-sensitive step while the CPU-heavy lane is still waiting to start.
+            # Never start a timing-sensitive step while the CPU-heavy lane is still waiting to start, nor beside the
+            # heavy scan or restore work (a load-induced readiness timeout would force a new bundle).
             if (@($steps | Where-Object { $_.Class -eq 'cpu' -and $_.Status -eq 'pending' }).Count -gt 0) { return $false }
+            if (@($Running | Where-Object { $_.Id -in 'scans', 'restore' }).Count -gt 0) { return $false }
         }
     }
     $true

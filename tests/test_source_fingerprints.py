@@ -265,7 +265,8 @@ class Protocol(unittest.TestCase):
 class ConcurrentRunner(unittest.TextTestRunner):
     """Run the independent Functional cases (own repository, subprocess-only) on worker threads.
 
-    Protocol cases patch module attributes of the checker, so they stay serial on the calling thread.
+    Protocol cases patch module attributes of the checker (including the global subprocess module), so they run
+    serially on the calling thread before any worker starts; nothing else runs while a patch is active.
     """
 
     def run(self, test):
@@ -281,9 +282,9 @@ class ConcurrentRunner(unittest.TextTestRunner):
         started = time.perf_counter()
         result.startTestRun()
         try:
+            unittest.TestSuite(serial).run(result)
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, os.cpu_count() or 2)) as pool:
                 futures = [pool.submit(unittest.TestSuite([c]).run, result) for c in parallel]
-                unittest.TestSuite(serial).run(result)
                 for future in futures:
                     future.result()
         finally:

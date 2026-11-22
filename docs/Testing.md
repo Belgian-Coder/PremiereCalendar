@@ -197,7 +197,7 @@ Hosting tests (`WebApplicationFactory<Program>`, each with a migrated database) 
 ### Portable static checks
 
 Run these from the native checkout on WINDOWS11-VM, PC-MARC or MacBook-Pro
-ARM64 with PowerShell 7 and Git. Python 3.10 or newer is required for the Python
+ARM64 with PowerShell 7 and Git. Python 3.11 or newer is required for the Python
 checks; Bash (Git Bash on Windows) enables the intercepted shell lifecycle checks.
 No SDK, WSL, Docker daemon, credentials or database is required. The scripts
 work by absolute path from any folder and have no Windows-only dependency.
@@ -213,7 +213,7 @@ pwsh -NoProfile -File ./eng/Invoke-Validation.ps1 -Changed
 
 `eng/Invoke-StaticChecks.ps1` runs the checks in the table below as separate child
 processes with up to `-ThrottleLimit` at a time (default: the logical CPU count; `1`
-reproduces the old serial order). Each check's output goes to
+runs them one at a time, heaviest first). Each check's output goes to
 `artifacts/static-checks/<timestamp>-<pid>/<name>.log`. It prints a per-check table
 (status, seconds), the total wall time, the last 30 lines of every failing check,
 and exits 1 when any check fails or exceeds `-TimeoutSeconds`. `-Only <names>` and
@@ -224,7 +224,7 @@ collide; the three checks with sub-second child-process deadlines share the
 `timing` group and run one after another so they do not starve each other.
 
 Python is chosen once by `eng/Python.Common.ps1`: the explicit
-`-PythonExecutable`, otherwise the first real Python 3.10 or newer among
+`-PythonExecutable`, otherwise the first real Python 3.11 or newer among
 `python3`, then `python` on PATH. The Windows Store alias stub
 (`WindowsApps\python.exe`) and older interpreters are skipped; the result is
 always a single path. The same helper serves `Test-ScriptSyntax.ps1` and the
@@ -266,12 +266,14 @@ file is missing from it):
 | `ValidationTools` | `tests/ValidationTools.Tests.ps1` | `Test-Docs.ps1`, `Test-ScriptSyntax.ps1` and candidate-plan contracts |
 | `SdkCache` | `tests/SdkCache.Tests.ps1` | SDK cache launcher ownership markers and refusals |
 | `PerformanceLogAudit` | `tests/PerformanceLogAudit.Tests.ps1` | `eng/Read-CalendarPerformance.ps1` log summaries |
+| `ReleaseOrchestrator` | `tests/ReleaseOrchestrator.Tests.ps1` | `Invoke-LocalGates.ps1` ordering, concurrency limits, stop-on-failure, bound resume |
+| `ReleaseSpeed` | `tests/ReleaseSpeed.Tests.ps1` | release cache volumes, Trivy DB age gates, concurrent Trivy/Syft, Dockerfile cache mounts |
 | `StaticChecks` | `tests/StaticChecks.Tests.ps1` | Python discovery, parallel runner, change classifier |
 | `ScriptSyntax` | `eng/Test-ScriptSyntax.ps1` | PowerShell/Python parse, LF-only `*.py/*.sh/*.sql` |
 | `Docs` | `eng/Test-Docs.ps1 -SourceOnly` | links, anchors, referenced scripts, stale statements |
 | `SourceFingerprints` | `tests/test_source_fingerprints.py` | exact source/blob fingerprint verification |
 | `ReviewInputs` | `tests/test_review_inputs.py` | review-input inventory and binding |
-| `GitDiffCheck` | `git diff --check HEAD` | whitespace errors in staged and unstaged changes |
+| `GitDiffCheck` | `git diff --check HEAD` (with `-Changed`: against the merge-base) | whitespace errors in staged and unstaged (and, with `-Changed`, committed) changes |
 
 Measured on WINDOWS11-VM (12 vCPU, shared with other validation runs, so absolute times are noisy): three alternating
 runs of the same 15 checks took 118.7, 125.0 and 88.5 seconds wall with the default throttle versus 370.4, 273.0 and

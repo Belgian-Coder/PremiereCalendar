@@ -38,7 +38,7 @@ $trivyLog = Join-Path $ctx.Bundle 'release-trivy.log'
 $trivyDbFile = Join-Path $ctx.Bundle "release-$v-trivy-db-metadata.json"
 $syftLog = Join-Path $ctx.Bundle 'release-syft.log'
 $inspectFile = Join-Path $ctx.Private 'image-inspect.json'
-$names = @{ Trivy = "$($ctx.Prefix)_trivy"; Syft = "$($ctx.Prefix)_syft"; TrivyDb = "$($ctx.Prefix)_trivy_db" }
+$names = @{ Trivy = "$($ctx.Prefix)_trivy"; Syft = "$($ctx.Prefix)_syft"; TrivyDb = "$($ctx.Prefix)_trivy_db"; TrivyAge = "$($ctx.Prefix)_trivy_db_age" }
 $trivyCache = Get-ReleaseCacheVolume 'trivy'
 # Only Trivy's vulnerability DB directory persists; the rest of its cache (layer analysis, checks) stays in the
 # disposable container, so no earlier scan's analysis can stand in for re-reading this archive.
@@ -47,11 +47,12 @@ $trivyDbMetadata = "$trivyCachePath/metadata.json"
 $staging = "/tmp/$($ctx.Prefix)-scan"
 
 $plan = @(
-    "Refuse if any scan evidence exists ($trivyJson, $sbomJson, $auditJson, $summaryJson, $trivyDbFile) or the resources $($names.Trivy), $($names.Syft), $($names.TrivyDb), $staging exist",
+    "Refuse if any scan evidence exists ($trivyJson, $sbomJson, $auditJson, $summaryJson, $trivyDbFile) or the resources $($names.Trivy), $($names.Syft), $($names.TrivyDb), $($names.TrivyAge), $staging exist",
+    "Discard the cached DB when this cache downloaded it more than 5 h ago, so the scan uses a DB as current as a fresh download",
     "Check $(Join-Path $ctx.Bundle 'release-nuget-audit.log') exists (step 4) and copy the image archive to $staging with a SHA-256 check against build-metadata.json",
     "Create the persistent release cache volume $($trivyCache.Name) ($($trivyCache.Label)) if missing; it is mounted at Trivy's DB directory only (layer analysis stays disposable) and is never deleted",
     "Run side by side on the same read-only staged archive: Trivy $($cfg.trivyImage) (--scanners vuln,misconfig,secret$(if ($IgnoreUnfixed) { ', --ignore-unfixed' })) and Syft $($cfg.syftImage) (CycloneDX JSON SBOM); each tool keeps its own log and exit code",
-    "Read the Trivy DB metadata (UpdatedAt/NextUpdate/DownloadedAt) from the cache into $scannersJson; summarize_scan.py fails when the DB is older than 48 h",
+    "Read the Trivy DB metadata (UpdatedAt/NextUpdate/DownloadedAt) from the cache into $trivyDbFile (embedded in $scannersJson); summarize_scan.py fails when the DB is older than 48 h or was downloaded more than 6 h before the scan",
     'audit_image_archive.py (archive/labels/platform/source proof) and summarize_scan.py; fail on any finding',
     'Remove the temporary copy and the finished containers (the cache volume stays)')
 if (Show-ReleasePlan -Title 'Invoke-Scans' -Step $plan) { return }
@@ -60,7 +61,7 @@ $nugetLog = Join-Path $ctx.Bundle 'release-nuget-audit.log'
 if (-not (Test-Path -LiteralPath $nugetLog)) { throw 'Run Invoke-NuGetAudit.ps1 first (release-nuget-audit.log is missing).' }
 Assert-FilesAbsent @($trivyJson, $sbomJson, $auditJson, $summaryJson, $scannersJson, $trivyDbFile, $trivyLog, $syftLog, $inspectFile)
 Assert-LocalDockerAvailable
-Assert-DockerNamesFree -Container @($names.Trivy, $names.Syft, $names.TrivyDb)
+Assert-DockerNamesFree -Container @($names.Trivy, $names.Syft, $names.TrivyDb, $names.TrivyAge)
 $metadata = Read-Json (Join-Path $ctx.Bundle 'build-metadata.json')
 if ($metadata.version -ne $v -or $metadata.os -ne 'linux' -or $metadata.architecture -ne 'amd64' -or $metadata.archive -ne "premierecalendar-$v.tar") { throw 'build-metadata.json does not describe this release archive.' }
 if ((Get-Item -LiteralPath $ctx.ImageArchive).Length -ne $metadata.bytes) { throw 'The image archive differs from the build metadata.' }
@@ -75,8 +76,12 @@ mkdir -p $(ConvertTo-ShellQuoted $staging)
 cp $(ConvertTo-ShellQuoted (ConvertTo-WslPath $ctx.ImageArchive)) $(ConvertTo-ShellQuoted "$staging/$archiveName")
 echo '$($metadata.archiveSha256)  $staging/$archiveName' | sha256sum -c -
 "@
-if ((Invoke-LocalShell $stage) -ne 0) { throw 'Staging the archive for the scan failed.' }
 $null = Initialize-ReleaseCacheVolume 'trivy'
+# The cache only saves the download: a copy that this cache downloaded more than 5 hours ago is discarded so Trivy
+# fetches the current DB, as a fresh volume did (summarize_scan.py also rejects a download older than 6 hours).
+$null = Invoke-LocalDocker run --rm --name $names.TrivyAge -v "$($trivyCache.Name):$trivyCachePath" --entrypoint sh $cfg.trivyImage -c `
+    "find $trivyCachePath -maxdepth 1 -name metadata.json -mmin +300 -exec rm -f $trivyCachePath/trivy.db $trivyCachePath/metadata.json \;"
+if ((Invoke-LocalShell $stage) -ne 0) { $null = Invoke-LocalShell "rm -rf $(ConvertTo-ShellQuoted $staging)"; throw 'Staging the archive for the scan failed.' }
 $scanScriptRan = $false
 try {
     $trivyArguments = @('run', '--name', $names.Trivy, '--rm', '-v', "${staging}:/in:ro", '-v', "$($ctx.BundleWsl):/out", '-v', "$($trivyCache.Name):$trivyCachePath", $cfg.trivyImage,
