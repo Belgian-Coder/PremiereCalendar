@@ -306,6 +306,69 @@ function Assert-DockerNamesFree {
     foreach ($name in $Volume) { if (Test-LocalDocker volume inspect $name) { throw "Refusing volume name collision: $name" } }
 }
 
+# Release-dedicated, persistent, labelled cache volumes. They hold only public data (the Trivy vulnerability DB,
+# NuGet packages that are content-hash verified by NuGet); they are created when missing and never deleted by a release.
+$script:ReleaseCacheVolumes = @{
+    'trivy' = 'premierecalendar-release-trivy-cache'
+    'nuget' = 'premierecalendar-release-nuget-packages'
+}
+$script:ReleaseCacheLabel = 'premierecalendar.release-cache'
+
+function Get-ReleaseCacheVolume {
+    param([Parameter(Mandatory)][ValidateSet('trivy', 'nuget')][string] $Kind)
+    [pscustomobject]@{ Name = $script:ReleaseCacheVolumes[$Kind]; Label = "$($script:ReleaseCacheLabel)=$Kind"; Kind = $Kind }
+}
+
+function Initialize-ReleaseCacheVolume {
+    # Creates the shared cache volume when missing; an existing volume of that name must carry the matching label,
+    # otherwise it is not ours and the step stops instead of mounting it. One inspect answers both questions.
+    param([Parameter(Mandatory)][ValidateSet('trivy', 'nuget')][string] $Kind)
+    $spec = Get-ReleaseCacheVolume $Kind
+    $probe = Invoke-ReleaseDockerClient -DockerArguments @('volume', 'inspect', '--format', "{{index .Labels `"$($script:ReleaseCacheLabel)`"}}", $spec.Name) -CallLimit 30 -CaptureOutput -StandardErrorWriter ([IO.TextWriter]::Null)
+    if ($probe.ExitCode -eq 0) {
+        if (([string]$probe.Output).Trim() -cne $Kind) { throw "Refusing to use the volume $($spec.Name): it lacks the label $($spec.Label)." }
+    }
+    else { $null = Invoke-LocalDocker volume create --label $spec.Label $spec.Name }
+    $spec.Name
+}
+
+function Get-ConcurrentScanScript {
+    # Bash for the WSL guest: Trivy and Syft read the same staged archive read-only and run side by side. Each tool
+    # keeps its own log (noclobber: an existing log is never overwritten) and its own exit code. Once Trivy has
+    # finished, the optional metadata command (a docker run that prints the Trivy DB metadata of the cache that scan
+    # used) writes its output to -MetadataFile. -CleanupPath is removed when the script ends, however it ends.
+    # Exit codes: 0 all succeeded; 11 Trivy failed; 12 Syft failed; 13 both failed; 14 only the metadata read failed.
+    param([Parameter(Mandatory)][string[]] $TrivyArguments, [Parameter(Mandatory)][string[]] $SyftArguments,
+        [Parameter(Mandatory)][string] $TrivyLog, [Parameter(Mandatory)][string] $SyftLog,
+        [string[]] $MetadataArguments = @(), [string] $MetadataFile = '', [string] $CleanupPath = '',
+        [string] $DockerDefinition = 'docker() { command docker --host unix:///var/run/docker.sock "$@"; }')
+    $trivy = ($TrivyArguments | ForEach-Object { ConvertTo-ShellQuoted $_ }) -join ' '
+    $syft = ($SyftArguments | ForEach-Object { ConvertTo-ShellQuoted $_ }) -join ' '
+    $metadata = ($MetadataArguments | ForEach-Object { ConvertTo-ShellQuoted $_ }) -join ' '
+    $trap = if ($CleanupPath) { "trap 'rm -rf $(ConvertTo-ShellQuoted $CleanupPath)' EXIT" } else { '' }
+    $metadataStep = if ($MetadataArguments.Count -gt 0) { "if [ `$trivy_exit -eq 0 ]; then docker $metadata > $(ConvertTo-ShellQuoted $MetadataFile) || meta_exit=`$?; fi" } else { '' }
+    @"
+set -u
+set -C
+$trap
+$DockerDefinition
+docker $trivy > $(ConvertTo-ShellQuoted $TrivyLog) 2>&1 &
+trivy_pid=`$!
+docker $syft > $(ConvertTo-ShellQuoted $SyftLog) 2>&1 &
+syft_pid=`$!
+trivy_exit=0; syft_exit=0; meta_exit=0
+wait `$trivy_pid || trivy_exit=`$?
+$metadataStep
+wait `$syft_pid || syft_exit=`$?
+code=0
+if [ `$trivy_exit -ne 0 ]; then code=11; fi
+if [ `$syft_exit -ne 0 ]; then if [ `$code -eq 0 ]; then code=12; else code=13; fi; fi
+if [ `$code -eq 0 ] && [ `$meta_exit -ne 0 ]; then code=14; fi
+echo "trivy_exit=`$trivy_exit syft_exit=`$syft_exit meta_exit=`$meta_exit"
+exit `$code
+"@
+}
+
 function Wait-LocalCondition {
     param([Parameter(Mandatory)][scriptblock] $Condition, [int] $Attempts = 60, [int] $DelaySeconds = 1, [Parameter(Mandatory)][string] $Message)
     $previous = $script:ReleaseLoopBudget

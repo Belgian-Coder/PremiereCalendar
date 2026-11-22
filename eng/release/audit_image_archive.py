@@ -41,7 +41,8 @@ def main():
         raw = archive.extractfile(manifest['Config']).read()
         config = json.loads(raw)
     image = json.loads(pathlib.Path(args.image_inspect).read_text(encoding='utf-8-sig'))[0]
-    archive_sha = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    with archive_path.open('rb') as stream:
+        archive_sha = hashlib.file_digest(stream, 'sha256').hexdigest()
     labels = config.get('config', {}).get('Labels', {})
     report = {
         'version': meta['version'], 'sourceRevision': meta['sourceRevision'], 'buildId': meta['buildId'],
