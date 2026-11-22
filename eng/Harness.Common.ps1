@@ -84,7 +84,7 @@ function Get-HarnessPrimaryRoot([string] $Root, [string] $GitPrimaryRoot) {
     $checkout = Assert-HarnessCanonicalPath $Root -Directory
     $null = Assert-HarnessCanonicalPath (Join-Path $checkout '.git') -Directory
     $markerPath = Assert-HarnessCanonicalPath (Join-Path $checkout '.request-release-owner.json')
-    if ((Get-Item -LiteralPath $markerPath).PSIsContainer) { throw 'Transport owner marker must be a file.' }
+    if ((Get-Item -LiteralPath $markerPath -Force).PSIsContainer) { throw 'Transport owner marker must be a file.' }
     $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json -AsHashtable
     $manifestPath = Assert-HarnessCanonicalPath (Join-Path $checkout 'eng/release-targets.json')
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable

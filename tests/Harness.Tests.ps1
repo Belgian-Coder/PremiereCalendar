@@ -436,11 +436,16 @@ docker() {
         $cleanupStart = $testScript.IndexOf('cleanup() {')
         $cleanupEnd = $testScript.IndexOf("runner_id=''")
         $cleanupFunctions = $testScript.Substring($cleanupStart, $cleanupEnd - $cleanupStart)
-        foreach ($case in @(
-            @{ Profile = 'current'; Mode = 'slow'; Expected = 0; Removals = 3 },
-            @{ Profile = 'old-1s'; Mode = 'slow'; Expected = 75; Removals = 0 },
+        # These cases execute the real GNU coreutils timeout (as the WSL guest has). BusyBox (Alpine) and stock macOS
+        # have no GNU timeout, so the cases are skipped there with a warning instead of failing the portable lane.
+        $null = & $bash -c "timeout --version 2>/dev/null | grep -q 'GNU coreutils'"
+        $gnuTimeout = $LASTEXITCODE -eq 0
+        if (-not $gnuTimeout) { Write-Warning 'GNU coreutils timeout is absent: the real-timeout cleanup cases were not run on this host.' }
+        foreach ($case in @(if ($gnuTimeout) {
+            @{ Profile = 'current'; Mode = 'slow'; Expected = 0; Removals = 3 }
+            @{ Profile = 'old-1s'; Mode = 'slow'; Expected = 75; Removals = 0 }
             @{ Profile = 'current'; Mode = 'foreign'; Expected = 75; Removals = 0 }
-        )) {
+        })) {
             $sandbox = New-BashSandbox 'real-timeout'
             New-Item -ItemType Directory -Path (Join-Path $sandbox 'bin') -Force | Out-Null
             $linuxSandbox = ConvertTo-LinuxSandbox $sandbox
