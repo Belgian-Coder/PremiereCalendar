@@ -185,6 +185,8 @@ To run against your own server instead, set `PREMIERECALENDAR_TEST_POSTGRES` to 
 
 Every test case runs in parallel (`ParallelMode.All`, see `tests/*/AssemblyConfiguration.cs`). A test or class opts out with `[Collection]` or `[Fact(DisableParallelization = true)]`; the existing opt-outs cover ImageMagick, telemetry listeners, the 2,000-item load benchmark and the Wikimedia/IMDb batchers.
 
+Hosting tests (`WebApplicationFactory<Program>`, each with a migrated database) are the most expensive fixtures, so a class starts one host through an `IClassFixture` for all of its read-only cases instead of one per test or theory row (`WebApplicationFactoryTests`, `CachedImageEndpointTests`, `ProviderHttpTransportConfigurationTests`). `CachedImageEndpointTests` registers a stub image cache per source URL on the shared host, so cases cannot see each other's stubs. A test that needs its own configuration or stops its host (`StoppingTheHostDisposesItsDatabaseDataSources`) builds a private host; keep that pattern for new hosting tests.
+
 ## Scoped feedback and output ownership
 
 ### Portable static checks

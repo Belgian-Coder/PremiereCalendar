@@ -45,7 +45,7 @@ public sealed class ProviderWorkCheckpointCodecBufferTests
     [Fact]
     public void CheckpointsLargerThanThePoolLimitEncodeToTheSameBytesAndDecode()
     {
-        var checkpoint = PerformanceGoldenSupport.Checkpoint(20_000);
+        var checkpoint = PerformanceGoldenSupport.Checkpoint(1_000);
         var reference = JsonSerializer.SerializeToUtf8Bytes(checkpoint,
             new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
         Assert.True(reference.Length > Limit, $"the fixture must exceed the pool limit but was {reference.Length} bytes");
