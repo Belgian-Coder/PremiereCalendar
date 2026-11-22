@@ -5,7 +5,8 @@ other projects used the same engine, so single numbers are noisy; comparisons ar
 alternating runs or duration sums from CTRF where stated. macOS ARM64 runs the same
 portable static lane (`eng/Invoke-StaticChecks.ps1`); its non-Windows path passed three
 consecutive runs on Linux pwsh 7.7 (73-83 s, see [Testing](Testing.md#portable-static-checks)),
-and a real Mac run is still outstanding.
+and on the MacBook-Pro (macOS 27, arm64) its Python checks passed natively; the
+PowerShell checks need PowerShell 7, which is not installed on that Mac yet.
 
 | # | Iteration | Before | After |
 | --- | --- | --- | --- |
