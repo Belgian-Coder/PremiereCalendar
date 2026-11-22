@@ -129,7 +129,7 @@ function Assert-HarnessWslRunning([string] $WslDistribution, [double] $TimeoutSe
 function Invoke-HarnessWsl([string] $Script, [switch] $ReturnExitCode,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $WslDistribution = 'Ubuntu-24.04',
     [ValidateRange(26, 86400)][int] $TimeoutSeconds = 1800,
-    [ValidateRange(15, 120)][int] $CleanupGraceSeconds = 15) {
+    [ValidateRange(15, 300)][int] $CleanupGraceSeconds = 15) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     Assert-HarnessWslRunning $WslDistribution -TimeoutSeconds ([Math]::Min(5, $TimeoutSeconds))
     # stdin avoids the Windows -> bash command-line quoting layer.

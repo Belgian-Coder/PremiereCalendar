@@ -221,6 +221,12 @@ function Get-HarnessSourceManifest([string] $Root) {
     , $manifest
 }
 
+# True when the working tree still hashes to the manifest the cache key was built from (used right before the native build
+# and after the run: a result is recorded only for sources that did not change in between).
+function Test-HarnessSourceUnchanged([string] $Root, [string] $ExpectedSha256) {
+    (Get-HarnessTextSha256 (ConvertTo-HarnessManifestText (Get-HarnessSourceManifest $Root))) -ceq $ExpectedSha256
+}
+
 function ConvertTo-HarnessManifestText($Manifest) {
     $builder = [Text.StringBuilder]::new()
     foreach ($entry in $Manifest.GetEnumerator()) { [void] $builder.Append($entry.Value).Append(' ').Append($entry.Key).Append("`n") }
@@ -305,31 +311,39 @@ function New-HarnessMirrorPlan([string] $Root, [string] $RunId, [switch] $Pack, 
     }
 }
 
-# Bash for the guest: ship the delta, drop files that are not in the manifest, VERIFY every path's blob id against the
-# Windows manifest and fail closed (51 = a delta did not verify: retry in full; 52 = a full copy did not verify).
+# Bash for the guest: ship the delta, drop files that are not in the manifest, re-list the mirror (nothing outside the
+# manifest may remain), VERIFY every path's blob id against the Windows manifest and fail closed (51 = a delta did not verify: retry in full; 52 = a full copy did not verify).
 # Leaves $pc_src (the directory to mount as /src) and writes <run>/verified only after the verification passed.
 function Get-HarnessMirrorSyncScript($Plan, $Storage, [string] $WslRoot, [string] $RunId) {
     if ($Storage.SourceMirror -notmatch '^\.cache/premierecalendar/mirror/[0-9a-f]{10}$') { throw 'Unexpected source mirror location.' }
     $run = "$WslRoot/artifacts/mirror/run-$RunId"
     $q = { param($value) ConvertTo-BashLiteral $value }
-    $clear = if ($Plan.Full) { 'find "$pc_src" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' } else { ':' }
-    $tarStep = if ($Plan.Tar) { "tar -x --no-same-owner -f $(& $q "$run/delta.tar") -C `"`$pc_src`"" } else { ':' }
+    $clear = if ($Plan.Full) { 'find "$pc_src" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || pc_fail' } else { ':' }
+    $tarStep = if ($Plan.Tar) { "tar -x --no-same-owner -f $(& $q "$run/delta.tar") -C `"`$pc_src`" || pc_fail" } else { ':' }
     $failure = if ($Plan.Full) { 52 } else { 51 }
     $mode = if ($Plan.Full) { 'full' } else { 'delta' }
     @"
 pc_src="`$HOME/$($Storage.SourceMirror)"
 pc_sync_t0=`$(date +%s%N)
-mkdir -p "`$pc_src"
+# Every failure of preparing the mirror (clearing, extracting, a directory/file type clash, stray files that cannot be
+# removed) is a verification failure: 51 retries in full, 52 is final and discards the recorded Windows-side manifest.
+pc_fail() { echo "PC_SOURCE_MIRROR state=verification-failed mode=$mode path=`$pc_src" >&2; exit $failure; }
+mkdir -p "`$pc_src" || pc_fail
 $clear
 $tarStep
-mkdir -p "`$pc_src/artifacts"
+mkdir -p "`$pc_src/artifacts" || pc_fail
+pc_mirror_listing() { find . -path ./artifacts -prune -o ! -type d -printf '%P\n' | LC_ALL=C sort; }
 pc_mirror_sync() {
   cd "`$pc_src" || return 1
-  LC_ALL=C comm -23 <(find . -path ./artifacts -prune -o \( -type f -o -type l \) -printf '%P\n' | LC_ALL=C sort) <(LC_ALL=C sort $(& $q "$run/paths.txt")) | while IFS= read -r pc_extra; do rm -f -- "`$pc_extra"; done
+  LC_ALL=C comm -23 <(pc_mirror_listing) <(LC_ALL=C sort $(& $q "$run/paths.txt")) | while IFS= read -r pc_extra; do rm -f -- "`$pc_extra" || :; done
+  # Fail closed: list again; anything that is not in the manifest (a file that could not be removed, a link, a special
+  # file; the artifacts mount point is excluded) means the mirror is not exactly the manifest.
+  pc_left=`$(LC_ALL=C comm -23 <(pc_mirror_listing) <(LC_ALL=C sort $(& $q "$run/paths.txt"))) || return 1
+  [ -z "`$pc_left" ] || return 1
   # The mirror is not a repository; the ceiling stops Git from adopting an enclosing one (it would resolve the paths against it).
   GIT_CEILING_DIRECTORIES="`$(dirname "`$pc_src")" git hash-object --no-filters --stdin-paths < $(& $q "$run/paths.txt") 2>/dev/null | cmp -s - $(& $q "$run/blobs.txt")
 }
-if ! ( pc_mirror_sync ); then echo "PC_SOURCE_MIRROR state=verification-failed mode=$mode path=`$pc_src" >&2; exit $failure; fi
+( pc_mirror_sync ) || pc_fail
 : > $(& $q "$run/verified")
 echo "PC_SOURCE_MIRROR mode=$mode files=$($Plan.Manifest.Count) changed=$($Plan.Changed.Count) ms=`$(( (`$(date +%s%N) - pc_sync_t0) / 1000000 )) path=`$pc_src"
 "@
@@ -401,6 +415,13 @@ function Get-HarnessResultInputsHash([hashtable] $Inputs) {
     Get-HarnessTextSha256 ($canonical | ConvertTo-Json -Compress -Depth 5)
 }
 
+# Date-dependent tests (this is a calendar application) can change outcome at midnight UTC, so a recorded pass is reused
+# only within the same UTC day; the date is part of the key inputs.
+function Get-HarnessCacheUtcDate { [DateTime]::UtcNow.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) }
+
+# Effective -MaxThreads for the key: scheduling can change outcomes. 'auto' is the resolved runner budget when known.
+function Get-HarnessCacheMaxThreads([string] $MaxThreads, [string] $ResolvedAuto = 'auto') { if ($MaxThreads -eq 'auto') { $ResolvedAuto } else { $MaxThreads } }
+
 function Get-HarnessResultKey([string] $InputsHash, [string] $ImageId) { Get-HarnessTextSha256 "$InputsHash`nimage=$ImageId" }
 
 # True only when every suite has a CTRF report with at least one test and no failed, errored or pending test.
@@ -409,8 +430,11 @@ function Test-HarnessResultsPassed([string] $Folder, [string[]] $Suites) {
     foreach ($suite in $Suites) {
         $report = Join-Path $Folder "$suite.ctrf.json"
         if (-not (Test-Path -LiteralPath $report -PathType Leaf)) { return $false }
-        try { $summary = (Get-Content -LiteralPath $report -Raw | ConvertFrom-Json).results.summary } catch { return $false }
-        if ($null -eq $summary -or [int] $summary.tests -le 0 -or ([int] $summary.failed + [int] $summary.other + [int] $summary.pending) -ne 0) { return $false }
+        # A malformed report (missing properties, wrong types) is "not passed", never an error: all reads stay inside the try.
+        try {
+            $summary = (Get-Content -LiteralPath $report -Raw | ConvertFrom-Json).results.summary
+            if ($null -eq $summary -or [int] $summary.tests -le 0 -or ([int] $summary.failed + [int] $summary.other + [int] $summary.pending) -ne 0) { return $false }
+        } catch { return $false }
     }
     $true
 }
@@ -430,11 +454,15 @@ function Find-HarnessReusableResults([string] $ResultsRoot, [string] $InputsHash
     foreach ($directory in (Get-ChildItem -LiteralPath $ResultsRoot -Directory | Where-Object { $_.Name -match '^[0-9]{8}-[0-9]{6}$' } | Sort-Object Name -Descending)) {
         $file = Join-Path $directory.FullName 'result-key.json'
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
-        try { $record = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { continue }
-        if ($record.schema -ne 1 -or $record.passed -ne $true -or $record.inputsHash -cne $InputsHash -or $record.imageId -notmatch '^sha256:[0-9a-f]{64}$') { continue }
-        if ($record.key -cne (Get-HarnessResultKey $InputsHash $record.imageId)) { continue }
-        if (-not (Test-HarnessResultsPassed $directory.FullName $Suites)) { continue }
-        $found.Add([pscustomobject]@{ Folder = $directory.FullName; Name = $directory.Name; ImageId = [string] $record.imageId; Key = [string] $record.key })
+        # A malformed record (missing or mistyped properties) is not reusable and never an error.
+        try {
+            $record = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+            if ($record.schema -ne 1 -or $record.passed -ne $true -or $record.inputsHash -cne $InputsHash -or $record.imageId -notmatch '^sha256:[0-9a-f]{64}$') { continue }
+            if ($record.key -cne (Get-HarnessResultKey $InputsHash $record.imageId)) { continue }
+            if (-not (Test-HarnessResultsPassed $directory.FullName $Suites)) { continue }
+            $entry = [pscustomobject]@{ Folder = $directory.FullName; Name = $directory.Name; ImageId = [string] $record.imageId; Key = [string] $record.key }
+        } catch { continue }
+        $found.Add($entry)
         if ($found.Count -ge $Limit) { break }
     }
     $found.ToArray()
@@ -575,9 +603,10 @@ function Get-HarnessNativeEnvironmentId([string] $Sdk, [string] $Rid, [string] $
 }
 
 function New-HarnessNativeCacheInputs([string] $ManifestSha256, [string[]] $Suites, [string[]] $Filter, [string[]] $QueryFilter,
-    [string] $Parallel, [string[]] $RunnerArguments, [string] $Configuration, [bool] $RuntimeAsync, [string] $Sdk, [string] $Rid) {
+    [string] $Parallel, [string[]] $RunnerArguments, [string] $Configuration, [bool] $RuntimeAsync, [string] $Sdk, [string] $Rid,
+    [string] $MaxThreads = 'auto', [string] $UtcDate = (Get-HarnessCacheUtcDate)) {
     @{
-        schema = 1; lane = 'native'; manifest = $ManifestSha256; suites = @($Suites | Sort-Object); filter = @($Filter | Sort-Object)
+        schema = 2; maxThreads = $MaxThreads; utcDate = $UtcDate; lane = 'native'; manifest = $ManifestSha256; suites = @($Suites | Sort-Object); filter = @($Filter | Sort-Object)
         queryFilter = @($QueryFilter | Sort-Object); parallel = [string] $Parallel; runnerArguments = @($RunnerArguments)
         configuration = $Configuration; runtimeAsync = $RuntimeAsync; sdk = $Sdk; rid = $Rid
     }

@@ -299,7 +299,9 @@ function Invoke-LocalShell {
 }
 
 function Assert-LocalDockerAvailable {
-    if (-not (Test-LocalDocker info)) { throw 'The explicit local Docker socket in Ubuntu-24.04 is unavailable (it must already be running; the helpers never start it).' }
+    # A shared engine saturated by another project has needed more than the 30 s existence-probe limit to answer `docker info`.
+    $probe = Invoke-ReleaseDockerClient -DockerArguments @('info') -CallLimit 120 -StandardOutputWriter ([IO.TextWriter]::Null) -StandardErrorWriter ([IO.TextWriter]::Null)
+    if ($probe.ExitCode -ne 0) { throw 'The explicit local Docker socket in Ubuntu-24.04 is unavailable (it must already be running; the helpers never start it).' }
 }
 
 function Assert-DockerNamesFree {

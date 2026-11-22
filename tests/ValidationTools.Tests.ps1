@@ -133,8 +133,8 @@ try {
     # Execute the real release runner function with an intercepted child executable.
     # This proves the public budgets cross the child-process boundary without a database/build.
     Write-Fixture 'eng/capture-runner.ps1' @'
-param([switch] $NoProfile, [string] $File, [int] $Cpus, [int] $MaxThreads, [int] $BuildMaxCpuCount, [string] $BuildVolume, [string] $NugetVolume, [string] $WslDistribution, [int] $TimeoutSeconds)
-if (-not $NoProfile -or $File -ne 'fixture-test-runner.ps1' -or $Cpus -ne 3 -or $MaxThreads -ne 5 -or $BuildMaxCpuCount -ne 2 -or $BuildVolume -ne 'fixture-linux-amd64-build' -or $NugetVolume -ne 'fixture-linux-amd64-nuget' -or $WslDistribution -ne 'PC-MARC-Dev' -or $TimeoutSeconds -ne 1800 -or $args.Count) { throw 'Release child argv lost budgets/storage/distribution/deadline or acquired a test filter.' }
+param([switch] $NoProfile, [string] $File, [switch] $NoCache, [string] $Lane, [int] $Cpus, [int] $MaxThreads, [int] $BuildMaxCpuCount, [string] $BuildVolume, [string] $NugetVolume, [string] $WslDistribution, [int] $TimeoutSeconds)
+if (-not $NoProfile -or -not $NoCache -or $Lane -ne 'Wsl' -or $File -ne 'fixture-test-runner.ps1' -or $Cpus -ne 3 -or $MaxThreads -ne 5 -or $BuildMaxCpuCount -ne 2 -or $BuildVolume -ne 'fixture-linux-amd64-build' -or $NugetVolume -ne 'fixture-linux-amd64-nuget' -or $WslDistribution -ne 'PC-MARC-Dev' -or $TimeoutSeconds -ne 1800 -or $args.Count) { throw 'Release child argv lost budgets/storage/distribution/deadline or acquired a test filter.' }
 $global:LASTEXITCODE = 0
 Write-Output 'Total wall time: 0 s. Results: fixture-results'
 '@

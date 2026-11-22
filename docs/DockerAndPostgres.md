@@ -66,11 +66,12 @@ execution checks the local engine and each required local image for Linux/amd64,
 then runs the inspected image ID with pulls disabled. An inherited remote Docker
 context cannot redirect these operations: helpers pin the local Unix socket.
 Images and the daemon must already exist; `build`/`up` remain explicit image-build
-actions. This does not add a native SDK or macOS application execution backend.
+actions. The WSL/Docker helpers add no native SDK backend; the separate macOS native feedback lane of `Test-WithPostgres.ps1` (host SDK, throwaway local PostgreSQL, feedback only, see [Testing](Testing.md)) is not release acceptance and never uses WSL or Docker.
 
 Test/check default to `-Cpus auto -BuildMaxCpuCount auto` and tests to
 `-MaxThreads auto` (half of the engine's CPUs, at least 2); explicit numbers win.
-PostgreSQL has its separate two-CPU quota. `wsl-docker.ps1 test` forwards those
+PostgreSQL gets half of the resolved runner budget (at least 2); the resolved
+values are printed as the `PC_TEST_BUDGET` line. `wsl-docker.ps1 test` forwards those
 budgets, distribution, image/ABI, runtime-async mode and volume overrides without
 changing the selected suites. Plans report the resolved storage/profile and
 budgets without querying WSL/Docker or creating files or volumes. For example:

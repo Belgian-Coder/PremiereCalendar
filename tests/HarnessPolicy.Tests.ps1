@@ -74,12 +74,23 @@ Assert-Policy (@($appAndSuites | Where-Object { ($_.Arguments -join ' ') -match 
 
 # 4. Release: steps 2-7 through the orchestrator, release tests record result reuse, candidates default to auto.
 Assert-Policy (Test-Path -LiteralPath (Join-Path $root 'eng/release/Invoke-LocalGates.ps1')) 'Invoke-LocalGates.ps1 is missing.'
-Assert-Policy ((Read-Repo 'eng/release/Invoke-ReleaseTests.ps1') -match 'reusedResults') 'The release test receipt does not record result reuse.'
+$releaseTests = Read-Repo 'eng/release/Invoke-ReleaseTests.ps1'
+Assert-Policy ($releaseTests -match 'reusedResults') 'The release test receipt does not record result reuse.'
+# The release test step always executes its own run on the WSL lane: -NoCache and -Lane Wsl reach the runner (also its plan),
+# a REUSED line fails the step, reusedResults is false by construction, and postgresCpus comes from the PC_TEST_BUDGET line.
+Assert-Policy ($releaseTests -match "-File \`$testScript -NoCache -Lane Wsl " -and $releaseTests -match "Lane = 'Wsl'; NoCache = \`$true") 'The release test step does not pass -NoCache and -Lane Wsl to Test-WithPostgres.ps1.'
+Assert-Policy ($releaseTests -match "\^REUSED passing results from" -and $releaseTests -match 'reusedResults = \$false') 'The release test step does not fail on REUSED results or record reusedResults as false.'
+Assert-Policy ($releaseTests -match 'postgresCpus=\(\\d\+\)' -and $releaseTests -notmatch 'postgresCpus = 2') 'The release test receipt hard-codes postgresCpus instead of reading PC_TEST_BUDGET.'
+# Only verified, reproducible runs are cached (and only within one UTC day).
+Assert-Policy ($testText -match '\$cacheEnabled = -not \$NoCache -and -not \$NoBuild -and -not \$FreshBuild -and \$SourceMount -eq ''Mirror''' -and $testText -match '-not \$NoCache -and -not \$NoBuild -and -not \$FreshBuild\r?\n' -and ([regex]::Matches($testText, 'Test-HarnessSourceUnchanged')).Count -eq 2) 'The result cache is not limited to verified sources (mirror, no -NoBuild/-FreshBuild, source re-hashed before the build and after the run).'
+# Cleanup bounds: per-call limit 45 s, guest grace 300 s, release docker-info probe 120 s.
+Assert-Policy ($testText -match 'timeout --kill-after=1s 45s docker' -and $testText -notmatch 'timeout --kill-after=1s 18s' -and $testText -match '\$cleanupGraceSeconds = 300') 'The bounded test cleanup lost its 45 s per-call limit or 300 s guest grace.'
+Assert-Policy ((Read-Repo 'eng/Wsl.Transport.ps1') -match 'ValidateRange\(15, 300\)\]\[int\] \$CleanupGraceSeconds' -and (Read-Repo 'eng/release/ReleaseCommon.ps1') -match "\@\('info'\) -CallLimit 120") 'The transport grace range or the release docker-info probe limit changed.'
 Assert-Policy ((Read-Repo 'eng/release/Invoke-Candidate.ps1') -match "\`$Jobs = 'auto'") 'Invoke-Candidate no longer defaults to the auto budget.'
 
 # 5. A new session learns the policy: AGENTS.md (loaded natively by Codex and Claude Code) must keep these rules.
 $agents = (Read-Repo 'AGENTS.md') -replace '\s+', ' '
-foreach ($phrase in @('Invoke-Validation.ps1 -Changed', 'Invoke-StaticChecks.ps1', 'Invoke-LocalGates', 'ext4 source mirror', 'NoCache', 'impact', 'once per release candidate', 'auto')) {
+foreach ($phrase in @('Invoke-Validation.ps1 -Changed', 'Invoke-StaticChecks.ps1', 'Invoke-LocalGates', 'ext4 source mirror', 'NoCache', 'impact', 'once per release candidate', 'auto', 'release gates always run their own tests with `-NoCache`')) {
     Assert-Policy ($agents.Contains($phrase)) "AGENTS.md no longer mentions '$phrase'."
 }
 

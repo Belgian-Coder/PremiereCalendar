@@ -207,6 +207,14 @@ try {
     Assert-Static ((Get-Row $generic 'Unit').Mode -eq 'Full' -and ((Get-Row $generic 'Unit').Reasons -join ' ') -match "'Options' is too generic") 'A generic type name must fall back instead of matching words.'
     $lonely = Get-Impact @('PremiereCalendar/Services/Lonely.cs')
     Assert-Static ((Get-Row $lonely 'Unit').Mode -eq 'Full' -and (Get-Row $lonely 'Integration').Mode -eq 'Full' -and ((Get-Row $lonely 'Unit').Reasons -join ' ') -match 'no test references') 'A change nobody references must fall back to the whole suites.'
+    # A path the impact analysis cannot classify (a script that runs the tests, an unknown root file) combined with an app change
+    # falls back to whole suites and says why; documentation, release scripts and harness tests do not.
+    foreach ($unknown in @('eng/Test-WithPostgres.ps1', 'eng/run-with-sdk-cache.sh', '.editorconfig', 'Directory.Packages.props')) {
+        $mixedUnknown = Get-Impact @('PremiereCalendar/Services/WidgetBar.cs', $unknown)
+        Assert-Static ((Get-Row $mixedUnknown 'Unit').Mode -eq 'Full' -and (Get-Row $mixedUnknown 'Component').Mode -eq 'Full' -and (Get-Row $mixedUnknown 'Integration').Mode -eq 'Full' -and ((Get-Row $mixedUnknown 'Unit').Reasons -join ' ') -match [regex]::Escape("${unknown}: unclassified")) "An unclassified path ($unknown) combined with an app change did not fall back to whole suites with a reason."
+    }
+    $mixedBenign = Get-Impact @('PremiereCalendar/Services/WidgetBar.cs', 'docs/Testing.md', 'eng/release/Invoke-ReleaseTests.ps1', 'tests/Harness.Tests.ps1', 'tests/fixtures/x.json', '.gitignore')
+    Assert-Static ((Get-Row $mixedBenign 'Unit').Mode -eq 'Classes' -and $null -eq (Get-Row $mixedBenign 'Component')) 'Documentation, release scripts and harness tests must not widen the selection.'
     $browserOnly = Get-Impact @('tests/PremiereCalendar.BrowserTests/Thing.cs')
     Assert-Static ($browserOnly.Suites.Count -eq 0) 'Browser tests are not selected by the service-suite impact analysis.'
 

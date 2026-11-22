@@ -96,6 +96,14 @@ function Invoke-HarnessFixtureScript([string] $Path, [hashtable] $Parameters) {
     $text = $text.Insert($ast.ParamBlock.Extent.EndOffset, ("`n`$PSScriptRoot = '" + (Split-Path -Parent $Path).Replace("'", "''") + "'`n"))
     & ([scriptblock]::Create($text)) @Parameters
 }
+# The guest-side cases (mirror integrity, real GNU timeout, generated bash) need Git Bash with GNU tools. On the Windows
+# development host their absence is a FAILURE (the cases protect the release gates and must never be skipped silently);
+# only hosts that legitimately lack GNU tools (BusyBox, stock macOS) skip them with a warning.
+function Assert-HarnessToolOrWarn([bool] $Present, [string] $Message) {
+    if ($Present) { return }
+    if ($IsWindows) { throw "Required test tool missing: $Message Install Git for Windows (Git Bash with GNU coreutils and tar)." }
+    Write-Warning "$Message The cases were skipped on this host."
+}
 $bashSandboxes = [Collections.Generic.List[string]]::new()
 function New-BashSandbox([string] $Prefix) {
     $path = Join-Path $root ("artifacts/harness-tests/$Prefix-" + [guid]::NewGuid().ToString('N'))
@@ -213,7 +221,7 @@ try {
     Assert-Harness ($global:HarnessCapturedArgv.Count -eq 8) 'Named-volume execution unexpectedly converts mutable host cache paths.'
     Assert-Harness (($global:HarnessCapturedArgv[1][0..4] -join '|') -eq '-d|Ubuntu-24.04|--|wslpath|-a' -and ($global:HarnessCapturedArgv[3][0..4] -join '|') -eq '-d|Ubuntu-24.04|--exec|timeout|--signal=TERM' -and ($global:HarnessCapturedArgv[3][-2..-1] -join '|') -eq 'bash|-s') 'Default distro/deadline did not reach the WSL argv boundary.'
     Assert-Harness (($global:HarnessCapturedArgv[5][0..4] -join '|') -eq '-d|PC-MARC-Dev|--|wslpath|-a' -and ($global:HarnessCapturedArgv[7][0..4] -join '|') -eq '-d|PC-MARC-Dev|--exec|timeout|--signal=TERM') 'Explicit distro did not reach both WSL operations.'
-    Assert-Harness ($global:HarnessCapturedArgv[3][5] -eq '--kill-after=15s' -and $global:HarnessCapturedArgv[7][5] -eq '--kill-after=120s') 'Test cleanup reserve changed another caller or did not reach the guest.'
+    Assert-Harness ($global:HarnessCapturedArgv[3][5] -eq '--kill-after=15s' -and $global:HarnessCapturedArgv[7][5] -eq '--kill-after=300s') 'Test cleanup reserve changed another caller or did not reach the guest.'
     Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'Unit'; NoRuntimeAsync = $true; NoBuild = $true } 6>$null | Out-Null
     $alternateScript = $global:HarnessCapturedScripts[2]
     # The same runs with the opt-out source mount: the former behaviour (live Windows checkout as /src).
@@ -411,13 +419,19 @@ dotnet() {
     $global:HarnessImage = 'sha256:' + ('f' * 64)
     $moved = & $cacheRun $viewSync
     Assert-Harness ($null -eq $moved.Failure -and $moved.Output -notmatch 'REUSED' -and $moved.Script -match 'pc_candidate') 'A different development image identity reused a run (or no candidate was offered to the guest check).'
-    $resultsParent = [IO.Path]::GetFullPath((Join-Path $root 'artifacts/test-results')) + [IO.Path]::DirectorySeparatorChar
-    foreach ($created in $global:HarnessCreated) {
-        $resolved = [IO.Path]::GetFullPath($created)
-        if ($resolved.StartsWith($resultsParent) -and (Test-Path -LiteralPath $resolved)) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+    # Only verified sources are cached: the unverified live Windows mount and a from-scratch build neither reuse nor record.
+    $global:HarnessImage = 'sha256:' + ('d' * 64)
+    $recorded = & $cacheRun $viewSync
+    $recordedFolder = $global:HarnessCreated[-1]
+    Assert-Harness ($null -eq $recorded.Failure -and (Test-Path -LiteralPath (Join-Path $recordedFolder 'result-key.json'))) 'The reference run for the cache-disabled cases did not record its result.'
+    foreach ($uncached in @(@{ SourceMount = 'Windows' }, @{ FreshBuild = $true })) {
+        $before = $global:HarnessCreated.Count
+        $run = & $cacheRun ($viewSync + $uncached)
+        Assert-Harness ($null -eq $run.Failure -and $run.Output -notmatch 'REUSED' -and $run.Script -notmatch 'pc_candidate|image-id' -and $global:HarnessCreated.Count -eq $before + 1 -and -not (Test-Path -LiteralPath (Join-Path $global:HarnessCreated[-1] 'result-key.json'))) "A run with $($uncached.Keys -join ',') used or recorded the result cache."
     }
-    $global:HarnessWslHook = $null
-    Remove-Variable HarnessTestRoot, HarnessWslRoot, HarnessImage, HarnessCreated, HarnessRunExit, HarnessCtrfFailed -Scope Global
+    # The key inputs of a real run carry the UTC date (date-dependent tests) and the effective -MaxThreads.
+    $dayInputs = (Get-Content -LiteralPath (Join-Path $recordedFolder 'result-key.json') -Raw | ConvertFrom-Json)
+    Assert-Harness ($dayInputs.inputs.utcDate -eq (Get-HarnessCacheUtcDate) -and $dayInputs.inputs.maxThreads -eq 'auto' -and $dayInputs.inputs.schema -eq 2) 'The recorded key inputs lack the UTC date or the effective -MaxThreads.'
     # Invoke the canonical wrapper's actual child-launch function with only the
     # child executable intercepted. Release/NAS transports are never loaded.
     $releaseTokens = $null; $releaseErrors = $null
@@ -445,6 +459,7 @@ dotnet() {
         Assert-Harness ($releaseWords -match '-WslDistribution:?\|PC-MARC-Dev' -and $releaseWords -match '-BuildVolume:?\|fixture-build' -and $releaseWords -match '-NugetVolume:?\|fixture-packages') 'Canonical test wrapper lost distribution/storage forwarding.'
         Assert-Harness ($releaseWords -match '-Cpus\|3' -and $releaseWords -match '-MaxThreads\|3' -and $releaseWords -match '-BuildMaxCpuCount\|3' -and $global:HarnessReleaseArgv -notcontains '-Project') 'Canonical test wrapper changed full roster/budget forwarding.'
         Assert-Harness ($releaseWords -match '-TimeoutSeconds:?\|2400') 'Canonical wrapper did not forward its explicit total deadline.'
+        Assert-Harness ($global:HarnessReleaseArgv -contains '-NoCache' -and $releaseWords -match '-Lane\|Wsl') 'The release test runner is not started with -NoCache and -Lane Wsl.'
     } finally {
         Remove-Variable HarnessReleaseArgv -Scope Global
         if ($sandbox.StartsWith((Join-Path $root 'artifacts/harness-tests') + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $sandbox -Recurse -Force }
@@ -517,7 +532,7 @@ flock() { return 0; }
 # Intercept timeout as well as Docker: never let a shell function double fall
 # through to a real Docker executable via timeout's child-process lookup.
 timeout() {
-  [ "`$1" = --kill-after=1s ] && [ "`$2" = 18s ] || return 99
+  [ "`$1" = --kill-after=1s ] && [ "`$2" = 45s ] || return 99
   shift 2
   if [ '$($case.Cleanup)' = timeout ] && [ "`$3" = inspect ]; then return 124; fi
   "`$@"
@@ -550,7 +565,7 @@ docker() {
         # have no GNU timeout, so the cases are skipped there with a warning instead of failing the portable lane.
         $null = & $bash -c "timeout --version 2>/dev/null | grep -q 'GNU coreutils'"
         $gnuTimeout = $LASTEXITCODE -eq 0
-        if (-not $gnuTimeout) { Write-Warning 'GNU coreutils timeout is absent: the real-timeout cleanup cases were not run on this host.' }
+        Assert-HarnessToolOrWarn $gnuTimeout 'GNU coreutils timeout is absent: the real-timeout cleanup cases cannot run on this host.'
         foreach ($case in @(if ($gnuTimeout) {
             @{ Profile = 'current'; Mode = 'slow'; Expected = 0; Removals = 3 }
             @{ Profile = 'old-1s'; Mode = 'slow'; Expected = 75; Removals = 0 }
@@ -559,7 +574,7 @@ docker() {
             $sandbox = New-BashSandbox 'real-timeout'
             New-Item -ItemType Directory -Path (Join-Path $sandbox 'bin') -Force | Out-Null
             $linuxSandbox = ConvertTo-LinuxSandbox $sandbox
-            # The fake client's latency (1.5 s) must sit between the old 1 s and the current 18 s bound.
+            # The fake client's latency (1.5 s) must sit between the old 1 s and the current 45 s bound.
             $fakeDocker = @'
 #!/bin/sh
 printf '%s %s\n' "$1" "$2" >> "$PC_FAKE_LOG"
@@ -575,7 +590,7 @@ fi
 exit 99
 '@
             [IO.File]::WriteAllText((Join-Path $sandbox 'bin/docker'), ($fakeDocker -replace "`r`n", "`n"), [Text.UTF8Encoding]::new($false))
-            $functions = if ($case.Profile -eq 'old-1s') { $cleanupFunctions.Replace('--kill-after=1s 18s docker', '--kill-after=1s 1s docker') } else { $cleanupFunctions }
+            $functions = if ($case.Profile -eq 'old-1s') { $cleanupFunctions.Replace('--kill-after=1s 45s docker', '--kill-after=1s 1s docker') } else { $cleanupFunctions }
             $fixtureScript = @"
 set -eu
 # Limit PATH to the fake and Git Bash/POSIX tools; a failed fake cannot select a host Docker executable.
@@ -660,8 +675,19 @@ docker() {
                 }
             }
         }
-    } else { Write-Warning 'Bash is absent: generated bash syntax and lifecycle validation were not performed.' }
+    } else { Assert-HarnessToolOrWarn $false 'Bash is absent: generated bash syntax and lifecycle validation cannot run on this host.' }
 } finally {
+    # The cache fixture runs the real entry point, whose results folders land in this checkout's artifacts/test-results:
+    # remove exactly the folders it created, even when an assertion above failed.
+    if (Test-Path variable:global:HarnessCreated) {
+        $resultsParent = [IO.Path]::GetFullPath((Join-Path $root 'artifacts/test-results')) + [IO.Path]::DirectorySeparatorChar
+        foreach ($created in $global:HarnessCreated) {
+            $resolved = [IO.Path]::GetFullPath($created)
+            if ($resolved.StartsWith($resultsParent) -and (Test-Path -LiteralPath $resolved)) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+        }
+        $global:HarnessWslHook = $null
+        Remove-Variable HarnessTestRoot, HarnessWslRoot, HarnessImage, HarnessCreated, HarnessRunExit, HarnessCtrfFailed -Scope Global -ErrorAction SilentlyContinue
+    }
     # Only the unique sandboxes this run created for its shell cases; each must still be inside artifacts/harness-tests.
     $sandboxParent = [IO.Path]::GetFullPath((Join-Path $root 'artifacts/harness-tests')) + [IO.Path]::DirectorySeparatorChar
     foreach ($owned in $bashSandboxes) {
@@ -669,7 +695,8 @@ docker() {
         if ($resolved.StartsWith($sandboxParent) -and (Test-Path -LiteralPath $resolved) -and -not ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint)) { Remove-Item -LiteralPath $resolved -Recurse -Force }
     }
     Remove-Item Function:\wsl.exe
-    Remove-Variable HarnessCapturedScripts, HarnessWslCalls, HarnessCapturedArgv, HarnessRunningDistros, HarnessRunningListExit, HarnessWslHook, HarnessWslExitCode -Scope Global
+    Remove-Variable HarnessCapturedScripts, HarnessWslCalls, HarnessCapturedArgv, HarnessRunningDistros, HarnessRunningListExit, HarnessWslExitCode -Scope Global
+    Remove-Variable HarnessWslHook -Scope Global -ErrorAction SilentlyContinue
     $transportPath = [IO.Path]::GetFullPath($transportSandbox)
     if (-not $transportPath.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'artifacts/harness-tests')) + [IO.Path]::DirectorySeparatorChar) -or (Get-Item -LiteralPath $transportPath).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Unexpected transport fixture path; preserving it.' }
     Remove-Item -LiteralPath $transportPath -Recurse
@@ -777,6 +804,34 @@ try {
         $script:syncLog = ''; $seen.Clear(); $before = $script:syncRuns
         $run = Invoke-HarnessMirroredWsl -BuildScript $capture -Context $rootContext -Storage $syncStorage -WslRoot $guestRoot -RunId 'aaaa000004' -SourceMount Mirror -WslDistribution x -RemainingSeconds $remaining
         Assert-Harness ($run.ExitCode -eq 0 -and $script:syncRuns -eq $before + 2 -and $seen[0].Full -eq $false -and $seen[1].Full -and $script:syncLog -match 'state=verification-failed mode=delta' -and [IO.File]::ReadAllText((Join-Path $mirrorDirectory 'run.sh')).StartsWith('#!/bin/sh')) "A tampered mirror was not detected and repaired in full: $($script:syncLog)"
+        # Fail closed on extras: a stray file that cannot be removed (the rm of the guest is replaced by a failing one for that
+        # name) is detected by listing the mirror again (51), and the retry copies in full.
+        [IO.File]::WriteAllText((Join-Path $mirrorDirectory 'stray-unremovable.dll'), 'junk')
+        $captureStuck = { param($sync) $seen.Add($sync); "set -eu`n" + 'rm() { case "$*" in *stray-unremovable*) return 1 ;; *) command rm "$@" ;; esac; }' + "`n$($sync.SyncScript)`n" }
+        $script:syncLog = ''; $seen.Clear(); $before = $script:syncRuns
+        $run = Invoke-HarnessMirroredWsl -BuildScript $captureStuck -Context $rootContext -Storage $syncStorage -WslRoot $guestRoot -RunId 'aaaa000041' -SourceMount Mirror -WslDistribution x -RemainingSeconds $remaining
+        Assert-Harness ($run.ExitCode -eq 0 -and $script:syncRuns -eq $before + 2 -and -not $seen[0].Full -and $seen[1].Full -and $script:syncLog -match 'state=verification-failed mode=delta' -and -not (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'stray-unremovable.dll'))) "An unremovable extra file was not rejected (51) and healed by a full copy: $($script:syncLog)"
+        # A directory that occupies a path the manifest wants as a file (and a file where it wants a directory) must never verify
+        # as the manifest; the result is exactly the checkout after at most one full retry.
+        Remove-Item -LiteralPath (Join-Path $mirrorDirectory 'untracked.txt') -Force
+        New-Item -ItemType Directory -Path (Join-Path $mirrorDirectory 'untracked.txt') | Out-Null
+        [IO.File]::WriteAllText((Join-Path $mirrorDirectory 'untracked.txt/inner.txt'), 'nested')
+        [IO.File]::WriteAllText((Join-Path $checkout 'untracked.txt'), 'changed again')
+        Remove-Item -LiteralPath (Join-Path $mirrorDirectory 'src') -Recurse -Force
+        [IO.File]::WriteAllText((Join-Path $mirrorDirectory 'src'), 'a file where the manifest has a directory')
+        [IO.File]::WriteAllText((Join-Path $checkout 'src/tracked file.cs'), 'class A { int changed; }')
+        $script:syncLog = ''; $seen.Clear(); $before = $script:syncRuns
+        $run = Invoke-HarnessMirroredWsl -BuildScript $capture -Context $rootContext -Storage $syncStorage -WslRoot $guestRoot -RunId 'aaaa000042' -SourceMount Mirror -WslDistribution x -RemainingSeconds $remaining
+        Assert-Harness ($run.ExitCode -eq 0 -and $script:syncRuns -le $before + 2 -and (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'untracked.txt') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'src/tracked file.cs') -PathType Leaf) -and -not (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'untracked.txt/inner.txt'))) "A directory/file type clash in the mirror was not repaired: $($script:syncLog)"
+        foreach ($path in (Get-HarnessSourceManifest $checkout).Keys) { Assert-Harness ([IO.File]::ReadAllBytes((Join-Path $mirrorDirectory $path)) -join ',' -eq ([IO.File]::ReadAllBytes((Join-Path $checkout $path)) -join ',')) "Mirror differs from the checkout after the type clash: $path" }
+        # A full copy that still fails (here: clearing the mirror fails) is final (52) and discards the recorded manifest, so the
+        # next run starts with a full copy.
+        [IO.File]::WriteAllText((Join-Path $mirrorDirectory 'run.sh'), 'tampered')
+        $captureBroken = { param($sync) $seen.Add($sync); $prefix = if ($sync.Full) { "find() { return 1; }`n" } else { '' }; "set -eu`n$prefix$($sync.SyncScript)`n" }
+        Assert-Harness (Test-Path -LiteralPath (Join-Path $checkout 'artifacts/mirror/manifest.txt')) 'Precondition: a verified manifest is recorded.'
+        $script:syncLog = ''; $seen.Clear()
+        $run = Invoke-HarnessMirroredWsl -BuildScript $captureBroken -Context $rootContext -Storage $syncStorage -WslRoot $guestRoot -RunId 'aaaa000043' -SourceMount Mirror -WslDistribution x -RemainingSeconds $remaining
+        Assert-Harness ($run.ExitCode -eq 52 -and -not (Test-Path -LiteralPath (Join-Path $checkout 'artifacts/mirror/manifest.txt')) -and $script:syncLog -match 'verification-failed mode=full') "A failing full copy did not exit 52 and discard the Windows-side manifest: $($script:syncLog)"
         Remove-Item -LiteralPath $mirrorDirectory -Recurse -Force
         $script:syncLog = ''; $seen.Clear()
         $run = Invoke-HarnessMirroredWsl -BuildScript $capture -Context $rootContext -Storage $syncStorage -WslRoot $guestRoot -RunId 'aaaa000005' -SourceMount Mirror -WslDistribution x -RemainingSeconds $remaining
@@ -801,17 +856,18 @@ try {
         Assert-Harness ($run.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $stateFile) -and $seen[0].SyncScript -eq "pc_src='$guestRoot'") '-SourceMount Windows recorded mirror state or used a mirror path.'
         Set-Item Function:\Invoke-HarnessWsl $originalInvokeWsl
         $env:HOME = $savedHome
-    } else { Write-Warning 'GNU tar/bash tools are absent: the mirror guest-sync cases were not run on this host.' }
+    } else { Assert-HarnessToolOrWarn $false 'GNU tar/bash tools are absent: the mirror guest-sync cases (mirror integrity) cannot run on this host.' }
 
     # --- Test result cache -------------------------------------------------------------------------------------------
-    $cacheInputs = @{ schema = 1; manifest = ('a' * 64); suites = @('Unit'); filter = @('ViewSync'); queryFilter = @(); parallel = ''; runnerArguments = @(); configuration = 'Release'; runtimeAsync = $true; postgresImage = 'postgres:x'; cacheFlavor = 'musl' }
+    $cacheInputs = @{ schema = 2; maxThreads = 'auto'; utcDate = '2026-11-22'; manifest = ('a' * 64); suites = @('Unit'); filter = @('ViewSync'); queryFilter = @(); parallel = ''; runnerArguments = @(); configuration = 'Release'; runtimeAsync = $true; postgresImage = 'postgres:x'; cacheFlavor = 'musl' }
     $baseHash = Get-HarnessResultInputsHash $cacheInputs
     $reordered = [ordered]@{}; foreach ($k in ($cacheInputs.Keys | Sort-Object -Descending)) { $reordered[$k] = $cacheInputs[$k] }
     Assert-Harness ($baseHash -eq (Get-HarnessResultInputsHash ([hashtable] $reordered)) -and $baseHash -match '^[0-9a-f]{64}$') 'The result key depends on hashtable order.'
-    foreach ($mutation in @(@{ manifest = 'b' * 64 }, @{ suites = @('Unit', 'Component') }, @{ filter = @('Other') }, @{ queryFilter = @('/*/*/X/*') }, @{ parallel = 'none' }, @{ runnerArguments = @('-longRunning', '30') }, @{ configuration = 'Debug' }, @{ runtimeAsync = $false })) {
+    foreach ($mutation in @(@{ manifest = 'b' * 64 }, @{ suites = @('Unit', 'Component') }, @{ filter = @('Other') }, @{ queryFilter = @('/*/*/X/*') }, @{ parallel = 'none' }, @{ runnerArguments = @('-longRunning', '30') }, @{ configuration = 'Debug' }, @{ runtimeAsync = $false }, @{ maxThreads = '2' }, @{ utcDate = '2026-11-23' })) {
         $changedInputs = $cacheInputs.Clone(); foreach ($k in $mutation.Keys) { $changedInputs[$k] = $mutation[$k] }
         Assert-Harness ((Get-HarnessResultInputsHash $changedInputs) -ne $baseHash) "Result key ignores $($mutation.Keys -join ',')."
     }
+    Assert-Harness ((Get-HarnessCacheMaxThreads 'auto' '6') -eq '6' -and (Get-HarnessCacheMaxThreads '3' '6') -eq '3' -and (Get-HarnessCacheUtcDate) -match '^\d{4}-\d{2}-\d{2}$') 'The effective -MaxThreads or UTC date helpers are wrong.'
     Assert-Harness ((Get-HarnessResultKey $baseHash ('sha256:' + 'a' * 64)) -ne (Get-HarnessResultKey $baseHash ('sha256:' + 'b' * 64))) 'The result key ignores the development image identity.'
     $resultsRoot = New-MirrorSandbox 'cache-results'
     function New-FakeResults([string] $Name, [string[]] $Suites, [int] $Tests = 5, [int] $Failed = 0, [int] $Other = 0) {
@@ -848,6 +904,32 @@ try {
     [IO.File]::WriteAllText((Join-Path $notPassed 'result-key.json'), ($notPassedRecord | ConvertTo-Json -Depth 6))
     $found = @(Find-HarnessReusableResults $resultsRoot $baseHash @('Unit'))
     Assert-Harness ($found.Count -eq 1 -and $found[0].Name -eq '20261101-000001') "Failed, empty, errored, partial, unrecorded, forged or not-passed runs were offered for reuse: $(@($found.Name) -join ',')"
+    # Malformed records (missing properties, wrong shapes) are not reusable and must never throw.
+    $malformedCases = @{
+        '20261101-000011' = @{ Record = '{"schema":1}'; Ctrf = $null }
+        '20261101-000012' = @{ Record = '{}'; Ctrf = $null }
+        '20261101-000013' = @{ Record = '[1,2]'; Ctrf = $null }
+        '20261101-000014' = @{ Record = 'not json'; Ctrf = $null }
+        '20261101-000015' = @{ Record = $null; Ctrf = '{"results":{"summary":{"tests":3}}}' }
+        '20261101-000016' = @{ Record = $null; Ctrf = '{"results":{}}' }
+        '20261101-000017' = @{ Record = $null; Ctrf = '{"results":{"summary":{"tests":"x","failed":0,"other":0,"pending":0}}}' }
+    }
+    foreach ($name in ($malformedCases.Keys | Sort-Object)) {
+        $folder = New-FakeResults $name @('Unit')
+        $case = $malformedCases[$name]
+        if ($null -ne $case.Ctrf) {
+            Write-HarnessResultKey $folder $cacheInputs $baseHash $imageA @('Unit')
+            [IO.File]::WriteAllText((Join-Path $folder 'Unit.ctrf.json'), $case.Ctrf)
+            Assert-Harness (-not (Test-HarnessResultsPassed $folder @('Unit'))) "A malformed CTRF summary was accepted or threw: $name"
+        } else { [IO.File]::WriteAllText((Join-Path $folder 'result-key.json'), $case.Record) }
+    }
+    $found = @(Find-HarnessReusableResults $resultsRoot $baseHash @('Unit'))
+    Assert-Harness ($found.Count -eq 1 -and $found[0].Name -eq '20261101-000001') "A malformed record or CTRF summary was offered for reuse or threw: $(@($found.Name) -join ',')"
+    # The native lane records a result only for sources that did not change between its key and the end of the run.
+    $unchangedManifest = Get-HarnessTextSha256 (ConvertTo-HarnessManifestText (Get-HarnessSourceManifest $checkout))
+    Assert-Harness (Test-HarnessSourceUnchanged $checkout $unchangedManifest) 'An untouched checkout was reported as changed.'
+    [IO.File]::WriteAllText((Join-Path $checkout 'untracked.txt'), 'edited while the tests ran')
+    Assert-Harness (-not (Test-HarnessSourceUnchanged $checkout $unchangedManifest)) 'A source edit between key and end of run was not detected.'
     Assert-Harness (-not (Test-HarnessResultsPassed $good @()) -and (Test-HarnessResultsPassed $good @('Unit')) -and -not (Test-HarnessResultsPassed (Join-Path $resultsRoot 'missing') @('Unit'))) 'Result validation accepts an empty suite list or a missing folder.'
 } finally {
     $parent = [IO.Path]::GetFullPath((Join-Path $root 'artifacts/harness-tests')) + [IO.Path]::DirectorySeparatorChar

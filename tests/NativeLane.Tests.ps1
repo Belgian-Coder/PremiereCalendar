@@ -88,11 +88,13 @@ try {
     $inputs = New-HarnessNativeCacheInputs ('a' * 64) @('Unit', 'Component') @('X') @() '' @() 'Release' $true '11.0.100' 'osx-arm64'
     $other = New-HarnessNativeCacheInputs ('a' * 64) @('Component', 'Unit') @('X') @() '' @() 'Release' $true '11.0.100' 'osx-arm64'
     Assert-Native ((Get-HarnessResultInputsHash $inputs) -eq (Get-HarnessResultInputsHash $other)) 'Suite order changed the cache key.'
-    foreach ($change in @({ $inputs.manifest = 'b' * 64 }, { $inputs.configuration = 'Debug' }, { $inputs.runtimeAsync = $false }, { $inputs.sdk = '11.0.101' }, { $inputs.rid = 'linux-arm64' }, { $inputs.filter = @('Y') }, { $inputs.lane = 'wsl' })) {
+    foreach ($change in @({ $inputs.manifest = 'b' * 64 }, { $inputs.configuration = 'Debug' }, { $inputs.runtimeAsync = $false }, { $inputs.sdk = '11.0.101' }, { $inputs.rid = 'linux-arm64' }, { $inputs.filter = @('Y') }, { $inputs.lane = 'wsl' }, { $inputs.maxThreads = '2' }, { $inputs.utcDate = '2026-01-01' })) {
         $changed = New-HarnessNativeCacheInputs ('a' * 64) @('Unit', 'Component') @('X') @() '' @() 'Release' $true '11.0.100' 'osx-arm64'
         $inputs = $changed.Clone(); & $change
         Assert-Native ((Get-HarnessResultInputsHash $inputs) -ne (Get-HarnessResultInputsHash $changed)) 'A key input did not change the cache key.'
     }
+    $dated = New-HarnessNativeCacheInputs ('a' * 64) @('Unit') @() @() '' @() 'Release' $true '11.0.100' 'osx-arm64' '4' '2026-11-22'
+    Assert-Native ($dated.maxThreads -eq '4' -and $dated.utcDate -eq '2026-11-22' -and $dated.schema -eq 2 -and (New-HarnessNativeCacheInputs ('a' * 64) @('Unit') @() @() '' @() 'Release' $true '11.0.100' 'osx-arm64').utcDate -eq (Get-HarnessCacheUtcDate)) 'The native key lacks the effective -MaxThreads or the UTC date.'
     $results = Join-Path $sandbox 'test-results'; $folder = Join-Path $results '20261122-010203'
     [void] (New-Item -ItemType Directory -Path $folder -Force)
     [IO.File]::WriteAllText((Join-Path $folder 'Unit.ctrf.json'), '{"results":{"summary":{"tests":3,"failed":0,"other":0,"pending":0}}}')

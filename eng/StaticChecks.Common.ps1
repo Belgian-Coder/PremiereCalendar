@@ -291,6 +291,16 @@ function Test-TestImpactInfrastructurePath([string] $Path) {
     $Path -match '^tests/Shared/'
 }
 
+# Paths that cannot change what a service suite builds or runs: documentation, the release-only scripts, the harness's own
+# PowerShell/Python tests and fixtures, repository metadata. Everything not listed here and not mapped above is treated as
+# unclassified by Get-TestImpact (conservative: whole suites).
+function Test-TestImpactIrrelevantPath([string] $Path) {
+    $Path -match '(\.md$|^docs/|^LICENSE$)' -or
+    $Path -match '^tests/[^/]+\.(ps1|py)$|^tests/fixtures/' -or
+    $Path -match '^eng/release/' -or
+    $Path -match '^(\.gitignore|\.gitattributes)$|^\.github/'
+}
+
 function Read-TypeDeclarations([string] $Text) {
     $decl = [regex]::new('(?m)^([ \t]*)(?:(?:public|internal|private|protected|file|sealed|static|abstract|partial|readonly|ref|unsafe|new)\s+)*(?:record\s+struct|record\s+class|record|class|struct|interface|enum)\s+([A-Za-z_]\w*)([^\r\n{;=]*)')
     foreach ($m in $decl.Matches($Text)) {
@@ -376,6 +386,10 @@ function Get-TestImpact([string] $Root, [string[]] $ChangedPaths, $TestCounts = 
         if ((Test-TestImpactInfrastructurePath $path) -or $path -match '^(Dockerfile|compose\.yaml|compose\.dev\.yaml|global\.json|Directory\.Build\.props|\.dockerignore|PremiereCalendar\.slnx)$|^tests/Directory\.Build\.props$') {
             Add-Full $suites "${path}: container/dependency/cross-cutting file"; continue
         }
+        if (Test-TestImpactIrrelevantPath $path) { continue }
+        # Anything else (eng/*.ps1 or *.sh that run the tests, an unknown root file such as .editorconfig or a package
+        # props file) can change how every test builds or runs and cannot be mapped to classes: whole suites, with the reason.
+        Add-Full $suites "${path}: unclassified path that may affect how tests build or run"
     }
     if ($needIndex) {
         if (-not $Index) { $Index = New-TestImpactIndex $Root }

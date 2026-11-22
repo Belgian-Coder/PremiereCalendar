@@ -111,12 +111,15 @@ diagnosis. Results and logs always land in this checkout's artifacts folder.
 .PARAMETER NoCache
 Runs the tests even when the same inputs already passed. By default a run is skipped ("REUSED passing results from ...")
 when a previous run of this checkout recorded an identical key (verified source manifest, development image identity,
-suites, filters, -Parallel/-RunnerArguments, configuration and runtime-async mode; not worker budgets or timeouts) and all
-of its suites passed. -NoBuild runs never use or record the cache.
+suites, filters, -Parallel, the effective -MaxThreads, -RunnerArguments, configuration, runtime-async mode and the UTC date, so
+a pass is reused only within the same UTC day; not -Cpus/-BuildMaxCpuCount or timeouts) and all of its suites passed.
+-NoBuild, -FreshBuild and -SourceMount Windows runs never use or record the cache, and the native lane records a pass only
+when the source manifest is unchanged at the start of the build and after the run. Release gates always pass -NoCache.
 
 .PARAMETER Cpus
 CPU limit of the test container: a number or auto (default). auto is half of the engine's CPUs read with nproc in the WSL
-guest (at least 2, at most 64); the PostgreSQL container always gets 2. The resolved value is printed as PC_TEST_BUDGET.
+guest (at least 2, at most 64); the PostgreSQL container gets half of the resolved runner budget (at least 2). The resolved
+values are printed as PC_TEST_BUDGET.
 
 .PARAMETER BuildMaxCpuCount
 Maximum MSBuild worker count: a number or auto (default, same rule as -Cpus). Suites run sequentially.
@@ -302,7 +305,7 @@ if ($hostLane -eq 'Native') {
             BuildBudget = $buildBudget
             TimeoutSeconds = $TimeoutSeconds
             AutoBudget = 'auto = max(2, CPU count / 2)'
-            ResultCache = if ($NoCache) { 'off (-NoCache)' } elseif ($NoBuild) { 'off (-NoBuild)' } else { 'on (key: source manifest, SDK version, RID, PostgreSQL version, selection, configuration)' }
+            ResultCache = if ($NoCache) { 'off (-NoCache)' } elseif ($NoBuild) { 'off (-NoBuild)' } elseif ($FreshBuild) { 'off (-FreshBuild)' } else { 'on (key: source manifest verified before the build and after the run, SDK version, RID, PostgreSQL version, selection, effective -MaxThreads and -Parallel, configuration, UTC date)' }
             Acceptance = 'feedback only; release acceptance stays on the Windows/WSL linux/amd64 container builder'
         }
         return
@@ -310,7 +313,8 @@ if ($hostLane -eq 'Native') {
     if (-not $postgres.Ok) { throw $postgres.Error }
     $nativeDotnet = Resolve-HarnessDotnet $context.Root -Probe
     if (-not $nativeDotnet.Ok) { throw $nativeDotnet.Error }
-    $cacheEnabled = -not $NoCache -and -not $NoBuild
+    # Cache only runs whose sources and build are verified and reproducible: not -NoBuild (unknown build), not -FreshBuild.
+    $cacheEnabled = -not $NoCache -and -not $NoBuild -and -not $FreshBuild
     $nativeClock = [Diagnostics.Stopwatch]::StartNew()
     $started = Get-Date
     $postgresVersion = ''
@@ -319,7 +323,7 @@ if ($hostLane -eq 'Native') {
     $environmentId = Get-HarnessNativeEnvironmentId $nativeDotnet.Sdk $platform.Rid $postgresVersion
     if ($cacheEnabled) {
         $manifestSha256 = Get-HarnessTextSha256 (ConvertTo-HarnessManifestText (Get-HarnessSourceManifest $context.Root))
-        $cacheInputs = New-HarnessNativeCacheInputs $manifestSha256 @($suites) @($Filter) @($QueryFilter) $Parallel @($RunnerArguments) $Configuration (-not $NoRuntimeAsync) $nativeDotnet.Sdk $platform.Rid
+        $cacheInputs = New-HarnessNativeCacheInputs $manifestSha256 @($suites) @($Filter) @($QueryFilter) $Parallel @($RunnerArguments) $Configuration (-not $NoRuntimeAsync) $nativeDotnet.Sdk $platform.Rid (Get-HarnessCacheMaxThreads $MaxThreads ([string] $runBudget)) (Get-HarnessCacheUtcDate)
         $cacheInputsHash = Get-HarnessResultInputsHash $cacheInputs
         $reused = @(Find-HarnessReusableResults (Join-Path $context.Root 'artifacts/test-results') $cacheInputsHash @($suites)) | Where-Object { $_.ImageId -ceq $environmentId } | Select-Object -First 1
         if ($reused) {
@@ -348,7 +352,12 @@ if ($hostLane -eq 'Native') {
     $status = 0
     $built = $false
     $failedBuild = @{}
+    # The sources must not change between the key's manifest and the build, nor while the tests ran; otherwise nothing is recorded.
+    $cacheBlocked = $null
     try {
+        if ($cacheEnabled -and -not (Test-HarnessSourceUnchanged $context.Root $manifestSha256)) {
+            $cacheBlocked = 'the source changed between the cache key and the start of the build'
+        }
         if (-not $NoBuild) {
             [void] (New-Item -ItemType Directory -Path $nativeBuildDirectory -Force)
             $target = $null
@@ -407,7 +416,12 @@ if ($hostLane -eq 'Native') {
     }
     Write-Host "`n=== summary"
     foreach ($line in $summary) { Write-Host $line }
-    if ($status -eq 0 -and $cacheEnabled -and (Test-HarnessResultsPassed $resultsHost @($suites))) {
+    if ($status -eq 0 -and $cacheEnabled -and -not $cacheBlocked -and -not (Test-HarnessSourceUnchanged $context.Root $manifestSha256)) {
+        $cacheBlocked = 'the source changed while the tests ran'
+    }
+    if ($status -eq 0 -and $cacheEnabled -and $cacheBlocked) { Write-Host "Result cache: not recorded, $cacheBlocked." }
+    elseif ($status -eq 0 -and $cacheEnabled -and $cacheInputs.utcDate -cne (Get-HarnessCacheUtcDate)) { Write-Host 'Result cache: not recorded, the UTC date changed during the run.' }
+    elseif ($status -eq 0 -and $cacheEnabled -and (Test-HarnessResultsPassed $resultsHost @($suites))) {
         Write-HarnessResultKey $resultsHost $cacheInputs $cacheInputsHash $environmentId @($suites)
     }
     Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] ((Get-Date) - $started).TotalSeconds, $resultsHost)
@@ -440,7 +454,7 @@ if ($Plan) {
         AutoBudget = 'auto = max(2, engine CPUs / 2), read with nproc in the WSL guest at run time'
         SourceMount = $SourceMount
         SourceStorage = if ($SourceMount -eq 'Mirror') { "wsl:~/$($storage.SourceMirror)" } else { 'windows' }
-        ResultCache = if ($NoCache) { 'off (-NoCache)' } elseif ($NoBuild) { 'off (-NoBuild)' } else { 'on' }
+        ResultCache = if ($NoCache) { 'off (-NoCache)' } elseif ($NoBuild) { 'off (-NoBuild)' } elseif ($FreshBuild) { 'off (-FreshBuild)' } elseif ($SourceMount -ne 'Mirror') { 'off (-SourceMount Windows: the source is not verified)' } else { 'on' }
     }
     return
 }
@@ -471,7 +485,9 @@ $doBuild = if ($NoBuild) { '0' } else { '1' }
 $suiteList = $suites -join ' '
 $PostgresReadySeconds = 180
 $srcMounts = if ($SourceMount -eq 'Mirror') { "-v `"`$pc_src`":/src -v $(ConvertTo-BashLiteral "$wslRoot/artifacts"):/src/artifacts" } else { "-v `"`$pc_src`":/src" }
-$cacheEnabled = -not $NoCache -and -not $NoBuild
+# Only verified, reproducible runs are cached: -SourceMount Windows reads the unverified live checkout and -FreshBuild /
+# -NoBuild do not build the recorded sources in a known way, so they neither reuse nor record results.
+$cacheEnabled = -not $NoCache -and -not $NoBuild -and -not $FreshBuild -and $SourceMount -eq 'Mirror'
 $configLower = $Configuration.ToLowerInvariant()
 
 $innerTemplate = @'
@@ -537,7 +553,7 @@ $buildScript = { param($sync)
 $cacheBlock = ''
 if ($cacheEnabled) {
     $script:cacheInputs = @{
-        schema = 1; manifest = $sync.ManifestSha256; suites = @($suites | Sort-Object); filter = @($Filter | Sort-Object)
+        schema = 2; manifest = $sync.ManifestSha256; maxThreads = (Get-HarnessCacheMaxThreads $MaxThreads); utcDate = (Get-HarnessCacheUtcDate); suites = @($suites | Sort-Object); filter = @($Filter | Sort-Object)
         queryFilter = @($QueryFilter | Sort-Object); parallel = [string] $Parallel; runnerArguments = @($RunnerArguments)
         configuration = $Configuration; runtimeAsync = (-not $NoRuntimeAsync); postgresImage = $postgresImage; cacheFlavor = $CacheFlavor
     }
@@ -586,15 +602,15 @@ cleanup_resource() {
   if [ "`$kind" = container ]; then
     format='{{.Id}}|{{index .Config.Labels "premierecalendar.test"}}'
   fi
-  identity=`$(timeout --kill-after=1s 18s docker "`$kind" inspect --format "`$format" "`$id" 2>/dev/null)
+  identity=`$(timeout --kill-after=1s 45s docker "`$kind" inspect --format "`$format" "`$id" 2>/dev/null)
   if [ "`$identity" != "`$id|$runId" ]; then
     echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=unresolved-identity" >&2
     cleanup_failed=1; return 0
   fi
   if [ "`$kind" = container ]; then
-    timeout --kill-after=1s 18s docker container rm -f "`$id" >/dev/null 2>&1
+    timeout --kill-after=1s 45s docker container rm -f "`$id" >/dev/null 2>&1
   else
-    timeout --kill-after=1s 18s docker network rm "`$id" >/dev/null 2>&1
+    timeout --kill-after=1s 45s docker network rm "`$id" >/dev/null 2>&1
   fi
   if [ "`$?" = 0 ]; then echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=removed"
   else echo "PC_TEST_CLEANUP kind=`$kind id=`$id label=$runId state=unresolved-removal" >&2; cleanup_failed=1; fi
@@ -668,7 +684,7 @@ wait "`$attach_pid"
 Write-Host "Results folder: $resultsHost"
 Write-Host "Test run label: premierecalendar.test=$runId; resource names: $runnerName, $server, $network"
 $started = Get-Date
-$cleanupGraceSeconds = 120
+$cleanupGraceSeconds = 300
 $remaining = [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds)
 if ($remaining -lt ($cleanupGraceSeconds + 11)) { throw 'Insufficient total test deadline remains for execution, cleanup and drain.' }
 try {
@@ -689,7 +705,8 @@ if ($exitCode -eq 60) {
     Write-Host "All requested test projects passed ($($suites -join ', ')), reused."
     return
 }
-if ($exitCode -eq 0 -and $cacheEnabled -and $run.ImageId -match '^sha256:[0-9a-f]{64}$' -and (Test-HarnessResultsPassed $resultsHost @($suites))) {
+if ($exitCode -eq 0 -and $cacheEnabled -and $script:cacheInputs.utcDate -cne (Get-HarnessCacheUtcDate)) { Write-Host 'Result cache: not recorded, the UTC date changed during the run.' }
+elseif ($exitCode -eq 0 -and $cacheEnabled -and $run.ImageId -match '^sha256:[0-9a-f]{64}$' -and (Test-HarnessResultsPassed $resultsHost @($suites))) {
     Write-HarnessResultKey $resultsHost $script:cacheInputs $script:cacheInputsHash $run.ImageId @($suites)
 }
 Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] ((Get-Date) - $started).TotalSeconds, $resultsHost)

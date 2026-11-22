@@ -78,13 +78,15 @@ service/browser commands are in [Testing](docs/Testing.md#local-only-execution).
   ext4 source mirror that the WSL helpers sync from this checkout by content hash (the WSL
   disk itself lives on D:); never bind-mount the Windows checkout (`/mnt/<drive>`)
   as build or test source in a script; only the Compose watcher uses the live
-  mount. Identical inputs reuse an earlier passing run; use `-NoCache` only to
-  diagnose. Run narrowed suites for feedback and the complete suites once per
+  mount. Feedback runs reuse an earlier passing run of identical inputs (same UTC
+  day, verified mirror sources, no `-NoBuild`/`-FreshBuild`/`-SourceMount
+  Windows`); release gates always run their own tests with `-NoCache` and
+  `-Lane Wsl`. Run narrowed suites for feedback and the complete suites once per
   release candidate (release step 6); do not rerun full suites, builds or the
   static lane without a changed input or a concrete reason.
 - Worker budgets default to `auto` (half of the shared engine's CPUs, at least
-  two) for the runner container, xUnit threads and MSBuild workers, leaving the
-  other half to other tenants; PostgreSQL has its own two-CPU quota. Pass
+  two) for the runner container, xUnit threads and MSBuild workers; PostgreSQL
+  gets half of the resolved runner budget (at least two). Pass
   `-Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2` to throttle on a busy host. The
   release runner records the requested and resolved budgets; benchmark
   scheduling changes without removing tests or gates.
