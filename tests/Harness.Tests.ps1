@@ -115,7 +115,7 @@ try {
     Assert-Harness (@($default.Projects) -join ',' -eq 'UnitTests,ComponentTests,IntegrationTests') 'Default test projects changed.'
     Assert-Harness (@($suiteAlias.Projects) -join ',' -eq 'UnitTests,IntegrationTests') '-Suite alias or short suite names regressed.'
     Assert-Harness (@($suiteAlias.RunnerArguments) -join ' ' -eq '-method *ViewSync* -method *Wikimedia* -parallelMode none -maxThreads 2') 'Filter/parallel runner arguments changed.'
-    Assert-Harness (@($query.RunnerArguments) -join ' ' -eq '-filter /*/*/PostgresResponseCacheTests/* -maxThreads 2 -longRunning 30') 'Query filter / runner arguments changed.'
+    Assert-Harness (@($query.RunnerArguments) -join ' ' -eq '-filter /*/*/PostgresResponseCacheTests/* -maxThreads auto -longRunning 30') 'Query filter / runner arguments changed.'
     Assert-Harness ($query.BuildArguments -contains '--no-restore' -and $query.BuildStorage -like 'container-local*') '-NoRestore / -FreshBuild regressed.'
     Assert-Harness ($viaDocker.Projects.Count -eq 1 -and $viaDocker.Projects[0] -eq 'UnitTests' -and $viaDocker.RunnerArguments -contains '*ViewSync*') 'wsl-docker test no longer forwards -Project/-Filter.'
     Assert-Harness ($bounded.Projects.Count -eq 4 -and $bounded.Cpus -eq 3 -and $bounded.BuildArguments -contains '-maxcpucount:3' -and $bounded.RunnerArguments -contains '3') 'Worker budgets changed the complete suite roster or were not propagated.'
@@ -123,12 +123,12 @@ try {
     Assert-Harness ($sharedCacheA.NugetHttpCache -eq $sharedCacheB.NugetHttpCache -and $sharedCacheA.NugetHttpCache -eq '/root/.nuget/packages/.http-cache' -and $check.NugetHttpCache -eq $plan.NugetHttpCache) 'Package consumers do not share the HTTP cache location.'
     Assert-Harness ($check.Command.Contains("NUGET_SCRATCH=$($plan.NugetScratch)")) 'Scoped checks and default shared packages use different extraction-lock namespaces.'
     Assert-Harness ($plan.BuildStorage -eq $check.BuildStorage -and $plan.BuildStorage -match '-linux-amd64-musl-async-check$') 'Test/check default Linux volumes differ.'
-    Assert-Harness ($default.Cpus -eq 2 -and $default.BuildArguments -contains '-maxcpucount:2' -and $default.RunnerArguments -contains '2') 'Default shared-host budgets changed.'
+    Assert-Harness ($default.Cpus -eq 'auto' -and $default.BuildArguments -contains '-maxcpucount:auto' -and $default.RunnerArguments -contains 'auto') 'Default budgets are no longer derived from the engine CPU count.'
     Assert-Harness (-not (Test-Path -LiteralPath $plan.Results)) 'Plan created its result directory.'
     Assert-Harness ($portable.Projects.Count -eq 4 -and $portable.WslDistribution -eq 'PC-MARC-Dev' -and $portable.CacheFlavor -eq 'glibc' -and $portable.Cpus -eq 3 -and $portable.BuildArguments -contains '-maxcpucount:3' -and $portable.RunnerArguments -contains '3') 'Local test forwarding lost profile/budgets or changed All.'
     Assert-Harness ($portable.BuildStorage -ne $plan.BuildStorage -and $portable.PackageStorage -eq $plan.PackageStorage) 'ABI isolation or shared project packages regressed.'
     Assert-Harness ($portable.BuildStorage -match '-glibc-sync-check$' -and $portable.BuildArguments -contains '-p:UseRuntimeAsync=false') 'Local test forwarding lost runtime-async mode.'
-    Assert-Harness ($default.TimeoutSeconds -eq 1800 -and $check.TimeoutSeconds -eq 1800 -and $portable.TimeoutSeconds -eq 2400) 'Total deadlines were not explicit or forwarded.'
+    Assert-Harness ($default.TimeoutSeconds -eq 3300 -and $plan.TimeoutSeconds -eq 1500 -and $check.TimeoutSeconds -eq 1800 -and $portable.TimeoutSeconds -eq 2400) 'Total deadlines were not explicit or forwarded.'
     Assert-Harness ($watch.BuildStorage -ne $plan.BuildStorage -and $watch.BuildStorage -match '-watch$' -and $watch.PackageStorage -eq $plan.PackageStorage) 'Watcher state is not separate with shared packages.'
     Assert-Harness ($checkPortable.BuildStorage -eq 'fixture-build' -and $checkPortable.PackageStorage -eq 'fixture-packages' -and $checkPortable.Command -match '--cpus=3' -and $checkPortable.Command -match '-maxcpucount:3') 'Scoped check override/budget propagation failed.'
     $primaryStorage = Get-HarnessStorage $primaryContext
@@ -223,6 +223,64 @@ try {
     Assert-Harness ($testScript.Contains("'$($plan.BuildStorage)':/build") -and $testScript.Contains("'$($plan.PackageStorage)':/root/.nuget/packages") -and $testScript -notmatch '/artifacts/(build|packages)/linux') 'Default mutable Linux caches are not named volume mounts.'
     Assert-Harness ($testScript.Contains('"$dev_image" sh /src/eng/run-with-sdk-cache.sh sh -c') -and $testScript.Contains('"$postgres_image" -c') -and $checkScript.Contains('"$dev_image" sh /src/eng/run-with-sdk-cache.sh dotnet build')) 'An inspected image identity is not pinned for execution.'
     Assert-Harness ($testScript.Contains('--pull=never') -and $checkScript.Contains('--pull=never')) 'Execution may implicitly pull an image.'
+    # Several suites share ONE MSBuild invocation (solution filter in container-local /tmp); PostgreSQL start-up
+    # overlaps it and is bounded by a time budget. Run the real inner script with a dotnet double.
+    Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'Unit', 'Component', 'Integration'; WslDistribution = 'PC-MARC-Dev' } 6>$null | Out-Null
+    $multiScript = $global:HarnessCapturedScripts[-1]
+    Assert-Harness ($multiScript -match "PC_INNER_SCRIPT='([^']+)'") 'Encoded multi-suite inner script is missing.'
+    $multiInner = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
+    Assert-Harness ($multiInner.Contains('for suite in Unit Component Integration; do')) 'Multi-suite roster changed.'
+    # auto budgets are resolved in the guest (half of nproc, at least 2); explicit numbers still win.
+    Assert-Harness ($multiScript.Contains('--cpus=$pc_budget') -and $multiScript.Contains('-e PC_BUDGET=$pc_budget') -and $multiInner.Contains('"-maxcpucount:$PC_BUDGET"') -and $multiInner.Contains('''-maxThreads'' "$PC_BUDGET"')) 'Auto worker budgets do not reach the runner, MSBuild and xUnit.net.'
+    Assert-Harness ($multiScript -match 'PC_TEST_BUDGET engineCpus') 'The resolved worker budget is not recorded in the run output.'
+    $explicitWords = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -Cpus 3 -MaxThreads 4 -BuildMaxCpuCount 5 -TimeoutSeconds 90 -Plan
+    Assert-Harness ($explicitWords.Cpus -eq '3' -and $explicitWords.BuildArguments -contains '-maxcpucount:5' -and $explicitWords.RunnerArguments -contains '4' -and $explicitWords.TimeoutSeconds -eq 90) 'Explicit budgets/timeout no longer win over auto.'
+    Assert-Harness ((& (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project All -Plan).TimeoutSeconds -eq 5100 -and (& (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Browser -Plan).TimeoutSeconds -eq 2400) 'Default deadline does not scale with the selected suites.'
+    Assert-Harness ($multiScript -match 'deadline=\$\(\(SECONDS \+ 180\)\)' -and $multiScript -match 'sleep 0\.2' -and $multiScript -notmatch 'sleep 2\b') 'PostgreSQL readiness is not a short-interval poll bounded by its budget.'
+    Assert-Harness ($multiScript.IndexOf('docker create') -lt $multiScript.IndexOf('psql -h 127.0.0.1') -and $multiScript.Contains('touch /tmp/pc-postgres-ready')) 'PostgreSQL start-up no longer overlaps the build.'
+    $innerBash = if ($IsWindows) { Join-Path $env:ProgramFiles 'Git/bin/bash.exe' } else { (Get-Command bash -ErrorAction SilentlyContinue)?.Source }
+    if ($innerBash -and (Test-Path -LiteralPath $innerBash)) {
+        $budgetLines = (($multiScript -split "`n") | Where-Object { $_ -match '^pc_(ncpu|budget)=' }) -join "`n"
+        foreach ($engineCpus in @(@(12, 6), @(4, 2), @(2, 2), @(1, 2), @(256, 64))) {
+            $resolved = "nproc() { echo $($engineCpus[0]); }`n$budgetLines`necho `$pc_budget" | & $innerBash -s
+            Assert-Harness ([int] $resolved -eq $engineCpus[1]) "Auto budget for $($engineCpus[0]) engine CPUs was $resolved."
+        }
+        foreach ($buildCase in @(@{ Fail = ''; Expected = 'combined' }, @{ Fail = 'combined'; Expected = 'per-project' })) {
+            $sandbox = Join-Path $root ('artifacts/harness-tests/inner-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
+            $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
+            $simulatedInner = $multiInner.Replace('/tmp/', "$linuxSandbox/").Replace('/src/', "$linuxSandbox/src/").Replace('/build/bin/', "$linuxSandbox/bin/")
+            $double = @"
+mkdir -p '$linuxSandbox/src' '$linuxSandbox/bin'
+for n in Unit Component Integration; do
+  d='$linuxSandbox/bin/PremiereCalendar.'`$n'Tests/release'; mkdir -p "`$d"
+  printf '#!/bin/sh\necho "Total: 1"\n' > "`$d/PremiereCalendar.`$n"Tests; chmod +x "`$d/PremiereCalendar.`$n"Tests
+done
+touch '$linuxSandbox/pc-postgres-ready'
+dotnet() {
+  echo "`$*" >> '$linuxSandbox/builds.txt'
+  case "`$2" in *.slnf) cat "`$2" >> '$linuxSandbox/builds.txt'; [ '$($buildCase.Fail)' != combined ] || return 1 ;; esac
+}
+"@
+            try {
+                $observed = (($double + "`n" + $simulatedInner) -replace "`r`n", "`n") | & $innerBash -s 2>&1
+                Assert-Harness ($LASTEXITCODE -eq 0) "Inner script failed with the dotnet double ($($buildCase.Expected)): $($observed -join ' ')"
+                $builds = @(Get-Content -LiteralPath (Join-Path $sandbox 'builds.txt'))
+                $invocations = @($builds | Where-Object { $_ -match '^build ' })
+                if ($buildCase.Expected -eq 'combined') {
+                    Assert-Harness ($invocations.Count -eq 1 -and $invocations[0] -match '\.slnf ') 'Selected suites were not built by one MSBuild invocation.'
+                    $listed = ((($builds -join '') | Select-String -Pattern 'tests/PremiereCalendar\.(\w+)Tests/' -AllMatches).Matches | ForEach-Object { $_.Groups[1].Value }) -join ','
+                    Assert-Harness ($listed -eq 'Unit,Component,Integration' -and ($builds -join '').Contains('"PremiereCalendar/PremiereCalendar.csproj"')) 'The solution filter does not list exactly the selected projects plus the application.'
+                } else {
+                    Assert-Harness ($invocations.Count -eq 4 -and @($invocations | Where-Object { $_ -match '\.csproj ' }).Count -eq 3) 'A failed combined build did not fall back to per-project attribution.'
+                }
+                Assert-Harness (($observed -join "`n") -match 'IntegrationTests: exit 0') 'A suite did not run after the build.'
+            } finally {
+                $resolved = [IO.Path]::GetFullPath($sandbox)
+                if ($resolved.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'artifacts/harness-tests')) + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+            }
+        }
+    }
     # Invoke the canonical wrapper's actual child-launch function with only the
     # child executable intercepted. Release/NAS transports are never loaded.
     $releaseTokens = $null; $releaseErrors = $null
@@ -300,12 +358,16 @@ try {
             @{ TestExit = 0; Cleanup = 'foreign'; Expected = 75 },
             @{ TestExit = 0; Cleanup = 'timeout'; Expected = 75 }
             @{ TestExit = 0; Cleanup = 'creation'; Expected = 9 }
+            @{ TestExit = 0; Cleanup = 'ok'; Expected = 24; Unready = $true }
         )) {
             $sandbox = Join-Path $root ('artifacts/harness-tests/lifecycle-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
             $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
             $linuxRoot = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }
             $simulation = $testScript.Replace($linuxRoot, $linuxSandbox)
+            # A server that never answers must fail at the readiness budget (shortened here) and still clean up.
+            $unready = $case.ContainsKey('Unready')
+            if ($unready) { $simulation = $simulation.Replace('SECONDS + 180', 'SECONDS + 1') }
             Assert-Harness ($simulation -match 'premierecalendar.test=([0-9a-f]{10})') 'Test run label missing.'
             $label = $Matches[1]
             $runnerId = 'a' * 64; $serverId = 'b' * 64; $networkId = 'c' * 64
@@ -326,7 +388,8 @@ docker() {
   if [ "`$1" = network ] && [ "`$2" = create ]; then echo '$networkId'; return 0; fi
   if [ "`$1" = run ]; then if [ '$($case.Cleanup)' = creation ]; then return 9; fi; echo '$serverId'; return 0; fi
   if [ "`$1" = create ]; then echo '$runnerId'; return 0; fi
-  if [ "`$1" = start ]; then return $($case.TestExit); fi
+  if [ "`$1" = exec ] && [ '$unready' = True ]; then return 1; fi
+  if [ "`$1" = start ]; then [ '$unready' != True ] || sleep 3; return $($case.TestExit); fi
   if [ "`${2-}" = inspect ]; then
     if [ '$($case.Cleanup)' = foreign ]; then echo "`${!#}|foreign-run"; else echo "`${!#}|$label"; fi
     return 0
