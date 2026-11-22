@@ -1,12 +1,36 @@
 #Requires -Version 7.0
 # Regression checks for portable source validation; no SDK, WSL, Docker or database.
 [CmdletBinding()]
-param([string] $PythonExecutable)
+param([string] $PythonExecutable, [ValidateSet('All', 'Docs', 'Syntax', 'Candidate')][string] $Section = 'All')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if ($Section -eq 'All') {
+    # The three groups are independent (each builds its own unique sandbox below artifacts/harness-tests), so they
+    # run as concurrent child processes; the parent sums their check counts.
+    $self = $PSCommandPath
+    $pwshPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $results = @('Docs', 'Syntax', 'Candidate' | ForEach-Object -ThrottleLimit 3 -Parallel {
+        $childArguments = @('-NoProfile', '-File', $using:self, '-Section', $_)
+        if ($using:PythonExecutable) { $childArguments += @('-PythonExecutable', $using:PythonExecutable) }
+        $output = & $using:pwshPath @childArguments 2>&1
+        [pscustomobject]@{ Section = $_; ExitCode = $LASTEXITCODE; Output = @($output | ForEach-Object { "$_" }) }
+    })
+    $total = 0
+    foreach ($name in 'Docs', 'Syntax', 'Candidate') {
+        $result = @($results | Where-Object Section -eq $name)
+        if ($result.Count -ne 1 -or $result[0].ExitCode -ne 0 -or $result[0].Output.Count -eq 0 -or $result[0].Output[-1] -notmatch '^(\d+) validation-tool checks passed') {
+            $result | ForEach-Object { $_.Output } | Write-Host
+            throw "Validation-tool section failed: $name"
+        }
+        $total += [int] $Matches[1]
+    }
+    $result | Out-Null
+    Write-Host "$total validation-tool checks passed; fixtures stayed inside this worktree's artifacts."
+    return
+}
 $sandboxRoot = Join-Path $root 'artifacts/harness-tests'
-$sandbox = Join-Path $sandboxRoot ('validation-' + [guid]::NewGuid().ToString('N'))
+$sandbox = Join-Path $sandboxRoot ('validation-' + $Section.ToLowerInvariant() + '-' + [guid]::NewGuid().ToString('N'))
 $count = 0
 function Write-Fixture([string] $Path, [string] $Text) {
     $destination = Join-Path $sandbox $Path
@@ -28,6 +52,7 @@ try {
     Write-Fixture 'AGENTS.md' '# Guidance'
     Write-Fixture 'docs/Present.md' '# Existing heading'
     Write-Fixture 'docs/Evidence-20261115.md' '[missing historical output](../artifacts/missing.json)'
+    if ($Section -eq 'Docs') {
     $docs = Join-Path $sandbox 'eng/Test-Docs.ps1'
     Assert-Rejected { & $docs } '*1 documentation problem*'
     & $docs -SourceOnly 3>$null 6>$null
@@ -49,7 +74,9 @@ try {
     Write-Fixture 'README.md' '[valid source](docs/Present.md#existing-heading)'
     & $docs -SourceOnly 6>$null
     $count++
+    }
 
+    if ($Section -eq 'Syntax') {
     $syntax = Join-Path $sandbox 'eng/Test-ScriptSyntax.ps1'
     Write-Fixture 'eng/invalid.ps1' 'function Broken {'
     Assert-Rejected { & $syntax } '*script problem*'
@@ -72,6 +99,11 @@ try {
         Assert-Rejected { & $syntax } '*1 script problem*'
         Write-Warning 'Python 3 absent: compilation success/failure cases were not run.'
     }
+    }
+
+    if ($Section -eq 'Candidate') {
+    $python = if ($PythonExecutable) { Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop }
+              else { Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
     $candidate = Join-Path $root 'eng/release/Invoke-Candidate.ps1'
     $revision = (& git -C $root rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the candidate revision.' }
@@ -138,7 +170,8 @@ for phase in ("validate", "package"):
         if ($LASTEXITCODE -ne 0) { throw 'Release manifest does not satisfy the shared client contract.' }
         $count++
     }
-    Write-Host "$count validation-tool checks passed; fixtures stayed inside this worktree's artifacts."
+    }
+    Write-Host "$count validation-tool checks passed ($Section section); fixtures stayed inside this worktree's artifacts."
 } finally {
     $absolute = [IO.Path]::GetFullPath($sandbox)
     $prefix = [IO.Path]::GetFullPath($sandboxRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
