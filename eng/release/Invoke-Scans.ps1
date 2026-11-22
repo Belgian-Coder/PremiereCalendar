@@ -80,7 +80,7 @@ $null = Initialize-ReleaseCacheVolume 'trivy'
 # The cache only saves the download: a copy that this cache downloaded more than 5 hours ago is discarded so Trivy
 # fetches the current DB, as a fresh volume did (summarize_scan.py also rejects a download older than 6 hours).
 $null = Invoke-LocalDocker run --rm --name $names.TrivyAge -v "$($trivyCache.Name):$trivyCachePath" --entrypoint sh $cfg.trivyImage -c `
-    "find $trivyCachePath -maxdepth 1 -name metadata.json -mmin +300 -exec rm -f $trivyCachePath/trivy.db $trivyCachePath/metadata.json \;"
+    "if [ -n `"`$(find $trivyCachePath -maxdepth 1 -name metadata.json -mmin +300)`" ]; then rm -f $trivyCachePath/trivy.db $trivyCachePath/metadata.json; fi"
 $stageExit = Invoke-LocalShell $stage
 if ($stageExit -ne 0) {
     # Exit 2 means the directory already existed and is not ours: never remove it.

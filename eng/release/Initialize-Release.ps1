@@ -25,7 +25,8 @@ Must be unique per attempt: the scripts refuse name collisions instead of reusin
 .PARAMETER SubnetPrefix
 First two octets of the explicit /24 subnets (10.130 to 10.149). Docker's default address pools are exhausted on
 the release machine, so a network is never created without --subnet. With -SubnetOctet N the roles use N (tests),
-N+1 (smoke) and N+2 (restore check).
+N+1 (smoke) and N+2 (restore check). The default (0) derives N from the bundle name (20 to 227, step 3), so a new
+candidate's networks do not overlap an earlier candidate's leftover restore network.
 
 .PARAMETER ExpectedOldVersion
 /health/version value of the installed release that will be replaced.
@@ -53,7 +54,8 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(:[A-Za-z0-9_.-]{1,64})?$')][string] $ImageTag,
     [ValidatePattern('^[a-z][a-z0-9]{2,23}$')][string] $ResourcePrefix,
     [ValidatePattern('^10\.(13[0-9]|14[0-9])$')][string] $SubnetPrefix = '10.139',
-    [ValidateRange(1, 240)][int] $SubnetOctet = 20,
+    # 0 = derive from the bundle name, so a new candidate never collides with an earlier candidate's leftover networks.
+    [ValidateRange(0, 240)][int] $SubnetOctet = 0,
     [Parameter(Mandatory)][ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string] $ExpectedOldVersion,
     [Parameter(Mandatory)][ValidatePattern('^sha256:[0-9a-f]{64}$')][string] $ExpectedOldDigest,
     [ValidatePattern('^[0-9a-f]{40}$')][string] $ExpectedOldSourceRevision,
@@ -95,6 +97,10 @@ if ([string]::IsNullOrWhiteSpace($ComposeRoot)) { $ComposeRoot = $defaults.Compo
 if ([string]::IsNullOrWhiteSpace($PortainerApiScript)) { $PortainerApiScript = $defaults.PortainerApi }
 if (($RequiredSettingKey -eq '') -ne ($RequiredSettingValue -eq '')) { throw '-RequiredSettingKey and -RequiredSettingValue must be given together.' }
 
+if ($SubnetOctet -eq 0) {
+    $nameHash = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($BundleName))
+    $SubnetOctet = 20 + ([int]$nameHash[0] % 70) * 3   # 20..227; the roles use N, N+1 and N+2
+}
 $images = Get-PinnedImages
 $schema = Get-DatabaseSchemaVersion
 if ($ExpectedOldSchemaVersion -lt 0) { $ExpectedOldSchemaVersion = $schema }

@@ -30,7 +30,7 @@ $subnet = Get-ReleaseSubnet $ctx 2
 $plan = @(
     "Refuse if container $db or network $network already exist",
     "docker network create --internal --subnet $subnet $network (local WSL engine only)",
-    "docker run --read-only, tmpfs-only, no published ports, trust auth inside the internal network: $db from $($cfg.postgresImage)",
+    "docker run --read-only, tmpfs-only (4 GiB data, autovacuum off), no published ports, trust auth inside the internal network: $db from $($cfg.postgresImage)",
     "Wait until pg_isready succeeds")
 if (Show-ReleasePlan -Title 'Initialize-RestoreCheck' -Step $plan) { return }
 
@@ -39,7 +39,11 @@ if (-not (Test-LocalDocker image inspect $cfg.postgresImage)) { throw "The pinne
 Assert-DockerNamesFree -Container $db -Network $network
 $null = Invoke-LocalDocker network create --internal --subnet $subnet --label $label $network
 $null = Invoke-LocalDocker run --pull=never -d --name $db --label $label --network $network --network-alias backup-db --read-only `
-    --tmpfs '/var/lib/postgresql:rw,size=1024m' --tmpfs '/tmp:rw,size=64m' --tmpfs '/run/postgresql:rw,size=16m' `
-    -e PGDATA=/var/lib/postgresql/data/pgdata -e POSTGRES_USER=postgres -e POSTGRES_DB=premierecalendar -e POSTGRES_HOST_AUTH_METHOD=trust $cfg.postgresImage
+    --tmpfs '/var/lib/postgresql:rw,size=4096m' --tmpfs '/tmp:rw,size=64m' --tmpfs '/run/postgresql:rw,size=16m' `
+    -e PGDATA=/var/lib/postgresql/data/pgdata -e POSTGRES_USER=postgres -e POSTGRES_DB=premierecalendar -e POSTGRES_HOST_AUTH_METHOD=trust $cfg.postgresImage `
+    -c autovacuum=off
+# The restored production data plus restore WAL outgrew a 1 GiB tmpfs once autovacuum ran on the idle copy (1.2.21-candidate3:
+# "No space left on device", server down before the compatibility check). The copy is throwaway and compared by content,
+# so autovacuum is off and the tmpfs has headroom.
 Wait-LocalCondition -Attempts 45 -Message 'The isolated PostgreSQL did not become ready.' -Condition { Test-LocalDocker exec $db pg_isready -U postgres -d premierecalendar }
 Write-Host "Isolated PostgreSQL ready: $db on internal network $network ($subnet)"

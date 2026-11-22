@@ -155,7 +155,7 @@ probe, so uncertainty cannot be interpreted as an available resource name.
 Release WSL calls share a monotonic step budget: 120 seconds for candidate
 initialization, 900 for compatibility/smoke, and 1800 for other release entry
 points. Poll loops also cap each child call within their attempts/delay budget;
-existence probes have a 30-second cap. Guest termination and output drain are
+existence probes have a 90-second cap. Guest termination and output drain are
 reserved inside each call. Outer stage watchdogs still bound non-WSL work and
 total completion, and must report retained clients/resources on failure.
 Binary `Restore-Backup.ps1` keeps its separate 900-second streaming contract;

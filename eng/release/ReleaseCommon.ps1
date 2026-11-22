@@ -262,7 +262,8 @@ function Invoke-LocalDockerInput([string] $InputText, [string[]] $DockerArgument
 
 function Test-LocalDocker {
     # Exit status only: true when the command succeeds (used for existence probes).
-    $result = Invoke-ReleaseDockerClient -DockerArguments @($args) -CallLimit 30 -StandardOutputWriter ([IO.TextWriter]::Null) -StandardErrorWriter ([IO.TextWriter]::Null)
+    # 90 s: a Docker daemon shared with other projects' test runs has answered single probes in more than 30 s.
+    $result = Invoke-ReleaseDockerClient -DockerArguments @($args) -CallLimit 90 -StandardOutputWriter ([IO.TextWriter]::Null) -StandardErrorWriter ([IO.TextWriter]::Null)
     $result.ExitCode -eq 0
 }
 

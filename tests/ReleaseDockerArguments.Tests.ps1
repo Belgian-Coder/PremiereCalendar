@@ -28,7 +28,7 @@ $networkTarget = $network; [string[]]$pullPolicy = @()
 $probeBuild = 'fixture-probe'; $probeRoot = Join-Path $root 'artifacts/fixture-probe'
 $app = 'fixture-app'; $image = [pscustomobject]@{ Id = 'fixture-image' }; $connection = 'fixture-connection'
 $expected = @{
-    'Initialize-RestoreCheck.ps1' = @(,@('/var/lib/postgresql:rw,size=1024m', '/tmp:rw,size=64m', '/run/postgresql:rw,size=16m'))
+    'Initialize-RestoreCheck.ps1' = @(,@('/var/lib/postgresql:rw,size=4096m', '/tmp:rw,size=64m', '/run/postgresql:rw,size=16m'))
     'Invoke-Smoke.ps1' = @(@('/tmp:rw,size=512m'), @('/var/lib/postgresql:rw,size=512m', '/tmp:rw,size=64m', '/run/postgresql:rw,size=16m'))
     'Test-BackupCompatibility.ps1' = @(,@('/tmp:rw,noexec,nosuid,size=64m', '/app/App_Data:rw,uid=1654,gid=999,mode=0770,size=128m'))
 }
