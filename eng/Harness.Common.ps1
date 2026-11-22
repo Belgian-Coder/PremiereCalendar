@@ -5,8 +5,11 @@ function ConvertTo-BashLiteral([string] $Value) {
 }
 
 function Invoke-HarnessGitMetadata([string] $Path, [string[]] $Arguments) {
-    $gitCommand = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
-    $start = [Diagnostics.ProcessStartInfo]::new($gitCommand.Source)
+    # Resolve the executable once per process: Get-Command costs ~65 ms and this runs for every metadata read.
+    if (-not (Test-Path Variable:global:HarnessGitExecutable) -or -not [IO.File]::Exists($global:HarnessGitExecutable)) {
+        $global:HarnessGitExecutable = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new($global:HarnessGitExecutable)
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -60,12 +63,17 @@ function Get-HarnessPrimaryRoot([string] $Root, [string] $GitPrimaryRoot) {
     $hint = [Environment]::GetEnvironmentVariable('BUILD_RELEASE_PROJECT_ROOT')
     if ($null -eq $hint) { return $GitPrimaryRoot }
     $primary = Assert-HarnessCanonicalPath $hint -Directory
-    $top = Get-HarnessGitScalar $primary @('rev-parse', '--show-toplevel')
+    # One Git read answers both questions (top level, then absolute common directory), one line each.
+    $answers = Invoke-HarnessGitMetadata $primary @('rev-parse', '--show-toplevel', '--path-format=absolute', '--git-common-dir')
+    $lines = @($answers.Output -replace '\r?\n$', '' -split '\r?\n')
+    if ($answers.ExitCode -ne 0 -or $lines.Count -ne 2 -or @($lines | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -match '\x00' }).Count -gt 0) {
+        throw 'Expected the top level and common directory from the selected checkout.'
+    }
+    $top = $lines[0]; $primaryCommon = $lines[1]
     if (-not [string]::Equals([IO.Path]::GetFullPath($top), $primary, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Cache-root hint is not the exact native Git primary checkout.'
     }
     $null = Assert-HarnessCanonicalPath (Join-Path $primary '.git') -Directory
-    $primaryCommon = Get-HarnessGitScalar $primary @('rev-parse', '--path-format=absolute', '--git-common-dir')
     if (-not [string]::Equals([IO.Path]::GetFullPath($primaryCommon), (Join-Path $primary '.git'), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Cache-root hint must name the canonical primary, not another linked checkout.'
     }
@@ -75,8 +83,6 @@ function Get-HarnessPrimaryRoot([string] $Root, [string] $GitPrimaryRoot) {
     # exact protocol owner/path/origin binding. Never adopt or silently fall back.
     $checkout = Assert-HarnessCanonicalPath $Root -Directory
     $null = Assert-HarnessCanonicalPath (Join-Path $checkout '.git') -Directory
-    $cloneTop = Get-HarnessGitScalar $checkout @('rev-parse', '--show-toplevel')
-    if (-not [string]::Equals([IO.Path]::GetFullPath($cloneTop), $checkout, [StringComparison]::OrdinalIgnoreCase)) { throw 'Transport clone is not an exact Git checkout.' }
     $markerPath = Assert-HarnessCanonicalPath (Join-Path $checkout '.request-release-owner.json')
     if ((Get-Item -LiteralPath $markerPath).PSIsContainer) { throw 'Transport owner marker must be a file.' }
     $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json -AsHashtable
@@ -93,6 +99,9 @@ function Get-HarnessPrimaryRoot([string] $Root, [string] $GitPrimaryRoot) {
     $expected = [IO.Path]::GetFullPath((Join-Path (Join-Path $primary $worktrees) ('release-' + $marker.target)))
     if (-not $expected.StartsWith($primary + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals($checkout, $expected, [StringComparison]::OrdinalIgnoreCase)) { throw 'Transport clone is outside its exact protocol path.' }
+    # Git is consulted for the clone only after the file-based owner/path binding passed (cheaper rejection, same acceptance).
+    $cloneTop = Get-HarnessGitScalar $checkout @('rev-parse', '--show-toplevel')
+    if (-not [string]::Equals([IO.Path]::GetFullPath($cloneTop), $checkout, [StringComparison]::OrdinalIgnoreCase)) { throw 'Transport clone is not an exact Git checkout.' }
     $origins = foreach ($path in @($primary, $checkout)) {
         $result = Invoke-HarnessGitMetadata $path @('config', '--local', '--null', '--get-all', 'remote.origin.url')
         if ($result.ExitCode -ne 0 -or -not $result.Output.EndsWith("`0")) { throw 'A local project origin is required.' }
