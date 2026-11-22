@@ -220,20 +220,42 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
     [Fact]
     public async Task PartialBatchKeepsVerifiedEntityButRetriesTheOmittedEntity()
     {
+        var firstWarmupStarted = Signal();
+        var secondWarmupStarted = Signal();
+        var releaseWarmups = Signal();
         var calls = 0;
-        var handler = new AsyncHandler((request, _) => Task.FromResult(Interlocked.Increment(ref calls) == 1
-            ? StubHttpMessageHandler.Json("{\"entities\":{\"Q1\":{\"claims\":{}}}}") : Identifiers(request)));
+        var handler = new AsyncHandler(async (request, token) =>
+        {
+            var ids = EntityIds(request.RequestUri!);
+            if (ids[0] is "Q9000001" or "Q9000002")
+            {
+                (ids[0] == "Q9000001" ? firstWarmupStarted : secondWarmupStarted).TrySetResult();
+                await releaseWarmups.Task.WaitAsync(token);
+                return Identifiers(request);
+            }
+            return Interlocked.Increment(ref calls) == 1
+                ? StubHttpMessageHandler.Json("{\"entities\":{\"Q1\":{\"claims\":{}}}}") : Identifiers(request);
+        });
         var client = CreateClient(handler);
+        // Occupy both HTTP slots so Q1 and Q2 deterministically join one batch, independently of how long caller
+        // creation takes under full-suite CPU load (the batch window alone made this flaky on a loaded host).
+        var firstWarmup = client.GetRottenTomatoesIdAsync("Q9000001", CancellationToken.None);
+        await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var secondWarmup = client.GetRottenTomatoesIdAsync("Q9000002", CancellationToken.None);
+        await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
-        var results = await Task.WhenAll(client.GetRottenTomatoesIdResultAsync("Q1", CancellationToken.None),
-            client.GetRottenTomatoesIdResultAsync("Q2", CancellationToken.None));
+        var pending = new[] { client.GetRottenTomatoesIdResultAsync("Q1", CancellationToken.None),
+            client.GetRottenTomatoesIdResultAsync("Q2", CancellationToken.None) };
+        releaseWarmups.TrySetResult();
+        var results = await Task.WhenAll(pending);
+        await Task.WhenAll(firstWarmup, secondWarmup);
 
         Assert.True(results[0].IsSuccess);
         Assert.Null(results[0].Value);
         Assert.False(results[1].IsSuccess);
         Assert.True((await client.GetRottenTomatoesIdResultAsync("Q1", CancellationToken.None)).IsSuccess);
         Assert.Equal("m/Q2", await client.GetRottenTomatoesIdAsync("Q2", CancellationToken.None));
-        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal(2, handler.Requests.Count(uri => EntityIds(uri)[0] is not ("Q9000001" or "Q9000002")));
     }
 
     [Fact]
