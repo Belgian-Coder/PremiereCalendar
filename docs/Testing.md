@@ -322,12 +322,13 @@ portability bugs (child `pwsh` resolution for tool installs, hidden dotfiles
 outside Windows, a load-sensitive pipe budget). Without GNU coreutils
 `timeout` (BusyBox, stock macOS) the three real-timeout cleanup cases of
 `Harness.Tests.ps1` are skipped with a warning. On the MacBook-Pro itself
-(macOS 27.0.1, arm64, reached through the build bridge) the Python part of the
-lane passed natively on the same day with Python 3.10.9: 29 source-fingerprint
-tests, 4 review-input tests and compilation of all 12 Python files. The
-PowerShell part could not run there because PowerShell 7 is not installed on
-that Mac (`pwsh` is a documented prerequisite of the lane); installing it is an
-owner decision. Stock macOS ships Bash 3.2.
+(macOS 27.0.1, arm64, reached through the build bridge) the complete lane then
+passed natively on the same day: all 17 checks, twice, in 14.1-14.2 seconds
+with the default throttle versus 45.5 seconds with `-ThrottleLimit 1`, using
+the official portable PowerShell 7.7.0 osx-arm64 archive (SHA-256 checked
+against the release's `hashes.sha256`, run from a temporary folder and removed
+afterwards; the Mac has no installed `pwsh`), Python 3.10.9, Git and the stock
+Bash 3.2. Only the three GNU-`timeout` cases were skipped.
 
 macOS ARM64 execution has not been qualified. Static checks are suitable for
 that host, but the WSL build/test helpers and release scripts require a Windows
