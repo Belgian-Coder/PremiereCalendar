@@ -59,10 +59,12 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $ExpectedRevision,
     [string] $SummaryJson,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $WslDistribution = 'Ubuntu-24.04',
-    [ValidateRange(1, 64)][int] $Cpus = 2,
-    [ValidateRange(1, 64)][int] $MaxThreads = 2,
-    [ValidateRange(1, 64)][int] $BuildMaxCpuCount = 2,
-    [ValidateRange(30, 86400)][int] $TimeoutSeconds = 1800,
+    # auto = half of the engine's CPUs (at least 2), resolved by Test-WithPostgres.ps1 and recorded in the receipt.
+    [ValidatePattern('^(auto|[1-9]|[1-5][0-9]|6[0-4])$')][string] $Cpus = 'auto',
+    [ValidatePattern('^(auto|[1-9]|[1-5][0-9]|6[0-4])$')][string] $MaxThreads = 'auto',
+    [ValidatePattern('^(auto|[1-9]|[1-5][0-9]|6[0-4])$')][string] $BuildMaxCpuCount = 'auto',
+    # 0 = the runner's suite-scaled default (600 s + 900 s per service suite, 3300 s for the release roster).
+    [ValidateRange(0, 86400)][int] $TimeoutSeconds = 0,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $BuildVolume,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $NugetVolume
 )
@@ -164,7 +166,8 @@ Write-NewJson -Path $summaryPath -Object $summary
 Write-NewJson -Path $receipt -Object ([ordered]@{
         sourceRevision = $ExpectedRevision; startedUtc = $started.ToString('O'); finishedUtc = $finished.ToString('O')
         runner = 'eng\Test-WithPostgres.ps1 (all unit/component/integration)'; exitCode = $exit; logSha256 = Get-FileSha256 $log
-        resources = [ordered]@{ cpus = $Cpus; maxThreads = $MaxThreads; buildMaxCpuCount = $BuildMaxCpuCount; postgresCpus = 2; timeoutSeconds = $TimeoutSeconds }
+        resources = [ordered]@{ cpus = $Cpus; maxThreads = $MaxThreads; buildMaxCpuCount = $BuildMaxCpuCount; postgresCpus = 2; timeoutSeconds = $TimeoutSeconds
+            resolvedBudget = (@(Get-Content -LiteralPath $log | Where-Object { $_ -match '^PC_TEST_BUDGET ' }) | Select-Object -First 1) }
         storage = [ordered]@{ buildVolume = $localTestPlan.BuildStorage; nugetVolume = $localTestPlan.PackageStorage; wslDistribution = $WslDistribution; cacheFlavor = $localTestPlan.CacheFlavor }
         testedSourceFingerprintsSha256 = $fingerprintHash; summarySource = $(if ($SummaryJson) { 'supplied -SummaryJson' } else { 'CTRF/log files of the runner' }) })
 $summary | ForEach-Object { Write-Host ("{0}: {1} passed, {2} failed, {3} skipped" -f $_.suite, $_.passed, $_.failed, $_.skipped) }

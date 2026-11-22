@@ -160,6 +160,7 @@ try {
     Assert-Harness ($default.TimeoutSeconds -eq 3300 -and $plan.TimeoutSeconds -eq 1500 -and $check.TimeoutSeconds -eq 1800 -and $portable.TimeoutSeconds -eq 2400) 'Total deadlines were not explicit or forwarded.'
     Assert-Harness ($watch.BuildStorage -ne $plan.BuildStorage -and $watch.BuildStorage -match '-watch$' -and $watch.PackageStorage -eq $plan.PackageStorage) 'Watcher state is not separate with shared packages.'
     Assert-Harness ($checkPortable.BuildStorage -eq 'fixture-build' -and $checkPortable.PackageStorage -eq 'fixture-packages' -and $checkPortable.Command -match '--cpus=3' -and $checkPortable.Command -match '-maxcpucount:3') 'Scoped check override/budget propagation failed.'
+    Assert-Harness ($check.Command.Contains('--cpus=$pc_budget') -and $check.Command.Contains('-maxcpucount:$pc_budget') -and $check.Cpus -eq 'auto') 'Scoped check no longer defaults to the engine-derived auto budget.'
     $primaryStorage = Get-HarnessStorage $primaryContext
     $sameStorage = Get-HarnessStorage (Get-HarnessContext $root)
     Assert-Harness ($sameStorage.BuildVolume -eq $plan.BuildStorage -and $primaryStorage.NugetVolume -eq $plan.PackageStorage) 'Volume names are unstable or packages are not project-scoped.'
@@ -192,7 +193,7 @@ try {
     Assert-Harness ($global:HarnessCapturedArgv.Count -eq 8) 'Named-volume execution unexpectedly converts mutable host cache paths.'
     Assert-Harness (($global:HarnessCapturedArgv[1][0..4] -join '|') -eq '-d|Ubuntu-24.04|--|wslpath|-a' -and ($global:HarnessCapturedArgv[3][0..4] -join '|') -eq '-d|Ubuntu-24.04|--exec|timeout|--signal=TERM' -and ($global:HarnessCapturedArgv[3][-2..-1] -join '|') -eq 'bash|-s') 'Default distro/deadline did not reach the WSL argv boundary.'
     Assert-Harness (($global:HarnessCapturedArgv[5][0..4] -join '|') -eq '-d|PC-MARC-Dev|--|wslpath|-a' -and ($global:HarnessCapturedArgv[7][0..4] -join '|') -eq '-d|PC-MARC-Dev|--exec|timeout|--signal=TERM') 'Explicit distro did not reach both WSL operations.'
-    Assert-Harness ($global:HarnessCapturedArgv[3][5] -eq '--kill-after=15s' -and $global:HarnessCapturedArgv[7][5] -eq '--kill-after=40s') 'Test cleanup reserve changed another caller or did not reach the guest.'
+    Assert-Harness ($global:HarnessCapturedArgv[3][5] -eq '--kill-after=15s' -and $global:HarnessCapturedArgv[7][5] -eq '--kill-after=120s') 'Test cleanup reserve changed another caller or did not reach the guest.'
     Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'Unit'; NoRuntimeAsync = $true; NoBuild = $true } 6>$null | Out-Null
     $alternateScript = $global:HarnessCapturedScripts[2]
     foreach ($laneScript in @($checkScript, $testScript, $alternateScript)) {
@@ -406,7 +407,7 @@ flock() { return 0; }
 # Intercept timeout as well as Docker: never let a shell function double fall
 # through to a real Docker executable via timeout's child-process lookup.
 timeout() {
-  [ "`$1" = --kill-after=1s ] && [ "`$2" = 5s ] || return 99
+  [ "`$1" = --kill-after=1s ] && [ "`$2" = 18s ] || return 99
   shift 2
   if [ '$($case.Cleanup)' = timeout ] && [ "`$3" = inspect ]; then return 124; fi
   "`$@"
@@ -443,7 +444,7 @@ docker() {
             $sandbox = New-BashSandbox 'real-timeout'
             New-Item -ItemType Directory -Path (Join-Path $sandbox 'bin') -Force | Out-Null
             $linuxSandbox = ConvertTo-LinuxSandbox $sandbox
-            # The fake client's latency (1.5 s) must sit between the old 1 s and the current 5 s bound.
+            # The fake client's latency (1.5 s) must sit between the old 1 s and the current 18 s bound.
             $fakeDocker = @'
 #!/bin/sh
 printf '%s %s\n' "$1" "$2" >> "$PC_FAKE_LOG"
@@ -459,7 +460,7 @@ fi
 exit 99
 '@
             [IO.File]::WriteAllText((Join-Path $sandbox 'bin/docker'), ($fakeDocker -replace "`r`n", "`n"), [Text.UTF8Encoding]::new($false))
-            $functions = if ($case.Profile -eq 'old-1s') { $cleanupFunctions.Replace('--kill-after=1s 5s docker', '--kill-after=1s 1s docker') } else { $cleanupFunctions }
+            $functions = if ($case.Profile -eq 'old-1s') { $cleanupFunctions.Replace('--kill-after=1s 18s docker', '--kill-after=1s 1s docker') } else { $cleanupFunctions }
             $fixtureScript = @"
 set -eu
 # Limit PATH to the fake and Git Bash/POSIX tools; a failed fake cannot select a host Docker executable.
@@ -518,7 +519,7 @@ docker() {
             switch ($job.Kind) {
                 'syntax' { Assert-Harness ($result.ExitCode -eq 0) 'Generated bash failed syntax validation.' }
                 'lifecycle' {
-                    Assert-Harness ($result.ExitCode -eq $case.Expected) "Test/cleanup exit status was not preserved: $($case.Cleanup), $($case.TestExit)."
+                    Assert-Harness ($result.ExitCode -eq $case.Expected) "Test/cleanup exit status was not preserved: $($case.Cleanup), $($case.TestExit) (exit $($result.ExitCode), expected $($case.Expected)):`n$($observed -join "`n")"
                     $calls = Get-Content (Join-Path $sandbox 'docker-calls.txt')
                     if ($case.Cleanup -eq 'creation') {
                         Assert-Harness (@($calls | Where-Object { $_ -eq 'container rm' }).Count -eq 0 -and $calls[-1] -eq 'network rm') 'Unknown creation was removed by name or the verified network was retained.'

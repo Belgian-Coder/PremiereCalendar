@@ -40,14 +40,15 @@ param(
     [string] $Filter,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')]
     [string] $WslDistribution = 'Ubuntu-24.04',
-    [ValidateRange(1, 64)][int] $Cpus = 2,
-    [ValidateRange(1, 64)][int] $BuildMaxCpuCount = 2,
-    [string] $MaxThreads = '2',
+    [ValidatePattern('^(auto|[1-9]|[1-5][0-9]|6[0-4])$')][string] $Cpus = 'auto',
+    [ValidatePattern('^(auto|[1-9]|[1-5][0-9]|6[0-4])$')][string] $BuildMaxCpuCount = 'auto',
+    [string] $MaxThreads = 'auto',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $BuildVolume,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $NugetVolume,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$')][string] $DevImage = 'premierecalendar-dev-app:latest',
     [ValidateSet('musl', 'glibc')][string] $CacheFlavor,
-    [ValidateRange(30, 86400)][int] $TimeoutSeconds = 1800,
+    # 0 = default: the test runner scales it with the selected suites; other actions use 1800 s.
+    [ValidateRange(0, 86400)][int] $TimeoutSeconds = 0,
     [switch] $NoRuntimeAsync,
     [switch] $Plan
 )
@@ -71,6 +72,13 @@ if ($Action -eq 'test') {
     return
 }
 if ($Filter) { throw '-Filter is supported only with -Action test.' }
+if ($TimeoutSeconds -eq 0) { $TimeoutSeconds = 1800 }
+if ($TimeoutSeconds -lt 30) { throw '-TimeoutSeconds must be at least 30.' }
+# auto = half of the engine's CPUs (other tenants share it), at least 2, at most 64; resolved in the guest, the same rule
+# as Test-WithPostgres.ps1. Explicit numbers win.
+$cpusWord = if ($Cpus -eq 'auto') { '$pc_budget' } else { $Cpus }
+$buildCpusWord = if ($BuildMaxCpuCount -eq 'auto') { '$pc_budget' } else { $BuildMaxCpuCount }
+$budgetShell = 'pc_ncpu=$(nproc 2>/dev/null || echo 2); pc_budget=$(( pc_ncpu / 2 )); [ "$pc_budget" -ge 2 ] || pc_budget=2; [ "$pc_budget" -le 64 ] || pc_budget=64'
 if ($Project -eq 'All') { throw '-Project All is supported only with -Action test.' }
 if (-not $CacheFlavor) {
     if ($DevImage -ne 'premierecalendar-dev-app:latest') { throw 'A custom -DevImage requires explicit -CacheFlavor musl or glibc.' }
@@ -88,7 +96,7 @@ $commands = @{
     up = "$compose up --build --pull never -d --wait"
     down = "$compose down"
     build = "$compose build"
-    check = "docker run --rm --pull=never --cpus=$Cpus -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=__BUILD__ -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache `"`$dev_image`" sh /src/eng/run-with-sdk-cache.sh dotnet build $projectPath -c Release --nologo -maxcpucount:$BuildMaxCpuCount$runtimeArgument"
+    check = "docker run --rm --pull=never --cpus=$cpusWord -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=__BUILD__ -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache `"`$dev_image`" sh /src/eng/run-with-sdk-cache.sh dotnet build $projectPath -c Release --nologo -maxcpucount:$buildCpusWord$runtimeArgument"
     logs = "$compose logs --tail=200 app database"
     reset = "$compose down --volumes --remove-orphans"
 }
@@ -143,7 +151,8 @@ cd $(ConvertTo-BashLiteral $wslRoot)
 $preflight
 export PREMIERECALENDAR_NUGET_VOLUME=$(ConvertTo-BashLiteral $wslPackages)
 export PREMIERECALENDAR_BUILD_VOLUME=$(ConvertTo-BashLiteral $wslBuild)
-export PREMIERECALENDAR_CPUS=$Cpus
+$budgetShell
+export PREMIERECALENDAR_CPUS=$cpusWord
 $lock
 $volumes
 $command
