@@ -35,30 +35,36 @@ $auditJson = Join-Path $ctx.Bundle "release-$v-audit.json"
 $summaryJson = Join-Path $ctx.Bundle "release-$v-scan-summary.json"
 $scannersJson = Join-Path $ctx.Bundle "release-$v-scanners.json"
 $trivyLog = Join-Path $ctx.Bundle 'release-trivy.log'
+$trivyDbFile = Join-Path $ctx.Bundle "release-$v-trivy-db-metadata.json"
 $syftLog = Join-Path $ctx.Bundle 'release-syft.log'
 $inspectFile = Join-Path $ctx.Private 'image-inspect.json'
-$names = @{ Trivy = "$($ctx.Prefix)_trivy"; Syft = "$($ctx.Prefix)_syft"; Cache = "$($ctx.Prefix)_trivy_cache" }
+$names = @{ Trivy = "$($ctx.Prefix)_trivy"; Syft = "$($ctx.Prefix)_syft"; TrivyDb = "$($ctx.Prefix)_trivy_db" }
+$trivyCache = Get-ReleaseCacheVolume 'trivy'
+$trivyCachePath = '/root/.cache'
+$trivyDbMetadata = "$trivyCachePath/trivy/db/metadata.json"
 $staging = "/tmp/$($ctx.Prefix)-scan"
 
 $plan = @(
-    "Refuse if any scan evidence exists ($trivyJson, $sbomJson, $auditJson, $summaryJson) or the resources $($names.Trivy), $($names.Syft), $($names.Cache), $staging exist",
+    "Refuse if any scan evidence exists ($trivyJson, $sbomJson, $auditJson, $summaryJson, $trivyDbFile) or the resources $($names.Trivy), $($names.Syft), $($names.TrivyDb), $staging exist",
     "Check $(Join-Path $ctx.Bundle 'release-nuget-audit.log') exists (step 4) and copy the image archive to $staging with a SHA-256 check against build-metadata.json",
-    "Trivy $($cfg.trivyImage): --scanners vuln,misconfig,secret on the archive$(if ($IgnoreUnfixed) { ' (--ignore-unfixed)' })",
-    "Syft $($cfg.syftImage): CycloneDX JSON SBOM of the archive",
+    "Create the persistent release cache volume $($trivyCache.Name) ($($trivyCache.Label)) if missing; it keeps only the public Trivy vulnerability DB and is never deleted",
+    "Run side by side on the same read-only staged archive: Trivy $($cfg.trivyImage) (--scanners vuln,misconfig,secret$(if ($IgnoreUnfixed) { ', --ignore-unfixed' })) and Syft $($cfg.syftImage) (CycloneDX JSON SBOM); each tool keeps its own log and exit code",
+    "Read the Trivy DB metadata (UpdatedAt/NextUpdate/DownloadedAt) from the cache into $scannersJson; summarize_scan.py fails when the DB is older than 48 h",
     'audit_image_archive.py (archive/labels/platform/source proof) and summarize_scan.py; fail on any finding',
-    'Remove the temporary copy, the scan cache volume and the finished containers')
+    'Remove the temporary copy and the finished containers (the cache volume stays)')
 if (Show-ReleasePlan -Title 'Invoke-Scans' -Step $plan) { return }
 
 $nugetLog = Join-Path $ctx.Bundle 'release-nuget-audit.log'
 if (-not (Test-Path -LiteralPath $nugetLog)) { throw 'Run Invoke-NuGetAudit.ps1 first (release-nuget-audit.log is missing).' }
-Assert-FilesAbsent @($trivyJson, $sbomJson, $auditJson, $summaryJson, $scannersJson, $trivyLog, $syftLog, $inspectFile)
+Assert-FilesAbsent @($trivyJson, $sbomJson, $auditJson, $summaryJson, $scannersJson, $trivyDbFile, $trivyLog, $syftLog, $inspectFile)
 Assert-LocalDockerAvailable
-Assert-DockerNamesFree -Container @($names.Trivy, $names.Syft) -Volume $names.Cache
+Assert-DockerNamesFree -Container @($names.Trivy, $names.Syft, $names.TrivyDb)
 $metadata = Read-Json (Join-Path $ctx.Bundle 'build-metadata.json')
 if ($metadata.version -ne $v -or $metadata.os -ne 'linux' -or $metadata.architecture -ne 'amd64' -or $metadata.archive -ne "premierecalendar-$v.tar") { throw 'build-metadata.json does not describe this release archive.' }
-if ((Get-Item -LiteralPath $ctx.ImageArchive).Length -ne $metadata.bytes -or (Get-FileSha256 $ctx.ImageArchive) -ne $metadata.archiveSha256) { throw 'The image archive differs from the build metadata.' }
+if ((Get-Item -LiteralPath $ctx.ImageArchive).Length -ne $metadata.bytes) { throw 'The image archive differs from the build metadata.' }
 
-# Stage a native copy (reading through /mnt is slow) and verify it again inside WSL.
+# Stage a native copy (reading through /mnt is slow). The copy that is scanned is hashed inside WSL against the build
+# metadata, and audit_image_archive.py hashes the original bundle file again, so no extra host-side hash is needed here.
 $archiveName = $metadata.archive
 $stage = @"
 set -eu
@@ -68,26 +74,47 @@ cp $(ConvertTo-ShellQuoted (ConvertTo-WslPath $ctx.ImageArchive)) $(ConvertTo-Sh
 echo '$($metadata.archiveSha256)  $staging/$archiveName' | sha256sum -c -
 "@
 if ((Invoke-LocalShell $stage) -ne 0) { throw 'Staging the archive for the scan failed.' }
-$created = $false
+$null = Initialize-ReleaseCacheVolume 'trivy'
+$scanScriptRan = $false
 try {
-    $null = Invoke-LocalDocker volume create --label "premierecalendar.validation=scan-$($ctx.BundleName)" $names.Cache
-    $created = $true
-    $trivyArguments = @('run', '--name', $names.Trivy, '--rm', '-v', "${staging}:/in:ro", '-v', "$($ctx.BundleWsl):/out", '-v', "$($names.Cache):/root/.cache", $cfg.trivyImage,
+    $trivyArguments = @('run', '--name', $names.Trivy, '--rm', '-v', "${staging}:/in:ro", '-v', "$($ctx.BundleWsl):/out", '-v', "$($trivyCache.Name):$trivyCachePath", $cfg.trivyImage,
         'image', '--input', "/in/$archiveName", '--scanners', 'vuln,misconfig,secret', '--format', 'json', '--output', "/out/release-$v-trivy.json", '--skip-version-check')
     if ($IgnoreUnfixed) { $trivyArguments += '--ignore-unfixed' }
-    if ((Invoke-LocalDockerToFile $trivyLog @trivyArguments) -ne 0) { Get-Content -LiteralPath $trivyLog -Tail 30; throw 'The Trivy scan failed to run.' }
     $syftArguments = @('run', '--name', $names.Syft, '--rm', '-v', "${staging}:/in:ro", '-v', "$($ctx.BundleWsl):/out", $cfg.syftImage,
         "docker-archive:/in/$archiveName", '-o', "cyclonedx-json=/out/release-$v-sbom.cdx.json")
-    if ((Invoke-LocalDockerToFile $syftLog @syftArguments) -ne 0) { Get-Content -LiteralPath $syftLog -Tail 30; throw 'The Syft SBOM generation failed.' }
+    # The metadata of the DB the scan used is read from the same cache right after Trivy finished.
+    $metadataArguments = @('run', '--rm', '--name', $names.TrivyDb, '-v', "$($trivyCache.Name):${trivyCachePath}:ro", '--entrypoint', 'cat', $cfg.trivyImage, $trivyDbMetadata)
+    # Trivy and Syft are independent read-only consumers of the same archive, so they run side by side; the staged
+    # copy is removed by the script itself, whatever happens.
+    $scanScript = Get-ConcurrentScanScript -TrivyArguments $trivyArguments -SyftArguments $syftArguments -TrivyLog (ConvertTo-WslPath $trivyLog) -SyftLog (ConvertTo-WslPath $syftLog) `
+        -MetadataArguments $metadataArguments -MetadataFile (ConvertTo-WslPath $trivyDbFile) -CleanupPath $staging
+    $scanScriptRan = $true
+    $scanExit = Invoke-LocalShell $scanScript
+    if ($scanExit -in 11, 13) { Get-Content -LiteralPath $trivyLog -Tail 30 }
+    if ($scanExit -in 12, 13) { Get-Content -LiteralPath $syftLog -Tail 30 }
+    switch ($scanExit) {
+        0 { }
+        11 { throw 'The Trivy scan failed to run.' }
+        12 { throw 'The Syft SBOM generation failed.' }
+        13 { throw 'The Trivy scan and the Syft SBOM generation both failed.' }
+        14 { throw 'The Trivy vulnerability DB metadata could not be read from the cache.' }
+        default { throw "The scan step failed unexpectedly (exit $scanExit); resource cleanup is unconfirmed." }
+    }
+    # summarize_scan.py rejects a DB older than 48 hours; the raw metadata file is kept as evidence next to the scanners record.
+    $dbText = (Get-Content -LiteralPath $trivyDbFile -Raw).Trim()
+    $checkedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
 }
 finally {
-    $null = Invoke-LocalShell "rm -rf $(ConvertTo-ShellQuoted $staging)"
-    if ($created) { $null = Test-LocalDocker volume rm $names.Cache }
+    if (-not $scanScriptRan) { $null = Invoke-LocalShell "rm -rf $(ConvertTo-ShellQuoted $staging)" }
 }
 Write-NewText -Path $inspectFile -Text ((@(Invoke-LocalDocker image inspect $cfg.imageTag) -join "`n") + "`n")
+$scannerIds = @(Invoke-LocalDocker image inspect --format '{{.Id}}' $cfg.trivyImage $cfg.syftImage)
+if ($scannerIds.Count -ne 2) { throw 'Could not read the scanner image identities.' }
 Write-NewJson -Path $scannersJson -Object ([ordered]@{
-        trivyImage = $cfg.trivyImage; trivyImageId = (Invoke-LocalDocker image inspect --format '{{.Id}}' $cfg.trivyImage | Select-Object -First 1)
-        syftImage = $cfg.syftImage; syftImageId = (Invoke-LocalDocker image inspect --format '{{.Id}}' $cfg.syftImage | Select-Object -First 1) })
+        trivyCacheVolume = $trivyCache.Name
+        trivyDbMetadataRaw = $dbText; trivyDbCheckedAtUtc = $checkedAt
+        trivyImage = $cfg.trivyImage; trivyImageId = $scannerIds[0]
+        syftImage = $cfg.syftImage; syftImageId = $scannerIds[1] })
 Invoke-ReleasePython (Join-Path $PSScriptRoot 'audit_image_archive.py') --bundle $ctx.Bundle --version $v --image-tag $cfg.imageTag --image-inspect $inspectFile
 $summaryArguments = @((Join-Path $PSScriptRoot 'summarize_scan.py'), '--bundle', $ctx.Bundle, '--version', $v)
 if ($IgnoreUnfixed) { $summaryArguments += '--ignore-unfixed' }

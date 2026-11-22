@@ -72,7 +72,7 @@ Steps 3 to 7 never touch the NAS or production. Steps 1, 8, 9 and the optional p
 The bundle is `D:\Projects\PremiereCalendar\artifacts\release\<bundle name>` (git-ignored). Everything in it may be published; it is checksummed and copied to the NAS release share at closure.
 
 - `release-config.json`: every parameter of this release.
-- Build and scan evidence: `source-<version>.tar`, `source-archive-verification.json`, `premierecalendar-<version>.tar`, `build-metadata.json`, `release-nuget-audit.log`, `release-<version>-trivy.json`, `release-<version>-sbom.cdx.json`, `release-<version>-audit.json`, `release-<version>-scan-summary.json`.
+- Build and scan evidence: `source-<version>.tar`, `source-archive-verification.json`, `premierecalendar-<version>.tar`, `build-metadata.json`, `release-nuget-audit.log`, `release-<version>-scanners.json`, `release-<version>-trivy-db-metadata.json`, `release-<version>-trivy.json`, `release-<version>-sbom.cdx.json`, `release-<version>-audit.json`, `release-<version>-scan-summary.json`.
 - Source evidence: `tested-source-fingerprints.json`, `test-run.log`, `test-run.json`, `test-summary.json`, `review-inputs-manifest.json`, `review-source.patch`, `source-review.json`.
 - Runtime evidence: `smoke-*`, `backup-restore.json` (sanitized), `backup-schema-before.txt`, `backup-schema-after.txt`, `backup-compat-*`, `schema-backup-compatibility.json`.
 - `installed\`: containers before and after, image-load and activation receipts, direct and private health, HTTP checks, `verification.json`, optional setting receipt, `backup-summary-public.json`.
@@ -222,7 +222,7 @@ Creates a read-only, tmpfs-only PostgreSQL container on a new internal network (
 pwsh -File "$rel\Build-Image.ps1" -Bundle $bundle -ExpectedRevision $commit
 ```
 
-`HEAD` must be the commit with a clean tracked tree and no untracked source files. The commit is archived with `git archive` (`core.autocrlf=false`), every archived C# and SQL file is compared with its committed blob, and linux/amd64 is built from that archive only (it is the build context on stdin) with `VERSION`, `SOURCE_REVISION`, `BUILD_ID` and `BUILD_TIME_UTC` build arguments. The image is exported with `docker save`; `build-metadata.json` records the archive hash, image id and labels.
+`HEAD` must be the commit with a clean tracked tree and no untracked source files. The commit is archived with `git archive` (`core.autocrlf=false`), every archived C# and SQL file is compared with its committed blob, and linux/amd64 is built from that archive only (it is the build context on stdin) with `VERSION`, `SOURCE_REVISION`, `BUILD_ID` and `BUILD_TIME_UTC` build arguments. The image is exported with `docker save`; `build-metadata.json` records the archive hash, image id and labels. The Dockerfile restores NuGet packages through a BuildKit cache mount (`id=premierecalendar-nuget`, mounted again on the `--no-restore` publish), so a changed project file downloads only new packages; the cache never enters an image layer and the image content is unchanged.
 
 ## Step 4: NuGet audit
 
@@ -232,13 +232,17 @@ pwsh -File "$rel\Invoke-NuGetAudit.ps1" -Bundle $bundle
 
 Restores the archived source in the Dockerfile's SDK image and runs `dotnet list package --vulnerable --include-transitive`. The gate is the sentence "has no vulnerable packages" in `release-nuget-audit.log`.
 
+Downloaded packages are kept in the persistent, labelled volume `premierecalendar-release-nuget-packages` (label `premierecalendar.release-cache=nuget`; it is created when missing, holds only public packages that NuGet verifies by content hash, and is never deleted by a release). The container is otherwise read-only and the NuGet HTTP cache is a tmpfs (`NUGET_HTTP_CACHE_PATH=/tmp/...`), so the vulnerability metadata is fetched fresh in every run. A same-named volume without the label is refused.
+
 ## Step 5: vulnerability scan and SBOM
 
 ```powershell
 pwsh -File "$rel\Invoke-Scans.ps1" -Bundle $bundle
 ```
 
-Scans the exported archive (the exact bytes that will be deployed) with Trivy (vulnerabilities, misconfigurations, secrets) and writes a CycloneDX SBOM with Syft. `audit_image_archive.py` binds archive, labels, platform and source proof to the local image; `summarize_scan.py` fails unless there are no vulnerabilities, misconfigurations or secrets, the SBOM is non-empty and the NuGet audit passed. `-IgnoreUnfixed` counts only vulnerabilities with a fix (the policy of the former hosted workflow) and is recorded in the summary. The scanner image tags are release parameters (`-TrivyImage`, `-SyftImage` of `Initialize-Release.ps1`); review them when you start a release.
+Scans the exported archive (the exact bytes that will be deployed) with Trivy (vulnerabilities, misconfigurations, secrets) and writes a CycloneDX SBOM with Syft. Both tools read the same staged copy read-only and run side by side; each keeps its own log (`release-trivy.log`, `release-syft.log`) and exit code, and either failure fails the step. The staged copy is hashed inside WSL against `build-metadata.json` and `audit_image_archive.py` hashes the bundle file again, so the archive is not hashed a third time on the host.
+
+The Trivy vulnerability database lives in the persistent, labelled volume `premierecalendar-release-trivy-cache` (label `premierecalendar.release-cache=trivy`; created when missing, public data only, never deleted by a release), so it is not downloaded in every release. Trivy refreshes a stale database itself; in addition the step reads the database metadata (`UpdatedAt`, `NextUpdate`, `DownloadedAt`) of the cache the scan used into `release-<version>-trivy-db-metadata.json` (also embedded in `release-<version>-scanners.json`) and `summarize_scan.py` fails (`trivyDbFresh`) unless the database was updated at most 48 hours before the scan. `audit_image_archive.py` binds archive, labels, platform and source proof to the local image; `summarize_scan.py` fails unless there are no vulnerabilities, misconfigurations or secrets, the SBOM is non-empty and the NuGet audit passed. `-IgnoreUnfixed` counts only vulnerabilities with a fix (the policy of the former hosted workflow) and is recorded in the summary. The scanner image tags are release parameters (`-TrivyImage`, `-SyftImage` of `Initialize-Release.ps1`); review them when you start a release.
 
 ## Step 6: tests
 

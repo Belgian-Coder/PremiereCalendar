@@ -89,7 +89,7 @@ The household installation is a Portainer stack on the NAS (stack 20, endpoint 2
 Keep release work under the releasing checkout's ignored `artifacts/release/<bundle>` (see [Releasing](Releasing.md)).
 Use normal Docker layer caching: the Dockerfile restores the app project before
 copying application source, so ordinary source-only changes can reuse dependency
-restore layers. Do not add `--no-cache` or `--pull` to routine builds; refresh
+restore layers; the restore and publish steps also mount a BuildKit cache (`id=premierecalendar-nuget`) so a changed project file downloads only new packages. Release scans and the NuGet audit keep their public data (Trivy vulnerability DB, NuGet packages) in the labelled `premierecalendar-release-*` volumes, which are created when missing and never deleted by a release. Do not add `--no-cache` or `--pull` to routine builds; refresh
 base/dependency pins deliberately and still run current vulnerability checks.
 Build the candidate runtime image once with explicit version/source/build metadata,
 run every acceptance gate on that immutable image ID, and activate that same image.
