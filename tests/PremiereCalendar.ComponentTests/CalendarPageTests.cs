@@ -880,10 +880,26 @@ public sealed partial class CalendarPageTests : BunitContext
             Assert.Empty(component.FindAll("[data-testid='refreshing']"));
             Assert.Single(_prefetcher.WeekStarts);
         });
-        for (var batch = 0; batch < 3; batch++) component.Find("[data-day-load-more]").Click();
-        Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+        // CalendarDay deliberately ignores clicks while a window move is pending (v1.2.20), so wait for the observable
+        // idle state before each click, click exactly once, then wait only for the render of that single click.
+        // A click that is lost while idle still fails the test: there is no re-click.
+        for (var expected = 20; expected <= 40; expected += 10) ClickLoadMoreOnce(component, expected);
+        ClickLoadMoreOnce(component, 40);
+    }
+
+    private static void ClickLoadMoreOnce(IRenderedComponent<PremiereCalendar.Components.Pages.Calendar> component, int expected)
+    {
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal("false", component.Find("[data-day-window-pending]").GetAttribute("data-day-window-pending"));
+            Assert.False(component.Find("[data-day-load-more]").HasAttribute("disabled"));
+        }, TimeSpan.FromSeconds(15));
         component.Find("[data-day-load-more]").Click();
-        Assert.Equal(40, component.FindAll("[data-testid='premiere-card']").Count);
+        component.WaitForAssertion(() =>
+        {
+            Assert.Equal(expected, component.FindAll("[data-testid='premiere-card']").Count);
+            Assert.Equal("false", component.Find("[data-day-window-pending]").GetAttribute("data-day-window-pending"));
+        }, TimeSpan.FromSeconds(15));
     }
 
     [Fact]
