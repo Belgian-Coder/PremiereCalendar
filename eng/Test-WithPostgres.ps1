@@ -445,7 +445,10 @@ export POSTGRES_PASSWORD='$password' PGPASSWORD='$password' PC_TEST_PASSWORD='$p
 # Worker budget: auto = half of the engine's CPUs (other tenants share it), at least 2, at most 64.
 pc_ncpu=`$(nproc 2>/dev/null || echo 2)
 pc_budget=`$(( pc_ncpu / 2 )); [ "`$pc_budget" -ge 2 ] || pc_budget=2; [ "`$pc_budget" -le 64 ] || pc_budget=64
-printf 'PC_TEST_BUDGET engineCpus=%s runnerCpus=%s maxThreads=%s buildMaxCpuCount=%s postgresCpus=2 timeoutSeconds=%s\n' "`$pc_ncpu" "$cpusWord" $threadsWord "$buildCpusWord" '$TimeoutSeconds'
+# PostgreSQL gets half of the runner budget (at least 2): every parallel test clones and queries its own database,
+# and a fixed 2-CPU server starved under 6 test threads (Npgsql read timeouts).
+pc_pg_cpus=`$(( $cpusWord / 2 )); [ "`$pc_pg_cpus" -ge 2 ] || pc_pg_cpus=2
+printf 'PC_TEST_BUDGET engineCpus=%s runnerCpus=%s maxThreads=%s buildMaxCpuCount=%s postgresCpus=%s timeoutSeconds=%s\n' "`$pc_ncpu" "$cpusWord" $threadsWord "$buildCpusWord" "`$pc_pg_cpus" '$TimeoutSeconds'
 created=0
 for attempt in 0 1 2 3 4 5; do
   octet=`$(( ($subnetOctet + attempt * 7) % 250 + 1 ))
@@ -454,14 +457,14 @@ for attempt in 0 1 2 3 4 5; do
 done
 [ "`$created" = 1 ] || { echo 'Could not create an isolated 10.141.x.0/24 network.' >&2; exit 22; }
 server_attempted=1
-server_id=`$(docker run --pull=never -d --name '$server' --label premierecalendar.test=$runId --network '$network' --cpus=2 --tmpfs /var/lib/postgresql \
+server_id=`$(docker run --pull=never -d --name '$server' --label premierecalendar.test=$runId --network '$network' --cpus=`$pc_pg_cpus --tmpfs /var/lib/postgresql \
   -e POSTGRES_PASSWORD -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=postgres \
   "`$postgres_image" -c max_connections=300)
 runner_attempted=1
 runner_id=`$(docker create --pull=never --name '$runnerName' --label premierecalendar.test=$runId --network '$network' --cpus=$cpusWord -e PC_BUDGET=`$pc_budget $srcMounts \
   -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -w /src \
   -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=$(ConvertTo-BashLiteral $sdkCacheOwner) -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
-  -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
+  -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar;Timeout=60;Command Timeout=120' \
   -e PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE=/tmp/pc-test-postgres-password \
   -e PC_TEST_PASSWORD -e PC_INNER_SCRIPT='$innerEncoded' "`$dev_image" sh /src/eng/run-with-sdk-cache.sh sh -c 'echo "`$PC_INNER_SCRIPT" | base64 -d | sh -s')
 case "`$runner_id`$server_id`$network_id" in *[!0-9a-f]*|'') echo 'Invalid immutable test resource identity.' >&2; exit 28 ;; esac

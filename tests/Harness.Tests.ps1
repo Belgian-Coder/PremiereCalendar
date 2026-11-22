@@ -289,6 +289,7 @@ try {
     # auto budgets are resolved in the guest (half of nproc, at least 2); explicit numbers still win.
     Assert-Harness ($multiScript.Contains('--cpus=$pc_budget') -and $multiScript.Contains('-e PC_BUDGET=$pc_budget') -and $multiInner.Contains('"-maxcpucount:$PC_BUDGET"') -and $multiInner.Contains('''-maxThreads'' "$PC_BUDGET"')) 'Auto worker budgets do not reach the runner, MSBuild and xUnit.net.'
     Assert-Harness ($multiScript -match 'PC_TEST_BUDGET engineCpus') 'The resolved worker budget is not recorded in the run output.'
+    Assert-Harness ($multiScript.Contains('--cpus=$pc_pg_cpus') -and $multiScript.Contains('pc_pg_cpus=$(( $pc_budget / 2 ))') -and $multiScript.Contains('Command Timeout=120')) 'PostgreSQL no longer scales with the runner budget or lost its longer test timeouts.'
     $explicitWords = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -Cpus 3 -MaxThreads 4 -BuildMaxCpuCount 5 -TimeoutSeconds 90 -Plan
     Assert-Harness ($explicitWords.Cpus -eq '3' -and $explicitWords.BuildArguments -contains '-maxcpucount:5' -and $explicitWords.RunnerArguments -contains '4' -and $explicitWords.TimeoutSeconds -eq 90) 'Explicit budgets/timeout no longer win over auto.'
     Assert-Harness ((& (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project All -Plan).TimeoutSeconds -eq 5100 -and (& (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Browser -Plan).TimeoutSeconds -eq 2400) 'Default deadline does not scale with the selected suites.'

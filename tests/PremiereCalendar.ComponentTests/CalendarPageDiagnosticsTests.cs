@@ -246,7 +246,8 @@ public sealed class CalendarPageDiagnosticsTests
 
         public async Task<JsonElement[]> WaitForEventAsync(string name, Func<JsonElement, bool>? predicate = null)
         {
-            var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+            // Event-driven: returns as soon as the event is persisted; the ceiling only bounds a real absence.
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
             do
             {
                 var events = ReadEvents();
