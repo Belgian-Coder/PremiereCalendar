@@ -154,6 +154,20 @@ try {
 
     # 8. The real process boundary (non-Windows only): exit codes, merged streams, environment and the deadline.
     if (-not $IsWindows) {
+        # A host that dies without running `finally` (SIGTERM/SIGKILL) must not leave the server or folder: the watchdog cleans up.
+        $orphanDir = Join-Path $sandbox 'pcpg-0123456789ab'
+        [void] (New-Item -ItemType Directory -Path (Join-Path $orphanDir 'data') -Force)
+        $parentStart = [Diagnostics.ProcessStartInfo]::new('/bin/sh'); foreach ($w in '-c', 'sleep 60') { $parentStart.ArgumentList.Add($w) }
+        $parentStart.UseShellExecute = $false
+        $parent = [Diagnostics.Process]::Start($parentStart)
+        $dog = Start-HarnessNativeWatchdog $parent.Id $orphanDir '/usr/bin/true' (Join-Path $orphanDir 'data')
+        Start-Sleep -Milliseconds 1500
+        Assert-Native ($null -ne $dog -and -not $dog.HasExited -and (Test-Path -LiteralPath $orphanDir)) 'The watchdog acted while its parent was alive.'
+        $parent.Kill(); $parent.WaitForExit(5000) | Out-Null; $parent.Dispose()
+        $limit = [DateTime]::UtcNow.AddSeconds(15)
+        while ((Test-Path -LiteralPath $orphanDir) -and [DateTime]::UtcNow -lt $limit) { Start-Sleep -Milliseconds 200 }
+        Assert-Native (-not (Test-Path -LiteralPath $orphanDir)) 'The watchdog did not remove the folder after its parent died.'
+        [void] $dog.WaitForExit(5000); Assert-Native $dog.HasExited 'The watchdog kept running after cleaning up.'; $dog.Dispose()
         $run = Invoke-HarnessNativeCommand '/bin/sh' @('-c', 'echo out; echo err 1>&2; echo "$PC_NATIVE_PROBE"; exit 3') -Environment @{ PC_NATIVE_PROBE = 'probe-value' } -TimeoutSeconds 20
         Assert-Native ($run.ExitCode -eq 3 -and $run.Output -match 'out' -and $run.Output -match 'err' -and $run.Output -match 'probe-value' -and -not $run.TimedOut) 'The process boundary lost output, environment or exit code.'
         $log = Join-Path $sandbox 'run.log'

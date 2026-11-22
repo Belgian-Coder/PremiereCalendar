@@ -654,6 +654,30 @@ function Remove-HarnessNativePostgresDirectory([string] $Directory, [string] $Te
     -not (Test-Path -LiteralPath $full)
 }
 
+# A small detached shell that outlives this process only if it dies without running `finally` (SIGTERM, SIGKILL, a crashed
+# host): it waits until this process or the throwaway folder is gone, then stops the server and removes the folder. The normal
+# path ends it explicitly. Start-HarnessNativeWatchdog returns the process (or $null where it cannot run).
+$script:HarnessWatchdogScript = @'
+exec >/dev/null 2>&1 </dev/null
+parent=$1; dir=$2; pgctl=$3; data=$4
+case "$dir" in */pcpg-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) exit 1 ;; esac
+while kill -0 "$parent" 2>/dev/null && [ -d "$dir" ]; do sleep 1; done
+[ -d "$dir" ] || exit 0
+"$pgctl" stop -D "$data" -m immediate -t 15
+pid=$(head -n 1 "$data/postmaster.pid" 2>/dev/null)
+case "$pid" in ''|*[!0-9]*) ;; *) kill -9 "$pid" 2>/dev/null ;; esac
+rm -rf "$dir"
+'@
+
+function Start-HarnessNativeWatchdog([int] $ParentId, [string] $Directory, [string] $PgCtl, [string] $Data) {
+    if ($IsWindows) { return $null }
+    $start = [Diagnostics.ProcessStartInfo]::new('/bin/sh')
+    foreach ($argument in @('-c', $script:HarnessWatchdogScript.Replace("`r", ''), 'sh', "$ParentId", $Directory, $PgCtl, $Data)) { $start.ArgumentList.Add($argument) }
+    $start.UseShellExecute = $false
+    $start.RedirectStandardInput = $true
+    try { $process = [Diagnostics.Process]::Start($start); $process.StandardInput.Close(); $process } catch { $null }
+}
+
 # Starts a throwaway PostgreSQL (own data directory, unix socket inside it, 127.0.0.1 on a free port, SCRAM password from a
 # per-run password file), runs $Body with the environment variables the test projects read, and ALWAYS stops the server and
 # deletes the folder afterwards (also when the body fails or is interrupted). The server is never reachable without the
@@ -670,18 +694,13 @@ function Invoke-HarnessWithNativePostgres([string] $Bin, [scriptblock] $Body, [i
     $log = Join-Path $directory 'server.log'
     $password = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLowerInvariant()
     $startAttempted = $false
-    $exitHandler = $null
+    $watchdog = $null
     try {
         [void] (New-Item -ItemType Directory -Path $directory)
         if (-not $IsWindows) { [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]'UserRead,UserWrite,UserExecute') }
         [void] (New-Item -ItemType Directory -Path $socket)
         Set-HarnessPrivateFile $passwordFile $password
-        # Best effort for SIGTERM/exit paths that do not run `finally`: stop the server and remove the folder.
-        $exitHandler = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -MessageData @{ Bin = $Bin; Data = $data; Directory = $directory; Root = $TempRoot } -Action {
-            $m = $Event.MessageData
-            try { & (Join-Path $m.Bin 'pg_ctl') stop -D $m.Data -m immediate -t 10 *> $null } catch { }
-            try { if ((Split-Path -Leaf $m.Directory) -match '^pcpg-[0-9a-f]{12}$') { Remove-Item -LiteralPath $m.Directory -Recurse -Force -ErrorAction SilentlyContinue } } catch { }
-        }
+        $watchdog = Start-HarnessNativeWatchdog $PID $directory (Get-HarnessPostgresTool $Bin 'pg_ctl') $data
         $init = Invoke-HarnessNativeCommand (Get-HarnessPostgresTool $Bin 'initdb') @('-D', $data, '-U', 'premierecalendar', '--auth-local=trust', '--auth-host=scram-sha-256', "--pwfile=$passwordFile", '-E', 'UTF8', '--no-sync') -TimeoutSeconds 120
         if ($init.ExitCode -ne 0) { throw "initdb failed (exit $($init.ExitCode)): $($init.Output.Trim())" }
         $ready = $false
@@ -720,6 +739,6 @@ function Invoke-HarnessWithNativePostgres([string] $Bin, [scriptblock] $Body, [i
         if (Test-Path -LiteralPath $directory) {
             if (-not (Remove-HarnessNativePostgresDirectory $directory $TempRoot)) { [Console]::Error.WriteLine("The disposable PostgreSQL folder could not be removed: $directory") }
         }
-        if ($exitHandler) { Unregister-Event -SourceIdentifier PowerShell.Exiting -ErrorAction SilentlyContinue; Remove-Job -Id $exitHandler.Id -Force -ErrorAction SilentlyContinue }
+        if ($watchdog) { try { if (-not $watchdog.HasExited) { $watchdog.Kill() } } catch { } finally { $watchdog.Dispose() } }
     }
 }
