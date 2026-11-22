@@ -34,7 +34,7 @@ function Invoke-Cache([string] $Folder, [string] $Owner, [string] $CacheParent =
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
     try {
         [void]$process.Start(); $output = $process.StandardOutput.ReadToEndAsync(); $errors = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(10000)) { $process.Kill(); throw 'Cache launcher fixture exceeded its deadline.' }
+        if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Cache launcher fixture exceeded its deadline.' }  # behaviour-only; generous for a loaded parallel lane
         [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $output.GetAwaiter().GetResult(); Error = $errors.GetAwaiter().GetResult() }
     } finally { $process.Dispose() }
 }

@@ -25,7 +25,8 @@
 
 Normal flow: `pwsh -NoProfile -File ./eng/Invoke-Validation.ps1 -Changed` runs the
 static checks that cover what changed and lists (or, with `-Run` on the Windows
-builder, runs) the scoped app commands; `./eng/Invoke-StaticChecks.ps1` runs the
+builder, runs) the scoped app commands, narrowed by test impact selection to the
+test classes that reference the changed types (`-FullSuites` only when needed); `./eng/Invoke-StaticChecks.ps1` runs the
 whole portable static lane in parallel (Windows and macOS). Releases run steps 2-7
 with `eng/release/Invoke-LocalGates.ps1`. Preview application work with
 `pwsh -NoProfile -File ./eng/wsl-docker.ps1 check -Project App -Plan`; the full
@@ -72,6 +73,15 @@ service/browser commands are in [Testing](docs/Testing.md#local-only-execution).
   separate build directory. Only one development stack can bind the default
   ports at a time. Worktree Compose names isolate containers/volumes but do not
   grant permission to reset another stack or copy its secrets/database.
+- Speed and test-minimisation rules (enforced by `tests/HarnessPolicy.Tests.ps1`
+  in the static lane): builds and tests read source from the verified
+  ext4 source mirror that the WSL helpers sync from this checkout by content hash (the WSL
+  disk itself lives on D:); never bind-mount the Windows checkout (`/mnt/<drive>`)
+  as build or test source in a script; only the Compose watcher uses the live
+  mount. Identical inputs reuse an earlier passing run; use `-NoCache` only to
+  diagnose. Run narrowed suites for feedback and the complete suites once per
+  release candidate (release step 6); do not rerun full suites, builds or the
+  static lane without a changed input or a concrete reason.
 - Worker budgets default to `auto` (half of the shared engine's CPUs, at least
   two) for the runner container, xUnit threads and MSBuild workers, leaving the
   other half to other tenants; PostgreSQL has its own two-CPU quota. Pass

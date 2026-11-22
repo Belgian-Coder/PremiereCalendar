@@ -173,6 +173,8 @@ Write-NewJson -Path $receipt -Object ([ordered]@{
         resources = [ordered]@{ cpus = $Cpus; maxThreads = $MaxThreads; buildMaxCpuCount = $BuildMaxCpuCount; postgresCpus = 2; timeoutSeconds = $TimeoutSeconds
             resolvedBudget = (@(Get-Content -LiteralPath $log | Where-Object { $_ -match '^PC_TEST_BUDGET ' }) | Select-Object -First 1) }
         storage = [ordered]@{ buildVolume = $localTestPlan.BuildStorage; nugetVolume = $localTestPlan.PackageStorage; wslDistribution = $WslDistribution; cacheFlavor = $localTestPlan.CacheFlavor }
-        testedSourceFingerprintsSha256 = $fingerprintHash; summarySource = $(if ($SummaryJson) { 'supplied -SummaryJson' } else { 'CTRF/log files of the runner' }) })
+        testedSourceFingerprintsSha256 = $fingerprintHash; summarySource = $(if ($SummaryJson) { 'supplied -SummaryJson' } else { 'CTRF/log files of the runner' })
+        # The runner reuses an earlier passing run only for byte-identical sources, image and selection; record it.
+        reusedResults = [bool](Select-String -LiteralPath $log -Pattern '^REUSED passing results from ' -Quiet) })
 $summary | ForEach-Object { Write-Host ("{0}: {1} passed, {2} failed, {3} skipped" -f $_.suite, $_.passed, $_.failed, $_.skipped) }
 if (@($summary | Where-Object { $_.failed -ne 0 -or $_.passed -lt 1 }).Count -gt 0) { throw 'A suite has failures or no passed cases; see test-summary.json.' }

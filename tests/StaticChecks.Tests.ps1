@@ -51,7 +51,7 @@ try {
     $pwshPath = Get-PwshExecutable
     Assert-Static ((Test-Path -LiteralPath $pwshPath -PathType Leaf) -and [IO.Path]::GetFileNameWithoutExtension($pwshPath) -eq 'pwsh') "The child pwsh executable does not exist: $pwshPath"
     $only = Select-StaticChecks $table @('Harness*', 'Docs') @('HarnessCacheRoot')
-    Assert-Static ((($only.Name | Sort-Object) -join ',') -eq 'Docs,Harness,HarnessProcess') '-Only/-Exclude wildcards selected the wrong checks.'
+    Assert-Static ((($only.Name | Sort-Object) -join ',') -eq 'Docs,Harness,HarnessPolicy,HarnessProcess') '-Only/-Exclude wildcards selected the wrong checks.'
     $failed = $false; try { Select-StaticChecks $table @('NoSuchCheck') $null | Out-Null } catch { $failed = $true }
     $commaOnly = Select-StaticChecks $table @('Harness,Docs') @('HarnessCacheRoot,HarnessProcess')
     Assert-Static ((@($commaOnly.Name | Sort-Object) -join ',') -ceq 'Docs,Harness') 'A comma-separated -Only/-Exclude list (as pwsh -File delivers it) is split into names.'

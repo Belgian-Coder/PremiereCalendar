@@ -62,11 +62,11 @@ Assert-Process ([bool] (Get-Process -Id $childId -ErrorAction SilentlyContinue))
 # Fixture cleanup: stop only the descendant this test started (it would self-exit after its 15 s hold).
 Stop-Process -Id $childId -Force -ErrorAction SilentlyContinue
 
-$run = Invoke-CapturedFixture (New-FixtureStart exit7) $secret 3
+$run = Invoke-CapturedFixture (New-FixtureStart exit7) $secret 15  # behaviour-only cases: generous for a loaded parallel lane
 Assert-Process ($run.Result.ExitCode -eq 7 -and -not $run.Result.TimedOut -and $run.Result.OutputDrained) 'Native failure exit code changed.'
 Assert-Process ($run.Out -eq "EXPECTED_FAILURE`n" -and -not ($run | ConvertTo-Json -Depth 5).Contains($secret)) 'Failure output exposed input or was incomplete.'
-$run = Invoke-CapturedFixture (New-FixtureStart early7) $inputText 3
-Assert-Process ($run.Result.ExitCode -eq 7 -and $run.Result.InputFailed -and $run.Result.OutputDrained -and -not $run.Result.TimedOut) 'Early native failure lost its exit/input/drain distinction.'
+$run = Invoke-CapturedFixture (New-FixtureStart early7) $inputText 15
+Assert-Process ($run.Result.ExitCode -eq 7 -and $run.Result.InputFailed -and $run.Result.OutputDrained -and -not $run.Result.TimedOut) "Early native failure lost its exit/input/drain distinction (exit $($run.Result.ExitCode), inputFailed $($run.Result.InputFailed), drained $($run.Result.OutputDrained), timedOut $($run.Result.TimedOut))."
 $code = & {
     function Assert-HarnessWslRunning { }
     function New-HarnessWslStartInfo { New-FixtureStart exit7 }

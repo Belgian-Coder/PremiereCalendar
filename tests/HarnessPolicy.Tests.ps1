@@ -1,0 +1,63 @@
+#Requires -Version 7.0
+# Enforces the harness speed and test-minimisation policy so a new session cannot silently fall back to slow or
+# redundant paths: source mounts go through the verified ext4 mirror, identical passing runs are reused, change-aware
+# validation narrows tests, release steps 2-7 run through Invoke-LocalGates, and AGENTS.md keeps teaching all of it.
+# No WSL, Docker, SDK or network is used; plans are evaluated with -Plan only.
+[CmdletBinding()]
+param()
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$count = 0
+function Assert-Policy([bool] $Condition, [string] $Message) {
+    if (-not $Condition) { throw "Harness policy violated: $Message" }
+    $script:count++
+}
+function Read-Repo([string] $Relative) { [IO.File]::ReadAllText((Join-Path $root $Relative)) }
+
+# 1. No script may bind-mount the Windows checkout (/mnt/<drive> or the converted checkout path) as build/test source.
+#    Allowed /src sources: the mirror variable ($pc_src / __SRC__) and WSL-native staging folders. The Compose watcher is
+#    the documented exception (dotnet watch needs live edits).
+$sourceMount = [regex] '-v\s+(?<source>[^\s]+?):/src(?=[\s:"''`]|$)'
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root 'eng') -Recurse -File -Include '*.ps1', '*.sh') {
+    $relative = [IO.Path]::GetRelativePath($root, $file.FullName).Replace('\', '/')
+    foreach ($match in $sourceMount.Matches([IO.File]::ReadAllText($file.FullName))) {
+        $source = $match.Groups['source'].Value
+        $allowed = $source -match 'pc_src|__SRC__|\$\(ConvertTo-ShellQuoted \$staging\)'
+        Assert-Policy $allowed "$relative mounts '$source' as /src; build and test sources must come from the verified ext4 mirror (Sync in eng/Harness.Common.ps1)."
+    }
+    Assert-Policy (-not ([IO.File]::ReadAllText($file.FullName) -match '/mnt/[a-z]/[^\s"'']*:/src')) "$relative bind-mounts a /mnt/<drive> path as /src."
+}
+Assert-Policy ((Read-Repo 'compose.dev.yaml') -match '\./:/src') 'The Compose watcher exception moved; review this policy.'
+
+# 2. Defaults of the WSL helpers: mirror source and the passing-result cache (plans only; no WSL is invoked).
+$testPlan = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -Plan
+Assert-Policy ($testPlan.SourceMount -eq 'Mirror') 'Test-WithPostgres no longer defaults to the ext4 source mirror.'
+Assert-Policy ([string]$testPlan.SourceStorage -like 'wsl:*mirror*') 'Test-WithPostgres plan does not report the mirror storage.'
+$testText = Read-Repo 'eng/Test-WithPostgres.ps1'
+Assert-Policy ($testText -match '\[switch\]\s*\$NoCache' -and $testText -match 'REUSED passing results') 'Test-WithPostgres lost the passing-result cache (or its -NoCache opt-out).'
+$rosterPlan = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Plan
+Assert-Policy ($testPlan.Cpus -eq 'auto' -and $testPlan.BuildMaxCpuCount -eq 'auto' -and $testPlan.TimeoutSeconds -eq 1500 -and $rosterPlan.TimeoutSeconds -eq 3300) 'Test-WithPostgres lost the auto budget or the suite-scaled deadline.'
+$checkPlan = & (Join-Path $root 'eng/wsl-docker.ps1') check -Project App -Plan
+Assert-Policy ([string]$checkPlan.Command -match '__SRC__|pc_src' -and [string]$checkPlan.Command -match 'maxcpucount:\$pc_budget') 'wsl-docker check no longer builds from the mirror with the auto budget.'
+
+# 3. Change-aware validation narrows tests and never adds a redundant app build before a test run.
+. (Join-Path $root 'eng/StaticChecks.Common.ps1')
+Assert-Policy ([bool](Get-Command Get-TestImpact -ErrorAction SilentlyContinue)) 'Invoke-Validation lost test impact selection.'
+$validationText = Read-Repo 'eng/Invoke-Validation.ps1'
+Assert-Policy ($validationText -match 'FullSuites' -and $validationText -match 'Get-TestImpact|TestImpact') 'Invoke-Validation no longer narrows tests by impact by default.'
+$appAndSuites = @(Get-AppFollowUpCommands ([pscustomobject]@{ BuildApp = $true; Suites = @('Unit') }) $root)
+Assert-Policy (@($appAndSuites | Where-Object { ($_.Arguments -join ' ') -match '^check -Project App$' }).Count -eq 0) 'A separate App build runs before a test run that already compiles the app.'
+
+# 4. Release: steps 2-7 through the orchestrator, release tests record result reuse, candidates default to auto.
+Assert-Policy (Test-Path -LiteralPath (Join-Path $root 'eng/release/Invoke-LocalGates.ps1')) 'Invoke-LocalGates.ps1 is missing.'
+Assert-Policy ((Read-Repo 'eng/release/Invoke-ReleaseTests.ps1') -match 'reusedResults') 'The release test receipt does not record result reuse.'
+Assert-Policy ((Read-Repo 'eng/release/Invoke-Candidate.ps1') -match "\`$Jobs = 'auto'") 'Invoke-Candidate no longer defaults to the auto budget.'
+
+# 5. A new session learns the policy: AGENTS.md (loaded natively by Codex and Claude Code) must keep these rules.
+$agents = (Read-Repo 'AGENTS.md') -replace '\s+', ' '
+foreach ($phrase in @('Invoke-Validation.ps1 -Changed', 'Invoke-StaticChecks.ps1', 'Invoke-LocalGates', 'ext4 source mirror', 'NoCache', 'impact', 'once per release candidate', 'auto')) {
+    Assert-Policy ($agents.Contains($phrase)) "AGENTS.md no longer mentions '$phrase'."
+}
+
+Write-Host "$count harness policy checks passed; no WSL, Docker or SDK was used."
