@@ -198,7 +198,7 @@ work by absolute path from any folder and have no Windows-only dependency.
 #### One command
 
 ```powershell
-# Everything the portable lane covers, concurrently, one summary (about 90 s instead of about 6 min)
+# Everything the portable lane covers, concurrently, one summary (see the measurement below)
 pwsh -NoProfile -File ./eng/Invoke-StaticChecks.ps1
 # Only what your change can affect (docs, eng/tests scripts, app code), see below
 pwsh -NoProfile -File ./eng/Invoke-Validation.ps1 -Changed
@@ -265,6 +265,14 @@ file is missing from it):
 | `SourceFingerprints` | `tests/test_source_fingerprints.py` | exact source/blob fingerprint verification |
 | `ReviewInputs` | `tests/test_review_inputs.py` | review-input inventory and binding |
 | `GitDiffCheck` | `git diff --check HEAD` | whitespace errors in staged and unstaged changes |
+
+Measured on WINDOWS11-VM (12 vCPU, shared with other validation runs, so absolute times are noisy): three alternating
+runs of the same 15 checks took 118.7, 125.0 and 88.5 seconds wall with the default throttle versus 370.4, 273.0 and
+214.0 seconds with `-ThrottleLimit 1` (medians 118.7 versus 273.0 seconds; the first serial run matches the 362-second
+baseline of the former one-command-per-check list). All six runs passed every check. The parallel floor is the slowest check
+(`Harness` or `HarnessCacheRoot`, 85-110 seconds alone). A documentation-only change through
+`Invoke-Validation.ps1 -Changed` took 4.1 seconds (`Docs` plus `GitDiffCheck`) and one new `eng` script 4.1 seconds
+(`ScriptSyntax`, `Docs`, `GitDiffCheck`). This measures static feedback only, not application or release speed.
 
 Each script can still be run alone with `pwsh -NoProfile -File <path>`
 (`python -B <path>` for the two Python tests); pass `-PythonExecutable <path>` to
