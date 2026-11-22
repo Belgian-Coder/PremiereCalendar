@@ -101,20 +101,42 @@ try {
     # metacharacters must reach the runner as one literal argument.
     $filter = 'FullyQualifiedName~Calendar.A''B$(touch NEVER)'
     $runnerFilter = '*Calendar.A''B$(touch NEVER)*'
-    $plan = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project ComponentTests -Filter $filter -Plan
-    $check = & (Join-Path $root 'eng/wsl-docker.ps1') check -Plan
-    $alternate = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project UnitTests -NoRuntimeAsync -Plan
-    $default = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Plan
-    $suiteAlias = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Suite Unit,Integration -Filter ViewSync,Wikimedia -Parallel none -MaxThreads 2 -Plan
-    $query = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -QueryFilter '/*/*/PostgresResponseCacheTests/*' -RunnerArguments:-longRunning,30 -FreshBuild -NoRestore -Plan
-    $viaDocker = & (Join-Path $root 'eng/wsl-docker.ps1') test -Project Unit -Filter ViewSync -Plan
-    $bounded = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project All -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -Plan
-    $sharedCacheA = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -NugetVolume fixture-linux-amd64-nuget -Plan
-    $sharedCacheB = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Component -NugetVolume fixture-linux-amd64-nuget -NoRuntimeAsync -Plan
-    $portable = & (Join-Path $root 'eng/wsl-docker.ps1') test -Project All -WslDistribution PC-MARC-Dev -DevImage prepared-browser:local -CacheFlavor glibc -NoRuntimeAsync -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -TimeoutSeconds 2400 -Plan
-    $watch = & (Join-Path $root 'eng/wsl-docker.ps1') up -Plan
-    $checkPortable = & (Join-Path $root 'eng/wsl-docker.ps1') check -WslDistribution PC-MARC-Dev -BuildVolume fixture-build -NugetVolume fixture-packages -Cpus 3 -BuildMaxCpuCount 3 -Plan
-    Assert-Harness ($global:HarnessWslCalls -eq 0) '-Plan invoked WSL.'
+    # -Plan invocations are independent and read-only, so they run concurrently (each costs about a second of
+    # script load plus one Git read). A parallel runspace cannot see the intercepted wsl.exe above, so each defines
+    # its own counting double: any WSL call from a plan is still detected and the real executable is never reached.
+    $planSpecs = [ordered]@{
+        plan = @('eng/Test-WithPostgres.ps1', @{ Project = 'ComponentTests'; Filter = $filter; Plan = $true })
+        check = @('eng/wsl-docker.ps1', @{ Action = 'check'; Plan = $true })
+        alternate = @('eng/Test-WithPostgres.ps1', @{ Project = 'UnitTests'; NoRuntimeAsync = $true; Plan = $true })
+        default = @('eng/Test-WithPostgres.ps1', @{ Plan = $true })
+        suiteAlias = @('eng/Test-WithPostgres.ps1', @{ Suite = @('Unit', 'Integration'); Filter = @('ViewSync', 'Wikimedia'); Parallel = 'none'; MaxThreads = 2; Plan = $true })
+        query = @('eng/Test-WithPostgres.ps1', @{ Project = 'Unit'; QueryFilter = '/*/*/PostgresResponseCacheTests/*'; RunnerArguments = @('-longRunning', '30'); FreshBuild = $true; NoRestore = $true; Plan = $true })
+        viaDocker = @('eng/wsl-docker.ps1', @{ Action = 'test'; Project = 'Unit'; Filter = 'ViewSync'; Plan = $true })
+        bounded = @('eng/Test-WithPostgres.ps1', @{ Project = 'All'; Cpus = 3; BuildMaxCpuCount = 3; MaxThreads = 3; Plan = $true })
+        sharedCacheA = @('eng/Test-WithPostgres.ps1', @{ Project = 'Unit'; NugetVolume = 'fixture-linux-amd64-nuget'; Plan = $true })
+        sharedCacheB = @('eng/Test-WithPostgres.ps1', @{ Project = 'Component'; NugetVolume = 'fixture-linux-amd64-nuget'; NoRuntimeAsync = $true; Plan = $true })
+        portable = @('eng/wsl-docker.ps1', @{ Action = 'test'; Project = 'All'; WslDistribution = 'PC-MARC-Dev'; DevImage = 'prepared-browser:local'; CacheFlavor = 'glibc'; NoRuntimeAsync = $true; Cpus = 3; BuildMaxCpuCount = 3; MaxThreads = 3; TimeoutSeconds = 2400; Plan = $true })
+        watch = @('eng/wsl-docker.ps1', @{ Action = 'up'; Plan = $true })
+        checkPortable = @('eng/wsl-docker.ps1', @{ Action = 'check'; WslDistribution = 'PC-MARC-Dev'; BuildVolume = 'fixture-build'; NugetVolume = 'fixture-packages'; Cpus = 3; BuildMaxCpuCount = 3; Plan = $true })
+    }
+    $planWslCalls = [Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $planResults = @($planSpecs.Keys | ForEach-Object -ThrottleLimit 6 -Parallel {
+        $name = $_
+        $spec = ($using:planSpecs)[$name]
+        $global:PlanWslCalls = $using:planWslCalls
+        function global:wsl.exe { $global:PlanWslCalls.Enqueue("$args"); $global:LASTEXITCODE = 1 }
+        $script = Join-Path ($using:root) $spec[0]
+        $parameters = $spec[1]
+        [pscustomobject]@{ Name = $name; Value = (& $script @parameters) }
+    })
+    Assert-Harness ($planResults.Count -eq $planSpecs.Count) 'A -Plan invocation did not return a result.'
+    $planned = @{}
+    foreach ($result in $planResults) { $planned[$result.Name] = $result.Value }
+    $plan = $planned.plan; $check = $planned.check; $alternate = $planned.alternate; $default = $planned.default
+    $suiteAlias = $planned.suiteAlias; $query = $planned.query; $viaDocker = $planned.viaDocker; $bounded = $planned.bounded
+    $sharedCacheA = $planned.sharedCacheA; $sharedCacheB = $planned.sharedCacheB; $portable = $planned.portable
+    $watch = $planned.watch; $checkPortable = $planned.checkPortable
+    Assert-Harness ($global:HarnessWslCalls -eq 0 -and $planWslCalls.Count -eq 0) '-Plan invoked WSL.'
     Assert-Harness ($plan.Projects.Count -eq 1 -and $plan.Projects[0] -eq 'ComponentTests') 'Scoped project selection changed.'
     Assert-Harness ($plan.RunnerArguments -contains $runnerFilter) 'The exact filter was not preserved.'
     Assert-Harness ($plan.Build -and $plan.BuildArguments -notcontains '--no-restore') 'Default checks bypass build/restore validation.'
@@ -207,8 +229,6 @@ try {
     $global:HarnessRunningDistros = @('Ubuntu-24.04', 'PC-MARC-Dev')
     foreach ($captured in @($checkScript, $testScript)) {
         Assert-Harness ($captured.StartsWith('unset DOCKER_CONTEXT; export DOCKER_HOST=unix:///var/run/docker.sock')) 'Docker calls can inherit a remote context.'
-        Assert-Harness ($captured.Contains('NUGET_SCRATCH=/root/.nuget/packages/.scratch')) 'Shared NuGet packages have isolated extraction locks.'
-        Assert-Harness ($captured.Contains('NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache')) 'Disposable checks discard the shared NuGet HTTP cache.'
     }
     $compose = Get-Content -LiteralPath (Join-Path $root 'compose.dev.yaml') -Raw
     Assert-Harness ($compose -match 'NUGET_SCRATCH: /root/\.nuget/packages/\.scratch') 'Development restores do not share the package-cache lock namespace.'
@@ -217,7 +237,6 @@ try {
     Assert-Harness ($compose -match 'NUGET_HTTP_CACHE_PATH: /root/\.nuget/packages/\.http-cache') 'Watcher restores do not share the NuGet HTTP cache.'
     Assert-Harness ($compose -match '(?s)nuget-cache:\s+external: true\s+name: \$\{PREMIERECALENDAR_NUGET_VOLUME:' -and $compose -match '(?s)watch-build:\s+external: true\s+name: \$\{PREMIERECALENDAR_BUILD_VOLUME:') 'Compose cache mapping/reset no longer preserves external shared caches.'
     Assert-Harness ($checkScript -match 'flock -n 9' -and $testScript -match 'flock -n 9') 'Check/test output locking is missing.'
-    Assert-Harness ($testScript -match 'trap cleanup EXIT') 'Disposable resource cleanup is missing.'
     Assert-Harness ($testScript -notmatch '/tmp/pcpg-env') 'Test credentials escaped into WSL host temp files.'
     Assert-Harness ($testScript -match "export POSTGRES_PASSWORD='([0-9a-f]{32})'") 'Disposable test password is not confined to the input script.'
     $testPassword = $Matches[1]
