@@ -25,6 +25,10 @@ projects, runner arguments and output paths without invoking WSL or Docker.
   pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit -Parallel none
   pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit -MaxThreads 2 -RunnerArguments:-longRunning,30
 
+On macOS and Linux the same command runs the NATIVE feedback lane instead of WSL/Docker (see -Lane): the host's .NET SDK
+builds and runs the suites against a throwaway PostgreSQL started from local binaries (initdb in a temporary folder, stopped and
+deleted on exit). It is feedback only, never release acceptance, refuses the Browser suite and installs nothing.
+
 Lists (-Project, -Filter, -RunnerArguments) are comma separated, also when the script is started with `pwsh -File`:
 -Project Unit,Component.
 
@@ -129,6 +133,14 @@ Explicit WSL distribution (default Ubuntu-24.04); PC-MARC uses PC-MARC-Dev.
 
 .PARAMETER CacheFlavor
 Linux ABI for build isolation: musl (default image) or glibc. Required with a custom prepared -DevImage.
+
+.PARAMETER Lane
+Auto (default) runs WSL/Docker on Windows and the native lane on macOS/Linux. Native or Wsl force a lane (plans and tests).
+The release scripts never use Native.
+
+.PARAMETER PostgresBin
+Native lane only: folder with initdb, pg_ctl, postgres and psql. Default: /opt/homebrew/opt/postgresql@18/bin, then
+/usr/local/opt/postgresql@18/bin, then pg_ctl on PATH. Nothing is installed when none is found; the run is refused.
 
 .PARAMETER Plan
 Prints the plan (projects, build and runner arguments, storage, results folder, images) and returns without invoking

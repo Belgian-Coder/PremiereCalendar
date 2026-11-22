@@ -16,6 +16,8 @@ foreach ($script in Get-ChildItem (Join-Path $root 'eng') -Filter '*.ps1') {
     [void][Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$parseErrors)
     Assert-Harness ($parseErrors.Count -eq 0) "PowerShell parse failure: $($script.Name)"
 }
+# The WSL lane's plans and intercepted fixtures are exercised on every host; macOS/Linux would otherwise resolve the native lane.
+$env:PC_HARNESS_LANE = 'Wsl'
 $context = Get-HarnessContext $root
 Assert-Harness ((Get-HarnessStorage $context).BuildVolume -match '^pc-[0-9a-f]{10}-[0-9a-f]{10}-linux-amd64-musl-async-check$') 'Build storage lost its owned checkout/ABI/mode/lane identity.'
 $common = & git -C $root rev-parse --path-format=absolute --git-common-dir

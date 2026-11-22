@@ -30,6 +30,7 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root 'eng') -Recurse -F
 }
 Assert-Policy ((Read-Repo 'compose.dev.yaml') -match '\./:/src') 'The Compose watcher exception moved; review this policy.'
 
+$env:PC_HARNESS_LANE = 'Wsl'   # the WSL helpers' plans are checked on every host (the native lane is checked in 2b)
 # 2. Defaults of the WSL helpers: mirror source and the passing-result cache (plans only; no WSL is invoked).
 $testPlan = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -Plan
 Assert-Policy ($testPlan.SourceMount -eq 'Mirror') 'Test-WithPostgres no longer defaults to the ext4 source mirror.'
@@ -41,6 +42,7 @@ Assert-Policy ($testPlan.Cpus -eq 'auto' -and $testPlan.BuildMaxCpuCount -eq 'au
 $checkPlan = & (Join-Path $root 'eng/wsl-docker.ps1') check -Project App -Plan
 Assert-Policy ([string]$checkPlan.Command -match '__SRC__|pc_src' -and [string]$checkPlan.Command -match 'maxcpucount:\$pc_budget') 'wsl-docker check no longer builds from the mirror with the auto budget.'
 
+$env:PC_HARNESS_LANE = $null
 # 2b. The macOS/Linux lane is NATIVE feedback only: never WSL/Docker, never part of a release, never claimed as acceptance.
 . (Join-Path $root 'eng/Harness.Common.ps1')
 Assert-Policy ((Resolve-HarnessHostLane 'Auto' $false) -eq 'Native' -and (Resolve-HarnessHostLane 'Auto' $true) -eq 'Wsl') 'The host lane decision changed: Windows must use WSL, other hosts the native lane.'

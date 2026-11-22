@@ -218,9 +218,10 @@ try {
     $names = @('PremiereCalendar.UnitTests.WidgetTests.Works', 'PremiereCalendar.UnitTests.WidgetBarTests.Works', 'PremiereCalendar.UnitTests.MyWidgetTests.Works', 'PremiereCalendar.UnitTests.WidgetTestsExtra.Works')
     $matched = @($names | Where-Object { $_ -like ('*' + (ConvertTo-TestClassFilter 'WidgetTests') + '*') })
     Assert-Static ($matched.Count -eq 1 -and $matched[0] -like '*.WidgetTests.Works') 'The class filter matched another class whose name contains it.'
-    $impactCommands = @(Get-TestImpactCommands (Get-Impact @('PremiereCalendar/Services/Widget.cs')) 'C:/repo')
+    $fakeRoot = [IO.Path]::GetFullPath((Join-Path $sandboxParent 'repo'))   # a root that is valid on every host (Join-Path rejects 'C:/' on macOS)
+    $impactCommands = @(Get-TestImpactCommands (Get-Impact @('PremiereCalendar/Services/Widget.cs')) $fakeRoot)
     Assert-Static ($impactCommands.Count -eq 1 -and ($impactCommands[0].Arguments -join ' ') -match '^-Project Unit,Integration -Filter \.IWidgetUserTests\.,\.WidgetConsumerTests\.,\.WidgetTests\.,\.WidgetIntegrationTests\.$') 'The narrowed command must list the suites and the collision-safe class filters.'
-    $mixedCommands = @(Get-TestImpactCommands (Get-Impact @('PremiereCalendar/Services/Popular.cs', 'PremiereCalendar/Components/Shared/WeatherCard.razor')) 'C:/repo')
+    $mixedCommands = @(Get-TestImpactCommands (Get-Impact @('PremiereCalendar/Services/Popular.cs', 'PremiereCalendar/Components/Shared/WeatherCard.razor')) $fakeRoot)
     Assert-Static ($mixedCommands.Count -eq 2 -and ($mixedCommands[0].Arguments -join ' ') -eq '-Project Unit' -and ($mixedCommands[1].Arguments -join ' ') -match '^-Project Component -Filter \.WeatherCardTests\.$') 'Whole-suite and narrowed suites must be separate commands.'
     $runner = & $pwsh -NoProfile -File (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -Filter $impactCommands[0].Arguments[-1] -Plan 2>&1 | Out-String
     Assert-Static ($runner -match '-method, \*\.IWidgetUserTests\.\*' -and $LASTEXITCODE -eq 0) 'The runner did not accept the generated filter in -Plan.'

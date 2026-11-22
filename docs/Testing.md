@@ -198,6 +198,29 @@ Every test case runs in parallel (`ParallelMode.All`, see `tests/*/AssemblyConfi
 
 Hosting tests (`WebApplicationFactory<Program>`, each with a migrated database) are the most expensive fixtures, so a class starts one host through an `IClassFixture` for all of its read-only cases instead of one per test or theory row (`WebApplicationFactoryTests`, `CachedImageEndpointTests`, `ProviderHttpTransportConfigurationTests`). `CachedImageEndpointTests` registers a stub image cache per source URL on the shared host, so cases cannot see each other's stubs. A test that needs its own configuration or stops its host (`StoppingTheHostDisposesItsDatabaseDataSources`) builds a private host; keep that pattern for new hosting tests.
 
+### Native macOS lane
+
+On macOS (and Linux) `eng/Test-WithPostgres.ps1` does not use WSL or Docker: it runs the same suites natively with the host's .NET SDK against a throwaway local PostgreSQL. This is a fast FEEDBACK lane for the MacBook-Pro (arm64); it is not release acceptance. Release builds, the complete regression run, the Browser suite, vulnerability/SBOM scans and the exact-image gates stay on the Windows/WSL linux/amd64 container builder, and no ARM64 release or browser acceptance exists. The release scripts never use the native lane (`tests/HarnessPolicy.Tests.ps1` enforces it). The Windows/WSL path is unchanged: `-Lane Auto` (default) picks WSL on Windows and the native lane everywhere else, and `-Lane Native|Wsl` forces a lane (for plans and tests).
+
+```bash
+# Preview (executes nothing, works without dotnet or PostgreSQL installed): Lane=native, dotnet path and SDK, PostgreSQL bin, build output
+pwsh -NoProfile -File /Users/<user>/Projects/<checkout>/eng/Test-WithPostgres.ps1 -Plan
+
+# Unit + Component + Integration, one suite, a subset: the same switches as the container lane
+pwsh -NoProfile -File /Users/<user>/Projects/<checkout>/eng/Test-WithPostgres.ps1
+pwsh -NoProfile -File /Users/<user>/Projects/<checkout>/eng/Test-WithPostgres.ps1 -Project Unit -Filter ViewSync
+```
+
+Nothing is installed and no service, PATH or profile is touched. The lane resolves `dotnet` (`DOTNET_ROOT`, `PATH`, `/usr/local/share/dotnet`) and requires an SDK that satisfies `global.json` (`dotnet --list-sdks`: same major.minor, not older, no prerelease). It resolves PostgreSQL binaries (`-PostgresBin`, default `/opt/homebrew/opt/postgresql@18/bin`, `/usr/local/opt/postgresql@18/bin`, then `pg_ctl` on `PATH`; `initdb`, `pg_ctl`, `postgres` and `psql` are required) and refuses with a message naming what it tried when either is missing. It builds all selected suites with one `dotnet build` of a generated solution filter (a single suite builds its project), into the isolated output `artifacts/build/native-<os>-<arch>` with the package cache `artifacts/packages/native-<os>-<arch>`, so Linux, Windows and macOS outputs never mix; `-nodeReuse:false` and no shared compiler server mean no build server outlives the run. `auto` budgets are half the CPU count (at least 2, at most 64) for MSBuild workers and xUnit threads.
+
+The throwaway server is `initdb` in a fresh temporary folder (`/tmp/pcpg-<id>`, mode 700): trust authentication on a unix socket inside that folder (readiness probes and `pg_ctl`), SCRAM password authentication on `127.0.0.1` at a free port, a random per-run password that exists only in a mode-600 file in that folder (`PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE`, exactly as in the container lane), `max_connections=300`, and `fsync=off` because the data is disposable. Readiness is polled every 0.1 s under a bounded deadline. A `finally` block stops the server (`pg_ctl stop -m immediate`, then a direct signal if that fails) and then deletes the folder, also when a suite fails or the run is interrupted; the folder is removed only when its name is exactly `pcpg-<12 hex>` directly under the temp directory. The server starts after the build, so a failed build never starts it.
+
+Each suite runs its test executable (or `dotnet <dll>` without an apphost) with the same runner arguments under a deadline derived from `-TimeoutSeconds`, writes `<Suite>.trx`, `<Suite>.ctrf.json` and `<Suite>.log` to `artifacts/test-results/<timestamp>/`, applies the same `Total: 0` guard, prints a per-suite summary and ends with the same `Total wall time: <n> s. Results: <folder>` line. `artifacts/check.lock` is held with an exclusive file handle, so a second check in the same checkout is refused. The passing-result cache follows the container lane's rules. Its key is a SHA-256 over the source manifest of the working tree (path and Git blob id from `git hash-object --stdin-paths`), the SDK version, the runtime identifier and the PostgreSQL version (in place of the dev image id), the lane, suites, filters, `-Parallel`/`-RunnerArguments`, configuration and runtime-async mode. `-NoCache` forces a run and `-NoBuild` neither uses nor records the cache. The Browser suite is refused on this lane (it needs the prepared linux browser image), as are `-WslDistribution`, `-DevImage`, `-SourceMount`, `-BuildVolume`, `-NugetVolume` and `-CacheFlavor`.
+
+`eng/Invoke-Validation.ps1 -Changed -Run` on macOS executes the service-test commands it prints (after impact selection) through this lane and keeps printing the Windows-builder-only commands (`wsl-docker.ps1 check`) as follow-up. Run the lane from a native checkout of committed source and never copy another host's `artifacts`.
+
+Platform finding of the first native run: the application's `CalendarCachePublicationLock` recognises a busy lock file by the Linux and Windows error numbers (11, 32, 33) and not by the macOS value of `EWOULDBLOCK` (35), so five tests that hold or contend for `.publish.lock` (in `FileCalendarCachePartialWeekTests`, `DegradedCalendarCacheTests`, `PostgresPersistenceTests` and `ProviderWorkSchedulerTests`) fail on macOS with an `IOException` until `is 11 or 32 or 33` also accepts 35. The same suites passed natively (1430 unit, 275 component, 614 integration tests) with that one change in a scratch clone; production runs in Linux containers and is unaffected, and the application source was not changed by the harness work.
+
 ## Scoped feedback and output ownership
 
 ### Portable static checks
@@ -380,13 +403,7 @@ against the release's `hashes.sha256`, run from a temporary folder and removed
 afterwards; the Mac has no installed `pwsh`), Python 3.10.9, Git and the stock
 Bash 3.2. Only the three GNU-`timeout` cases were skipped.
 
-macOS ARM64 execution has not been qualified. Static checks are suitable for
-that host, but the WSL build/test helpers and release scripts require a Windows
-builder. The accepted release platform is linux/amd64; a native Mac build or an
-emulated container is not independently established release acceptance. Keep
-editable source native and retain writable caches/results on their owning
-host and worktree, separated by OS/architecture. The existing container caches
-and old WSL prototype remain in place.
+macOS ARM64 runs two things natively: the static lane above and, as a feedback-only lane, the application build and the Unit, Component and Integration suites (see "Native macOS lane" under Run). Neither is release acceptance. The release scripts, the Browser suite and the accepted linux/amd64 artifact stay on the Windows/WSL builder; a native Mac build or an emulated container is not independently established release acceptance. Keep editable source native and retain writable caches/results on their owning host and worktree, separated by OS/architecture. The existing container caches and old WSL prototype remain in place.
 
 ### Scoped application checks
 

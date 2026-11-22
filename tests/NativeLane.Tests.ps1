@@ -19,13 +19,15 @@ function Assert-Throws([scriptblock] $Action, [string] $Pattern, [string] $Messa
     try { & $Action } catch { $text = $_.Exception.Message }
     Assert-Native ($null -ne $text -and $text -match $Pattern) "$Message (got: $text)"
 }
+$savedLane = $env:PC_HARNESS_LANE
+$env:PC_HARNESS_LANE = $null   # the Auto decision below must not be overridden by the caller's environment
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ('pc-native-' + [Guid]::NewGuid().ToString('N').Substring(0, 12))
 [void] (New-Item -ItemType Directory -Path $sandbox)
 try {
     # 1. The OS decision is one function: Windows -> WSL, everything else -> native; a wrong explicit choice is refused.
     Assert-Native ((Resolve-HarnessHostLane 'Auto' $true) -eq 'Wsl') 'Windows must keep the WSL lane.'
     Assert-Native ((Resolve-HarnessHostLane 'Auto' $false) -eq 'Native') 'A non-Windows host must run natively.'
-    Assert-Throws { Resolve-HarnessHostLane 'Wsl' $false } 'Windows host' 'The WSL lane must be refused on a non-Windows host.'
+    Assert-Native ((Resolve-HarnessHostLane 'Wsl' $false) -eq 'Wsl' -and (Resolve-HarnessHostLane 'Native' $true) -eq 'Native') 'An explicit -Lane must win over the host.'
     $platform = Get-HarnessNativePlatform 'macos' 'arm64'
     Assert-Native ($platform.Rid -eq 'osx-arm64' -and $platform.Name -eq 'macos-arm64') 'macOS arm64 platform identity.'
     Assert-Native ((Get-HarnessNativePlatform 'linux' 'x64').Rid -eq 'linux-x64') 'Linux x64 platform identity.'
@@ -123,7 +125,7 @@ try {
     Invoke-HarnessWithNativePostgres '/nonexistent/bin' { param($variables)
         $script:seen = $variables
         $script:passwordFileText = [IO.File]::ReadAllText($variables.PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE)
-        $script:modeText = if ($IsWindows) { 'n/a' } else { [string][IO.File]::GetUnixFileMode($variables.PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE) }
+        $script:modeInt = if ($IsWindows) { 384 } else { [int][IO.File]::GetUnixFileMode($variables.PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE) }
         $script:folder = Split-Path -Parent $variables.PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE
     } -TempRoot $sandbox
     Assert-Native (($script:calls -join ',') -eq 'initdb,pg_ctl-start,psql,pg_ctl-stop') "Unexpected server step order: $($script:calls -join ',')"
@@ -131,7 +133,7 @@ try {
     Assert-Native (-not (Test-Path -LiteralPath $script:folder)) 'The throwaway server folder was not deleted.'
     Assert-Native ($seen.PREMIERECALENDAR_TEST_POSTGRES -match '^Host=127\.0\.0\.1;Port=\d+;Database=postgres;Username=premierecalendar;') 'The connection string differs from the container lane.'
     Assert-Native ($passwordFileText -match '^[0-9a-f]{32}$' -and $seen.PREMIERECALENDAR_TEST_POSTGRES -notmatch $passwordFileText) 'The password must live in the password file only.'
-    Assert-Native ($IsWindows -or $script:modeText -eq 'UserRead, UserWrite') "The password file is not private ($($script:modeText))."
+    Assert-Native ($script:modeInt -eq 384) "The password file is not private (mode $($script:modeInt), expected 0600)."
     # A failing body still stops the server and deletes the folder.
     $script:calls.Clear(); $script:folder = $null
     Assert-Throws { Invoke-HarnessWithNativePostgres '/nonexistent/bin' { param($variables) $script:folder = Split-Path -Parent $variables.PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE; throw 'suite exploded' } -TempRoot $sandbox } 'suite exploded' 'The body failure was swallowed.'
@@ -159,6 +161,7 @@ try {
         Assert-Native ($slow.TimedOut -and $slow.ExitCode -eq 124 -and (Get-Content -LiteralPath $log -Raw) -match 'TIMEOUT') 'A command that exceeds its deadline was not stopped and logged.'
     }
 } finally {
+    $env:PC_HARNESS_LANE = $savedLane
     if ((Split-Path -Leaf $sandbox) -match '^pc-native-[0-9a-f]{12}$' -and (Test-Path -LiteralPath $sandbox)) { Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Write-Host "$count native lane checks passed; no SDK, PostgreSQL, WSL or Docker was used."

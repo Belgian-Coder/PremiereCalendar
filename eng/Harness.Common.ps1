@@ -444,13 +444,14 @@ function Find-HarnessReusableResults([string] $ResultsRoot, [string] $InputsHash
 # ---------------------------------------------------------------------------
 
 # The OS decision lives in one place so tests can force it. Auto: Windows uses WSL/Docker, every other OS runs natively.
+# PC_HARNESS_LANE=Wsl|Native is a test hook that overrides Auto (the Harness tests drive the WSL lane's plans and intercepted
+# fixtures on any host); explicit -Lane values always win. Release scripts never use the native lane (HarnessPolicy.Tests.ps1).
 function Resolve-HarnessHostLane([ValidateSet('Auto', 'Native', 'Wsl')][string] $Requested = 'Auto', [Nullable[bool]] $IsWindowsHost = $null) {
+    if ($Requested -ne 'Auto') { return $Requested }
+    $override = [Environment]::GetEnvironmentVariable('PC_HARNESS_LANE')
+    if ($override -in 'Native', 'Wsl') { return $override }
     $windowsHost = if ($null -ne $IsWindowsHost) { [bool] $IsWindowsHost } else { [bool] $IsWindows }
-    switch ($Requested) {
-        'Auto' { if ($windowsHost) { 'Wsl' } else { 'Native' } }
-        'Wsl' { if (-not $windowsHost) { throw 'The WSL/Docker lane needs a Windows host; this host runs the native lane.' }; 'Wsl' }
-        'Native' { 'Native' }
-    }
+    if ($windowsHost) { 'Wsl' } else { 'Native' }
 }
 
 function Get-HarnessNativePlatform([string] $Os, [string] $Architecture) {
