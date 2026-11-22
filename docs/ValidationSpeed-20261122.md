@@ -3,7 +3,9 @@
 Measured on WINDOWS11-VM (Windows 11, Ubuntu-24.04 WSL Docker engine with 12 CPUs) while
 other projects used the same engine, so single numbers are noisy; comparisons are
 alternating runs or duration sums from CTRF where stated. macOS ARM64 runs the same
-portable static lane (`eng/Invoke-StaticChecks.ps1`) and was not measured here.
+portable static lane (`eng/Invoke-StaticChecks.ps1`); its non-Windows path passed three
+consecutive runs on Linux pwsh 7.7 (73-83 s, see [Testing](Testing.md#portable-static-checks)),
+and a real Mac run is still outstanding.
 
 | # | Iteration | Before | After |
 | --- | --- | --- | --- |

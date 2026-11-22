@@ -314,6 +314,16 @@ and continues checking source files, anchors, maintained documents and script
 references. It does not establish that the historical tests ran. Use the strict
 check on the evidence-owning host when checking those links is required.
 
+The non-Windows path of the portable lane was exercised on 22 November 2026 on
+Linux (PowerShell 7.7 installed as a .NET global tool, Python 3.14, BusyBox
+userland) as the closest available stand-in for macOS: three consecutive runs
+of all 17 checks passed in 73-83 seconds. That run found and fixed three
+portability bugs (child `pwsh` resolution for tool installs, hidden dotfiles
+outside Windows, a load-sensitive pipe budget). Without GNU coreutils
+`timeout` (BusyBox, stock macOS) the three real-timeout cleanup cases of
+`Harness.Tests.ps1` are skipped with a warning. A real Mac run is still
+outstanding; note that stock macOS ships Bash 3.2.
+
 macOS ARM64 execution has not been qualified. Static checks are suitable for
 that host, but the WSL build/test helpers and release scripts require a Windows
 builder. The accepted release platform is linux/amd64; a native Mac build or an
