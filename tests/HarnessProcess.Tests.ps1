@@ -40,7 +40,7 @@ function Invoke-CapturedFixture($Start, [string] $Text, [double] $Seconds) {
 $secret = [guid]::NewGuid().ToString('N')
 $inputText = $secret + ('x' * 524288)
 $start = New-FixtureStart duplex
-$run = Invoke-CapturedFixture $start $inputText 10
+$run = Invoke-CapturedFixture $start $inputText 30  # success-only check; generous for a fully loaded parallel lane
 Assert-Process ($run.Result.ExitCode -eq 0 -and -not $run.Result.TimedOut -and -not $run.Result.InputFailed -and $run.Result.OutputDrained) 'Concurrent pipe/slow-input fixture failed.'
 Assert-Process ($run.Out -eq (('O' * 262144) + "`nSTDOUT_END`nINPUT_BYTES=$([Text.Encoding]::UTF8.GetByteCount($inputText))`n")) 'Stdout was lost, duplicated or changed.'
 Assert-Process ($run.Error -eq (('E' * 262144) + "`nSTDERR_END`n")) 'Stderr was lost, duplicated or changed.'

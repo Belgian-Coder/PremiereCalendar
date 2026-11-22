@@ -121,7 +121,7 @@ try {
             Reject-Hint { Get-HarnessContext $clone } 'Empty-array protocol identity was accepted as a scalar.'
             $marker[$key] = $oldValue; Write-Marker
         }
-        Remove-Item -LiteralPath $markerPath
+        Remove-Item -LiteralPath $markerPath -Force
         Reject-Hint { Get-HarnessContext $clone } 'Missing protocol owner marker was accepted.'
         Write-Marker
         [Environment]::SetEnvironmentVariable('BUILD_RELEASE_PROJECT_ROOT', $sandbox)
@@ -176,13 +176,13 @@ try {
             Reject-Hint { Get-HarnessContext $clone } 'Linked primary root was accepted.'
         } finally { Remove-Item -LiteralPath $link }
         $markerLink = Join-Path $sandbox 'marker.json'
-        Copy-Item -LiteralPath $markerPath -Destination $markerLink
-        Remove-Item -LiteralPath $markerPath
+        Copy-Item -LiteralPath $markerPath -Destination $markerLink -Force
+        Remove-Item -LiteralPath $markerPath -Force
         New-Item -ItemType SymbolicLink -Path $markerPath -Target $markerLink | Out-Null
         try {
             [Environment]::SetEnvironmentVariable('BUILD_RELEASE_PROJECT_ROOT', $primary)
             Reject-Hint { Get-HarnessContext $clone } 'Linked owner marker was accepted.'
-        } finally { Remove-Item -LiteralPath $markerPath; Write-Marker }
+        } finally { Remove-Item -LiteralPath $markerPath -Force; Write-Marker }
         [Environment]::SetEnvironmentVariable('BUILD_RELEASE_PROJECT_ROOT', $primary)
         Assert-Cache ((Get-HarnessContext $clone).ProjectNamespace -eq $normal.ProjectNamespace) 'Refused hints contaminated subsequent valid routing.'
     }
