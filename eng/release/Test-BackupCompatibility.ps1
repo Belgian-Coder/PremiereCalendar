@@ -246,7 +246,9 @@ Get-SchemaState -Path $before
 if ($historical) { $null = Assert-ExistingFixture }
 $connection = 'Host=backup-db;Database=premierecalendar;Username=postgres;GSS Encryption Mode=Disable'
 $networkTarget = if ($historical) { $fixtureObservation.networkId } else { $network }
-[string[]]$pullPolicy = if ($historical) { @('--pull=never') } else { @() }
+# @(if ...) keeps an empty array: a typed assignment of an empty if-branch is $null, and splatting $null passes one
+# empty argument that docker run reads as the image name ("invalid reference format").
+$pullPolicy = @(if ($historical) { '--pull=never' })
 $candidateStarted = $false
 try {
     $candidateOutput = @(Invoke-LocalDocker run @pullPolicy -d --name $app --label "premierecalendar.validation=compat-$($ctx.BundleName)" --network $networkTarget `

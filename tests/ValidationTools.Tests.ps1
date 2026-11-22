@@ -81,6 +81,8 @@ try {
     $syntax = Join-Path $sandbox 'eng/Test-ScriptSyntax.ps1'
     Write-Fixture 'eng/invalid.ps1' 'function Broken {'
     Assert-Rejected { & $syntax } '*script problem*'
+    Write-Fixture 'eng/invalid.ps1' "[string[]]`$pull = if (`$x) { @('--pull=never') } else { @() }"
+    Assert-Rejected { & $syntax } '*script problem*'
     Write-Fixture 'eng/invalid.ps1' '# valid PowerShell'
     Write-Fixture 'eng/one.py' 'value = 1'
     Write-Fixture 'eng/two.py' 'value = 2'

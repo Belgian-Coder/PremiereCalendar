@@ -37,6 +37,13 @@ foreach ($file in $files) {
             $tokens = $null; $parseErrors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors)
             foreach ($e in $parseErrors) { $problems.Add("${relative}:$($e.Extent.StartLineNumber): $($e.Message)") }
+            # A typed array assigned from an if/else whose taken branch is empty is $null, and splatting $null passes
+            # one empty argument (a release step once failed with docker "invalid reference format"). Use $x = @(if ...).
+            $lineNumber = 0
+            foreach ($line in [IO.File]::ReadAllLines($file.FullName)) {
+                $lineNumber++
+                if ($line -match '^\s*\[[A-Za-z.]+\[\]\]\s*\$\w+\s*=\s*if\s*\(') { $problems.Add("${relative}:${lineNumber}: typed array assigned from 'if' becomes `$null when the branch is empty; use `$x = @(if (...) { ... })") }
+            }
         }
         '.py' {
             $pyChecked++
