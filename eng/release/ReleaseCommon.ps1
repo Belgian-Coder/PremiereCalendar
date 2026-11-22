@@ -463,3 +463,15 @@ function Get-NasContainerBaseline {
         [pscustomobject]@{ Name = $container.Name; Id = $container.Id; Image = $container.Image; StartedAt = $container.State.StartedAt; Health = $container.State.Health.Status; Status = $container.State.Status }
     }
 }
+
+function Get-AppDatabaseStartupBlockers {
+    # Settings lines ("KEY=value" environment entries or "KEY: value" Compose lines) that make 1.2.20+ refuse to start:
+    # a non-empty AppDatabase Path (SQLite) or a Provider other than PostgreSql. Returns one message per blocker.
+    param([string[]] $Settings)
+    foreach ($setting in @($Settings | Where-Object { $_ })) {
+        if ($setting -notmatch '^\s*-?\s*["'']?AppDatabase(?:__|:)(Path|Provider)["'']?\s*[:=]\s*(.*?)\s*$') { continue }
+        $key = $Matches[1]; $value = $Matches[2].Trim().Trim('"', "'").Trim()
+        if ($key -eq 'Path' -and $value) { "The live stack still sets AppDatabase Path, which stops this release at startup: $($setting.Trim())" }
+        if ($key -eq 'Provider' -and $value -ne 'PostgreSql') { "The live stack selects AppDatabase Provider '$value', which stops this release at startup (only PostgreSql is supported)." }
+    }
+}

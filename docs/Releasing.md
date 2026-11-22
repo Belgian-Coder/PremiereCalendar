@@ -230,7 +230,7 @@ pwsh -File "$rel\Build-Image.ps1" -Bundle $bundle -ExpectedRevision $commit
 pwsh -File "$rel\Invoke-NuGetAudit.ps1" -Bundle $bundle
 ```
 
-Restores the archived source in the Dockerfile's SDK image and runs `dotnet list package --vulnerable --include-transitive`. The gate is the sentence "has no vulnerable packages" in `release-nuget-audit.log`.
+Restores the archived source in the Dockerfile's SDK image and runs `dotnet list package --vulnerable --include-transitive`. The gate is the sentence "has no vulnerable packages" in `release-nuget-audit.log`; the step also fails when the log contains NU1900 (vulnerability data could not be read from the feed) or NU1901-NU1904, so an unreachable vulnerability feed cannot pass as "no vulnerable packages".
 
 Downloaded packages are kept in the persistent, labelled volume `premierecalendar-release-nuget-packages` (label `premierecalendar.release-cache=nuget`; it is created when missing, holds only downloaded public packages, shares NuGet's extraction locks through `NUGET_SCRATCH` inside the same volume, and is never deleted by a release; NuGet checks a package's hash when it downloads it, not on every later use). The container is otherwise read-only and the NuGet HTTP cache is a tmpfs (`NUGET_HTTP_CACHE_PATH=/tmp/...`), so the vulnerability metadata is fetched fresh in every run. A same-named volume without the label is refused.
 

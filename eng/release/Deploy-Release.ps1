@@ -93,6 +93,16 @@ $stack = Invoke-ReleaseApi -Path "/api/stacks/$($cfg.stackId)"
 $current = Invoke-ReleaseApi -Path "/api/stacks/$($cfg.stackId)/file"
 if ($stack.StackFileVersion -ne $cfg.expectedStackRevision) { throw 'Unexpected current stack revision.' }
 if (([regex]::Matches($current.StackFileContent, [regex]::Escape($old))).Count -ne 1) { throw 'The old app pin is not unique in the stack file.' }
+# Since 1.2.20 the app refuses to start with a SQLite path or a non-PostgreSql provider: refuse before activation
+# instead of crash-looping the new container (stack file, stack Env and the running app container are all checked).
+$appDatabaseSettings = @($current.StackFileContent -split "`r?`n" | Where-Object { $_ -match 'AppDatabase(__|:)(Path|Provider)\b' }) +
+    @($stack.Env | Where-Object { $_.name -match '^AppDatabase(__|:)(Path|Provider)$' } | ForEach-Object { "$($_.name)=$($_.value)" })
+$appContainer = @($before | Where-Object { $_.Name.TrimStart('/') -eq $cfg.appContainer }) | Select-Object -First 1
+if ($appContainer) {
+    $appDatabaseSettings += @((Invoke-ReleaseApi -Path "$endpoint/containers/$($appContainer.Id)/json").Config.Env | Where-Object { $_ -match '^AppDatabase__(Path|Provider)=' })
+}
+$blockers = @(Get-AppDatabaseStartupBlockers $appDatabaseSettings)
+if ($blockers.Count -gt 0) { throw ($blockers -join ' ') }
 $candidateSource = $current.StackFileContent.Replace($old, $new)
 if ($candidateSource.Replace($new, $old) -cne $current.StackFileContent) { throw 'The candidate changes more than the single app pin.' }
 $image = Invoke-ReleaseApi -Path "$endpoint/images/$($cfg.imageTag)/json"

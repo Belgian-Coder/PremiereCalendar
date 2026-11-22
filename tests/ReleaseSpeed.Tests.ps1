@@ -93,6 +93,11 @@ Assert-Speed ($LASTEXITCODE -ne 0 -and -not (Test-Path -LiteralPath (Join-Path $
 $vulnerable = Invoke-Summary (New-ScanFixture 'vulnerable' (New-ScannersJson '2026-11-21T20:00:00Z') -Vulnerable)
 Assert-Speed ($vulnerable.Exit -eq 1 -and $vulnerable.Report -match '"trivyZeroVulnerabilities": false' -and $vulnerable.Report -match '"trivyDbFresh": true') 'A vulnerability no longer fails when the DB is fresh.'
 
+# --- deploy guard: settings that stop 1.2.20+ at startup
+Assert-Speed (@(Get-AppDatabaseStartupBlockers @('      AppDatabase__Provider: PostgreSql', 'AppDatabase__Provider=PostgreSql', 'AppDatabase__PasswordFile=/run/secrets/x', 'AppDatabase__Path=')).Count -eq 0) 'A valid PostgreSQL configuration was reported as a startup blocker.'
+Assert-Speed (@(Get-AppDatabaseStartupBlockers @('      AppDatabase__Path: /app/App_Data/premierecalendar.db')).Count -eq 1) 'A Compose AppDatabase__Path was not reported.'
+Assert-Speed (@(Get-AppDatabaseStartupBlockers @('AppDatabase__Provider=Sqlite', '- "AppDatabase:Provider=Sqlite"')).Count -eq 2) 'A non-PostgreSql provider was not reported.'
+
 # --- concurrent Trivy/Syft script: failure propagation, separate logs, true overlap (bash with a stub docker)
 $bash = $null
 if ($IsWindows) {
