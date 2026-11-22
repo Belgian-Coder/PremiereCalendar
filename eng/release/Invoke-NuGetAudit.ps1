@@ -7,8 +7,8 @@ Step 4: audits the NuGet dependencies of the shipped project for known vulnerabi
 Extracts the verified source archive (not the working folder) into a new directory inside the WSL distribution and
 runs `dotnet restore` plus `dotnet list package --vulnerable --include-transitive` for PremiereCalendar.csproj in
 the Dockerfile's digest-pinned SDK image (read-only root, tmpfs scratch, network only for the restore). Downloaded
-packages are kept in the persistent release volume premierecalendar-release-nuget-packages (NuGet verifies their
-content hashes); the NuGet HTTP cache is tmpfs so every run fetches fresh vulnerability metadata. The full
+packages are kept in the persistent release volume premierecalendar-release-nuget-packages (extraction locks via
+NUGET_SCRATCH in the same volume); the NuGet HTTP cache is tmpfs so every run fetches fresh vulnerability metadata. The full
 output is kept as release-nuget-audit.log; later gates require the sentence "has no vulnerable packages". The
 temporary source copy and the container are removed after a successful run.
 
@@ -55,7 +55,7 @@ mkdir -p $(ConvertTo-ShellQuoted $staging)
 trap 'rm -rf $(ConvertTo-ShellQuoted $staging)' EXIT
 tar -xf $(ConvertTo-ShellQuoted $wslArchive) -C $(ConvertTo-ShellQuoted $staging)
 docker run --rm --name $container --read-only --tmpfs /tmp:rw,size=1536m -v $(ConvertTo-ShellQuoted $staging):/src:rw -v $(ConvertTo-ShellQuoted $packageCache.Name):/nuget-packages:rw \
-  -e DOTNET_CLI_HOME=/tmp/dotnet-home -e NUGET_PACKAGES=/nuget-packages -e NUGET_HTTP_CACHE_PATH=/tmp/nuget-http-cache -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e ArtifactsPath=/tmp/PremiereCalendar.Build \
+  -e DOTNET_CLI_HOME=/tmp/dotnet-home -e NUGET_PACKAGES=/nuget-packages -e NUGET_SCRATCH=/nuget-packages/.scratch -e NUGET_HTTP_CACHE_PATH=/tmp/nuget-http-cache -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e ArtifactsPath=/tmp/PremiereCalendar.Build \
   --entrypoint sh $($cfg.sdkImage) -ec 'dotnet restore /src/PremiereCalendar/PremiereCalendar.csproj && dotnet list /src/PremiereCalendar/PremiereCalendar.csproj package --vulnerable --include-transitive --no-restore' > $(ConvertTo-ShellQuoted $wslLog) 2>&1
 "@
 $exit = Invoke-LocalShell $script

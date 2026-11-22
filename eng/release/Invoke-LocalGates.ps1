@@ -153,7 +153,9 @@ function Get-GateSteps {
             $fingerprintFile, (Join-Path $bundlePath 'test-run.log'), (Join-Path $bundlePath 'test-run.json'),
             (Join-Path $bundlePath 'test-summary.json'), (Join-Path $bundlePath 'tests')) -Validate {
             $rows = @(Get-JsonOrNull (Join-Path $bundlePath 'test-summary.json'))
+            $receipt = Get-JsonOrNull (Join-Path $bundlePath 'test-run.json')
             if ($rows.Count -lt 1 -or @($rows | Where-Object { $_.failed -ne 0 -or $_.passed -lt 1 }).Count -gt 0) { 'test-summary.json records failures or no passed cases' }
+            elseif (-not $receipt -or $receipt.sourceRevision -cne $ExpectedRevision -or @($rows | Where-Object { $_.sourceRevision -cne $ExpectedRevision }).Count -gt 0) { 'the test evidence belongs to another source revision' }
         }
         New-Step 'restore-init' 'Initialize-RestoreCheck (isolated PostgreSQL)' 'Initialize-RestoreCheck.ps1' $b @() 'io'
         New-Step 'restore' 'Restore-Backup (fresh dump into the isolated database)' 'Restore-Backup.ps1' $restoreArgs @('restore-init') 'io' @(
@@ -163,14 +165,20 @@ function Get-GateSteps {
         }
         New-Step 'build' 'Build-Image (exact source archive, docker save)' 'Build-Image.ps1' $testArgs[0..3] @() 'io' @(
             (Join-Path $bundlePath "source-$v.tar"), (Join-Path $bundlePath 'source-archive-verification.json'),
-            (Join-Path $bundlePath "premierecalendar-$v.tar"), (Join-Path $bundlePath 'build.log'), (Join-Path $bundlePath 'build-metadata.json'))
+            (Join-Path $bundlePath "premierecalendar-$v.tar"), (Join-Path $bundlePath 'build.log'), (Join-Path $bundlePath 'build-metadata.json')) -Validate {
+            # A build made outside this graph is only reused when it is bound to the same revision and tested bytes.
+            $m = Get-JsonOrNull (Join-Path $bundlePath 'build-metadata.json')
+            if (-not $m -or $m.sourceRevision -cne $ExpectedRevision) { 'build-metadata.json belongs to another source revision' }
+            elseif (-not (Test-Path -LiteralPath $fingerprintFile) -or $m.testedSourceFingerprintsSha256 -cne (Get-FileHash -LiteralPath $fingerprintFile -Algorithm SHA256).Hash.ToLowerInvariant()) { 'the build is not bound to the tested source fingerprints' }
+        }
         New-Step 'nuget-audit' 'Invoke-NuGetAudit' 'Invoke-NuGetAudit.ps1' $b @('build') 'io' @((Join-Path $bundlePath 'release-nuget-audit.log')) -Validate {
             if (-not (Select-String -LiteralPath (Join-Path $bundlePath 'release-nuget-audit.log') -Pattern 'has no vulnerable packages' -Quiet)) { 'release-nuget-audit.log does not report "has no vulnerable packages"' }
         }
         New-Step 'scans' 'Invoke-Scans (Trivy, Syft SBOM, archive audit)' 'Invoke-Scans.ps1' $scanArgs @('nuget-audit') 'io' @(
             (Join-Path $bundlePath "release-$v-trivy.json"), (Join-Path $bundlePath "release-$v-sbom.cdx.json"), (Join-Path $bundlePath "release-$v-audit.json"),
             (Join-Path $bundlePath "release-$v-scan-summary.json"), (Join-Path $bundlePath "release-$v-scanners.json"),
-            (Join-Path $bundlePath 'release-trivy.log'), (Join-Path $bundlePath 'release-syft.log'), (Join-Path $privatePath 'image-inspect.json')) -Validate {
+            (Join-Path $bundlePath 'release-trivy.log'), (Join-Path $bundlePath 'release-syft.log'), (Join-Path $bundlePath "release-$v-trivy-db-metadata.json"),
+            (Join-Path $privatePath 'image-inspect.json')) -Validate {
             $s = Get-JsonOrNull (Join-Path $bundlePath "release-$version-scan-summary.json")
             if (-not $s -or $s.allChecksPass -ne $true) { "release-$version-scan-summary.json does not record allChecksPass" }
         }

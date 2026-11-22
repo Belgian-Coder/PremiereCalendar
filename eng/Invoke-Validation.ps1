@@ -57,6 +57,11 @@ if ($Plan) { Write-Host 'Plan only: nothing was run.'; return }
 
 $python = Resolve-StaticPython $PythonExecutable $selected
 $commands = @($selected | ForEach-Object { ConvertTo-StaticCheckCommand $_ $root $python })
+if (-not $All) {
+    # With -Changed, check whitespace of everything since the merge-base (committed and uncommitted), not only HEAD.
+    $mergeBase = (& git -C $root merge-base HEAD $Base).Trim()
+    foreach ($c in $commands) { if ($c.Name -eq 'GitDiffCheck') { $c.Arguments = [string[]]@('diff', '--check', $mergeBase) } }
+}
 $logs = Join-Path $root ('artifacts/static-checks/' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + $PID)
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $results = Invoke-StaticCheckSet $commands $logs $ThrottleLimit $TimeoutSeconds

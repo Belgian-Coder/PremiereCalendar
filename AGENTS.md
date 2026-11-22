@@ -62,10 +62,12 @@ service/browser commands are in [Testing](docs/Testing.md#local-only-execution).
   separate build directory. Only one development stack can bind the default
   ports at a time. Worktree Compose names isolate containers/volumes but do not
   grant permission to reset another stack or copy its secrets/database.
-- Start shared-host qualification with two runner CPUs, two xUnit threads and
-  two MSBuild workers (`-Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2`). PostgreSQL
-  has its own two-CPU quota. The release runner defaults to these budgets and
-  records them; benchmark changes to scheduling without removing tests or gates.
+- Worker budgets default to `auto` (half of the shared engine's CPUs, at least
+  two) for the runner container, xUnit threads and MSBuild workers, leaving the
+  other half to other tenants; PostgreSQL has its own two-CPU quota. Pass
+  `-Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2` to throttle on a busy host. The
+  release runner records the requested and resolved budgets; benchmark
+  scheduling changes without removing tests or gates.
 - Scoped feedback is not release acceptance. Preserve the complete regression,
   browser timing, vulnerability, SBOM and exact-image runtime gates documented
   in `docs/Testing.md` and `docs/DockerAndPostgres.md`. Never publish or deploy

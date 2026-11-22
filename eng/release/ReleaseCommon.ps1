@@ -307,10 +307,12 @@ function Assert-DockerNamesFree {
     foreach ($name in $Volume) { if (Test-LocalDocker volume inspect $name) { throw "Refusing volume name collision: $name" } }
 }
 
-# Release-dedicated, persistent, labelled cache volumes. They hold only public data (the Trivy vulnerability DB,
-# NuGet packages that are content-hash verified by NuGet); they are created when missing and never deleted by a release.
+# Release-dedicated, persistent, labelled cache volumes. They hold only public data: the Trivy vulnerability DB (the
+# volume is mounted at Trivy's db directory only, so layer analysis and checks bundles stay in the disposable scanner
+# container and every scan re-analyses the archive) and downloaded NuGet packages. They are created when missing and
+# never deleted by a release.
 $script:ReleaseCacheVolumes = @{
-    'trivy' = 'premierecalendar-release-trivy-cache'
+    'trivy' = 'premierecalendar-release-trivy-db'
     'nuget' = 'premierecalendar-release-nuget-packages'
 }
 $script:ReleaseCacheLabel = 'premierecalendar.release-cache'
@@ -322,14 +324,19 @@ function Get-ReleaseCacheVolume {
 
 function Initialize-ReleaseCacheVolume {
     # Creates the shared cache volume when missing; an existing volume of that name must carry the matching label,
-    # otherwise it is not ours and the step stops instead of mounting it. One inspect answers both questions.
+    # otherwise it is not ours and the step stops instead of mounting it. A failed probe (missing, or a timed-out
+    # client) leads to create, which returns an existing volume unchanged, so the label is checked again afterwards.
     param([Parameter(Mandatory)][ValidateSet('trivy', 'nuget')][string] $Kind)
     $spec = Get-ReleaseCacheVolume $Kind
     $probe = Invoke-ReleaseDockerClient -DockerArguments @('volume', 'inspect', '--format', "{{index .Labels `"$($script:ReleaseCacheLabel)`"}}", $spec.Name) -CallLimit 30 -CaptureOutput -StandardErrorWriter ([IO.TextWriter]::Null)
     if ($probe.ExitCode -eq 0) {
         if (([string]$probe.Output).Trim() -cne $Kind) { throw "Refusing to use the volume $($spec.Name): it lacks the label $($spec.Label)." }
     }
-    else { $null = Invoke-LocalDocker volume create --label $spec.Label $spec.Name }
+    else {
+        $null = Invoke-LocalDocker volume create --label $spec.Label $spec.Name
+        $recheck = Invoke-ReleaseDockerClient -DockerArguments @('volume', 'inspect', '--format', "{{index .Labels `"$($script:ReleaseCacheLabel)`"}}", $spec.Name) -CallLimit 30 -CaptureOutput -StandardErrorWriter ([IO.TextWriter]::Null)
+        if ($recheck.ExitCode -ne 0 -or ([string]$recheck.Output).Trim() -cne $Kind) { throw "Refusing to use the volume $($spec.Name): it lacks the label $($spec.Label) after create." }
+    }
     $spec.Name
 }
 

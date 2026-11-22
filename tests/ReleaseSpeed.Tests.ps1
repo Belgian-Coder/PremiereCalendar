@@ -22,25 +22,37 @@ $null = New-Item -ItemType Directory -Path $work -Force
 
 # --- shared cache volumes: names, labels and the refuse-foreign-volume rule (stubbed Docker)
 $trivy = Get-ReleaseCacheVolume 'trivy'; $nuget = Get-ReleaseCacheVolume 'nuget'
-Assert-Speed ($trivy.Name -ceq 'premierecalendar-release-trivy-cache' -and $trivy.Label -ceq 'premierecalendar.release-cache=trivy') 'Trivy cache volume name/label changed.'
+Assert-Speed ($trivy.Name -ceq 'premierecalendar-release-trivy-db' -and $trivy.Label -ceq 'premierecalendar.release-cache=trivy') 'Trivy cache volume name/label changed.'
 Assert-Speed ($nuget.Name -ceq 'premierecalendar-release-nuget-packages' -and $nuget.Label -ceq 'premierecalendar.release-cache=nuget') 'NuGet cache volume name/label changed.'
-$script:Calls = [Collections.Generic.List[string]]::new(); $script:Existing = @{}
+$script:Calls = [Collections.Generic.List[string]]::new(); $script:Existing = @{}; $script:HideFromProbe = $false
 function Invoke-ReleaseDockerClient {
     param([string[]] $DockerArguments, [double] $CallLimit = 0, [switch] $CaptureOutput, $StandardErrorWriter)
     $script:Calls.Add("client $($DockerArguments -join ' ')")
     $name = $DockerArguments[-1]
     if ($script:Existing.ContainsKey($name)) { [pscustomobject]@{ ExitCode = 0; Output = "$($script:Existing[$name])`n" } } else { [pscustomobject]@{ ExitCode = 1; Output = '' } }
 }
-function Invoke-LocalDocker { $script:Calls.Add("run $($args -join ' ')") }
+function Invoke-LocalDocker {
+    $script:Calls.Add("run $($args -join ' ')")
+    # docker volume create returns an existing volume unchanged; a new one gets the requested label.
+    if ($args[0] -eq 'volume' -and $args[1] -eq 'create' -and -not $script:Existing.ContainsKey($args[-1]) -and -not $script:HideFromProbe) { $script:Existing[$args[-1]] = ($args[3] -split '=', 2)[1] }
+}
 $null = Initialize-ReleaseCacheVolume 'trivy'
-Assert-Speed (@($script:Calls | Where-Object { $_ -like 'run volume create --label premierecalendar.release-cache=trivy premierecalendar-release-trivy-cache' }).Count -eq 1) 'A missing cache volume was not created with its label.'
-$script:Calls.Clear(); $script:Existing['premierecalendar-release-trivy-cache'] = 'trivy'
+Assert-Speed (@($script:Calls | Where-Object { $_ -like 'run volume create --label premierecalendar.release-cache=trivy premierecalendar-release-trivy-db' }).Count -eq 1) 'A missing cache volume was not created with its label.'
+Assert-Speed (@($script:Calls | Where-Object { $_ -like 'client volume inspect*' }).Count -eq 2) 'A created cache volume was not re-inspected for its label.'
+$script:Calls.Clear(); $script:Existing['premierecalendar-release-trivy-db'] = 'trivy'
 $null = Initialize-ReleaseCacheVolume 'trivy'
 Assert-Speed ($script:Calls.Count -eq 1 -and $script:Calls[0] -like 'client volume inspect*') 'An existing labelled cache volume needed more than one Docker call or was recreated.'
 $script:Existing['premierecalendar-release-nuget-packages'] = ''
 $refused = $false
 try { $null = Initialize-ReleaseCacheVolume 'nuget' } catch { $refused = $_.Exception.Message -like '*lacks the label*' }
 Assert-Speed $refused 'A same-named volume without the release-cache label was accepted.'
+# A probe that fails although an unlabelled volume exists (for example a timed-out client) must not adopt it.
+$script:Existing.Remove('premierecalendar-release-nuget-packages')
+$script:HideFromProbe = $true
+$refusedAfterCreate = $false
+try { $null = Initialize-ReleaseCacheVolume 'nuget' } catch { $refusedAfterCreate = $_.Exception.Message -like '*after create*' }
+$script:HideFromProbe = $false
+Assert-Speed $refusedAfterCreate 'A volume that still lacks the label after create was adopted.'
 Remove-Item Function:\Invoke-ReleaseDockerClient, Function:\Invoke-LocalDocker
 . (Join-Path $root 'eng/release/ReleaseCommon.ps1')
 
@@ -135,7 +147,7 @@ $config = [ordered]@{
 Set-Content -LiteralPath (Join-Path $plansBundle 'release-config.json') -Value ($config | ConvertTo-Json)
 $pwshExe = (Get-Process -Id $PID).Path
 $scans = (& $pwshExe -NoProfile -File (Join-Path $root 'eng/release/Invoke-Scans.ps1') -Bundle $plansBundle -WhatIf 2>&1) -join "`n"
-Assert-Speed ($scans -like '*premierecalendar-release-trivy-cache*never deleted*' -and $scans -like '*side by side*' -and $scans -like '*older than 48 h*') 'Invoke-Scans -WhatIf lost the shared cache, concurrency or DB age lines.'
+Assert-Speed ($scans -like '*premierecalendar-release-trivy-db*DB directory only*never deleted*' -and $scans -like '*side by side*' -and $scans -like '*older than 48 h*') 'Invoke-Scans -WhatIf lost the shared cache, concurrency or DB age lines.'
 Assert-Speed ($scans -notlike '*scan cache volume*') 'Invoke-Scans still plans to delete a cache volume.'
 $audit = (& $pwshExe -NoProfile -File (Join-Path $root 'eng/release/Invoke-NuGetAudit.ps1') -Bundle $plansBundle -WhatIf 2>&1) -join "`n"
 Assert-Speed ($audit -like '*premierecalendar-release-nuget-packages*never deleted*' -and $audit -like '*HTTP cache on tmpfs*') 'Invoke-NuGetAudit -WhatIf lost the shared package volume or the fresh vulnerability metadata line.'
@@ -147,7 +159,7 @@ Assert-Speed ($auditScript -match '--read-only' -and $auditScript -match 'NUGET_
 
 # --- Dockerfile: restore and publish must mount the same package cache, and nothing else may reference it
 $dockerfile = Get-Content -LiteralPath (Join-Path $root 'Dockerfile') -Raw
-$mounts = [regex]::Matches($dockerfile, '(?m)^RUN --mount=type=cache,id=premierecalendar-nuget,target=/nuget-packages \\\r?\n\s+dotnet (restore|publish)')
+$mounts = [regex]::Matches($dockerfile, '(?m)^RUN --mount=type=cache,id=premierecalendar-nuget,target=/nuget-packages,sharing=locked \\\r?\n\s+dotnet (restore|publish)')
 Assert-Speed ((@($mounts | ForEach-Object { $_.Groups[1].Value } | Sort-Object) -join ',') -ceq 'publish,restore') 'Restore and publish must both mount the NuGet cache (publish uses --no-restore).'
 Assert-Speed ($dockerfile -match '(?m)^ENV NUGET_PACKAGES=/nuget-packages\s*$') 'The build stage must point NuGet at the cache mount.'
 Assert-Speed (($dockerfile -split '(?m)^FROM ')[2] -notmatch 'nuget-packages') 'The development target must not depend on the cache mount.'

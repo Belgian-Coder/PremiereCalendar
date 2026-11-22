@@ -40,14 +40,16 @@ $syftLog = Join-Path $ctx.Bundle 'release-syft.log'
 $inspectFile = Join-Path $ctx.Private 'image-inspect.json'
 $names = @{ Trivy = "$($ctx.Prefix)_trivy"; Syft = "$($ctx.Prefix)_syft"; TrivyDb = "$($ctx.Prefix)_trivy_db" }
 $trivyCache = Get-ReleaseCacheVolume 'trivy'
-$trivyCachePath = '/root/.cache'
-$trivyDbMetadata = "$trivyCachePath/trivy/db/metadata.json"
+# Only Trivy's vulnerability DB directory persists; the rest of its cache (layer analysis, checks) stays in the
+# disposable container, so no earlier scan's analysis can stand in for re-reading this archive.
+$trivyCachePath = '/root/.cache/trivy/db'
+$trivyDbMetadata = "$trivyCachePath/metadata.json"
 $staging = "/tmp/$($ctx.Prefix)-scan"
 
 $plan = @(
     "Refuse if any scan evidence exists ($trivyJson, $sbomJson, $auditJson, $summaryJson, $trivyDbFile) or the resources $($names.Trivy), $($names.Syft), $($names.TrivyDb), $staging exist",
     "Check $(Join-Path $ctx.Bundle 'release-nuget-audit.log') exists (step 4) and copy the image archive to $staging with a SHA-256 check against build-metadata.json",
-    "Create the persistent release cache volume $($trivyCache.Name) ($($trivyCache.Label)) if missing; it keeps only the public Trivy vulnerability DB and is never deleted",
+    "Create the persistent release cache volume $($trivyCache.Name) ($($trivyCache.Label)) if missing; it is mounted at Trivy's DB directory only (layer analysis stays disposable) and is never deleted",
     "Run side by side on the same read-only staged archive: Trivy $($cfg.trivyImage) (--scanners vuln,misconfig,secret$(if ($IgnoreUnfixed) { ', --ignore-unfixed' })) and Syft $($cfg.syftImage) (CycloneDX JSON SBOM); each tool keeps its own log and exit code",
     "Read the Trivy DB metadata (UpdatedAt/NextUpdate/DownloadedAt) from the cache into $scannersJson; summarize_scan.py fails when the DB is older than 48 h",
     'audit_image_archive.py (archive/labels/platform/source proof) and summarize_scan.py; fail on any finding',
@@ -105,7 +107,9 @@ try {
     $checkedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
 }
 finally {
-    if (-not $scanScriptRan) { $null = Invoke-LocalShell "rm -rf $(ConvertTo-ShellQuoted $staging)" }
+    # The scan script removes the staged copy itself; repeat it unconditionally because a guest killed at its
+    # deadline may not have run its trap. rm -rf of an absent path is harmless.
+    $null = Invoke-LocalShell "rm -rf $(ConvertTo-ShellQuoted $staging)"
 }
 Write-NewText -Path $inspectFile -Text ((@(Invoke-LocalDocker image inspect $cfg.imageTag) -join "`n") + "`n")
 $scannerIds = @(Invoke-LocalDocker image inspect --format '{{.Id}}' $cfg.trivyImage $cfg.syftImage)

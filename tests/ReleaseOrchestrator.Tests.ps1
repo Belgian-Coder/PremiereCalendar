@@ -121,16 +121,36 @@ try {
     Assert-That ($r.Text -match 'Evidence present after the stop') 'the stop report lists the evidence that exists'
     Assert-That ((@($t.steps | Where-Object { $_.id -eq 'build' }).exitCode) -eq 7) 'the child exit code is recorded'
 
-    # 5. resume: complete evidence is skipped, never re-run
+    # 5. resume: complete evidence bound to this revision and the tested bytes is skipped, never re-run
+    function Write-BoundEvidence([string] $Bundle, [string] $Revision, [switch] $Unbound) {
+        $fp = Join-Path $Bundle 'tested-source-fingerprints.json'; [IO.File]::WriteAllText($fp, '{"tested":true}')
+        $fpHash = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText((Join-Path $Bundle 'test-run.log'), 'log'); $null = New-Item -ItemType Directory -Path (Join-Path $Bundle 'tests')
+        [IO.File]::WriteAllText((Join-Path $Bundle 'test-run.json'), (@{ sourceRevision = $Revision } | ConvertTo-Json))
+        [IO.File]::WriteAllText((Join-Path $Bundle 'test-summary.json'), (ConvertTo-Json -InputObject @(@{ suite = 'unit'; passed = 1; failed = 0; sourceRevision = $Revision })))
+        foreach ($f in 'source-1.2.20.tar', 'source-archive-verification.json', 'premierecalendar-1.2.20.tar', 'build.log') { [IO.File]::WriteAllText((Join-Path $Bundle $f), 'x') }
+        $bound = if ($Unbound) { $null } else { $fpHash }
+        [IO.File]::WriteAllText((Join-Path $Bundle 'build-metadata.json'), (@{ sourceRevision = $Revision; testedSourceFingerprintsSha256 = $bound } | ConvertTo-Json))
+        [IO.File]::WriteAllText((Join-Path $Bundle 'release-nuget-audit.log'), "Project 'x' has no vulnerable packages given the current sources.`n")
+    }
     $global:Scenario = & $happy
     $bundle = New-Bundle
-    foreach ($f in 'source-1.2.20.tar', 'source-archive-verification.json', 'premierecalendar-1.2.20.tar', 'build.log', 'build-metadata.json') { [IO.File]::WriteAllText((Join-Path $bundle $f), 'x') }
-    [IO.File]::WriteAllText((Join-Path $bundle 'release-nuget-audit.log'), "Project 'x' has no vulnerable packages given the current sources.`n")
+    Write-BoundEvidence $bundle $revision
     $r = Invoke-Gates $bundle
-    Assert-That ($r.Exit -eq 0 -and $null -eq (Get-Call 'build') -and $null -eq (Get-Call 'nuget-audit') -and $global:Calls.Count -eq 6) "complete evidence is skipped (launched: $($global:Calls.Id -join ','))"
-    $t = Get-Content -LiteralPath $r.Timings[0].FullName -Raw | ConvertFrom-Json
-    Assert-That ((@($t.steps | Where-Object { $_.id -eq 'build' }).status) -eq 'skipped' -and $t.succeeded -eq $true) 'skipped steps are recorded and the run still succeeds'
-    Assert-That ((Get-Call 'scans').Start -lt (Get-Call 'tests').Done) 'with the build and audit skipped, the scans overlap the test lane at once'
+    Assert-That ($r.Exit -eq 0 -and $null -eq (Get-Call 'tests') -and $null -eq (Get-Call 'build') -and $null -eq (Get-Call 'nuget-audit') -and $global:Calls.Count -eq 5) "complete bound evidence is skipped (launched: $(@($global:Calls | ForEach-Object Id) -join ','))`n$($r.Text)"
+    if ($r.Timings.Count -gt 0) {
+        $t = Get-Content -LiteralPath $r.Timings[0].FullName -Raw | ConvertFrom-Json
+        Assert-That ((@($t.steps | Where-Object { $_.id -eq 'build' }).status) -eq 'skipped' -and (@($t.steps | Where-Object { $_.id -eq 'tests' }).status) -eq 'skipped' -and $t.succeeded -eq $true) 'skipped steps are recorded and the run still succeeds'
+    } else { Assert-That $false 'the resumed run wrote no timings' }
+
+    # 5b. resume refuses evidence of another revision and a build that is not bound to the tested fingerprints
+    foreach ($case in @(@{ Name = 'other revision'; Revision = 'fedcba9876543210fedcba9876543210fedcba98'; Unbound = $false; Text = 'another source revision' },
+                        @{ Name = 'unbound build'; Revision = $revision; Unbound = $true; Text = 'not bound to the tested source fingerprints' })) {
+        $bundle = New-Bundle
+        Write-BoundEvidence $bundle $case.Revision -Unbound:$case.Unbound
+        $r = Invoke-Gates $bundle
+        Assert-That ($r.Exit -eq 2 -and $global:Calls.Count -eq 0 -and $r.Text -match [regex]::Escape($case.Text)) "resume refuses $($case.Name) without launching a step`n$($r.Text)"
+    }
 
     # 6. partial evidence: refuse before launching anything
     $bundle = New-Bundle

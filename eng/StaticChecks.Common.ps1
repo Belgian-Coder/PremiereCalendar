@@ -90,12 +90,17 @@ try {
         [void]$process.Start()
         $out = $process.StandardOutput.ReadToEndAsync(); $err = $process.StandardError.ReadToEndAsync()
         if ($process.WaitForExit($TimeoutSeconds * 1000)) {
-            $process.WaitForExit()
             $exit = $process.ExitCode
             $status = if ($exit -eq 0) { 'PASS' } else { 'FAIL' }
-            $text = $out.GetAwaiter().GetResult()
-            $errText = $err.GetAwaiter().GetResult()
-            if ($errText) { $text += "`n[stderr]`n" + $errText }
+            # A leftover grandchild can hold the pipes open after the check exited; bound the drain instead of
+            # waiting for end-of-stream forever (the parameterless WaitForExit would).
+            if ([Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($out, $err), 30000)) {
+                $text = $out.Result
+                if ($err.Result) { $text += "`n[stderr]`n" + $err.Result }
+            } else {
+                $status = 'FAIL'
+                $text = "The check exited ($exit) but its output pipes stayed open for 30 s (a leftover child process?); output incomplete."
+            }
         } else {
             try { $process.Kill($true) } catch { }
             $status = 'TIMEOUT'
@@ -115,10 +120,18 @@ function Invoke-StaticCheckSet($Commands, [string] $LogDirectory, [int] $Throttl
         ForEach-Object { , @($_.Group) } |
         Sort-Object { -(($_ | Measure-Object Weight -Sum).Sum) })
     $runner = $script:StaticCheckProcessRunner
-    @($units | ForEach-Object -ThrottleLimit ([math]::Max(1, $ThrottleLimit)) -Parallel {
+    $results = @($units | ForEach-Object -ThrottleLimit ([math]::Max(1, $ThrottleLimit)) -Parallel {
         $run = [scriptblock]::Create($using:runner)
         foreach ($command in $_) { & $run $command $using:LogDirectory $using:TimeoutSeconds }
     })
+    # A worker that threw reports nothing; a check without a result must fail rather than drop out of the summary.
+    $reported = @($results | ForEach-Object Name)
+    foreach ($command in $Commands) {
+        if ($command.Name -notin $reported) {
+            $results += [pscustomobject]@{ Name = $command.Name; Status = 'FAIL'; ExitCode = -1; Seconds = 0; Log = (Join-Path $LogDirectory ($command.Name + '.log')) }
+        }
+    }
+    $results
 }
 
 function Write-StaticCheckSummary($Results, [double] $WallSeconds, [int] $TailLines = 30) {
