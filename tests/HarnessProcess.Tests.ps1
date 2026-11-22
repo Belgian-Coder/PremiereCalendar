@@ -1,12 +1,14 @@
 #Requires -Version 7.0
 # Native pipe/deadline checks; Python is a controlled child, never a WSL/SDK fallback.
 [CmdletBinding()]
-param([string] $PythonExecutable = 'python')
+param([string] $PythonExecutable)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'eng/Harness.Common.ps1')
-$python = (Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop).Source
+. (Join-Path $root 'eng/Python.Common.ps1')
+$python = Resolve-PythonExecutable $PythonExecutable
+if (-not $python) { throw 'Python 3.10 or newer is required; pass -PythonExecutable.' }
 $fixture = Join-Path $PSScriptRoot 'fixtures/harness_client.py'
 $folder = Join-Path $root ('artifacts/harness-process-tests/' + [guid]::NewGuid().ToString('N'))
 [void] (New-Item -ItemType Directory -Path $folder)
@@ -50,15 +52,14 @@ Assert-Process ($run.Result.TimedOut -and -not $run.Result.OutputDrained -and $r
 Assert-Process (-not (Get-Process -Id $run.Result.ClientPid -ErrorAction SilentlyContinue)) 'Owned timed-out client remains live.'
 
 $pidFile = Join-Path $folder 'child.pid'
-$run = Invoke-CapturedFixture (New-FixtureStart inherited_pipe @($pidFile)) '' 0.4
-Assert-Process ($run.Result.ExitCode -eq 0 -and $run.Result.TimedOut -and -not $run.Result.OutputDrained -and $run.Seconds -lt 1.5) 'An inherited pipe handle bypassed the drain deadline.'
+$run = Invoke-CapturedFixture (New-FixtureStart inherited_pipe @($pidFile)) '' 2
+# Deadline covers two interpreter starts on a loaded host; the descendant holds the pipe for 15 s, so a bypass would take far longer than 6 s.
+Assert-Process ($run.Result.ExitCode -eq 0 -and $run.Result.TimedOut -and -not $run.Result.OutputDrained -and $run.Seconds -lt 6) 'An inherited pipe handle bypassed the drain deadline.'
 Assert-Process ($run.Out -eq "PARENT_END`n") 'Parent output was not preserved before drain timeout.'
 $childId = [int] (Get-Content -LiteralPath $pidFile -Raw)
 Assert-Process ([bool] (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'Client ownership killed an unrelated descendant tree.'
-# This independently bounded fixture child self-exits; do not kill a tree.
-$wait = [Diagnostics.Stopwatch]::StartNew()
-while ((Get-Process -Id $childId -ErrorAction SilentlyContinue) -and $wait.Elapsed.TotalSeconds -lt 4) { Start-Sleep -Milliseconds 25 }
-Assert-Process (-not (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'Controlled inherited-handle child did not self-exit.'
+# Fixture cleanup: stop only the descendant this test started (it would self-exit after its 15 s hold).
+Stop-Process -Id $childId -Force -ErrorAction SilentlyContinue
 
 $run = Invoke-CapturedFixture (New-FixtureStart exit7) $secret 3
 Assert-Process ($run.Result.ExitCode -eq 7 -and -not $run.Result.TimedOut -and $run.Result.OutputDrained) 'Native failure exit code changed.'

@@ -190,30 +190,97 @@ Every test case runs in parallel (`ParallelMode.All`, see `tests/*/AssemblyConfi
 ### Portable static checks
 
 Run these from the native checkout on WINDOWS11-VM, PC-MARC or MacBook-Pro
-ARM64 with PowerShell 7 and Git. Python 3 is required for Python syntax checks;
-Bash (Git Bash on Windows) enables the intercepted shell lifecycle checks.
-No SDK, WSL, Docker daemon, credentials or database is required. Commands below
-use relative paths from the repository root; the scripts also work by absolute
-path from any folder.
+ARM64 with PowerShell 7 and Git. Python 3.10 or newer is required for the Python
+checks; Bash (Git Bash on Windows) enables the intercepted shell lifecycle checks.
+No SDK, WSL, Docker daemon, credentials or database is required. The scripts
+work by absolute path from any folder and have no Windows-only dependency.
+
+#### One command
 
 ```powershell
-pwsh -NoProfile -File ./tests/Harness.Tests.ps1
-pwsh -NoProfile -File ./tests/HarnessProcess.Tests.ps1
-pwsh -NoProfile -File ./tests/ReleaseTransport.Tests.ps1 -PythonExecutable python
-pwsh -NoProfile -File ./tests/HarnessCacheRoot.Tests.ps1
-pwsh -NoProfile -File ./tests/ExistingRestoreFixture.Tests.ps1
-pwsh -NoProfile -File ./tests/ReleaseDockerArguments.Tests.ps1
-pwsh -NoProfile -File ./tests/ValidationTools.Tests.ps1
-pwsh -NoProfile -File ./eng/Test-ScriptSyntax.ps1
-pwsh -NoProfile -File ./eng/Test-Docs.ps1 -SourceOnly
-python -B ./tests/test_source_fingerprints.py
-git diff --check
+# Everything the portable lane covers, concurrently, one summary (see the measurement below)
+pwsh -NoProfile -File ./eng/Invoke-StaticChecks.ps1
+# Only what your change can affect (docs, eng/tests scripts, app code), see below
+pwsh -NoProfile -File ./eng/Invoke-Validation.ps1 -Changed
 ```
 
+`eng/Invoke-StaticChecks.ps1` runs the checks in the table below as separate child
+processes with up to `-ThrottleLimit` at a time (default: the logical CPU count; `1`
+reproduces the old serial order). Each check's output goes to
+`artifacts/static-checks/<timestamp>-<pid>/<name>.log`. It prints a per-check table
+(status, seconds), the total wall time, the last 30 lines of every failing check,
+and exits 1 when any check fails or exceeds `-TimeoutSeconds`. `-Only <names>` and
+`-Exclude <names>` take check names (wildcards allowed), `-PythonExecutable <path>`
+overrides discovery and `-Plan` prints the table without running anything.
+Fixtures live in GUID-named sandboxes below `artifacts/`, so the checks do not
+collide; the three checks with sub-second child-process deadlines share the
+`timing` group and run one after another so they do not starve each other.
+
+Python is chosen once by `eng/Python.Common.ps1`: the explicit
+`-PythonExecutable`, otherwise the first real Python 3.10 or newer among
+`python3`, then `python` on PATH. The Windows Store alias stub
+(`WindowsApps\python.exe`) and older interpreters are skipped; the result is
+always a single path. The same helper serves `Test-ScriptSyntax.ps1` and the
+Python-using tests, so none of them needs the parameter on a normal host.
+
+`eng/Invoke-Validation.ps1 -Changed [-Base <ref>]` classifies the paths changed
+since the merge-base with `-Base` (default `origin/main`) plus staged, unstaged
+and untracked files, following the table in "Scoped application checks":
+
+| Changed paths | Static checks | Builder follow-up (Windows/WSL) |
+| --- | --- | --- |
+| Documentation only (`*.md`, `docs/**`) | `Docs` and `GitDiffCheck` | none |
+| `eng/**`, `tests/*.ps1`, `tests/*.py`, `tests/fixtures/**` | the checks whose table row covers those files (for example `eng/run-with-sdk-cache.sh` runs `SdkCache` and `ScriptSyntax`); all checks for a file no row covers | none |
+| `PremiereCalendar/**` C#/project files | applicable rows plus `GitDiffCheck` | `eng/wsl-docker.ps1 check -Project App`, then `eng/Test-WithPostgres.ps1 -Project Unit,Component,Integration` |
+| `*.razor`, `*.css`, `*.js` | same | App check, then `-Project Component`; Browser checks are required before release |
+| `tests/PremiereCalendar.<X>Tests/**` | same | `-Project <X>` (Browser tests are only flagged: they need the prepared browser image) |
+| `Dockerfile`, `compose*.yaml`, `global.json`, `Directory.Build.props`, `PremiereCalendar.slnx`, `tests/Shared/**` | same | App check and all three service suites |
+
+On Windows, `-Run` executes the builder commands after the static checks passed,
+one after another (never concurrently in one worktree); without `-Run`, and on
+macOS, they are printed as the required builder follow-up. `-All` runs the full
+static lane, and `-Plan` prints the classification and commands only. The result
+is scoped feedback and never release acceptance: complete suites, Browser,
+vulnerability, SBOM and exact-image gates stay as documented below.
+
+What the lane runs (names for `-Only`/`-Exclude`; the declared table is
+`Get-StaticCheckTable` in `eng/StaticChecks.Common.ps1`, and
+`tests/StaticChecks.Tests.ps1` fails when a `tests/*.Tests.ps1` or `test_*.py`
+file is missing from it):
+
+| Name | Command | Guards |
+| --- | --- | --- |
+| `Harness` | `tests/Harness.Tests.ps1` | WSL/Docker/PostgreSQL helper plans, argument and cache-volume contracts |
+| `HarnessProcess` | `tests/HarnessProcess.Tests.ps1` | native child-process pipes, deadlines and cleanup |
+| `ReleaseTransport` | `tests/ReleaseTransport.Tests.ps1` | release transport I/O, timeouts, no false "absent" results |
+| `HarnessCacheRoot` | `tests/HarnessCacheRoot.Tests.ps1` | canonical primary/clone cache-root binding with real Git fixtures |
+| `ExistingRestoreFixture` | `tests/ExistingRestoreFixture.Tests.ps1` | restore-compatibility fixture handling in the release scripts |
+| `ReleaseDockerArguments` | `tests/ReleaseDockerArguments.Tests.ps1` | release Docker argv across the native process boundary |
+| `ValidationTools` | `tests/ValidationTools.Tests.ps1` | `Test-Docs.ps1`, `Test-ScriptSyntax.ps1` and candidate-plan contracts |
+| `SdkCache` | `tests/SdkCache.Tests.ps1` | SDK cache launcher ownership markers and refusals |
+| `PerformanceLogAudit` | `tests/PerformanceLogAudit.Tests.ps1` | `eng/Read-CalendarPerformance.ps1` log summaries |
+| `StaticChecks` | `tests/StaticChecks.Tests.ps1` | Python discovery, parallel runner, change classifier |
+| `ScriptSyntax` | `eng/Test-ScriptSyntax.ps1` | PowerShell/Python parse, LF-only `*.py/*.sh/*.sql` |
+| `Docs` | `eng/Test-Docs.ps1 -SourceOnly` | links, anchors, referenced scripts, stale statements |
+| `SourceFingerprints` | `tests/test_source_fingerprints.py` | exact source/blob fingerprint verification |
+| `ReviewInputs` | `tests/test_review_inputs.py` | review-input inventory and binding |
+| `GitDiffCheck` | `git diff --check HEAD` | whitespace errors in staged and unstaged changes |
+
+Measured on WINDOWS11-VM (12 vCPU, shared with other validation runs, so absolute times are noisy): three alternating
+runs of the same 15 checks took 118.7, 125.0 and 88.5 seconds wall with the default throttle versus 370.4, 273.0 and
+214.0 seconds with `-ThrottleLimit 1` (medians 118.7 versus 273.0 seconds; the first serial run matches the 362-second
+baseline of the former one-command-per-check list). All six runs passed every check. The parallel floor is the slowest check
+(`Harness` or `HarnessCacheRoot`, 85-110 seconds alone). A documentation-only change through
+`Invoke-Validation.ps1 -Changed` took 4.1 seconds (`Docs` plus `GitDiffCheck`) and one new `eng` script 4.1 seconds
+(`ScriptSyntax`, `Docs`, `GitDiffCheck`). This measures static feedback only, not application or release speed.
+
+Each script can still be run alone with `pwsh -NoProfile -File <path>`
+(`python -B <path>` for the two Python tests); pass `-PythonExecutable <path>` to
+the Python-using scripts only when the default choice is not the one you want.
+`tests/StaticChecks.Tests.ps1` runs no Docker or WSL.
 The syntax checker compiles all Python files in one isolated interpreter process
-without writing bytecode. Pass `-PythonExecutable <existing-Python-3-path>` to it
-or `ValidationTools.Tests.ps1` / `HarnessProcess.Tests.ps1` if Python is not on PATH. Missing Python fails the
-syntax check; it never falls back to another SDK or installs anything.
+without writing bytecode. Missing Python fails the syntax check; it never falls back to
+another SDK or installs anything.
 
 At source `dbf17a67306f44283025a87e2ea5c6af3b1f480b` on PC-MARC with Python
 3.12.11, the same nine Python files compiled in 0.214855 seconds with separate
@@ -265,6 +332,8 @@ pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit
 | Pure logic/provider/cache | Relevant unit/integration project plus a focused filter | Complete unit, component and integration suites |
 | Razor/CSS/JavaScript/navigation | App build and relevant component tests; affected browser cases | Complete suites and serial browser performance/accessibility checks |
 | Database, dependency, container or cross-cutting change | Affected integration/project build first | Complete regression, database and exact-image release gates |
+
+`eng/Invoke-Validation.ps1 -Changed` applies the feedback column to the current changes (see [Portable static checks](#portable-static-checks)); the acceptance column is never implied by it.
 
 Each checkout/worktree owns named ext4 Docker build volumes, separated by Linux/amd64 ABI (`musl` or `glibc`), runtime-async mode and check/watcher role. A project-scoped Linux/amd64 NuGet volume is shared across worktrees. Source and timestamped `artifacts/test-results/<run>` reports stay in the native checkout. Existing native output remains under `artifacts/build/host` and native packages under `artifacts/packages/host`; old Linux bind caches are preserved. Helpers retain the worktree's `artifacts/check.lock` to reject concurrent check/test writers. Do not bypass that lock with concurrent raw `dotnet` commands. Sharing packages does not share `obj`/`bin`, test databases, results or application data. See [Docker and PostgreSQL](DockerAndPostgres.md#local-development) for the profile naming and watcher mapping.
 

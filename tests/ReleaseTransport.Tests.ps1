@@ -1,12 +1,14 @@
 #Requires -Version 7.0
 # Real native child I/O; WSL/Docker construction is replaced, never executed.
 [CmdletBinding()]
-param([Parameter(Mandatory)][string] $PythonExecutable)
+param([string] $PythonExecutable)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'eng/release/ReleaseCommon.ps1')
-$python = (Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop).Source
+. (Join-Path $root 'eng/Python.Common.ps1')
+$python = Resolve-PythonExecutable $PythonExecutable
+if (-not $python) { throw 'Python 3.10 or newer is required; pass -PythonExecutable.' }
 $fixture = Join-Path $PSScriptRoot 'fixtures/harness_client.py'
 $folder = Join-Path $root ('artifacts/release-transport-tests/' + [guid]::NewGuid().ToString('N'))
 [void] (New-Item -ItemType Directory -Path $folder)
@@ -175,8 +177,10 @@ $script:FixtureMode = 'delay'; $script:FixtureDeadline = 0.4
 $clock = [Diagnostics.Stopwatch]::StartNew(); $refused = $false
 try { Test-LocalDocker container inspect unknown | Out-Null } catch { $refused = $_.Exception.Message.Contains('unconfirmed') }
 Assert-ReleaseTransport ($refused -and $clock.Elapsed.TotalSeconds -lt 2) 'Owned-client timeout became false or exceeded its bound.'
-$script:FixtureMode = 'partial_delay'; $partial = Join-Path $folder 'partial.log'; $refused = $false
+# The child must print before the deadline; allow for interpreter start-up on a loaded host (the fixture then waits 3 s).
+$script:FixtureMode = 'partial_delay'; $script:FixtureDeadline = 2; $partial = Join-Path $folder 'partial.log'; $refused = $false
 try { Invoke-LocalDockerToFile $partial run fixture | Out-Null } catch { $refused = $_.Exception.Message.Contains('unconfirmed') }
+$script:FixtureDeadline = 0.4
 $partialText = Get-Content -LiteralPath $partial -Raw
 Assert-ReleaseTransport ($refused -and $partialText.Contains("OUT_BEFORE_TIMEOUT`n") -and $partialText.Contains("ERR_BEFORE_TIMEOUT`n")) 'Failed transport lost its available combined output.'
 $script:FixtureMode = 'delay'
@@ -184,15 +188,18 @@ $clock.Restart(); $refused = $false
 try { Wait-LocalCondition -Attempts 10 -DelaySeconds 0 -Message 'fixture wait' -Condition { Test-LocalDocker container inspect unknown } } catch { $refused = $_.Exception.Message.Contains('unconfirmed') }
 Assert-ReleaseTransport ($refused -and $script:LastClientBudget -le 10 -and $clock.Elapsed.TotalSeconds -lt 2 -and $script:ReleaseLoopBudget -eq $null) 'Loop budget did not cap native calls or restore caller state.'
 
-$script:FixtureMode = 'inherited_pipe'; $script:FixtureExtra = @((Join-Path $folder 'retained.pid'))
+# Deadline covers two interpreter starts on a loaded host; the descendant holds the pipe for 15 s.
+$script:FixtureMode = 'inherited_pipe'; $script:FixtureDeadline = 2; $script:FixtureExtra = @((Join-Path $folder 'retained.pid'))
 $clock.Restart(); $refused = $false
 try { Test-LocalDocker container inspect unknown | Out-Null } catch { $refused = $_.Exception.Message.Contains('unconfirmed') }
-Assert-ReleaseTransport ($refused -and $clock.Elapsed.TotalSeconds -lt 1.5) 'Inherited drain timeout was treated as absence.'
+Assert-ReleaseTransport ($refused -and $clock.Elapsed.TotalSeconds -lt 6) 'Inherited drain timeout was treated as absence.'
+# The fixture can still be starting under host load when the bounded drain gives up; wait for its pid file.
+$clock.Restart()
+while (-not (Test-Path -LiteralPath $script:FixtureExtra[0]) -and $clock.Elapsed.TotalSeconds -lt 5) { Start-Sleep -Milliseconds 25 }
 $childId = [int] (Get-Content -LiteralPath $script:FixtureExtra[0] -Raw)
 Assert-ReleaseTransport ([bool] (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'A descendant tree was killed.'
-$clock.Restart()
-while ((Get-Process -Id $childId -ErrorAction SilentlyContinue) -and $clock.Elapsed.TotalSeconds -lt 4) { Start-Sleep -Milliseconds 25 }
-Assert-ReleaseTransport (-not (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'Bounded fixture descendant did not self-exit.'
+# Fixture cleanup: stop only the descendant this test started (it would self-exit after its 15 s hold).
+Stop-Process -Id $childId -Force -ErrorAction SilentlyContinue
 $script:FixtureExtra = @(); $script:FixtureDeadline = 0; $script:FixtureMode = 'early7'
 $oldSeconds = $script:ReleaseStepSeconds; $oldClock = $script:ReleaseStepClock
 try {

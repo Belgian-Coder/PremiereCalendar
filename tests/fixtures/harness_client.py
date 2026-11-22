@@ -20,7 +20,7 @@ if mode == "duplex":
         time.sleep(0.0005)
     print(f"INPUT_BYTES={size}", flush=True)
 elif mode == "hold":
-    time.sleep(2)
+    time.sleep(15)
 elif mode == "inherited_pipe":
     child = subprocess.Popen(
         [sys.executable, "-I", "-B", __file__, "hold"],
