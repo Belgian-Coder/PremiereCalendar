@@ -89,7 +89,9 @@ try {
     Assert-That ($r.Timings.Count -eq 1 -and $r.Timings[0].Name -eq 'stage-timings.json') 'stage-timings.json is written once'
     Assert-That ($t.schema -eq 1 -and $t.mode -eq 'parallel' -and $t.succeeded -eq $true -and @($t.steps).Count -eq 8) 'timings header and step count'
     Assert-That (@($t.steps | Where-Object { $_.status -ne 'passed' -or $_.exitCode -ne 0 -or -not $_.startUtc -or -not $_.endUtc -or $_.seconds -le 0 -or -not $_.log }).Count -eq 0) 'every timing row has status, exit code, start, end, duration and log'
-    Assert-That ($t.wallSeconds -gt 0 -and $t.sumOfStepSeconds -gt $t.wallSeconds -and $t.criticalPathSeconds -le $t.wallSeconds + 0.05) 'wall time is below the sum of the steps and not below the critical path'
+    # Overlap itself is proven by the call-interval assertions above; wall versus sum depends on host load, so only
+    # the load-independent invariants of the timing record are asserted here.
+    Assert-That ($t.wallSeconds -gt 0 -and $t.criticalPathSeconds -le $t.sumOfStepSeconds + 0.001 -and $t.criticalPathSeconds -le $t.wallSeconds + 0.05) 'the critical path is within both the wall time and the sum of the steps'
     $logs = @(Get-ChildItem -LiteralPath (Join-Path $bundle 'gates') -Filter '*.log')
     Assert-That ($logs.Count -eq 8) 'one new log per step in gates/'
 
