@@ -53,7 +53,7 @@ $activationReceipt = Join-Path $ctx.Installed 'activation.json'
 $plan = @(
     'Re-validate all release gates and the bundle evidence (nothing is trusted from an earlier step)',
     "Refuse if $activationReceipt exists or the exec evidence $AttemptTagPrefix-* exists",
-    "Read-only Portainer checks: NAS endpoint; stack $($cfg.stackId) at revision $($cfg.expectedStackRevision); old digest $($cfg.oldImageDigest) pinned exactly once; stack containers unchanged since installed\containers-before.json; image $($cfg.imageTag) loaded with the audited digest",
+    "Read-only Portainer checks: NAS endpoint; stack $($cfg.stackId) at revision $($cfg.expectedStackRevision); old digest $($cfg.oldImageDigest) pinned exactly once; stack containers unchanged since installed\containers-before.json; image $($cfg.imageTag) loaded with the audited digest; refuse when the stack file, stack Env or running app container sets AppDatabase Path or a non-PostgreSql provider (1.2.20+ stops at startup)",
     "Backup freshness (younger than $MaximumBackupAgeHours h) through exec in $($cfg.backupContainer); live migration history equals the proven one; no running foreground jobs (execs are Portainer POSTs)",
     $(if ($cfg.requiredSettingKey) { "Require the read-only receipt for '$($cfg.requiredSettingKey)' = '$($cfg.requiredSettingValue)'" } else { 'No required persisted setting is configured' }),
     "Save the candidate stack (only the app pin replaced) in the restricted backup folder, then PUT /api/stacks/$($cfg.stackId)?endpointId=$($cfg.endpointId) with PullImage=false, Prune=false (needs -AllowMutation)",

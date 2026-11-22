@@ -9,7 +9,7 @@ runs `dotnet restore` plus `dotnet list package --vulnerable --include-transitiv
 the Dockerfile's digest-pinned SDK image (read-only root, tmpfs scratch, network only for the restore). Downloaded
 packages are kept in the persistent release volume premierecalendar-release-nuget-packages (extraction locks via
 NUGET_SCRATCH in the same volume); the NuGet HTTP cache is tmpfs so every run fetches fresh vulnerability metadata. The full
-output is kept as release-nuget-audit.log; the step fails on NU1900-NU1904 warnings, and later gates require the sentence "has no vulnerable packages". The
+output is kept as release-nuget-audit.log; the step and every later gate fail on NU1900-NU1905 warnings and require the sentence "has no vulnerable packages". The
 temporary source copy and the container are removed after a successful run.
 
 .PARAMETER Bundle
@@ -63,6 +63,7 @@ if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 40 }
 if ($exit -ne 0) { throw 'The NuGet restore/audit command failed.' }
 if (-not (Select-String -LiteralPath $log -Pattern 'has no vulnerable packages' -Quiet)) { throw 'The NuGet audit did not report "has no vulnerable packages"; see the log.' }
 # "No vulnerable packages" is only meaningful when the vulnerability data could be read: NU1900 (feed vulnerability
-# data unavailable) and NU1901-NU1904 (vulnerable packages) fail the step even when the sentence is present.
-if (Select-String -LiteralPath $log -Pattern '\bNU190[0-4]\b' -Quiet) { throw 'The NuGet audit reported NU1900-NU1904 (vulnerability data unavailable or a vulnerable package); see the log.' }
+# data unavailable), NU1901-NU1904 (vulnerable packages) and NU1905 (feed without audit data) fail the step even when
+# the sentence is present. summarize_scan.py, Invoke-LocalGates and ReleaseGates.ps1 re-check the same rule.
+if (Select-String -LiteralPath $log -Pattern '\bNU190[0-5]\b' -Quiet) { throw 'The NuGet audit reported NU1900-NU1905 (vulnerability data unavailable or a vulnerable package); see the log.' }
 Write-Host 'NuGet audit passed: no vulnerable packages.'

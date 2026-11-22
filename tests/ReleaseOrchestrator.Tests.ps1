@@ -124,11 +124,13 @@ try {
 
     # 4b. a slow audit lets smoke start first: scans must then wait for the timing-sensitive steps (reverse guard)
     $global:Scenario = @{ tests = @{ Ms = 8; Exit = 0; FingerprintAtMs = 2 }; 'restore-init' = @{ Ms = 2; Exit = 0 }; restore = @{ Ms = 3; Exit = 0 }; build = @{ Ms = 4; Exit = 0 }
-        'nuget-audit' = @{ Ms = 40; Exit = 0 }; scans = @{ Ms = 6; Exit = 0 }; smoke = @{ Ms = 10; Exit = 0 }; 'backup-compat' = @{ Ms = 10; Exit = 0 } }
+        'nuget-audit' = @{ Ms = 12; Exit = 0 }; scans = @{ Ms = 6; Exit = 0 }; smoke = @{ Ms = 30; Exit = 0 }; 'backup-compat' = @{ Ms = 30; Exit = 0 } }
     $r = Invoke-Gates (New-Bundle)
     Assert-That ($r.Exit -eq 0) "slow-audit run succeeds`n$($r.Text)"
     $scansCall = Get-Call 'scans'
     Assert-That ($null -ne $scansCall -and -not (Test-Overlap $scansCall (Get-Call 'smoke')) -and -not (Test-Overlap $scansCall (Get-Call 'backup-compat'))) 'scans never start beside a running smoke or backup-compat'
+    # The scenario must really put the audit's end inside smoke, otherwise the guard is not exercised.
+    Assert-That ((Get-Call 'smoke').Start -lt (Get-Call 'nuget-audit').Done -and (Get-Call 'nuget-audit').Done -lt (Get-Call 'smoke').Done) 'the slow-audit scenario finishes the audit while smoke runs'
 
     # 5. resume: complete evidence bound to this revision and the tested bytes is skipped, never re-run
     function Write-BoundEvidence([string] $Bundle, [string] $Revision, [switch] $Unbound) {
@@ -170,6 +172,13 @@ try {
     [IO.File]::WriteAllText((Join-Path "$bundle.private" 'backup-restore.json'), '{}')
     $r = Invoke-Gates $bundle
     Assert-That ($r.Exit -eq 0 -and $null -eq (Get-Call 'restore-init') -and $null -eq (Get-Call 'restore')) "a completed restore also skips restore-init`n$($r.Text)"
+
+    # 5c. an audit log that also reports NU1900 is never resumed as clean evidence
+    $bundle = New-Bundle
+    Write-BoundEvidence $bundle $revision
+    Add-Content -LiteralPath (Join-Path $bundle 'release-nuget-audit.log') -Value 'warning NU1900: Error occurred while getting package vulnerability data'
+    $r = Invoke-Gates $bundle
+    Assert-That ($r.Exit -eq 2 -and $global:Calls.Count -eq 0 -and $r.Text -match 'NU1900-NU1905') "an audit log with NU1900 is refused on resume`n$($r.Text)"
 
     # 5b. resume refuses evidence of another revision and a build that is not bound to the tested fingerprints
     foreach ($case in @(@{ Name = 'other revision'; Revision = 'fedcba9876543210fedcba9876543210fedcba98'; Unbound = $false; Text = 'another source revision' },

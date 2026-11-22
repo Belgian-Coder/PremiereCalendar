@@ -97,6 +97,11 @@ Assert-Speed ($vulnerable.Exit -eq 1 -and $vulnerable.Report -match '"trivyZeroV
 Assert-Speed (@(Get-AppDatabaseStartupBlockers @('      AppDatabase__Provider: PostgreSql', 'AppDatabase__Provider=PostgreSql', 'AppDatabase__PasswordFile=/run/secrets/x', 'AppDatabase__Path=')).Count -eq 0) 'A valid PostgreSQL configuration was reported as a startup blocker.'
 Assert-Speed (@(Get-AppDatabaseStartupBlockers @('      AppDatabase__Path: /app/App_Data/premierecalendar.db')).Count -eq 1) 'A Compose AppDatabase__Path was not reported.'
 Assert-Speed (@(Get-AppDatabaseStartupBlockers @('AppDatabase__Provider=Sqlite', '- "AppDatabase:Provider=Sqlite"')).Count -eq 2) 'A non-PostgreSql provider was not reported.'
+Assert-Speed (@(Get-AppDatabaseStartupBlockers @('      AppDatabase__Provider: PostgreSql  # required')).Count -eq 0) 'A trailing Compose comment was read as part of the provider.'
+$nu1900 = New-ScanFixture 'nu1900' (New-ScannersJson '2026-11-21T20:00:00Z')
+Set-Content -LiteralPath (Join-Path $nu1900 'release-nuget-audit.log') -Value "warning NU1900: Error occurred while getting package vulnerability data`nProject has no vulnerable packages"
+$nuSummary = Invoke-Summary $nu1900
+Assert-Speed ($nuSummary.Exit -eq 1 -and $nuSummary.Report -match '"nugetAuditDataComplete": false') 'A NuGet audit log with NU1900 passed the scan summary.'
 
 # --- concurrent Trivy/Syft script: failure propagation, separate logs, true overlap (bash with a stub docker)
 $bash = $null

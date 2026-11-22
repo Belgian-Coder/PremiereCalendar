@@ -174,6 +174,7 @@ function Get-GateSteps {
         }
         New-Step 'nuget-audit' 'Invoke-NuGetAudit' 'Invoke-NuGetAudit.ps1' $b @('build') 'io' @((Join-Path $bundlePath 'release-nuget-audit.log')) -Validate {
             if (-not (Select-String -LiteralPath (Join-Path $bundlePath 'release-nuget-audit.log') -Pattern 'has no vulnerable packages' -Quiet)) { 'release-nuget-audit.log does not report "has no vulnerable packages"' }
+            elseif (Select-String -LiteralPath (Join-Path $bundlePath 'release-nuget-audit.log') -Pattern '\bNU190[0-5]\b' -Quiet) { 'release-nuget-audit.log reports NU1900-NU1905' }
         }
         New-Step 'scans' 'Invoke-Scans (Trivy, Syft SBOM, archive audit)' 'Invoke-Scans.ps1' $scanArgs @('nuget-audit') 'io' @(
             (Join-Path $bundlePath "release-$v-trivy.json"), (Join-Path $bundlePath "release-$v-sbom.cdx.json"), (Join-Path $bundlePath "release-$v-audit.json"),

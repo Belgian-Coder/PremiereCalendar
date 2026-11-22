@@ -68,6 +68,7 @@ function Assert-ReleaseImageGates {
     if (-not (Select-String -LiteralPath (Join-Path $bundle 'smoke-security.log') -Pattern '1654:999 true .*no-new-privileges:true.*ALL' -Quiet) -or
         -not (Select-String -LiteralPath (Join-Path $bundle 'smoke-downgrade-command.json') -Pattern '"Success"\s*:\s*true' -Quiet)) { throw 'The hardened-runtime or checkpoint-command smoke proof failed.' }
     if (-not (Select-String -LiteralPath (Join-Path $bundle 'release-nuget-audit.log') -Pattern 'has no vulnerable packages' -Quiet)) { throw 'The NuGet audit gate failed.' }
+    if (Select-String -LiteralPath (Join-Path $bundle 'release-nuget-audit.log') -Pattern '\bNU190[0-5]\b' -Quiet) { throw 'The NuGet audit log reports NU1900-NU1905 (vulnerability data unavailable or a vulnerable package).' }
     if ((Get-FileSha256 $Context.ImageArchive) -ine $build.archiveSha256) { throw 'The image archive SHA-256 differs from the build metadata.' }
 
     # Re-read the raw scan reports instead of trusting the summary alone.

@@ -84,7 +84,9 @@ def main():
         'trivyDbFresh': db['fresh'],
         'sbomCycloneDxNonempty': sbom.get('bomFormat') == 'CycloneDX' and len(sbom.get('components', [])) > 0,
         'archiveIdentityPass': all(audit['checks'].values()),
-        'nugetNoVulnerablePackages': 'has no vulnerable packages' in nuget}
+        'nugetNoVulnerablePackages': 'has no vulnerable packages' in nuget,
+        # NU1900 (vulnerability data unreadable), NU1901-NU1904 (vulnerable package), NU1905 (feed has no audit data).
+        'nugetAuditDataComplete': re.search(r'\bNU190[0-5]\b', nuget) is None}
     report = {
         'sourceRevision': audit['sourceRevision'], 'archiveSha256': audit['archiveSha256'],
         'policy': 'fixable vulnerabilities only (--ignore-unfixed)' if args.ignore_unfixed else 'any vulnerability fails',

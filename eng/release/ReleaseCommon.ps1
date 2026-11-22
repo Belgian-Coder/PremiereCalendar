@@ -470,7 +470,7 @@ function Get-AppDatabaseStartupBlockers {
     param([string[]] $Settings)
     foreach ($setting in @($Settings | Where-Object { $_ })) {
         if ($setting -notmatch '^\s*-?\s*["'']?AppDatabase(?:__|:)(Path|Provider)["'']?\s*[:=]\s*(.*?)\s*$') { continue }
-        $key = $Matches[1]; $value = $Matches[2].Trim().Trim('"', "'").Trim()
+        $key = $Matches[1]; $value = ($Matches[2] -replace '\s+#.*$', '').Trim().Trim('"', "'").Trim()
         if ($key -eq 'Path' -and $value) { "The live stack still sets AppDatabase Path, which stops this release at startup: $($setting.Trim())" }
         if ($key -eq 'Provider' -and $value -ne 'PostgreSql') { "The live stack selects AppDatabase Provider '$value', which stops this release at startup (only PostgreSql is supported)." }
     }
