@@ -13,8 +13,10 @@ untracked files are classified following docs/Testing.md "Scoped application che
 Test impact selection (eng/StaticChecks.Common.ps1 Get-TestImpact) narrows the service suites to the test classes that reference
 the changed types (plus one hop of consumers) and falls back to whole suites with a printed reason; -FullSuites disables it.
 -All runs the complete static lane. -Plan prints the classification and commands and runs nothing.
-Builder commands run only on Windows with -Run, after the static checks passed, one after another (never
-concurrently in one worktree). Without -Run, or on macOS, they are printed as the required builder follow-up.
+With -Run the app commands execute after the static checks passed, one after another (never concurrently in one worktree):
+on Windows through the WSL/Docker builder, on macOS/Linux the service-test commands through the native feedback lane
+(Test-WithPostgres.ps1 runs the host SDK against a throwaway PostgreSQL; wsl-docker.ps1 commands stay printed for the Windows
+builder). Without -Run they are printed as the required follow-up.
 This is scoped feedback. It never claims release acceptance; Browser checks and the complete suites stay required.
 
 .EXAMPLE
@@ -84,15 +86,19 @@ $failed = @($results | Where-Object Status -ne 'PASS').Count -gt 0
 if ($failed) { Write-Host 'Static checks failed; builder commands were not started.' -ForegroundColor Red; exit 1 }
 
 if ($followUp.Count -gt 0) {
-    if ($Run -and $IsWindows) {
-        foreach ($c in $followUp) {
+    $runnable = Select-RunnableFollowUps $followUp ([bool] $IsWindows)
+    if ($Run -and $runnable.Run.Count -gt 0) {
+        $laneText = if ($runnable.Lane -eq 'native') { 'native macOS/Linux feedback lane' } else { 'Windows/WSL builder' }
+        Write-Host "Running the scoped app commands on the $laneText."
+        foreach ($c in $runnable.Run) {
             Write-Host "== $($c.Label)"
             & (Get-PwshExecutable) -NoProfile -File $c.File @($c.Arguments)
             if ($LASTEXITCODE -ne 0) { Write-Host "$($c.Label) failed (exit $LASTEXITCODE)." -ForegroundColor Red; exit 1 }
         }
-        Write-Host 'Builder steps passed. Scoped feedback only: not release acceptance (complete suites, Browser, vulnerability, SBOM and exact-image gates remain).'
+        if ($runnable.Skipped.Count -gt 0) { Write-Host "Not run here (needs the Windows/WSL builder): $((@($runnable.Skipped.Label)) -join '; ')." }
+        Write-Host 'App commands passed. Scoped feedback only: not release acceptance (complete suites, Browser, vulnerability, SBOM and exact-image gates remain on the Windows/WSL linux/amd64 builder).'
     } else {
-        Write-Host 'Static checks passed. Required builder follow-up (Windows/WSL builder; add -Run on Windows to execute it) is listed above. Not release acceptance.'
+        Write-Host 'Static checks passed. Required app follow-up (listed above; add -Run to execute the service tests: on Windows through WSL, on macOS/Linux through the native feedback lane) is not release acceptance.'
     }
 } else {
     Write-Host 'Static checks passed. Scoped feedback only: not release acceptance.'

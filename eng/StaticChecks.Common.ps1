@@ -23,6 +23,7 @@ function Get-StaticCheckTable {
         [pscustomobject]@{ Name = 'ValidationTools';         Kind = 'pwsh';   Path = 'tests/ValidationTools.Tests.ps1';         Args = @(); UsesPython = $true;  Weight = 30;  Group = ''; Covers = @('^eng/(Test-Docs|Test-ScriptSyntax|Python\.Common)\.ps1$', '^eng/release/Invoke-Candidate\.ps1$') }
         [pscustomobject]@{ Name = 'SdkCache';                Kind = 'pwsh';   Path = 'tests/SdkCache.Tests.ps1';                Args = @(); UsesPython = $false; Weight = 10;  Group = ''; Covers = @('^eng/run-with-sdk-cache\.sh$') }
         [pscustomobject]@{ Name = 'PerformanceLogAudit';     Kind = 'pwsh';   Path = 'tests/PerformanceLogAudit.Tests.ps1';     Args = @(); UsesPython = $false; Weight = 7;   Group = ''; Covers = @('^eng/Read-CalendarPerformance\.ps1$') }
+        [pscustomobject]@{ Name = 'NativeLane';              Kind = 'pwsh';   Path = 'tests/NativeLane.Tests.ps1';              Args = @(); UsesPython = $false; Weight = 15;  Group = ''; Covers = @('^eng/(Test-WithPostgres|Harness\.Common|StaticChecks\.Common|Invoke-Validation)\.ps1$', '^global\.json$') }
         [pscustomobject]@{ Name = 'HarnessPolicy';           Kind = 'pwsh';   Path = 'tests/HarnessPolicy.Tests.ps1';           Args = @(); UsesPython = $false; Weight = 12;  Group = ''; Covers = @('^eng/(Test-WithPostgres|wsl-docker|Harness\.Common|StaticChecks\.Common|Invoke-Validation|Invoke-StaticChecks)\.ps1$', '^eng/release/(Invoke-ReleaseTests|Invoke-Candidate|Invoke-LocalGates)\.ps1$', '^AGENTS\.md$', '^compose\.dev\.yaml$') }
         [pscustomobject]@{ Name = 'ReleaseOrchestrator';     Kind = 'pwsh';   Path = 'tests/ReleaseOrchestrator.Tests.ps1';     Args = @(); UsesPython = $false; Weight = 45;  Group = ''; Covers = @('^eng/release/') }
         [pscustomobject]@{ Name = 'ReleaseSpeed';            Kind = 'pwsh';   Path = 'tests/ReleaseSpeed.Tests.ps1';            Args = @(); UsesPython = $true;  Weight = 20;  Group = ''; Covers = @('^eng/release/', '^Dockerfile$') }
@@ -241,6 +242,17 @@ function Get-AppFollowUpCommands($Classification, [string] $Root) {
         $commands.Add([pscustomobject]@{ Label = "Tests: $($Classification.Suites -join ', ')"; File = (Join-Path $Root 'eng/Test-WithPostgres.ps1'); Arguments = @('-Project', ($Classification.Suites -join ',')) })
     }
     $commands.ToArray()
+}
+
+# Which follow-up commands -Run may execute on this host. Windows runs them all (WSL/Docker builder). macOS and Linux run only the
+# service-test commands, which use the native feedback lane (SDK + throwaway PostgreSQL on the host); builder-only commands
+# (wsl-docker.ps1) stay printed as follow-up for the Windows builder. Native runs are feedback, never release acceptance.
+function Select-RunnableFollowUps($FollowUp, [bool] $WindowsHost) {
+    $run = [Collections.Generic.List[object]]::new(); $skipped = [Collections.Generic.List[object]]::new()
+    foreach ($c in @($FollowUp)) {
+        if ($WindowsHost -or [IO.Path]::GetFileName([string] $c.File) -eq 'Test-WithPostgres.ps1') { $run.Add($c) } else { $skipped.Add($c) }
+    }
+    [pscustomobject]@{ Run = $run.ToArray(); Skipped = $skipped.ToArray(); Lane = if ($WindowsHost) { 'wsl' } else { 'native' } }
 }
 
 # Changed paths: committed since the merge-base with $Base, plus staged, unstaged and untracked files.

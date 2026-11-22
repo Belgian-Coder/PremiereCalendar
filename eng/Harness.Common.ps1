@@ -435,3 +435,290 @@ function Find-HarnessReusableResults([string] $ResultsRoot, [string] $InputsHash
     }
     $found.ToArray()
 }
+
+# ---------------------------------------------------------------------------
+# Native feedback lane (macOS, Linux): the same suites, runner arguments, results and passing-result cache as the container
+# lane, but built and run with the host's own .NET SDK against a throwaway PostgreSQL started from locally installed
+# binaries. It is FEEDBACK ONLY: release acceptance stays on the linux/amd64 container builder (see AGENTS.md).
+# Nothing here installs software, starts a service, or edits PATH/profile files.
+# ---------------------------------------------------------------------------
+
+# The OS decision lives in one place so tests can force it. Auto: Windows uses WSL/Docker, every other OS runs natively.
+function Resolve-HarnessHostLane([ValidateSet('Auto', 'Native', 'Wsl')][string] $Requested = 'Auto', [Nullable[bool]] $IsWindowsHost = $null) {
+    $windowsHost = if ($null -ne $IsWindowsHost) { [bool] $IsWindowsHost } else { [bool] $IsWindows }
+    switch ($Requested) {
+        'Auto' { if ($windowsHost) { 'Wsl' } else { 'Native' } }
+        'Wsl' { if (-not $windowsHost) { throw 'The WSL/Docker lane needs a Windows host; this host runs the native lane.' }; 'Wsl' }
+        'Native' { 'Native' }
+    }
+}
+
+function Get-HarnessNativePlatform([string] $Os, [string] $Architecture) {
+    if (-not $Os) { $Os = if ($IsMacOS) { 'macos' } elseif ($IsLinux) { 'linux' } else { 'windows' } }
+    if (-not $Architecture) { $Architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant() }
+    $ridOs = switch ($Os) { 'macos' { 'osx' } 'linux' { 'linux' } 'windows' { 'win' } default { throw "Unsupported native OS '$Os'." } }
+    [pscustomobject]@{ Os = $Os; Architecture = $Architecture; Rid = "$ridOs-$Architecture"; Name = "$Os-$Architecture" }
+}
+
+# Isolated per OS/architecture (and runtime-async mode) so Linux, Windows and macOS outputs never mix.
+function Get-HarnessNativeStorage($Context, $Platform, [switch] $NoRuntimeAsync) {
+    $suffix = if ($NoRuntimeAsync) { '-sync' } else { '' }
+    [pscustomobject]@{
+        BuildDirectory = Join-Path $Context.Root "artifacts/build/native-$($Platform.Name)$suffix"
+        PackageDirectory = Join-Path $Context.PrimaryRoot "artifacts/packages/native-$($Platform.Name)"
+    }
+}
+
+# auto = half of the CPUs (at least 2, at most 64); explicit numbers pass through.
+function Get-HarnessNativeBudget([string] $Value, [int] $CpuCount = [Environment]::ProcessorCount) {
+    if ($Value -ne 'auto') { return [int] $Value }
+    [Math]::Min(64, [Math]::Max(2, [int][Math]::Floor($CpuCount / 2)))
+}
+
+function Get-HarnessRequiredSdk([string] $Root) {
+    $global = Get-Content -LiteralPath (Join-Path $Root 'global.json') -Raw | ConvertFrom-Json
+    [pscustomobject]@{ Version = [string] $global.sdk.version; RollForward = if ($global.sdk.PSObject.Properties['rollForward']) { [string] $global.sdk.rollForward } else { 'patch' } }
+}
+
+# Highest installed SDK that satisfies global.json: same major.minor, not older, no prerelease ('disable' = exact).
+function Select-HarnessSdk([string[]] $Installed, $Required) {
+    $need = [version] $Required.Version
+    $best = $null
+    foreach ($text in $Installed) {
+        if ($text -notmatch '^\d+\.\d+\.\d+$') { continue }
+        $candidate = [version] $text
+        if ($candidate.Major -ne $need.Major -or $candidate.Minor -ne $need.Minor) { continue }
+        if ($Required.RollForward -eq 'disable') { if ($candidate -ne $need) { continue } } elseif ($candidate -lt $need) { continue }
+        if ($null -eq $best -or $candidate -gt [version] $best) { $best = $text }
+    }
+    $best
+}
+
+function Get-HarnessDotnetCandidates {
+    $list = [Collections.Generic.List[string]]::new()
+    if ($env:DOTNET_ROOT) { $list.Add((Join-Path $env:DOTNET_ROOT 'dotnet')) }
+    $onPath = Get-Command dotnet -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { $list.Add($onPath.Source) }
+    foreach ($fixed in '/usr/local/share/dotnet/dotnet', '/usr/share/dotnet/dotnet', '/usr/lib/dotnet/dotnet') { $list.Add($fixed) }
+    @($list | Select-Object -Unique)
+}
+
+# -Probe runs `dotnet --list-sdks` (execution); without it the SDK folders next to the executable are listed instead, so a
+# plan never starts a process. Returns Ok=$false with an explanation instead of throwing.
+function Resolve-HarnessDotnet([string] $Root, [string[]] $Candidates = (Get-HarnessDotnetCandidates), [switch] $Probe, [scriptblock] $ListSdks) {
+    $required = Get-HarnessRequiredSdk $Root
+    $tried = [Collections.Generic.List[string]]::new()
+    foreach ($candidate in $Candidates) {
+        if (-not [IO.File]::Exists($candidate)) { $tried.Add("$candidate (missing)"); continue }
+        $resolved = $candidate
+        try { $link = (Get-Item -LiteralPath $candidate -Force).ResolveLinkTarget($true); if ($link) { $resolved = $link.FullName } } catch { }
+        $installed = if ($Probe) {
+            if ($ListSdks) { @(& $ListSdks $candidate) } else {
+                $listed = Invoke-HarnessNativeCommand $candidate @('--list-sdks') -TimeoutSeconds 60
+                if ($listed.ExitCode -ne 0) { $tried.Add("$candidate (--list-sdks failed)"); continue }
+                @($listed.Output -split '\r?\n' | Where-Object { $_ -match '^\s*\d' } | ForEach-Object { ($_.Trim() -split '\s+')[0] })
+            }
+        } else {
+            $sdkDirectory = Join-Path ([IO.Path]::GetDirectoryName($resolved)) 'sdk'
+            if (Test-Path -LiteralPath $sdkDirectory -PathType Container) { @(Get-ChildItem -LiteralPath $sdkDirectory -Directory | ForEach-Object Name) } else { @() }
+        }
+        $sdk = Select-HarnessSdk $installed $required
+        if ($sdk) {
+            return [pscustomobject]@{ Ok = $true; Path = $candidate; Root = [IO.Path]::GetDirectoryName($resolved); Sdk = $sdk; Required = $required.Version; Error = $null; Tried = $tried.ToArray() }
+        }
+        $tried.Add("$candidate (SDKs: $((@($installed) -join ', ')))")
+    }
+    $message = "No .NET SDK matching global.json ($($required.Version), $($required.RollForward)) was found. Tried: $(if ($tried.Count) { $tried -join '; ' } else { 'nothing' }). Nothing is installed by the helpers; install the SDK yourself or set DOTNET_ROOT."
+    [pscustomobject]@{ Ok = $false; Path = $null; Root = $null; Sdk = $null; Required = $required.Version; Error = $message; Tried = $tried.ToArray() }
+}
+
+function Get-HarnessPostgresCandidates {
+    $list = [Collections.Generic.List[string]]::new()
+    foreach ($fixed in '/opt/homebrew/opt/postgresql@18/bin', '/usr/local/opt/postgresql@18/bin') { $list.Add($fixed) }
+    $onPath = Get-Command pg_ctl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { $list.Add([IO.Path]::GetDirectoryName($onPath.Source)) }
+    $list.ToArray()
+}
+
+# A usable PostgreSQL binary directory holds initdb, pg_ctl, postgres and psql. -Requested (a bin folder or an install root
+# with bin/) is the only candidate when given, so a wrong explicit path never silently falls back.
+function Resolve-HarnessPostgresBin([string] $Requested, [string[]] $Candidates) {
+    $tools = 'initdb', 'pg_ctl', 'postgres', 'psql'
+    $list = if ($Requested) {
+        @($Requested, (Join-Path $Requested 'bin'))
+    } elseif ($PSBoundParameters.ContainsKey('Candidates')) { @($Candidates) } else { @(Get-HarnessPostgresCandidates) }
+    $tried = [Collections.Generic.List[string]]::new()
+    foreach ($directory in $list) {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) { $tried.Add("$directory (missing)"); continue }
+        $missing = @($tools | Where-Object { -not [IO.File]::Exists((Join-Path $directory $_)) -and -not [IO.File]::Exists((Join-Path $directory "$_.exe")) })
+        if ($missing.Count -eq 0) { return [pscustomobject]@{ Ok = $true; Bin = [IO.Path]::GetFullPath($directory); Error = $null; Tried = $tried.ToArray() } }
+        $tried.Add("$directory (missing $($missing -join ', '))")
+    }
+    $message = "No PostgreSQL binaries (initdb, pg_ctl, postgres, psql) were found. Tried: $(if ($tried.Count) { $tried -join '; ' } else { 'nothing' }). Nothing is installed by the helpers; pass -PostgresBin <folder> or install PostgreSQL yourself."
+    [pscustomobject]@{ Ok = $false; Bin = $null; Error = $message; Tried = $tried.ToArray() }
+}
+
+function Get-HarnessPostgresTool([string] $Bin, [string] $Name) {
+    $plain = Join-Path $Bin $Name
+    if ([IO.File]::Exists($plain)) { $plain } else { "$plain.exe" }
+}
+
+# Cache identity of the native environment, shaped like a container image id so the shared cache helpers apply unchanged:
+# SDK version, runtime identifier and PostgreSQL version (the container lane uses the immutable dev image id instead).
+function Get-HarnessNativeEnvironmentId([string] $Sdk, [string] $Rid, [string] $PostgresVersion) {
+    'sha256:' + (Get-HarnessTextSha256 "native-environment`nsdk=$Sdk`nrid=$Rid`npostgres=$PostgresVersion")
+}
+
+function New-HarnessNativeCacheInputs([string] $ManifestSha256, [string[]] $Suites, [string[]] $Filter, [string[]] $QueryFilter,
+    [string] $Parallel, [string[]] $RunnerArguments, [string] $Configuration, [bool] $RuntimeAsync, [string] $Sdk, [string] $Rid) {
+    @{
+        schema = 1; lane = 'native'; manifest = $ManifestSha256; suites = @($Suites | Sort-Object); filter = @($Filter | Sort-Object)
+        queryFilter = @($QueryFilter | Sort-Object); parallel = [string] $Parallel; runnerArguments = @($RunnerArguments)
+        configuration = $Configuration; runtimeAsync = $RuntimeAsync; sdk = $Sdk; rid = $Rid
+    }
+}
+
+# Runs one process (through `sh -c 'exec "$@" 2>&1'` so stdout and stderr arrive as one ordered stream), bounded by a
+# deadline. -LogPath tees every line to a file, -Echo to the console; without -Echo the output is returned (capped).
+# The single process boundary of the native lane: tests replace this function with a stub.
+function Invoke-HarnessNativeCommand([string] $File, [string[]] $Arguments = @(), [hashtable] $Environment = @{}, [int] $TimeoutSeconds = 60,
+    [string] $LogPath, [switch] $Echo, [string] $WorkingDirectory) {
+    if ($IsWindows) { throw 'The native lane runs on macOS or Linux.' }
+    $start = [Diagnostics.ProcessStartInfo]::new('/bin/sh')
+    foreach ($argument in (@('-c', 'exec "$@" 2>&1', 'sh', $File) + $Arguments)) { $start.ArgumentList.Add($argument) }
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardInput = $true
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    if ($WorkingDirectory) { $start.WorkingDirectory = $WorkingDirectory }
+    foreach ($name in $Environment.Keys) { $start.Environment[$name] = [string] $Environment[$name] }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    $writer = $null
+    $captured = [Text.StringBuilder]::new()
+    $timedOut = $false
+    try {
+        if ($LogPath) { $writer = [IO.StreamWriter]::new($LogPath, $false, [Text.UTF8Encoding]::new($false)); $writer.AutoFlush = $true }
+        if (-not $process.Start()) { throw "Could not start $File." }
+        $process.StandardInput.Close()
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $reader = $process.StandardOutput
+        while ($true) {
+            $pending = $reader.ReadLineAsync()
+            while (-not $pending.Wait(250)) {
+                if ([DateTime]::UtcNow -gt $deadline) { $timedOut = $true; break }
+            }
+            if ($timedOut) { break }
+            $line = $pending.Result
+            if ($null -eq $line) { break }
+            if ($Echo) { [Console]::Out.WriteLine($line) } elseif ($captured.Length -lt 1MB) { [void] $captured.AppendLine($line) }
+            if ($writer) { $writer.WriteLine($line) }
+        }
+        if ($timedOut) {
+            try { $process.Kill($true) } catch { }
+            [void] $process.WaitForExit(10000)
+            $message = "TIMEOUT: $File exceeded $TimeoutSeconds s and was stopped."
+            if ($Echo) { [Console]::Out.WriteLine($message) }
+            if ($writer) { $writer.WriteLine($message) }
+            return [pscustomobject]@{ ExitCode = 124; Output = $captured.ToString(); TimedOut = $true }
+        }
+        $process.WaitForExit()
+        [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $captured.ToString(); TimedOut = $false }
+    } finally {
+        if ($writer) { $writer.Dispose() }
+        $process.Dispose()
+    }
+}
+
+function Get-HarnessFreeTcpPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try { $listener.Start(); ([Net.IPEndPoint] $listener.LocalEndpoint).Port } finally { $listener.Stop() }
+}
+
+function Set-HarnessPrivateFile([string] $Path, [string] $Content) {
+    [IO.File]::WriteAllText($Path, '')
+    if (-not $IsWindows) { [IO.File]::SetUnixFileMode($Path, [IO.UnixFileMode]'UserRead,UserWrite') }
+    [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false))
+}
+
+# Removes the throwaway server folder only when it is exactly <temp>/pcpg-<12 hex> (never anything else).
+function Remove-HarnessNativePostgresDirectory([string] $Directory, [string] $TempRoot) {
+    $full = [IO.Path]::GetFullPath($Directory).TrimEnd('/', '\')
+    $parent = [IO.Path]::GetFullPath($TempRoot).TrimEnd('/', '\')
+    if ([IO.Path]::GetDirectoryName($full) -cne $parent -or [IO.Path]::GetFileName($full) -cnotmatch '^pcpg-[0-9a-f]{12}$') { throw "Refusing to remove unexpected path '$full'." }
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        if (-not (Test-Path -LiteralPath $full)) { return $true }
+        try { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop } catch { Start-Sleep -Milliseconds 200 }
+    }
+    -not (Test-Path -LiteralPath $full)
+}
+
+# Starts a throwaway PostgreSQL (own data directory, unix socket inside it, 127.0.0.1 on a free port, SCRAM password from a
+# per-run password file), runs $Body with the environment variables the test projects read, and ALWAYS stops the server and
+# deletes the folder afterwards (also when the body fails or is interrupted). The server is never reachable without the
+# password over TCP, matches the container lane's settings (max_connections=300) and uses no fsync because it is disposable.
+function Invoke-HarnessWithNativePostgres([string] $Bin, [scriptblock] $Body, [int] $ReadySeconds = 60, [string] $TempRoot) {
+    if (-not $TempRoot) { $TempRoot = [IO.Path]::GetTempPath() }
+    $TempRoot = [IO.Path]::GetFullPath($TempRoot).TrimEnd('/', '\')
+    # Unix socket paths are limited to about 100 characters on macOS.
+    if (($TempRoot.Length + 40) -gt 100 -and (Test-Path -LiteralPath '/tmp' -PathType Container)) { $TempRoot = '/tmp' }
+    $directory = Join-Path $TempRoot ('pcpg-' + [Guid]::NewGuid().ToString('N').Substring(0, 12))
+    $data = Join-Path $directory 'data'
+    $socket = Join-Path $directory 'sock'
+    $passwordFile = Join-Path $directory 'password'
+    $log = Join-Path $directory 'server.log'
+    $password = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLowerInvariant()
+    $startAttempted = $false
+    $exitHandler = $null
+    try {
+        [void] (New-Item -ItemType Directory -Path $directory)
+        if (-not $IsWindows) { [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]'UserRead,UserWrite,UserExecute') }
+        [void] (New-Item -ItemType Directory -Path $socket)
+        Set-HarnessPrivateFile $passwordFile $password
+        # Best effort for SIGTERM/exit paths that do not run `finally`: stop the server and remove the folder.
+        $exitHandler = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -MessageData @{ Bin = $Bin; Data = $data; Directory = $directory; Root = $TempRoot } -Action {
+            $m = $Event.MessageData
+            try { & (Join-Path $m.Bin 'pg_ctl') stop -D $m.Data -m immediate -t 10 *> $null } catch { }
+            try { if ((Split-Path -Leaf $m.Directory) -match '^pcpg-[0-9a-f]{12}$') { Remove-Item -LiteralPath $m.Directory -Recurse -Force -ErrorAction SilentlyContinue } } catch { }
+        }
+        $init = Invoke-HarnessNativeCommand (Get-HarnessPostgresTool $Bin 'initdb') @('-D', $data, '-U', 'premierecalendar', '--auth-local=trust', '--auth-host=scram-sha-256', "--pwfile=$passwordFile", '-E', 'UTF8', '--no-sync') -TimeoutSeconds 120
+        if ($init.ExitCode -ne 0) { throw "initdb failed (exit $($init.ExitCode)): $($init.Output.Trim())" }
+        $ready = $false
+        for ($attempt = 1; $attempt -le 3 -and -not $ready; $attempt++) {
+            $port = Get-HarnessFreeTcpPort
+            $options = "-c port=$port -c listen_addresses=127.0.0.1 -c unix_socket_directories=$socket -c max_connections=300 -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+            $startAttempted = $true
+            $started = Invoke-HarnessNativeCommand (Get-HarnessPostgresTool $Bin 'pg_ctl') @('start', '-D', $data, '-l', $log, '-o', $options) -TimeoutSeconds 30
+            if ($started.ExitCode -ne 0) { continue }
+            $deadline = [DateTime]::UtcNow.AddSeconds($ReadySeconds)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                $probe = Invoke-HarnessNativeCommand (Get-HarnessPostgresTool $Bin 'psql') @('-h', $socket, '-p', "$port", '-U', 'premierecalendar', '-d', 'postgres', '-Atc', 'select 1') -Environment @{ PGCONNECT_TIMEOUT = '2' } -TimeoutSeconds 15
+                if ($probe.ExitCode -eq 0 -and $probe.Output.Trim() -eq '1') { $ready = $true; break }
+                Start-Sleep -Milliseconds 100
+            }
+            if (-not $ready) { break }
+        }
+        if (-not $ready) {
+            $tail = if (Test-Path -LiteralPath $log) { (Get-Content -LiteralPath $log -Tail 15) -join "`n" } else { '' }
+            throw "The disposable PostgreSQL did not become ready.`n$tail"
+        }
+        $variables = @{
+            PREMIERECALENDAR_TEST_POSTGRES = "Host=127.0.0.1;Port=$port;Database=postgres;Username=premierecalendar;Timeout=60;Command Timeout=120"
+            PREMIERECALENDAR_TEST_POSTGRES_PASSWORD_FILE = $passwordFile
+        }
+        & $Body $variables
+    } finally {
+        if ($startAttempted) {
+            $stopped = Invoke-HarnessNativeCommand (Get-HarnessPostgresTool $Bin 'pg_ctl') @('stop', '-D', $data, '-m', 'immediate', '-t', '20') -TimeoutSeconds 40
+            $pidFile = Join-Path $data 'postmaster.pid'
+            if ($stopped.ExitCode -ne 0 -and (Test-Path -LiteralPath $pidFile)) {
+                # pg_ctl could not stop it: signal the recorded postmaster directly.
+                try { $postmaster = [int] ((Get-Content -LiteralPath $pidFile -TotalCount 1).Trim()); Stop-Process -Id $postmaster -Force -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+        if (Test-Path -LiteralPath $directory) {
+            if (-not (Remove-HarnessNativePostgresDirectory $directory $TempRoot)) { [Console]::Error.WriteLine("The disposable PostgreSQL folder could not be removed: $directory") }
+        }
+        if ($exitHandler) { Unregister-Event -SourceIdentifier PowerShell.Exiting -ErrorAction SilentlyContinue; Remove-Job -Id $exitHandler.Id -Force -ErrorAction SilentlyContinue }
+    }
+}

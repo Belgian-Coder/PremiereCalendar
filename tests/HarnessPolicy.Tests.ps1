@@ -41,6 +41,24 @@ Assert-Policy ($testPlan.Cpus -eq 'auto' -and $testPlan.BuildMaxCpuCount -eq 'au
 $checkPlan = & (Join-Path $root 'eng/wsl-docker.ps1') check -Project App -Plan
 Assert-Policy ([string]$checkPlan.Command -match '__SRC__|pc_src' -and [string]$checkPlan.Command -match 'maxcpucount:\$pc_budget') 'wsl-docker check no longer builds from the mirror with the auto budget.'
 
+# 2b. The macOS/Linux lane is NATIVE feedback only: never WSL/Docker, never part of a release, never claimed as acceptance.
+. (Join-Path $root 'eng/Harness.Common.ps1')
+Assert-Policy ((Resolve-HarnessHostLane 'Auto' $false) -eq 'Native' -and (Resolve-HarnessHostLane 'Auto' $true) -eq 'Wsl') 'The host lane decision changed: Windows must use WSL, other hosts the native lane.'
+$nativePlan = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Lane Native -Project Unit -Plan
+Assert-Policy ($nativePlan.Lane -eq 'native' -and $nativePlan.Acceptance -match 'feedback only' -and $nativePlan.Acceptance -match 'container builder') 'The native lane no longer states that it is feedback only.'
+Assert-Policy ($null -eq $nativePlan.PSObject.Properties['WslDistribution'] -and $null -eq $nativePlan.PSObject.Properties['DevImage']) 'The native lane plan reports WSL/Docker resources.'
+$nativeStart = $testText.IndexOf('if ($hostLane -eq ''Native'')'); $nativeEnd = $testText.IndexOf("`n" + 'if ($Plan) {', $nativeStart)
+$nativeBlock = if ($nativeStart -ge 0 -and $nativeEnd -gt $nativeStart) { $testText.Substring($nativeStart, $nativeEnd - $nativeStart) } else { '' }
+Assert-Policy ($nativeBlock.Length -gt 500 -and $nativeBlock -notmatch 'Invoke-HarnessMirroredWsl|ConvertTo-WslPath|Invoke-HarnessWsl|Assert-HarnessWslRunning|wsl\.exe|docker\s+(run|exec|create|network|info|image)') 'The native lane block uses WSL or Docker.'
+Assert-Policy ($nativeBlock -match "Browser" -and $nativeBlock -match 'Invoke-HarnessWithNativePostgres') 'The native lane lost the Browser refusal or the throwaway PostgreSQL wrapper.'
+foreach ($releaseScript in Get-ChildItem -LiteralPath (Join-Path $root 'eng/release') -Recurse -File -Include '*.ps1', '*.py', '*.sh') {
+    Assert-Policy (([IO.File]::ReadAllText($releaseScript.FullName)) -notmatch 'Lane\s+Native|Resolve-HarnessHostLane|Invoke-HarnessWithNativePostgres|Get-HarnessNativePlatform|-PostgresBin') "$($releaseScript.Name) uses the native feedback lane; release acceptance stays on the Windows/WSL container builder."
+}
+# The release and wsl-docker parameter sets (WSL distribution, dev image, volumes) are refused by the native lane.
+$refused = $false
+try { & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Lane Native -WslDistribution Ubuntu-24.04 -Plan | Out-Null } catch { $refused = $true }
+Assert-Policy $refused 'A release-style (WSL) parameter set was accepted by the native lane.'
+
 # 3. Change-aware validation narrows tests and never adds a redundant app build before a test run.
 . (Join-Path $root 'eng/StaticChecks.Common.ps1')
 Assert-Policy ([bool](Get-Command Get-TestImpact -ErrorAction SilentlyContinue)) 'Invoke-Validation lost test impact selection.'

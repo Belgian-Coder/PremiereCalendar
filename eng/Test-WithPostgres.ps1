@@ -174,6 +174,9 @@ param(
     [ValidateSet('musl', 'glibc')]
     [string] $CacheFlavor,
     [ValidateRange(0, 86400)][int] $TimeoutSeconds = 0,
+    [ValidateSet('Auto', 'Native', 'Wsl')]
+    [string] $Lane = 'Auto',
+    [string] $PostgresBin,
     [switch] $Plan
 )
 
@@ -244,9 +247,164 @@ $buildArguments = @('-c', $Configuration, '--nologo', '-v', 'q', "-maxcpucount:$
 if ($NoRuntimeAsync) { $buildArguments += '-p:UseRuntimeAsync=false' }
 if ($NoRestore) { $buildArguments += '--no-restore' }
 
+$hostLane = Resolve-HarnessHostLane $Lane
+if ($hostLane -eq 'Native') {
+    # Native feedback lane (macOS/Linux): host SDK + throwaway local PostgreSQL. Not release acceptance.
+    foreach ($containerOnly in 'SourceMount', 'WslDistribution', 'DevImage', 'BuildVolume', 'NugetVolume', 'CacheFlavor') {
+        if ($PSBoundParameters.ContainsKey($containerOnly)) { throw "-$containerOnly applies to the WSL/container lane only." }
+    }
+    if ($suites.Contains('Browser')) { throw 'The Browser suite needs the prepared linux browser image and runs only on the Windows/WSL container lane; the native lane covers Unit, Component and Integration.' }
+    $platform = Get-HarnessNativePlatform
+    $nativeStorage = Get-HarnessNativeStorage $context $platform -NoRuntimeAsync:$NoRuntimeAsync
+    $buildBudget = Get-HarnessNativeBudget $BuildMaxCpuCount
+    $runBudget = Get-HarnessNativeBudget $Cpus
+    $nativeBuildArguments = @('-c', $Configuration, '--nologo', '-v', 'q', "-maxcpucount:$buildBudget", '-nodeReuse:false', '-p:UseSharedCompilation=false')
+    if ($NoRuntimeAsync) { $nativeBuildArguments += '-p:UseRuntimeAsync=false' }
+    if ($NoRestore) { $nativeBuildArguments += '--no-restore' }
+    $nativeRunner = @($runner | ForEach-Object { if ($_ -eq 'auto') { [string] $runBudget } else { $_ } })
+    $nativeBuildDirectory = if ($FreshBuild) { Join-Path $context.Root "artifacts/build/native-$($platform.Name)-fresh-$([Guid]::NewGuid().ToString('N').Substring(0, 8))" } else { $nativeStorage.BuildDirectory }
+    $postgres = Resolve-HarnessPostgresBin $PostgresBin
+    if ($Plan) {
+        $planned = Resolve-HarnessDotnet $context.Root
+        [pscustomobject]@{
+            Lane = 'native'
+            Projects = @($suites | ForEach-Object { "$($_)Tests" })
+            Build = -not $NoBuild
+            BuildArguments = $nativeBuildArguments
+            RunnerArguments = $nativeRunner
+            Platform = $platform.Name
+            RuntimeIdentifier = $platform.Rid
+            Dotnet = if ($planned.Ok) { $planned.Path } else { "(not found) $($planned.Error)" }
+            Sdk = if ($planned.Ok) { $planned.Sdk } else { "(none; global.json requires $($planned.Required))" }
+            SdkRequired = $planned.Required
+            PostgresBin = if ($postgres.Ok) { $postgres.Bin } else { "(not found) $($postgres.Error)" }
+            PostgreSql = 'throwaway initdb in a temporary folder (unix socket there plus 127.0.0.1 on a free port, SCRAM password file, max_connections=300, fsync off); stopped and deleted on exit'
+            BuildOutput = $nativeBuildDirectory
+            PackageStorage = $nativeStorage.PackageDirectory
+            Results = $resultsHost
+            Cpus = $Cpus
+            BuildMaxCpuCount = $BuildMaxCpuCount
+            RunnerBudget = $runBudget
+            BuildBudget = $buildBudget
+            TimeoutSeconds = $TimeoutSeconds
+            AutoBudget = 'auto = max(2, CPU count / 2)'
+            ResultCache = if ($NoCache) { 'off (-NoCache)' } elseif ($NoBuild) { 'off (-NoBuild)' } else { 'on (key: source manifest, SDK version, RID, PostgreSQL version, selection, configuration)' }
+            Acceptance = 'feedback only; release acceptance stays on the Windows/WSL linux/amd64 container builder'
+        }
+        return
+    }
+    if (-not $postgres.Ok) { throw $postgres.Error }
+    $nativeDotnet = Resolve-HarnessDotnet $context.Root -Probe
+    if (-not $nativeDotnet.Ok) { throw $nativeDotnet.Error }
+    $cacheEnabled = -not $NoCache -and -not $NoBuild
+    $nativeClock = [Diagnostics.Stopwatch]::StartNew()
+    $started = Get-Date
+    $postgresVersion = ''
+    $versionProbe = Invoke-HarnessNativeCommand (Get-HarnessPostgresTool $postgres.Bin 'postgres') @('--version') -TimeoutSeconds 30
+    if ($versionProbe.ExitCode -eq 0) { $postgresVersion = $versionProbe.Output.Trim() }
+    $environmentId = Get-HarnessNativeEnvironmentId $nativeDotnet.Sdk $platform.Rid $postgresVersion
+    if ($cacheEnabled) {
+        $manifestSha256 = Get-HarnessTextSha256 (ConvertTo-HarnessManifestText (Get-HarnessSourceManifest $context.Root))
+        $cacheInputs = New-HarnessNativeCacheInputs $manifestSha256 @($suites) @($Filter) @($QueryFilter) $Parallel @($RunnerArguments) $Configuration (-not $NoRuntimeAsync) $nativeDotnet.Sdk $platform.Rid
+        $cacheInputsHash = Get-HarnessResultInputsHash $cacheInputs
+        $reused = @(Find-HarnessReusableResults (Join-Path $context.Root 'artifacts/test-results') $cacheInputsHash @($suites)) | Where-Object { $_.ImageId -ceq $environmentId } | Select-Object -First 1
+        if ($reused) {
+            Write-Host "REUSED passing results from $($reused.Folder) (key $($reused.Key.Substring(0, 16))); nothing was built or run. Use -NoCache to run anyway."
+            Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] $nativeClock.Elapsed.TotalSeconds, $reused.Folder)
+            Write-Host "All requested test projects passed ($($suites -join ', ')), reused."
+            return
+        }
+    }
+    [void] (New-Item -ItemType Directory -Path (Join-Path $context.Root 'artifacts') -Force)
+    $lockStream = $null
+    try { $lockStream = [IO.File]::Open((Join-Path $context.Root 'artifacts/check.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+    catch [IO.IOException] { throw 'Another build/test check owns this worktree. Use another worktree or wait.' }
+    [void] (New-Item -ItemType Directory -Path $resultsHost -Force)
+    Write-Host "Results folder: $resultsHost"
+    Write-Host "Native feedback lane: $($platform.Name) ($($platform.Rid)); SDK $($nativeDotnet.Sdk) at $($nativeDotnet.Path); PostgreSQL $postgresVersion at $($postgres.Bin)"
+    Write-Host "PC_TEST_BUDGET cpus=$([Environment]::ProcessorCount) runnerCpus=$runBudget maxThreads=$(if ($MaxThreads -eq 'auto') { $runBudget } else { $MaxThreads }) buildMaxCpuCount=$buildBudget timeoutSeconds=$TimeoutSeconds"
+    $nativeEnvironment = @{
+        ArtifactsPath = $nativeBuildDirectory; NUGET_PACKAGES = $nativeStorage.PackageDirectory; DOTNET_ROOT = $nativeDotnet.Root
+        DOTNET_NOLOGO = '1'; DOTNET_CLI_TELEMETRY_OPTOUT = '1'; DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'; DOTNET_CLI_HOME = (Join-Path $nativeBuildDirectory '.sdk-cache/dotnet')
+    }
+    [void] (New-Item -ItemType Directory -Path $nativeStorage.PackageDirectory -Force)
+    $remainingSeconds = { [Math]::Max(1, [int][Math]::Floor($TimeoutSeconds - $nativeClock.Elapsed.TotalSeconds)) }
+    $names = @{}; foreach ($s in $suites) { $names[$s] = "PremiereCalendar.$($s)Tests" }
+    $summary = [Collections.Generic.List[string]]::new()
+    $status = 0
+    $built = $false
+    $failedBuild = @{}
+    try {
+        if (-not $NoBuild) {
+            [void] (New-Item -ItemType Directory -Path $nativeBuildDirectory -Force)
+            $target = $null
+            if ($suites.Count -gt 1) {
+                # One MSBuild evaluation/restore for every selected project, like the container lane.
+                $target = Join-Path $nativeBuildDirectory 'pc-selected-tests.slnf'
+                $solution = [IO.Path]::GetRelativePath($nativeBuildDirectory, (Join-Path $context.Root 'PremiereCalendar.slnx')).Replace('\', '/')
+                $projects = @('PremiereCalendar/PremiereCalendar.csproj') + @($suites | ForEach-Object { "tests/$($names[$_])/$($names[$_]).csproj" })
+                [IO.File]::WriteAllText($target, (@{ solution = @{ path = $solution; projects = $projects } } | ConvertTo-Json -Depth 5 -Compress), [Text.UTF8Encoding]::new($false))
+                Write-Host "=== build $($suites -join ' ') (one MSBuild invocation)"
+                $clock = [Diagnostics.Stopwatch]::StartNew()
+                $result = Invoke-HarnessNativeCommand $nativeDotnet.Path (@('build', $target) + $nativeBuildArguments) -Environment $nativeEnvironment -WorkingDirectory $context.Root -Echo -TimeoutSeconds (& $remainingSeconds)
+                if ($result.ExitCode -eq 0) { $built = $true; Write-Host ("build time: {0} s" -f [int] $clock.Elapsed.TotalSeconds) }
+                else { Write-Host 'COMBINED BUILD FAILED: building each project separately to attribute the failure' }
+            }
+            if (-not $built) {
+                foreach ($suite in $suites) {
+                    $name = $names[$suite]
+                    Write-Host "=== build $name"
+                    $clock = [Diagnostics.Stopwatch]::StartNew()
+                    $result = Invoke-HarnessNativeCommand $nativeDotnet.Path (@('build', "tests/$name/$name.csproj") + $nativeBuildArguments) -Environment $nativeEnvironment -WorkingDirectory $context.Root -Echo -TimeoutSeconds (& $remainingSeconds)
+                    if ($result.ExitCode -ne 0) { Write-Host "BUILD FAILED: $name"; $failedBuild[$suite] = $true; $status = 1; $summary.Add("${name}: build failed"); continue }
+                    Write-Host ("build time: {0} s" -f [int] $clock.Elapsed.TotalSeconds)
+                }
+            }
+        }
+        $runnable = @($suites | Where-Object { -not $failedBuild.ContainsKey($_) })
+        if ($runnable.Count -gt 0) {
+            Invoke-HarnessWithNativePostgres $postgres.Bin {
+                param($variables)
+                $suiteEnvironment = @{ DOTNET_ROOT = $nativeDotnet.Root; DOTNET_NOLOGO = '1' } + $variables
+                foreach ($suite in $runnable) {
+                    $name = $names[$suite]
+                    $apphost = Join-Path $nativeBuildDirectory "bin/$name/$($Configuration.ToLowerInvariant())/$name"
+                    $arguments = @('-noLogo', '-result-trx', (Join-Path $resultsHost "$suite.trx"), '-result-ctrf', (Join-Path $resultsHost "$suite.ctrf.json")) + $nativeRunner
+                    if ([IO.File]::Exists($apphost)) { $file = $apphost }
+                    elseif ([IO.File]::Exists("$apphost.dll")) { $file = $nativeDotnet.Path; $arguments = @("$apphost.dll") + $arguments }
+                    else { Write-Host "Missing test executable $apphost (run without -NoBuild)"; $script:status = 1; $summary.Add("${name}: no executable"); continue }
+                    Write-Host "=== run $name"
+                    $clock = [Diagnostics.Stopwatch]::StartNew()
+                    $logPath = Join-Path $resultsHost "$suite.log"
+                    $result = Invoke-HarnessNativeCommand $file $arguments -Environment $suiteEnvironment -WorkingDirectory $context.Root -Echo -LogPath $logPath -TimeoutSeconds (& $remainingSeconds)
+                    $code = $result.ExitCode
+                    # A filter that matches nothing makes the xUnit.net runner exit 0 with "Total: 0"; that must not count as a pass.
+                    if ($code -eq 0 -and (Select-String -LiteralPath $logPath -Pattern 'Total: 0($|[^0-9])' -Quiet)) { Write-Host "NO TESTS RAN in ${name}: the filter matched nothing"; $code = 9 }
+                    if ($code -ne 0) { $script:status = 1 }
+                    $summary.Add(("{0}: exit {1}, {2} s" -f $name, $code, [int] $clock.Elapsed.TotalSeconds))
+                }
+            }
+        }
+    } finally {
+        if ($lockStream) { $lockStream.Dispose() }
+        if ($FreshBuild -and (Test-Path -LiteralPath $nativeBuildDirectory) -and ([IO.Path]::GetFileName($nativeBuildDirectory) -match '^native-.*-fresh-[0-9a-f]{8}$')) {
+            Remove-Item -LiteralPath $nativeBuildDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Host "`n=== summary"
+    foreach ($line in $summary) { Write-Host $line }
+    if ($status -eq 0 -and $cacheEnabled -and (Test-HarnessResultsPassed $resultsHost @($suites))) {
+        Write-HarnessResultKey $resultsHost $cacheInputs $cacheInputsHash $environmentId @($suites)
+    }
+    Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] ((Get-Date) - $started).TotalSeconds, $resultsHost)
+    if ($status -ne 0) { throw 'Tests did not pass (see the messages above).' }
+    Write-Host "All requested test projects passed ($($suites -join ', '))."
+    return
+}
+
 if ($Plan) {
     [pscustomobject]@{
-        Projects = @($suites | ForEach-Object { "$($_)Tests" })
+        Projects =@($suites | ForEach-Object { "$($_)Tests" })
         Build = -not $NoBuild
         BuildArguments = $buildArguments
         RunnerArguments = $runner.ToArray()
