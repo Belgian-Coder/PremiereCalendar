@@ -230,6 +230,7 @@ try {
     Invoke-HarnessFixtureScript (Join-Path $root 'eng/wsl-docker.ps1') @{ Action = 'check'; SourceMount = 'Windows' } | Out-Null
     $checkScriptWindows = $global:HarnessCapturedScripts[-1]
     $wslRootPath = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }   # the mocked wslpath passes POSIX paths through
+    Assert-Harness ($testScript -match ":/src/\.local-data" -and $testScript -match 'test-results/[0-9-]+/local-data') 'Test hosts would write runtime data into the verified mirror instead of the run folder.'
     Assert-Harness ($testScript.Contains('-v "$pc_src":/src') -and $testScript.Contains("-v '$wslRootPath/artifacts':/src/artifacts") -and $testScript.Contains('PC_SOURCE_MIRROR') -and $testScript -notmatch [regex]::Escape("-v '$wslRootPath':/src")) 'The default test run does not mount the verified mirror (with this checkout''s artifacts over it).'
     Assert-Harness ($checkScript.Contains('-v "$pc_src":/src') -and $checkScript.Contains('PC_SOURCE_MIRROR') -and $checkScript.Contains('git hash-object --no-filters --stdin-paths') -and $checkScript.IndexOf('flock -n 9') -lt $checkScript.IndexOf('pc_mirror_sync()')) 'The scoped check does not sync and verify the mirror under its lock.'
     Assert-Harness ($testScript.IndexOf('flock -n 9') -lt $testScript.IndexOf('pc_mirror_sync()') -and $testScript.IndexOf('pc_mirror_sync()') -lt $testScript.IndexOf('docker network create') -and $testScript -match 'exit 5[12]') 'The mirror is verified after the lock and before any container resource is created.'
@@ -795,10 +796,13 @@ try {
         [IO.File]::WriteAllText((Join-Path $mirrorDirectory 'stray-build-product.dll'), 'junk')
         New-Item -ItemType Directory -Path (Join-Path $mirrorDirectory 'artifacts') -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $mirrorDirectory 'artifacts/keep.txt'), 'overlay')
+        # Runtime data the test hosts wrote (root-owned in a real container) is a mount point, never a stray.
+        New-Item -ItemType Directory -Path (Join-Path $mirrorDirectory '.local-data/logs') -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $mirrorDirectory '.local-data/logs/runtime.ndjson'), '{}')
         $script:syncLog = ''; $seen.Clear()
         $run = Invoke-HarnessMirroredWsl -BuildScript $capture -Context $rootContext -Storage $syncStorage -WslRoot $guestRoot -RunId 'aaaa000003' -SourceMount Mirror -WslDistribution x -RemainingSeconds $remaining
         Assert-Harness ($run.ExitCode -eq 0 -and $seen[0].Changed -eq 2 -and $script:syncLog -match 'mode=delta files=5 changed=2') "Delta sync shipped the wrong files: $($script:syncLog)"
-        Assert-Harness ([IO.File]::ReadAllText((Join-Path $mirrorDirectory 'untracked.txt')) -eq 'changed' -and -not (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'src/crlf.txt')) -and -not (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'stray-build-product.dll')) -and (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'artifacts/keep.txt'))) 'Delta sync did not apply edits/deletions, remove strays or leave artifacts alone.'
+        Assert-Harness ([IO.File]::ReadAllText((Join-Path $mirrorDirectory 'untracked.txt')) -eq 'changed' -and -not (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'src/crlf.txt')) -and -not (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'stray-build-product.dll')) -and (Test-Path -LiteralPath (Join-Path $mirrorDirectory 'artifacts/keep.txt')) -and (Test-Path -LiteralPath (Join-Path $mirrorDirectory '.local-data/logs/runtime.ndjson'))) 'Delta sync did not apply edits/deletions, remove strays or leave artifacts and .local-data alone.'
         # A mirror that no longer matches its record (wiped, or a tracked file rewritten) fails verification, then heals with one full copy.
         [IO.File]::WriteAllText((Join-Path $mirrorDirectory 'run.sh'), 'tampered')
         $script:syncLog = ''; $seen.Clear(); $before = $script:syncRuns

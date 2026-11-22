@@ -318,7 +318,9 @@ function Get-HarnessMirrorSyncScript($Plan, $Storage, [string] $WslRoot, [string
     if ($Storage.SourceMirror -notmatch '^\.cache/premierecalendar/mirror/[0-9a-f]{10}$') { throw 'Unexpected source mirror location.' }
     $run = "$WslRoot/artifacts/mirror/run-$RunId"
     $q = { param($value) ConvertTo-BashLiteral $value }
-    $clear = if ($Plan.Full) { 'find "$pc_src" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || pc_fail' } else { ':' }
+    # artifacts and .local-data are mount points for container output (results, runtime logs written as root); they are
+    # never part of the source manifest, so neither the full-copy clear nor the stray check touches them.
+    $clear = if ($Plan.Full) { 'find "$pc_src" -mindepth 1 -maxdepth 1 ! -name artifacts ! -name .local-data -exec rm -rf -- {} + || pc_fail' } else { ':' }
     $tarStep = if ($Plan.Tar) { "tar -x --no-same-owner -f $(& $q "$run/delta.tar") -C `"`$pc_src`" || pc_fail" } else { ':' }
     $failure = if ($Plan.Full) { 52 } else { 51 }
     $mode = if ($Plan.Full) { 'full' } else { 'delta' }
@@ -332,12 +334,12 @@ mkdir -p "`$pc_src" || pc_fail
 $clear
 $tarStep
 mkdir -p "`$pc_src/artifacts" || pc_fail
-pc_mirror_listing() { find . -path ./artifacts -prune -o ! -type d -printf '%P\n' | LC_ALL=C sort; }
+pc_mirror_listing() { find . \( -path ./artifacts -o -path ./.local-data \) -prune -o ! -type d -printf '%P\n' | LC_ALL=C sort; }
 pc_mirror_sync() {
   cd "`$pc_src" || return 1
   LC_ALL=C comm -23 <(pc_mirror_listing) <(LC_ALL=C sort $(& $q "$run/paths.txt")) | while IFS= read -r pc_extra; do rm -f -- "`$pc_extra" || :; done
   # Fail closed: list again; anything that is not in the manifest (a file that could not be removed, a link, a special
-  # file; the artifacts mount point is excluded) means the mirror is not exactly the manifest.
+  # file; the artifacts and .local-data mount points are excluded) means the mirror is not exactly the manifest.
   pc_left=`$(LC_ALL=C comm -23 <(pc_mirror_listing) <(LC_ALL=C sort $(& $q "$run/paths.txt"))) || return 1
   [ -z "`$pc_left" ] || return 1
   # The mirror is not a repository; the ceiling stops Git from adopting an enclosing one (it would resolve the paths against it).

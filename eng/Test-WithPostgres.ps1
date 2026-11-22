@@ -484,7 +484,9 @@ $buildCpusWord = if ($BuildMaxCpuCount -eq 'auto') { '$pc_budget' } else { $Buil
 $doBuild = if ($NoBuild) { '0' } else { '1' }
 $suiteList = $suites -join ' '
 $PostgresReadySeconds = 180
-$srcMounts = if ($SourceMount -eq 'Mirror') { "-v `"`$pc_src`":/src -v $(ConvertTo-BashLiteral "$wslRoot/artifacts"):/src/artifacts" } else { "-v `"`$pc_src`":/src" }
+# Mirror lane: results go to the checkout's artifacts, and the app's runtime data/logs (written as root by test hosts)
+# go to this run's results folder instead of the mirror, so the mirror stays exactly the verified source.
+$srcMounts = if ($SourceMount -eq 'Mirror') { "-v `"`$pc_src`":/src -v $(ConvertTo-BashLiteral "$wslRoot/artifacts"):/src/artifacts -v $(ConvertTo-BashLiteral "$wslRoot/$resultsRelative/local-data"):/src/.local-data" } else { "-v `"`$pc_src`":/src" }
 # Only verified, reproducible runs are cached: -SourceMount Windows reads the unverified live checkout and -FreshBuild /
 # -NoBuild do not build the recorded sources in a known way, so they neither reuse nor record results.
 $cacheEnabled = -not $NoCache -and -not $NoBuild -and -not $FreshBuild -and $SourceMount -eq 'Mirror'
@@ -593,8 +595,8 @@ cleanup_resource() {
     cleanup_failed=1; return 0
   fi
   # Each inspect/removal is independently bounded, including timeout's kill
-  # grace: at most 6 x 19s = 114s for all three resources within the guest's
-  # 120s grace. A loaded shared engine has been measured at 19s per inspect,
+  # grace: at most 6 x 46s = 276s for all three resources within the guest's
+  # 300s grace. A loaded shared engine has been measured at 19s per inspect and over 18s per removal,
   # so the former 5s bound reported live resources as unresolved and leaked them.
   case "`$id" in *[!0-9a-f]*|'') cleanup_failed=1; echo "PC_TEST_CLEANUP kind=`$kind name=`$name state=invalid-id" >&2; return 0 ;; esac
   if [ "`${#id}" != 64 ]; then cleanup_failed=1; echo "PC_TEST_CLEANUP kind=`$kind name=`$name state=invalid-id" >&2; return 0; fi
