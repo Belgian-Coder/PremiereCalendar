@@ -30,13 +30,16 @@ Optional path of a JSON array [{suite, passed, failed, skipped}] produced from t
 parsing of the result files. Use it if the runner's result format changes.
 
 .PARAMETER Cpus
-CPU quota for the SDK/test container (default 2); the disposable PostgreSQL has its own 2-CPU limit.
+CPU quota for the SDK/test container: auto (default; half of the engine's CPUs, at least 2) or 1-64; the disposable
+PostgreSQL has its own 2-CPU limit.
 
 .PARAMETER MaxThreads
-Maximum xUnit test threads (default 2). This changes scheduling, never the selected test roster.
+Maximum xUnit test threads: auto (default, same rule as -Cpus) or 1-64. This changes scheduling, never the selected
+test roster.
 
 .PARAMETER BuildMaxCpuCount
-Maximum MSBuild workers (default 2). Defaults are bounded for shared release hosts.
+Maximum MSBuild workers: auto (default, same rule as -Cpus) or 1-64. auto leaves half of the shared engine to other
+tenants; pass smaller numbers to throttle further.
 
 .PARAMETER BuildVolume
 Optional existing helper override for an exclusively owned per-worktree Linux/amd64 build volume on ext4.
@@ -48,7 +51,8 @@ Optional Linux-only NuGet volume override. Keep it separate from native-host cac
 Explicit local test distribution (default Ubuntu-24.04). Does not change other release or NAS transports.
 
 .PARAMETER TimeoutSeconds
-Total test helper budget including guest cleanup and output drain (default 1800 seconds).
+Total test helper budget including guest cleanup and output drain (default 0: the runner's suite-scaled
+default, 3300 seconds for the three release suites).
 
 .EXAMPLE
 pwsh -File D:\Projects\PremiereCalendar\eng\release\Invoke-ReleaseTests.ps1 -Bundle D:\Projects\PremiereCalendar\artifacts\release\1.2.20 -ExpectedRevision 0123456789abcdef0123456789abcdef01234567

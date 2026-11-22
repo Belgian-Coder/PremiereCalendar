@@ -68,7 +68,8 @@ context cannot redirect these operations: helpers pin the local Unix socket.
 Images and the daemon must already exist; `build`/`up` remain explicit image-build
 actions. This does not add a native SDK or macOS application execution backend.
 
-Test/check start with `-Cpus 2 -BuildMaxCpuCount 2` and tests with `-MaxThreads 2`;
+Test/check default to `-Cpus auto -BuildMaxCpuCount auto` and tests to
+`-MaxThreads auto` (half of the engine's CPUs, at least 2); explicit numbers win.
 PostgreSQL has its separate two-CPU quota. `wsl-docker.ps1 test` forwards those
 budgets, distribution, image/ABI, runtime-async mode and volume overrides without
 changing the selected suites. Plans report the resolved storage/profile and

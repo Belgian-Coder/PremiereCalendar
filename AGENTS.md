@@ -13,8 +13,11 @@
 - Deploy digest-pinned images and preserve PostgreSQL, application data and backups.
 - The scripted local release (backup, build, scans, tests, smoke, load, deploy, verify, close) is in `eng/release` and documented in `docs/Releasing.md`.
 
-Canonical source checks are `pwsh -NoProfile -File ./eng/Test-ScriptSyntax.ps1`
-and `pwsh -NoProfile -File ./eng/Test-Docs.ps1`. Preview application work with
+Normal flow: `pwsh -NoProfile -File ./eng/Invoke-Validation.ps1 -Changed` runs the
+static checks that cover what changed and lists (or, with `-Run` on the Windows
+builder, runs) the scoped app commands; `./eng/Invoke-StaticChecks.ps1` runs the
+whole portable static lane in parallel (Windows and macOS). Releases run steps 2-7
+with `eng/release/Invoke-LocalGates.ps1`. Preview application work with
 `pwsh -NoProfile -File ./eng/wsl-docker.ps1 check -Project App -Plan`; the full
 service/browser commands are in [Testing](docs/Testing.md#local-only-execution).
 
@@ -32,7 +35,8 @@ service/browser commands are in [Testing](docs/Testing.md#local-only-execution).
   The supported SDK is supplied by a prepared Linux/amd64 Docker image in WSL;
   select `-WslDistribution PC-MARC-Dev` on PC-MARC (default `Ubuntu-24.04`).
   do not install a host SDK or change WSL/Docker configuration as a fallback.
-- Start with `eng/wsl-docker.ps1 check -Project App -Plan` or
+- Start with `eng/Invoke-Validation.ps1 -Changed -Plan`,
+  `eng/wsl-docker.ps1 check -Project App -Plan` or
   `eng/Test-WithPostgres.ps1 -Project <suite> -Filter <expression> -Plan`.
   Plans invoke neither WSL nor Docker. Execution requires an already running
   selected WSL distribution and Docker daemon; helpers never start them implicitly.

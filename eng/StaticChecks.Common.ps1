@@ -56,6 +56,9 @@ function ConvertTo-StaticCheckCommand($Check, [string] $Root, [string] $Python) 
 
 function Select-StaticChecks($Table, [string[]] $Only, [string[]] $Exclude) {
     $selected = @($Table)
+    # `pwsh -File ... -Only A,B` delivers "A,B" as one string; accept both forms.
+    $Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $Exclude = @($Exclude | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if ($Only) {
         foreach ($pattern in $Only) { if (-not @($Table | Where-Object { $_.Name -like $pattern })) { throw "-Only '$pattern' matches no static check. Known: $(($Table.Name) -join ', ')." } }
         $selected = @($selected | Where-Object { $name = $_.Name; @($Only | Where-Object { $name -like $_ }).Count -gt 0 })

@@ -51,6 +51,8 @@ try {
     $only = Select-StaticChecks $table @('Harness*', 'Docs') @('HarnessCacheRoot')
     Assert-Static ((($only.Name | Sort-Object) -join ',') -eq 'Docs,Harness,HarnessProcess') '-Only/-Exclude wildcards selected the wrong checks.'
     $failed = $false; try { Select-StaticChecks $table @('NoSuchCheck') $null | Out-Null } catch { $failed = $true }
+    $commaOnly = Select-StaticChecks $table @('Harness,Docs') @('HarnessCacheRoot,HarnessProcess')
+    Assert-Static ((@($commaOnly.Name | Sort-Object) -join ',') -ceq 'Docs,Harness') 'A comma-separated -Only/-Exclude list (as pwsh -File delivers it) is split into names.'
     Assert-Static $failed 'An unknown -Only name was accepted.'
 
     # --- parallel runner with fake checks ---------------------------------------------------------------------

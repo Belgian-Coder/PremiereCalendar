@@ -25,9 +25,9 @@ sequentially when execution is allocated:
 ```powershell
 $distro = 'PC-MARC-Dev'
 & ./eng/wsl-docker.ps1 check -Project App -WslDistribution $distro -Plan
-& ./eng/Test-WithPostgres.ps1 -Project Unit,Component,Integration -WslDistribution $distro -Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2 -TimeoutSeconds 1800
+& ./eng/Test-WithPostgres.ps1 -Project Unit,Component,Integration -WslDistribution $distro
 # Set $browserImage to the approved, already prepared local Linux/amd64 browser image.
-& ./eng/Test-WithPostgres.ps1 -Project Browser -WslDistribution $distro -DevImage $browserImage -CacheFlavor glibc -Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2 -TimeoutSeconds 2400
+& ./eng/Test-WithPostgres.ps1 -Project Browser -WslDistribution $distro -DevImage $browserImage -CacheFlavor glibc -TimeoutSeconds 2400
 ```
 
 Both test commands retain restore/build validation, isolated PostgreSQL, TRX,
@@ -118,12 +118,17 @@ Component tests cover Blazor rendering:
 
 The selected WSL distribution and its local Linux/amd64 Docker Engine must already be running, and the development image must exist. Select `-WslDistribution PC-MARC-Dev` on PC-MARC; the compatibility default is `Ubuntu-24.04`. Helpers never start the distribution or daemon, install tools, pull images or build them implicitly (build the image once with the explicit `wsl-docker.ps1 build` action). All commands work from any folder; each script works on its containing checkout, so use the worktree's own script. Add `-Plan` to print the selected projects, arguments, storage profile and output paths without invoking WSL or Docker.
 
-`-TimeoutSeconds` sets the total helper budget: 1800 seconds by default,
-including WSL execution, guest cleanup and output drain. Browser qualification
+`-TimeoutSeconds` sets the total helper budget, including WSL execution, guest
+cleanup and output drain. By default it scales with the selected suites: 600
+seconds plus 900 per Unit/Component/Integration suite and 1800 per Browser suite,
+at most 7200 (3300 seconds for the default three suites); an explicit value wins.
+The earlier fixed 1800-second default could not fit a full run on a loaded host. Browser qualification
 explicitly passes `-TimeoutSeconds 2400` to retain its 2400-second bound.
 `wsl-docker.ps1` and `Invoke-ReleaseTests.ps1` forward this budget. The guest
-deadline reserves 15 seconds for termination/cleanup and five seconds for output
-drain within the total. Input stays on stdin; both output streams drain concurrently.
+deadline reserves 15 seconds for termination/cleanup (120 seconds for the test
+runner, whose six bounded cleanup Docker calls get 18 seconds each because a
+loaded shared engine was measured at 19 seconds per `docker inspect`) and five
+seconds for output drain within the total. Input stays on stdin; both output streams drain concurrently.
 Cancellation stops only the owned Windows client, never a distro or shared WSL
 host. It does not prove that Linux processes or Docker resources stopped.
 
@@ -367,11 +372,16 @@ Storage verification on 15 November 2026: Compose configuration validated; an Ap
 
 `-NoRestore` and `-NoBuild` are explicit rerun options only after a successful matching restore/build of the same worktree, configuration, image ABI and runtime-async mode. Normal runs keep restore validation and incremental compilation enabled; `-FreshBuild` builds from scratch in a throwaway container location. `-BuildVolume`/`-NugetVolume` preserve explicit Docker cache overrides; a build-volume override must belong exclusively to that worktree/ABI/mode. A custom prepared `-DevImage` requires explicit `-CacheFlavor musl|glibc`, and the browser lane uses `glibc`. Execution checks the local image's Linux/amd64 identity and runs its immutable ID with pulls disabled. A filtered run is feedback, never proof that the complete regression suite passed.
 
-Use explicit shared-host budgets: `-Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2`
-bounds the runner container, xUnit scheduling and MSBuild workers respectively.
-PostgreSQL has its separate two-CPU quota; suites still run serially and every
-selected test executes. The release test entry point defaults all three budgets
-to two, records them in its receipt, and always runs the complete unit/component/
+Worker budgets default to `auto` everywhere (`Test-WithPostgres.ps1`,
+`wsl-docker.ps1 check|test` and the release test step): half of the engine's CPUs
+(`nproc` in the WSL guest), at least 2 and at most 64, which leaves the other half
+to other tenants of the shared engine. `-Cpus`, `-MaxThreads` and
+`-BuildMaxCpuCount` bound the runner container, xUnit scheduling and MSBuild
+workers respectively; pass explicit numbers (for example `-Cpus 2 -MaxThreads 2
+-BuildMaxCpuCount 2`) to throttle further on a busy host. PostgreSQL has its
+separate two-CPU quota; suites still run serially and every selected test
+executes. The release test entry point records the requested values and the
+resolved `PC_TEST_BUDGET` line in its receipt, and always runs the complete unit/component/
 integration roster. The request adapter maps `-Jobs` to those same budgets.
 For a native Windows source checkout, the canonical release test runner also
 forwards `-WslDistribution`, `-BuildVolume` and `-NugetVolume`; its receipt records
@@ -407,7 +417,7 @@ HTML/full-page PNG, with continuous trace screenshots/DOM snapshots disabled;
 console, CLS and long-task observers remain enabled. Record the capture profile
 alongside results when comparing timings.
 
-There are no skipped PostgreSQL tests: when `PREMIERECALENDAR_TEST_POSTGRES` is missing, every database-backed test fails with a message that names the variable. One test is skipped on Linux because it depends on Windows file-lock semantics.
+There are no skipped PostgreSQL tests: when `PREMIERECALENDAR_TEST_POSTGRES` is missing, every database-backed test fails with a message that names the variable. No test is skipped: the former Windows file-lock test was removed because the product ships only as a Linux container.
 
 `ProviderWorkSchedulerDurabilityTests` covers checkpoint accumulation, failure exclusion, deferred work, independent lease renewal, stale-owner fencing, watcher priority, and bounded progress replay. `CalendarLoadPerformanceTests` uses the real scheduler with both workers occupied for 300 ms and 2,000 deterministic rows split across seven days. It covers cold, fresh, and stale caches. Its `PERFORMANCE` output is retained in the suite's `.log` and `.trx` files under `artifacts\test-results\<timestamp>\`.
 

@@ -243,7 +243,7 @@ Scans the exported archive (the exact bytes that will be deployed) with Trivy (v
 ## Step 6: tests
 
 ```powershell
-pwsh -File "$rel\Invoke-ReleaseTests.ps1" -Bundle $bundle -ExpectedRevision $commit -Cpus 2 -MaxThreads 2 -BuildMaxCpuCount 2
+pwsh -File "$rel\Invoke-ReleaseTests.ps1" -Bundle $bundle -ExpectedRevision $commit
 ```
 
 Requires the same clean commit, freezes fingerprints of the tracked source (it fails when a `*.cs` file contains CR characters), runs `D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1` with its defaults (xUnit.net 4 on Microsoft.Testing.Platform: the unit, component and integration suites against a throwaway PostgreSQL), verifies the fingerprints again and writes `test-summary.json` per suite. The counts come from the CTRF JSON files the script writes to `<repo>\artifacts\test-results\<timestamp>\` (the summary line of each suite's console log is the fallback, `-SummaryJson` an override); the console log, the CTRF and TRX files are copied into the bundle as `test-run.log` and `tests\*`. A focused or partial run cannot satisfy the gates. Tests may run any time before step 8, also before the build.
