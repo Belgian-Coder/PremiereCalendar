@@ -38,7 +38,7 @@ try {
     if ($python) {
         Assert-Static (($python -is [string]) -and (Test-Path -LiteralPath $python)) 'Real discovery did not return one existing path.'
         Assert-Static ((Resolve-PythonExecutable $python) -eq $python) 'An explicit interpreter was not returned unchanged.'
-    } else { Write-Warning 'Python 3.11+ absent: real-interpreter discovery cases were not run.' }
+    } else { Write-Warning 'Python 3.10+ absent: real-interpreter discovery cases were not run.' }
 
     # --- table integrity and selection ------------------------------------------------------------------------
     $table = Get-StaticCheckTable

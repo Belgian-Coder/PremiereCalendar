@@ -2,11 +2,11 @@
 # Dot-source this file; it has no WSL/Docker dependency and never installs anything.
 #
 # Resolve-PythonExecutable: an explicit path/name wins; otherwise the first python3, then python, on PATH
-# that is a real Python >= 3.11. The Windows Store alias stub (WindowsApps\python.exe) is skipped. Always
+# that is a real Python >= 3.10. The Windows Store alias stub (WindowsApps\python.exe) is skipped. Always
 # returns one string (or $null when nothing qualifies and no explicit value was given).
 
 $script:PythonMinimumMajor = 3
-$script:PythonMinimumMinor = 11  # audit_image_archive.py uses hashlib.file_digest (3.11)
+$script:PythonMinimumMinor = 10  # the macOS static lane host runs 3.10; release-only scripts on the Windows builder use 3.11+
 
 function Test-PythonStoreStub([string] $Path) {
     $Path -match '(?i)[\\/]WindowsApps[\\/]python3?(\.\d+)?\.exe$'

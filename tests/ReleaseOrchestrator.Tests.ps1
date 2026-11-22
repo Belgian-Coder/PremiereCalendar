@@ -122,13 +122,21 @@ try {
     Assert-That ($r.Text -match 'Evidence present after the stop') 'the stop report lists the evidence that exists'
     Assert-That ((@($t.steps | Where-Object { $_.id -eq 'build' }).exitCode) -eq 7) 'the child exit code is recorded'
 
+    # 4b. a slow audit lets smoke start first: scans must then wait for the timing-sensitive steps (reverse guard)
+    $global:Scenario = @{ tests = @{ Ms = 8; Exit = 0; FingerprintAtMs = 2 }; 'restore-init' = @{ Ms = 2; Exit = 0 }; restore = @{ Ms = 3; Exit = 0 }; build = @{ Ms = 4; Exit = 0 }
+        'nuget-audit' = @{ Ms = 40; Exit = 0 }; scans = @{ Ms = 6; Exit = 0 }; smoke = @{ Ms = 10; Exit = 0 }; 'backup-compat' = @{ Ms = 10; Exit = 0 } }
+    $r = Invoke-Gates (New-Bundle)
+    Assert-That ($r.Exit -eq 0) "slow-audit run succeeds`n$($r.Text)"
+    $scansCall = Get-Call 'scans'
+    Assert-That ($null -ne $scansCall -and -not (Test-Overlap $scansCall (Get-Call 'smoke')) -and -not (Test-Overlap $scansCall (Get-Call 'backup-compat'))) 'scans never start beside a running smoke or backup-compat'
+
     # 5. resume: complete evidence bound to this revision and the tested bytes is skipped, never re-run
     function Write-BoundEvidence([string] $Bundle, [string] $Revision, [switch] $Unbound) {
         $fp = Join-Path $Bundle 'tested-source-fingerprints.json'; [IO.File]::WriteAllText($fp, '{"tested":true}')
         $fpHash = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash.ToLowerInvariant()
         [IO.File]::WriteAllText((Join-Path $Bundle 'test-run.log'), 'log'); $null = New-Item -ItemType Directory -Path (Join-Path $Bundle 'tests')
         [IO.File]::WriteAllText((Join-Path $Bundle 'test-run.json'), (@{ sourceRevision = $Revision } | ConvertTo-Json))
-        [IO.File]::WriteAllText((Join-Path $Bundle 'test-summary.json'), (ConvertTo-Json -InputObject @(@{ suite = 'unit'; passed = 1; failed = 0; sourceRevision = $Revision })))
+        [IO.File]::WriteAllText((Join-Path $Bundle 'test-summary.json'), (ConvertTo-Json -InputObject @('unit', 'component', 'integration' | ForEach-Object { @{ suite = $_; passed = 1; failed = 0; sourceRevision = $Revision } })))
         foreach ($f in 'source-1.2.20.tar', 'source-archive-verification.json', 'premierecalendar-1.2.20.tar', 'build.log') { [IO.File]::WriteAllText((Join-Path $Bundle $f), 'x') }
         $bound = if ($Unbound) { $null } else { $fpHash }
         [IO.File]::WriteAllText((Join-Path $Bundle 'build-metadata.json'), (@{ sourceRevision = $Revision; testedSourceFingerprintsSha256 = $bound } | ConvertTo-Json))
@@ -150,7 +158,12 @@ try {
     $null = New-Item -ItemType Directory -Path (Join-Path $bundle 'gates') -Force
     [IO.File]::WriteAllText((Join-Path $bundle 'gates/nuget-audit.result.json'), '{"exitCode":1}')
     $r = Invoke-Gates $bundle
-    Assert-That ($r.Exit -eq 2 -and $global:Calls.Count -eq 0 -and $r.Text -match 'an earlier run of this step failed') "evidence of a failed run is refused`n$($r.Text)"
+    Assert-That ($r.Exit -eq 2 -and $global:Calls.Count -eq 0 -and $r.Text -match 'the latest run of this step failed') "evidence of a failed run is refused`n$($r.Text)"
+    # a failure that a later run of the same step repaired is history: the newest marker decides
+    [IO.File]::WriteAllText((Join-Path $bundle 'gates/nuget-audit.2.result.json'), '{"exitCode":0}')
+    $global:Scenario = & $happy
+    $r = Invoke-Gates $bundle
+    Assert-That ($r.Exit -eq 0 -and $null -eq (Get-Call 'nuget-audit') -and $null -eq (Get-Call 'build')) "a re-run that succeeded makes the evidence reusable on a third run`n$($r.Text)"
     $global:Scenario = & $happy
     $bundle = New-Bundle
     [IO.File]::WriteAllText((Join-Path $bundle 'backup-restore.json'), '{"restoreExitCode":0,"timedOut":false,"inputPipeFailed":false}')

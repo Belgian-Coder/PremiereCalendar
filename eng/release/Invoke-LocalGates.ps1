@@ -155,6 +155,7 @@ function Get-GateSteps {
             $rows = @(Get-JsonOrNull (Join-Path $bundlePath 'test-summary.json'))
             $receipt = Get-JsonOrNull (Join-Path $bundlePath 'test-run.json')
             if ($rows.Count -lt 1 -or @($rows | Where-Object { $_.failed -ne 0 -or $_.passed -lt 1 }).Count -gt 0) { 'test-summary.json records failures or no passed cases' }
+            elseif (@('unit', 'component', 'integration' | Where-Object { $_ -notin @($rows | ForEach-Object { $_.suite }) }).Count -gt 0) { 'test-summary.json lacks one of the unit, component and integration suites' }
             elseif (-not $receipt -or $receipt.sourceRevision -cne $ExpectedRevision -or @($rows | Where-Object { $_.sourceRevision -cne $ExpectedRevision }).Count -gt 0) { 'the test evidence belongs to another source revision' }
         }
         New-Step 'restore-init' 'Initialize-RestoreCheck (isolated PostgreSQL)' 'Initialize-RestoreCheck.ps1' $b @() 'io'
@@ -212,9 +213,11 @@ function Get-StepEvidence($Step) {
     if ($present.Count -eq 0) { return [pscustomobject]@{ State = 'none'; Present = @(); Missing = $missing; Problem = $null } }
     if ($missing.Count -gt 0) { return [pscustomobject]@{ State = 'partial'; Present = $present; Missing = $missing; Problem = 'some evidence files are missing' } }
     $problem = if ($Step.Validate) { & $Step.Validate } else { $null }
-    # Defence in depth: complete-looking evidence of a step that this orchestrator saw fail is never reused.
-    if (-not $problem -and @(Get-ResultMarkers $Step.Id | Where-Object { (Get-JsonOrNull $_.FullName).exitCode -ne 0 }).Count -gt 0) {
-        $problem = 'an earlier run of this step failed (gates/*.result.json)'
+    # Defence in depth: complete-looking evidence is never reused when this orchestrator's latest run of the step
+    # failed. Only the newest marker counts (<id>, <id>.2, ...): a failure that was re-run successfully is history.
+    $latest = Get-ResultMarkers $Step.Id | Sort-Object { if ($_.Name -match '\.(\d+)\.result\.json$') { [int]$Matches[1] } else { 1 } } | Select-Object -Last 1
+    if (-not $problem -and $latest -and (Get-JsonOrNull $latest.FullName).exitCode -ne 0) {
+        $problem = 'the latest run of this step failed (gates/*.result.json)'
     }
     if ($problem) { return [pscustomobject]@{ State = 'invalid'; Present = $present; Missing = @(); Problem = [string]$problem } }
     [pscustomobject]@{ State = 'complete'; Present = $present; Missing = @(); Problem = $null }
@@ -418,6 +421,8 @@ function Test-CanStart($Step, [object[]] $Running) {
             if (@($Running | Where-Object { $_.Id -in 'scans', 'restore' }).Count -gt 0) { return $false }
         }
     }
+    # ... and the reverse: heavy scan/restore work never starts beside a running timing-sensitive step.
+    if ($Step.Id -in 'scans', 'restore' -and $classes -contains 'timing') { return $false }
     $true
 }
 

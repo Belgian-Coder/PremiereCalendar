@@ -81,7 +81,12 @@ $null = Initialize-ReleaseCacheVolume 'trivy'
 # fetches the current DB, as a fresh volume did (summarize_scan.py also rejects a download older than 6 hours).
 $null = Invoke-LocalDocker run --rm --name $names.TrivyAge -v "$($trivyCache.Name):$trivyCachePath" --entrypoint sh $cfg.trivyImage -c `
     "find $trivyCachePath -maxdepth 1 -name metadata.json -mmin +300 -exec rm -f $trivyCachePath/trivy.db $trivyCachePath/metadata.json \;"
-if ((Invoke-LocalShell $stage) -ne 0) { $null = Invoke-LocalShell "rm -rf $(ConvertTo-ShellQuoted $staging)"; throw 'Staging the archive for the scan failed.' }
+$stageExit = Invoke-LocalShell $stage
+if ($stageExit -ne 0) {
+    # Exit 2 means the directory already existed and is not ours: never remove it.
+    if ($stageExit -ne 2) { $null = Invoke-LocalShell "rm -rf $(ConvertTo-ShellQuoted $staging)" }
+    throw 'Staging the archive for the scan failed.'
+}
 $scanScriptRan = $false
 try {
     $trivyArguments = @('run', '--name', $names.Trivy, '--rm', '-v', "${staging}:/in:ro", '-v', "$($ctx.BundleWsl):/out", '-v', "$($trivyCache.Name):$trivyCachePath", $cfg.trivyImage,

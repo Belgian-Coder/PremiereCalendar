@@ -197,7 +197,7 @@ Hosting tests (`WebApplicationFactory<Program>`, each with a migrated database) 
 ### Portable static checks
 
 Run these from the native checkout on WINDOWS11-VM, PC-MARC or MacBook-Pro
-ARM64 with PowerShell 7 and Git. Python 3.11 or newer is required for the Python
+ARM64 with PowerShell 7 and Git. Python 3.10 or newer is required for the Python
 checks; Bash (Git Bash on Windows) enables the intercepted shell lifecycle checks.
 No SDK, WSL, Docker daemon, credentials or database is required. The scripts
 work by absolute path from any folder and have no Windows-only dependency.
@@ -224,7 +224,7 @@ collide; the three checks with sub-second child-process deadlines share the
 `timing` group and run one after another so they do not starve each other.
 
 Python is chosen once by `eng/Python.Common.ps1`: the explicit
-`-PythonExecutable`, otherwise the first real Python 3.11 or newer among
+`-PythonExecutable`, otherwise the first real Python 3.10 or newer among
 `python3`, then `python` on PATH. The Windows Store alias stub
 (`WindowsApps\python.exe`) and older interpreters are skipped; the result is
 always a single path. The same helper serves `Test-ScriptSyntax.ps1` and the
