@@ -34,7 +34,18 @@ function Get-StaticCheckTable {
     )
 }
 
-function Get-PwshExecutable { Join-Path $PSHOME ($(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })) }
+# The running pwsh first: $PSHOME has no native pwsh when PowerShell is a .NET global tool (Linux/macOS installs
+# via `dotnet tool`), so fall back from the process to $PSHOME to PATH, and fail clearly instead of every check.
+function Get-PwshExecutable {
+    $name = if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
+    $own = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    if ($own -and [IO.Path]::GetFileNameWithoutExtension($own) -eq 'pwsh' -and (Test-Path -LiteralPath $own -PathType Leaf)) { return $own }
+    $fromHome = Join-Path $PSHOME $name
+    if (Test-Path -LiteralPath $fromHome -PathType Leaf) { return $fromHome }
+    $command = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return [string]$command.Source }
+    throw 'Could not locate the pwsh executable for the static checks.'
+}
 
 # Turn a table row into a runnable command {Name, FileName, Arguments, WorkingDirectory, Weight, Group}.
 function ConvertTo-StaticCheckCommand($Check, [string] $Root, [string] $Python) {

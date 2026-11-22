@@ -48,6 +48,8 @@ try {
     foreach ($file in @(Get-ChildItem (Join-Path $root 'tests') -File | Where-Object { $_.Name -like '*.Tests.ps1' -or $_.Name -like 'test_*.py' })) {
         Assert-Static ($declared -contains ('tests/' + $file.Name)) "tests/$($file.Name) is missing from the static check table."
     }
+    $pwshPath = Get-PwshExecutable
+    Assert-Static ((Test-Path -LiteralPath $pwshPath -PathType Leaf) -and [IO.Path]::GetFileNameWithoutExtension($pwshPath) -eq 'pwsh') "The child pwsh executable does not exist: $pwshPath"
     $only = Select-StaticChecks $table @('Harness*', 'Docs') @('HarnessCacheRoot')
     Assert-Static ((($only.Name | Sort-Object) -join ',') -eq 'Docs,Harness,HarnessProcess') '-Only/-Exclude wildcards selected the wrong checks.'
     $failed = $false; try { Select-StaticChecks $table @('NoSuchCheck') $null | Out-Null } catch { $failed = $true }
