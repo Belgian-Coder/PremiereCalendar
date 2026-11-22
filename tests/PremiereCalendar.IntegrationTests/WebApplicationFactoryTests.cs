@@ -9,28 +9,16 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
-public sealed class WebApplicationFactoryTests : IDisposable
+// Tests that only read from the default host (or the image-cache-disabled host) share one instance of each through
+// the class fixture instead of starting two hosts per test case. Tests that need their own configuration or that
+// stop their host build a private one.
+public sealed class WebApplicationFactoryTests(WebApplicationFactoryTests.HostFixture hosts)
+    : IClassFixture<WebApplicationFactoryTests.HostFixture>, IDisposable
 {
     private readonly string _temporaryRoot = Path.Combine(Path.GetTempPath(), $"premiere-web-factory-{Guid.NewGuid():N}");
     private readonly List<PostgresTestDatabase> _databases = [];
-    private readonly WebApplicationFactory<Program> _factory;
-    private readonly HttpClient _client;
-    private readonly WebApplicationFactory<Program> _imageCacheDisabledFactory;
-    private readonly HttpClient _imageCacheDisabledClient;
-
-    public WebApplicationFactoryTests()
-    {
-        _factory = CreateFactory();
-        _client = _factory.CreateClient();
-        _imageCacheDisabledFactory = CreateFactory(new Dictionary<string, string?>
-        {
-            ["ImageCache:Enabled"] = "false"
-        });
-        _imageCacheDisabledClient = _imageCacheDisabledFactory.CreateClient(new WebApplicationFactoryClientOptions
-        {
-            AllowAutoRedirect = false
-        });
-    }
+    private HttpClient _client => hosts.Client;
+    private HttpClient _imageCacheDisabledClient => hosts.ImageCacheDisabledClient;
 
     [Fact]
     public async Task HomePage_RendersShellWithoutBlockingWhenTmdbSecretIsAbsent()
@@ -77,7 +65,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
     [Fact]
     public async Task HostShutdown_IsBoundedForContainerStops()
     {
-        var options = _factory.Services.GetRequiredService<IOptions<HostOptions>>().Value;
+        var options = hosts.Factory.Services.GetRequiredService<IOptions<HostOptions>>().Value;
 
         Assert.Equal(TimeSpan.FromSeconds(15), options.ShutdownTimeout);
     }
@@ -174,7 +162,17 @@ public sealed class WebApplicationFactoryTests : IDisposable
 
     private WebApplicationFactory<Program> CreateFactory(IReadOnlyDictionary<string, string?>? overrides = null)
     {
-        var instanceRoot = Path.Combine(_temporaryRoot, Guid.NewGuid().ToString("N"));
+        var factory = CreateHostFactory(_temporaryRoot, out var database, overrides);
+        _databases.Add(database);
+        return factory;
+    }
+
+    private static WebApplicationFactory<Program> CreateHostFactory(
+        string temporaryRoot,
+        out PostgresTestDatabase database,
+        IReadOnlyDictionary<string, string?>? overrides = null)
+    {
+        var instanceRoot = Path.Combine(temporaryRoot, Guid.NewGuid().ToString("N"));
         var settings = new Dictionary<string, string?>
         {
             ["ProviderScheduler:Enabled"] = "false",
@@ -185,8 +183,7 @@ public sealed class WebApplicationFactoryTests : IDisposable
             ["ImageCache:Directory"] = Path.Combine(instanceRoot, "image-cache"),
             ["Telemetry:LogDirectory"] = Path.Combine(instanceRoot, "logs")
         };
-        var database = PostgresTestDatabase.Create();
-        _databases.Add(database);
+        database = PostgresTestDatabase.Create();
         foreach (var setting in database.AppSettings) settings[setting.Key] = setting.Value;
         if (overrides is not null)
         {
@@ -200,12 +197,47 @@ public sealed class WebApplicationFactoryTests : IDisposable
             builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(settings)));
     }
 
+    public sealed class HostFixture : IDisposable
+    {
+        private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-web-factory-shared-{Guid.NewGuid():N}");
+        private readonly PostgresTestDatabase _database;
+        private readonly PostgresTestDatabase _disabledDatabase;
+        private readonly WebApplicationFactory<Program> _disabledFactory;
+
+        public HostFixture()
+        {
+            Factory = CreateHostFactory(_root, out _database);
+            Client = Factory.CreateClient();
+            _disabledFactory = CreateHostFactory(_root, out _disabledDatabase, new Dictionary<string, string?>
+            {
+                ["ImageCache:Enabled"] = "false"
+            });
+            ImageCacheDisabledClient = _disabledFactory.CreateClient(new WebApplicationFactoryClientOptions
+            {
+                AllowAutoRedirect = false
+            });
+        }
+
+        public WebApplicationFactory<Program> Factory { get; }
+        public HttpClient Client { get; }
+        public HttpClient ImageCacheDisabledClient { get; }
+
+        public void Dispose()
+        {
+            ImageCacheDisabledClient.Dispose();
+            _disabledFactory.Dispose();
+            Client.Dispose();
+            Factory.Dispose();
+            _database.Dispose();
+            _disabledDatabase.Dispose();
+            try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     public void Dispose()
     {
-        _imageCacheDisabledClient.Dispose();
-        _imageCacheDisabledFactory.Dispose();
-        _client.Dispose();
-        _factory.Dispose();
         foreach (var database in _databases) database.Dispose();
         if (Directory.Exists(_temporaryRoot))
         {

@@ -17,10 +17,10 @@ namespace PremiereCalendar.IntegrationTests;
 // ImageMagick's native resource limits (memory, list length) are process-wide: concurrent decodes in other tests make
 // "cache resources exhausted" fail. All image tests share one collection, so they run one after the other.
 [Collection(ImageMagickCollection.Name)]
-public sealed class CachedImageEndpointTests : IDisposable
+public sealed class CachedImageEndpointTests(CachedImageEndpointTests.HostFixture hosts)
+    : IClassFixture<CachedImageEndpointTests.HostFixture>, IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-cached-image-endpoint-{Guid.NewGuid():N}");
-    private readonly List<PostgresTestDatabase> _databases = [];
 
     [Fact]
     public async Task CachedImageEndpoint_UsesEncodedContentHashAndShortFreshnessForStaleImage()
@@ -41,7 +41,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(cache);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal($"\"{hash}\"", response.Headers.ETag?.Tag);
@@ -61,7 +61,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(cache);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
@@ -74,7 +74,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(cache);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -102,10 +102,10 @@ public sealed class CachedImageEndpointTests : IDisposable
             await realCache.GetOrAddAsync(url, true, cancellationToken, width, format);
             return endpointSnapshot;
         });
-        using var factory = CreateFactory(cache);
+        using var factory = CreateFactory(cache, imageUrl);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg", TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
         var body = await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken);
         var contentHash = Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant();
 
@@ -115,8 +115,6 @@ public sealed class CachedImageEndpointTests : IDisposable
         Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 1 }, body);
         Assert.True(File.Exists(firstGeneration.FilePath));
     }
-
-    private const string ImageRequest = "/cached-image?url=https%3A%2F%2Fimage.tmdb.org%2Ft%2Fp%2Fw342%2Fposter.jpg";
 
     private async Task<CachedImage> WriteImageAsync(string contentType, string name = "image.bin")
     {
@@ -133,7 +131,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("image/jpeg", response.Content.Headers.ContentType?.MediaType);
@@ -152,7 +150,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
         Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
@@ -170,7 +168,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromResult(image)));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(contentType, response.Content.Headers.ContentType?.MediaType);
@@ -191,7 +189,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         using var factory = CreateFactory(new StubImageCache((_, _, _, _, _) => Task.FromException<CachedImage>(failure)));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
 
         Assert.Equal(expected, response.StatusCode);
         Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
@@ -204,7 +202,7 @@ public sealed class CachedImageEndpointTests : IDisposable
             Task.FromException<CachedImage>(new InvalidOperationException("boom"))));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest, TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
         Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
@@ -225,7 +223,7 @@ public sealed class CachedImageEndpointTests : IDisposable
         }));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync($"{ImageRequest}&refresh=true", TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync($"{factory.Request}&refresh=true", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal([false], forceRefreshValues);
@@ -251,43 +249,91 @@ public sealed class CachedImageEndpointTests : IDisposable
         }));
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync(ImageRequest + query, TestContext.Current.CancellationToken);
+        using var response = await client.GetAsync(factory.Request + query, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(expectedWidth, seenWidth);
     }
 
-    private WebApplicationFactory<Program> CreateFactory(IImageCache imageCache)
-    {
-        var instanceRoot = Path.Combine(_root, Guid.NewGuid().ToString("N"));
-        var settings = new Dictionary<string, string?>
-        {
-            ["ProviderScheduler:Enabled"] = "false",
-            ["CalendarWarmup:Enabled"] = "false",
-            ["ProviderDeltaSync:Enabled"] = "false",
-            ["ImdbDataset:Enabled"] = "false",
-            ["CalendarCache:Directory"] = Path.Combine(instanceRoot, "calendar-cache"),
-            ["ImageCache:Directory"] = Path.Combine(instanceRoot, "image-cache"),
-            ["Telemetry:LogDirectory"] = Path.Combine(instanceRoot, "logs")
-        };
-        var database = PostgresTestDatabase.Create();
-        _databases.Add(database);
-        foreach (var setting in database.AppSettings) settings[setting.Key] = setting.Value;
+    // The endpoint is served by one shared host. Each test registers its stub under a source URL of its own, which
+    // the endpoint passes straight through to the image cache, so tests cannot see each other's stubs.
+    private ImageEndpoint CreateFactory(IImageCache imageCache, string? sourceUrl = null)
+        => hosts.Register(imageCache, sourceUrl ?? $"https://image.tmdb.org/t/p/w342/{Guid.NewGuid():N}.jpg");
 
-        return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+    public sealed class ImageEndpoint(HostFixture host, string sourceUrl) : IDisposable
+    {
+        public string Request { get; } = $"/cached-image?url={Uri.EscapeDataString(sourceUrl)}";
+        public HttpClient CreateClient() => host.Factory.CreateClient();
+        public void Dispose() => host.Unregister(sourceUrl);
+    }
+
+    public sealed class HostFixture : IDisposable
+    {
+        private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-cached-image-host-{Guid.NewGuid():N}");
+        private readonly PostgresTestDatabase _database;
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, IImageCache> _stubs = new();
+
+        public HostFixture()
         {
-            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(settings));
-            builder.ConfigureServices(services =>
+            var settings = new Dictionary<string, string?>
             {
-                services.RemoveAll<IImageCache>();
-                services.AddSingleton(imageCache);
+                ["ProviderScheduler:Enabled"] = "false",
+                ["CalendarWarmup:Enabled"] = "false",
+                ["ProviderDeltaSync:Enabled"] = "false",
+                ["ImdbDataset:Enabled"] = "false",
+                ["CalendarCache:Directory"] = Path.Combine(_root, "calendar-cache"),
+                ["ImageCache:Directory"] = Path.Combine(_root, "image-cache"),
+                ["Telemetry:LogDirectory"] = Path.Combine(_root, "logs")
+            };
+            _database = PostgresTestDatabase.Create();
+            foreach (var setting in _database.AppSettings) settings[setting.Key] = setting.Value;
+            var dispatcher = new DispatchingImageCache(_stubs);
+            Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(settings));
+                builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<IImageCache>();
+                    services.AddSingleton<IImageCache>(dispatcher);
+                });
             });
-        });
+        }
+
+        public WebApplicationFactory<Program> Factory { get; }
+
+        internal ImageEndpoint Register(IImageCache imageCache, string sourceUrl)
+        {
+            _stubs[sourceUrl] = imageCache;
+            return new ImageEndpoint(this, sourceUrl);
+        }
+
+        internal void Unregister(string sourceUrl) => _stubs.TryRemove(sourceUrl, out _);
+
+        public void Dispose()
+        {
+            Factory.Dispose();
+            _database.Dispose();
+            try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private sealed class DispatchingImageCache(System.Collections.Concurrent.ConcurrentDictionary<string, IImageCache> stubs) : IImageCache
+    {
+        public Task<CachedImage> GetOrAddAsync(
+            string sourceUrl,
+            bool forceRefresh,
+            CancellationToken cancellationToken,
+            int? width = null,
+            ImageCacheFormat format = ImageCacheFormat.Original)
+            => stubs.TryGetValue(sourceUrl, out var stub)
+                ? stub.GetOrAddAsync(sourceUrl, forceRefresh, cancellationToken, width, format)
+                : throw new InvalidOperationException($"No test stub is registered for {sourceUrl}.");
     }
 
     public void Dispose()
     {
-        foreach (var database in _databases) database.Dispose();
         if (Directory.Exists(_root))
         {
             Directory.Delete(_root, recursive: true);

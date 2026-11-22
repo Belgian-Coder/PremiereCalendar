@@ -8,10 +8,12 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
-public sealed class ProviderHttpTransportConfigurationTests : IDisposable
+// One host serves every case: the tests only read its service provider (handler pipelines, options), they never
+// send requests or change state, so a host per theory row (about 8 s each, 22 hosts) proved nothing more.
+public sealed class ProviderHttpTransportConfigurationTests(ProviderHttpTransportConfigurationTests.HostFixture host)
+    : IClassFixture<ProviderHttpTransportConfigurationTests.HostFixture>
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-provider-transport-{Guid.NewGuid():N}");
-    private readonly List<PostgresTestDatabase> _databases = [];
+    private WebApplicationFactory<Program> Factory => host.Factory;
 
     public static TheoryData<string> CompressedProviderClients => new()
     {
@@ -31,7 +33,7 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
     [MemberData(nameof(CompressedProviderClients))]
     public void ProviderClientsUseCompressingSocketsHandlerWithTheDefaultHandlerLifetimeAndCookies(string clientName)
     {
-        using var factory = CreateFactory();
+        var factory = Factory;
 
         var primary = PrimaryHandler(factory, clientName);
 
@@ -51,7 +53,7 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
     [MemberData(nameof(CompressedProviderClients))]
     public void ProviderClientsCapDecodedResponsesBeforeTheAdaptiveHandlerSeesThem(string clientName)
     {
-        using var factory = CreateFactory();
+        var factory = Factory;
 
         // Buffered reads are capped by HttpClient itself.
         using var client = factory.Services.GetRequiredService<IHttpClientFactory>().CreateClient(clientName);
@@ -73,7 +75,7 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
     [Fact]
     public void ImageAndDatasetClientsKeepTheirRawTransport()
     {
-        using var factory = CreateFactory();
+        var factory = Factory;
 
         // The image cache validates redirects itself and the dataset is a .gz file that its importer inflates, so
         // neither may be given transparent decompression.
@@ -91,25 +93,6 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
         Assert.Equal(DecompressionMethods.None, datasetDecompression);
     }
 
-    private WebApplicationFactory<Program> CreateFactory()
-    {
-        var settings = new Dictionary<string, string?>
-        {
-            ["ProviderScheduler:Enabled"] = "false",
-            ["CalendarWarmup:Enabled"] = "false",
-            ["ProviderDeltaSync:Enabled"] = "false",
-            ["ImdbDataset:Enabled"] = "false",
-            ["CalendarCache:Directory"] = Path.Combine(_root, "calendar-cache"),
-            ["ImageCache:Directory"] = Path.Combine(_root, "image-cache"),
-            ["Telemetry:LogDirectory"] = Path.Combine(_root, "logs")
-        };
-        var database = PostgresTestDatabase.Create();
-        _databases.Add(database);
-        foreach (var setting in database.AppSettings) settings[setting.Key] = setting.Value;
-        return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(settings)));
-    }
-
     private static HttpMessageHandler PrimaryHandler(WebApplicationFactory<Program> factory, string clientName)
     {
         // Resolve the real pipeline: delegating handlers first, the primary transport at the end of the chain.
@@ -118,11 +101,38 @@ public sealed class ProviderHttpTransportConfigurationTests : IDisposable
         return handler;
     }
 
-    public void Dispose()
+    public sealed class HostFixture : IDisposable
     {
-        foreach (var database in _databases) database.Dispose();
-        try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
+        private readonly string _root = Path.Combine(Path.GetTempPath(), $"premiere-provider-transport-{Guid.NewGuid():N}");
+        private readonly PostgresTestDatabase _database;
+
+        public HostFixture()
+        {
+            var settings = new Dictionary<string, string?>
+            {
+                ["ProviderScheduler:Enabled"] = "false",
+                ["CalendarWarmup:Enabled"] = "false",
+                ["ProviderDeltaSync:Enabled"] = "false",
+                ["ImdbDataset:Enabled"] = "false",
+                ["CalendarCache:Directory"] = Path.Combine(_root, "calendar-cache"),
+                ["ImageCache:Directory"] = Path.Combine(_root, "image-cache"),
+                ["Telemetry:LogDirectory"] = Path.Combine(_root, "logs")
+            };
+            _database = PostgresTestDatabase.Create();
+            foreach (var setting in _database.AppSettings) settings[setting.Key] = setting.Value;
+            Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+                builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(settings)));
+        }
+
+        public WebApplicationFactory<Program> Factory { get; }
+
+        public void Dispose()
+        {
+            Factory.Dispose();
+            _database.Dispose();
+            try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 }
