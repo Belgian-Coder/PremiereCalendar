@@ -583,6 +583,11 @@ public sealed partial class PremiereServiceTests
                 start.AddDays(day), language)).Concat(includeSeries
                     ? [new FullWeekRow(20_000 + day * 100 + languageIndex * 10, true, start.AddDays(day), language)] : []))).ToArray();
 
+    // Synthetic provider latencies (HTTP, OMDb, Rotten Tomatoes, artwork, availability). They only make the stages
+    // overlap in a realistic order; the tests assert parity, call counts and upper concurrency bounds, never durations,
+    // so a quarter of the original 60/80/150 ms keeps the same interleaving at a quarter of the wall time.
+    private const int FullWeekHttpLatencyMilliseconds = 15;
+
     private sealed class FullWeekHttpHandler(FullWeekRow[] rows, bool paginate = false) : HttpMessageHandler
     {
         public ConcurrentBag<string> Paths { get; } = [];
@@ -597,7 +602,7 @@ public sealed partial class PremiereServiceTests
             FullWeekSetMaximum(ref _maxActive, active);
             try
             {
-                await Task.Delay(60, token);
+                await Task.Delay(FullWeekHttpLatencyMilliseconds, token);
                 object payload;
                 if (uri.AbsolutePath.Contains("/discover/", StringComparison.Ordinal))
                 {
@@ -667,7 +672,7 @@ public sealed partial class PremiereServiceTests
         }
         public void Dispose() => _pool.Dispose();
     }
-    private sealed class FullWeekOmdb() : FullWeekOptionalPool(80), IOmdbClient
+    private sealed class FullWeekOmdb() : FullWeekOptionalPool(20), IOmdbClient
     {
         public async Task<OmdbItem?> GetByImdbIdAsync(string id, CancellationToken token, bool forceRefresh = false)
         {
@@ -675,18 +680,18 @@ public sealed partial class PremiereServiceTests
             return new OmdbItem { Response = "True", ImdbRating = "7.6", ImdbVotes = "12,345", Metascore = "71" };
         }
     }
-    private sealed class FullWeekTomatoes() : FullWeekOptionalPool(150), IRottenTomatoesClient
+    private sealed class FullWeekTomatoes() : FullWeekOptionalPool(40), IRottenTomatoesClient
     {
         public async Task<RottenTomatoesScores> GetScoresAsync(PremiereMediaType type, string title, int? year,
             string? wikidataId, CancellationToken token, bool forceRefresh = false)
         { await PauseAsync(token); return new(81, 73); }
     }
-    private sealed class FullWeekArtwork() : FullWeekOptionalPool(80), IArtworkProvider
+    private sealed class FullWeekArtwork() : FullWeekOptionalPool(20), IArtworkProvider
     {
         public async Task<ArtworkCandidate?> GetArtworkAsync(ArtworkRequest request, CancellationToken token, bool forceRefresh = false)
         { await PauseAsync(token); return new($"https://fixture.invalid/artwork/{request.TmdbId}.jpg", "Fixture artwork"); }
     }
-    private sealed class FullWeekAvailability() : FullWeekOptionalPool(80), IWatchmodeClient
+    private sealed class FullWeekAvailability() : FullWeekOptionalPool(20), IWatchmodeClient
     {
         public ConcurrentBag<int> CompletedIds { get; } = [];
         public async Task<IReadOnlyList<PremiereSource>> GetTitleSourcesAsync(PremiereMediaType type, int tmdbId, string? imdbId,

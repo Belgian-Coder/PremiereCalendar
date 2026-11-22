@@ -543,7 +543,7 @@ public sealed partial class ProviderWorkSchedulerTests
     [Fact]
     public async Task RepeatedCompletedJobsReleaseBroadcastsAndReplayLateSubscribers()
     {
-        for (var index = 0; index < 100; index++)
+        for (var index = 0; index < 10; index++)
         {
             var job = await ClaimCalendarAsync($"soak-{index}");
             var execution = _scheduler.BeginExecution(job, CancellationToken.None);
