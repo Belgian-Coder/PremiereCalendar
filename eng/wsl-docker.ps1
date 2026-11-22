@@ -16,8 +16,11 @@ Actions:
   up     build and start the development stack (http://localhost:5299, PostgreSQL on 127.0.0.1:55432)
   down   stop the stack, keeping its named volumes
   build  rebuild the development image (premierecalendar-dev-app:latest, also used by Test-WithPostgres.ps1)
-  check  compile one project (-Project App, the default, or a test project) in the development image; no PostgreSQL
-  test   run eng\Test-WithPostgres.ps1 (project/filter, distro, cache/profile and scheduling budgets are forwarded)
+  check  compile one project (-Project App, the default, or a test project) in the development image; no PostgreSQL.
+         The source comes from a verified per-checkout copy on the distribution's ext4 disk (-SourceMount Mirror, the
+         default; -SourceMount Windows mounts the live checkout instead). `up` always mounts the live checkout, because
+         `dotnet watch` must see edits as they happen.
+  test   run eng\Test-WithPostgres.ps1 (project/filter, distro, cache/profile, -SourceMount, -NoCache and scheduling budgets are forwarded)
   logs   show the last 200 log lines of the app and database
   reset  remove only this checkout's development containers and named development volumes (needs permission)
 
@@ -50,6 +53,8 @@ param(
     # 0 = default: the test runner scales it with the selected suites; other actions use 1800 s.
     [ValidateRange(0, 86400)][int] $TimeoutSeconds = 0,
     [switch] $NoRuntimeAsync,
+    [ValidateSet('Mirror', 'Windows')][string] $SourceMount = 'Mirror',
+    [switch] $NoCache,
     [switch] $Plan
 )
 
@@ -61,7 +66,8 @@ if ($Project -notin 'App', 'All') { $Project = ($Project -replace 'Tests$', '') 
 
 if ($Action -eq 'test') {
     $arguments = @{ Plan = $Plan; WslDistribution = $WslDistribution; Cpus = $Cpus; BuildMaxCpuCount = $BuildMaxCpuCount;
-        MaxThreads = $MaxThreads; DevImage = $DevImage; NoRuntimeAsync = $NoRuntimeAsync; TimeoutSeconds = $TimeoutSeconds }
+        MaxThreads = $MaxThreads; DevImage = $DevImage; NoRuntimeAsync = $NoRuntimeAsync; TimeoutSeconds = $TimeoutSeconds
+        SourceMount = $SourceMount; NoCache = $NoCache }
     foreach ($name in @('BuildVolume', 'NugetVolume', 'CacheFlavor')) {
         $value = Get-Variable -Name $name -ValueOnly
         if ($value) { $arguments[$name] = $value }
@@ -91,18 +97,21 @@ if ($Action -ne 'check' -and ($NoRuntimeAsync -or $DevImage -ne 'premierecalenda
 $storage = Get-HarnessStorage $context -CacheFlavor $CacheFlavor -NoRuntimeAsync:$NoRuntimeAsync -Watcher:($Action -ne 'check') -BuildVolume $BuildVolume -NugetVolume $NugetVolume
 $runtimeArgument = if ($NoRuntimeAsync) { ' -p:UseRuntimeAsync=false' } else { '' }
 $projectPath = if ($Project -eq 'App') { 'PremiereCalendar/PremiereCalendar.csproj' } else { "tests/PremiereCalendar.$Project/PremiereCalendar.$Project.csproj" }
+# Only `check` reads the mirror; the Compose watcher needs the live checkout.
+$mirrored = $Action -eq 'check' -and $SourceMount -eq 'Mirror'
 $compose = 'docker compose -p ' + $context.ComposeProject + ' -f compose.dev.yaml'
 $commands = @{
     up = "$compose up --build --pull never -d --wait"
     down = "$compose down"
     build = "$compose build"
-    check = "docker run --rm --pull=never --cpus=$cpusWord -v __ROOT__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=__BUILD__ -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache `"`$dev_image`" sh /src/eng/run-with-sdk-cache.sh dotnet build $projectPath -c Release --nologo -maxcpucount:$buildCpusWord$runtimeArgument"
+    check = "docker run --rm --pull=never --cpus=$cpusWord -v __SRC__:/src -v __BUILD__:/build -v __PACKAGES__:/root/.nuget/packages -w /src -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=__BUILD__ -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache `"`$dev_image`" sh /src/eng/run-with-sdk-cache.sh dotnet build $projectPath -c Release --nologo -maxcpucount:$buildCpusWord$runtimeArgument"
     logs = "$compose logs --tail=200 app database"
     reset = "$compose down --volumes --remove-orphans"
 }
 if ($Plan) {
-    [pscustomobject]@{ Action = $Action; Project = $Project; Context = $context; Command = $commands[$Action];
+    [pscustomobject]@{ Action = $Action; Project = $Project; Context = $context; Command = $commands[$Action].Replace('__SRC__', $(if ($mirrored) { '"$pc_src"' } else { '__ROOT__' }));
         WslDistribution = $WslDistribution; CacheFlavor = $CacheFlavor; DevImage = $DevImage;
+        SourceStorage = if ($mirrored) { "wsl:~/$($storage.SourceMirror)" } else { 'windows' };
         BuildStorage = $storage.BuildVolume; PackageStorage = $storage.NugetVolume;
         SdkCacheStorage = [pscustomobject]@{ BuildStorage = $storage.BuildVolume; Subdirectory = $storage.SdkCacheSubdirectory };
         DotnetCliHome = $storage.DotnetCliHome; NugetPluginsCache = $storage.NugetPluginsCache; Cpus = $Cpus; BuildMaxCpuCount = $BuildMaxCpuCount;
@@ -137,15 +146,18 @@ if ($Action -eq 'up') {
 }
 $wslBuild = $storage.BuildVolume
 $wslPackages = $storage.NugetVolume
-$command = $commands[$Action].Replace('__ROOT__', (ConvertTo-BashLiteral $wslRoot)).
+$srcWord = if ($mirrored) { '"$pc_src"' } else { ConvertTo-BashLiteral $wslRoot }
+$command = $commands[$Action].Replace('__SRC__', $srcWord).
     Replace('__BUILD__', (ConvertTo-BashLiteral $wslBuild)).Replace('__PACKAGES__', (ConvertTo-BashLiteral $wslPackages))
 $lock = if ($Action -eq 'check') {
     "mkdir -p artifacts; exec 9>artifacts/check.lock; flock -n 9 || { echo 'Another check owns this worktree.' >&2; exit 21; }"
 } else { '' }
 $volumes = if ($Action -in 'up', 'build') {
-    "docker volume create $(ConvertTo-BashLiteral $wslBuild) >/dev/null`ndocker volume create $(ConvertTo-BashLiteral $wslPackages) >/dev/null"
+    "docker volume create $(ConvertTo-BashLiteral $wslBuild) >/dev/null`
+docker volume create $(ConvertTo-BashLiteral $wslPackages) >/dev/null"
 } else { '' }
-$script = @"
+$buildScript = { param($sync)
+@"
 set -eu
 cd $(ConvertTo-BashLiteral $wslRoot)
 $preflight
@@ -154,9 +166,18 @@ export PREMIERECALENDAR_BUILD_VOLUME=$(ConvertTo-BashLiteral $wslBuild)
 $budgetShell
 export PREMIERECALENDAR_CPUS=$cpusWord
 $lock
+$(if ($Action -eq 'check') { $sync.SyncScript })
 $volumes
 $command
 "@
+}
 $remaining = [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds)
 if ($remaining -lt 26) { throw 'Insufficient total helper deadline remains before execution.' }
-Invoke-HarnessWsl $script -WslDistribution $WslDistribution -TimeoutSeconds $remaining
+if ($Action -eq 'check') {
+    # The mirror is synced under the same lock the build holds, so nothing else can change it while this build reads it.
+    $run = Invoke-HarnessMirroredWsl -BuildScript $buildScript -Context $context -Storage $storage -WslRoot $wslRoot -RunId ([Guid]::NewGuid().ToString('N').Substring(0, 10)) `
+        -SourceMount $SourceMount -WslDistribution $WslDistribution -RemainingSeconds { [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds) }
+    if ($run.ExitCode -ne 0) { throw "WSL command failed (exit $($run.ExitCode)); inspect resource cleanup evidence. Docker must already be running." }
+} else {
+    Invoke-HarnessWsl (& $buildScript $null) -WslDistribution $WslDistribution -TimeoutSeconds $remaining
+}

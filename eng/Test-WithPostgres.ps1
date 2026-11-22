@@ -34,7 +34,7 @@ the requested test projects inside premierecalendar-dev-app:latest (one MSBuild 
 container-local /tmp when several suites are selected; on a combined failure each project is rebuilt to attribute it),
 runs each test executable directly (xUnit.net 4
 projects are executables; this skips the `dotnet test` start-up cost) and attempts bounded, ownership-verified cleanup
-of the server, runner and network on exit. Unresolved cleanup is reported and fails the run. The repository is mounted into the container as /src. PostgreSQL's start-up overlaps the build: the runner is started
+of the server, runner and network on exit. Unresolved cleanup is reported and fails the run. The source is mounted into the container as /src (a verified ext4 mirror of this checkout by default, see -SourceMount). PostgreSQL's start-up overlaps the build: the runner is started
 immediately, the shell polls the server every 0.2 s (bounded to 180 s) and the runner waits for a readiness marker
 before its first suite. The default worker budgets are `auto` (see -Cpus). The network is created
 with an explicit subnet because the Docker default address pools can be exhausted. The test password is generated per
@@ -97,6 +97,19 @@ Skips the build and runs the output of the previous run of the same worktree and
 .PARAMETER FreshBuild
 Builds from scratch in a throwaway container location instead of this checkout's build directory.
 
+.PARAMETER SourceMount
+Mirror (default) copies this checkout's source (tracked plus untracked-not-ignored files) into a per-checkout directory on
+the WSL distribution's ext4 disk and mounts that as /src: the Windows drive is slow to read from Linux. The copy is
+content addressed and verified in the guest against a Windows manifest of Git blob ids before any container starts; only
+new or changed files are copied after the first run. Windows mounts the live checkout as /src (the former behaviour) for
+diagnosis. Results and logs always land in this checkout's artifacts folder.
+
+.PARAMETER NoCache
+Runs the tests even when the same inputs already passed. By default a run is skipped ("REUSED passing results from ...")
+when a previous run of this checkout recorded an identical key (verified source manifest, development image identity,
+suites, filters, -Parallel/-RunnerArguments, configuration and runtime-async mode; not worker budgets or timeouts) and all
+of its suites passed. -NoBuild runs never use or record the cache.
+
 .PARAMETER Cpus
 CPU limit of the test container: a number or auto (default). auto is half of the engine's CPUs read with nproc in the WSL
 guest (at least 2, at most 64); the PostgreSQL container always gets 2. The resolved value is printed as PC_TEST_BUDGET.
@@ -147,6 +160,9 @@ param(
     [switch] $NoRestore,
     [switch] $NoBuild,
     [switch] $FreshBuild,
+    [ValidateSet('Mirror', 'Windows')]
+    [string] $SourceMount = 'Mirror',
+    [switch] $NoCache,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')]
     [string] $BuildVolume,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$')]
@@ -250,6 +266,9 @@ if ($Plan) {
         BuildMaxCpuCount = $BuildMaxCpuCount
         TimeoutSeconds = $TimeoutSeconds
         AutoBudget = 'auto = max(2, engine CPUs / 2), read with nproc in the WSL guest at run time'
+        SourceMount = $SourceMount
+        SourceStorage = if ($SourceMount -eq 'Mirror') { "wsl:~/$($storage.SourceMirror)" } else { 'windows' }
+        ResultCache = if ($NoCache) { 'off (-NoCache)' } elseif ($NoBuild) { 'off (-NoBuild)' } else { 'on' }
     }
     return
 }
@@ -279,6 +298,8 @@ $buildCpusWord = if ($BuildMaxCpuCount -eq 'auto') { '$pc_budget' } else { $Buil
 $doBuild = if ($NoBuild) { '0' } else { '1' }
 $suiteList = $suites -join ' '
 $PostgresReadySeconds = 180
+$srcMounts = if ($SourceMount -eq 'Mirror') { "-v `"`$pc_src`":/src -v $(ConvertTo-BashLiteral "$wslRoot/artifacts"):/src/artifacts" } else { "-v `"`$pc_src`":/src" }
+$cacheEnabled = -not $NoCache -and -not $NoBuild
 $configLower = $Configuration.ToLowerInvariant()
 
 $innerTemplate = @'
@@ -339,7 +360,31 @@ $innerEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($inner
 
 # A single WSL shell owns the lock and the cleanup. Passwords travel on stdin and inherited environment variables,
 # never arguments or WSL host temporary files. No production or development database is joined.
-$script = @"
+# Built per attempt: the source-sync script and the cache decision depend on this attempt's verified source manifest.
+$buildScript = { param($sync)
+$cacheBlock = ''
+if ($cacheEnabled) {
+    $script:cacheInputs = @{
+        schema = 1; manifest = $sync.ManifestSha256; suites = @($suites | Sort-Object); filter = @($Filter | Sort-Object)
+        queryFilter = @($QueryFilter | Sort-Object); parallel = [string] $Parallel; runnerArguments = @($RunnerArguments)
+        configuration = $Configuration; runtimeAsync = (-not $NoRuntimeAsync); postgresImage = $postgresImage; cacheFlavor = $CacheFlavor
+    }
+    $script:cacheInputsHash = Get-HarnessResultInputsHash $script:cacheInputs
+    $script:cacheCandidates = @(Find-HarnessReusableResults (Join-Path $context.Root 'artifacts/test-results') $script:cacheInputsHash @($suites))
+    $reuseLoop = ''
+    if ($script:cacheCandidates.Count -gt 0) {
+        $words = ($script:cacheCandidates | ForEach-Object { ConvertTo-BashLiteral "$($_.Name)|$($_.ImageId)" }) -join ' '
+        $reuseLoop = @"
+for pc_candidate in $words; do
+  [ "`${pc_candidate#*|}" = "`$dev_image" ] || continue
+  printf %s "`${pc_candidate%%|*}" > $(ConvertTo-BashLiteral "$($sync.RunDirectoryWsl)/reuse.txt")
+  exit 60
+done
+"@
+    }
+    $cacheBlock = "mkdir -p $(ConvertTo-BashLiteral $sync.RunDirectoryWsl)`nprintf %s `"`$dev_image`" > $(ConvertTo-BashLiteral "$($sync.RunDirectoryWsl)/image-id.txt")`n$reuseLoop"
+}
+@"
 set -eu
 cleanup() {
   original=`$?
@@ -385,15 +430,17 @@ cleanup_resource() {
 runner_id=''; server_id=''; network_id=''
 runner_attempted=0; server_attempted=0; network_attempted=0
 $(Get-HarnessPreflight -Image $DevImage)
-$(Get-HarnessPreflight -Image $postgresImage -ImageVariable 'postgres_image')
 command -v flock >/dev/null
 command -v timeout >/dev/null
 mkdir -p $quotedDirectories
+$cacheBlock
+$(Get-HarnessPreflight -Image $postgresImage -ImageVariable 'postgres_image' -SkipEngine)
 exec 9>$(ConvertTo-BashLiteral "$wslRoot/artifacts/check.lock")
 flock -n 9 || { echo 'Another build/test check owns this worktree. Use another worktree or wait.' >&2; exit 21; }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+$($sync.SyncScript)
 export POSTGRES_PASSWORD='$password' PGPASSWORD='$password' PC_TEST_PASSWORD='$password'
 # Worker budget: auto = half of the engine's CPUs (other tenants share it), at least 2, at most 64.
 pc_ncpu=`$(nproc 2>/dev/null || echo 2)
@@ -411,7 +458,7 @@ server_id=`$(docker run --pull=never -d --name '$server' --label premierecalenda
   -e POSTGRES_PASSWORD -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=postgres \
   "`$postgres_image" -c max_connections=300)
 runner_attempted=1
-runner_id=`$(docker create --pull=never --name '$runnerName' --label premierecalendar.test=$runId --network '$network' --cpus=$cpusWord -e PC_BUDGET=`$pc_budget -v $(ConvertTo-BashLiteral $wslRoot):/src \
+runner_id=`$(docker create --pull=never --name '$runnerName' --label premierecalendar.test=$runId --network '$network' --cpus=$cpusWord -e PC_BUDGET=`$pc_budget $srcMounts \
   -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -w /src \
   -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=$(ConvertTo-BashLiteral $sdkCacheOwner) -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
@@ -441,18 +488,34 @@ elif kill -0 "`$attach_pid" 2>/dev/null; then
 fi
 wait "`$attach_pid"
 "@
+}
 
-Write-Host "Results: $resultsHost"
+Write-Host "Results folder: $resultsHost"
 Write-Host "Test run label: premierecalendar.test=$runId; resource names: $runnerName, $server, $network"
 $started = Get-Date
 $cleanupGraceSeconds = 120
 $remaining = [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds)
 if ($remaining -lt ($cleanupGraceSeconds + 11)) { throw 'Insufficient total test deadline remains for execution, cleanup and drain.' }
 try {
-    $exitCode = Invoke-HarnessWsl $script -ReturnExitCode -WslDistribution $WslDistribution -TimeoutSeconds $remaining -CleanupGraceSeconds $cleanupGraceSeconds
+    $run = Invoke-HarnessMirroredWsl -BuildScript $buildScript -Context $context -Storage $storage -WslRoot $wslRoot -RunId $runId `
+        -SourceMount $SourceMount -WslDistribution $WslDistribution -CleanupGraceSeconds $cleanupGraceSeconds `
+        -RemainingSeconds { [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds) }
+    $exitCode = $run.ExitCode
 } catch {
     [Console]::Error.WriteLine("Test resources with label premierecalendar.test=$runId may remain: $runnerName, $server, $network. Guest cleanup is unconfirmed; inspect exact ownership before removal.")
     throw
+}
+if ($exitCode -eq 60) {
+    # The guest found a recorded passing run of identical inputs on this image before it took the lock or started a container.
+    $reused = @($script:cacheCandidates | Where-Object { $_.Name -ceq $run.ReuseFolder }) | Select-Object -First 1
+    if (-not $reused) { throw 'The reuse decision named a results folder that was not offered.' }
+    Write-Host "REUSED passing results from $($reused.Folder) (key $($reused.Key.Substring(0, 16))); no container was started. Use -NoCache to run anyway."
+    Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] ((Get-Date) - $started).TotalSeconds, $reused.Folder)
+    Write-Host "All requested test projects passed ($($suites -join ', ')), reused."
+    return
+}
+if ($exitCode -eq 0 -and $cacheEnabled -and $run.ImageId -match '^sha256:[0-9a-f]{64}$' -and (Test-HarnessResultsPassed $resultsHost @($suites))) {
+    Write-HarnessResultKey $resultsHost $script:cacheInputs $script:cacheInputsHash $run.ImageId @($suites)
 }
 Write-Host ("Total wall time: {0} s. Results: {1}" -f [int] ((Get-Date) - $started).TotalSeconds, $resultsHost)
 if ($exitCode -ne 0) { throw "Tests did not pass (exit code $exitCode; see the messages above)." }
