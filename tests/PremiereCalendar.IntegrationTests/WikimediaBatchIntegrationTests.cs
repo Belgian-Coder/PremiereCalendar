@@ -8,8 +8,8 @@ using PremiereCalendar.Services;
 
 namespace PremiereCalendar.IntegrationTests;
 
-// Batch windows of a few hundred milliseconds: the tests of this class keep running one after the other (the xUnit.net 2 behaviour).
-[Collection(nameof(WikimediaBatchIntegrationTests))]
+// Tests of this class run in parallel with each other (ParallelMode.All ignores [Collection]). Batch membership never
+// depends on the 10 ms coalescing window: lookups are queued behind occupied HTTP slots (see Warmups) or held by gates.
 public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
 {
     [Theory]
@@ -40,9 +40,9 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         });
         var client = CreateClient(handler);
         var firstWarmup = client.GetRottenTomatoesIdAsync("Q9000001", CancellationToken.None);
-        await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var secondWarmup = client.GetRottenTomatoesIdAsync("Q9000002", CancellationToken.None);
-        await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         var started = Stopwatch.GetTimestamp();
         // Occupied HTTP slots let every lookup join the queue before a batch drains,
@@ -92,36 +92,44 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
     [Fact]
     public async Task CancellingOneCallerDoesNotCancelTheSharedBatch()
     {
+        var warmups = new Warmups();
         var started = Signal();
         var release = Signal();
         var handler = new AsyncHandler(async (request, token) =>
         {
+            if (await warmups.HoldAsync(request, token)) return Identifiers(request);
             started.TrySetResult();
             await release.Task.WaitAsync(token);
             return Identifiers(request);
         });
         var client = CreateClient(handler);
+        var occupied = await warmups.OccupyAsync(client);
         using var cancelled = new CancellationTokenSource();
+        // Both lookups are queued while the HTTP slots are busy, so they share one batch however slow caller creation is.
         var first = client.GetRottenTomatoesIdAsync("Q1", cancelled.Token);
         var second = client.GetRottenTomatoesIdAsync("Q2", CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        warmups.Release();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
         release.TrySetResult();
 
         Assert.Equal("m/Q2", await second);
-        Assert.Single(handler.Requests);
+        await occupied;
+        Assert.Single(Warmups.Exclude(handler.Requests));
     }
 
     [Fact]
     public async Task CancellingEveryCallerAbortsHttpAndTheQueueRecovers()
     {
+        var warmups = new Warmups();
         var started = Signal();
         var aborted = Signal();
         var calls = 0;
         var handler = new AsyncHandler(async (request, token) =>
         {
+            if (await warmups.HoldAsync(request, token)) return Identifiers(request);
             if (Interlocked.Increment(ref calls) == 1)
             {
                 started.TrySetResult();
@@ -131,32 +139,45 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
             return Identifiers(request);
         });
         var client = CreateClient(handler);
+        var occupied = await warmups.OccupyAsync(client);
         using var cancellation = new CancellationTokenSource();
+        // Queued behind busy HTTP slots: one batch, so cancelling both callers must abort that single request.
         var first = client.GetRottenTomatoesIdAsync("Q1", cancellation.Token);
         var second = client.GetRottenTomatoesIdAsync("Q2", cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        warmups.Release();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
-        await aborted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await aborted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         Assert.Equal("m/Q1", await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None));
-        Assert.Equal(2, handler.Requests.Count);
+        await occupied;
+        Assert.Equal(2, Warmups.Exclude(handler.Requests).Count());
     }
 
-    [Fact]
+    // The barrier hooks block thread-pool threads on purpose, so this test runs alone in the non-parallel phase.
+    [Fact(DisableParallelization = true)]
     public async Task NewCallerCannotJoinBatchBetweenLastCancellationDecisionAndHttpAbort()
     {
         var started = Signal();
         var abandoning = Signal();
+        var firstWarmupStarted = Signal();
+        var secondWarmupStarted = Signal();
+        var releaseWarmups = Signal();
         var secondCancellationEntered = Signal();
         using var releaseCancellation = new ManualResetEventSlim();
         using var releaseSecondCancellation = new ManualResetEventSlim();
         var calls = 0;
         var batcher = new WikimediaClaimBatcher(async (ids, token) =>
         {
-            if (Interlocked.Increment(ref calls) == 1)
+            if (ids[0] is Warmups.FirstId or Warmups.SecondId)
+            {
+                (ids[0] == Warmups.FirstId ? firstWarmupStarted : secondWarmupStarted).TrySetResult();
+                await releaseWarmups.Task.WaitAsync(token);
+            }
+            else if (Interlocked.Increment(ref calls) == 1)
             {
                 started.TrySetResult();
                 await Task.Delay(Timeout.Infinite, token);
@@ -165,34 +186,47 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         }, null, beforeAbandonedBatchCancellation: () =>
         {
             abandoning.TrySetResult();
-            releaseCancellation.Wait(TimeSpan.FromSeconds(5));
+            releaseCancellation.Wait(TimeSpan.FromSeconds(30));
         });
         using var firstCancellation = new CancellationTokenSource();
         using var secondCancellation = new CancellationTokenSource();
+        // Occupy both batch slots so Q1 and Q2 are queued together and form one batch once the slots free up,
+        // independently of how long the calls below take under CPU load (the 10 ms window alone could split them).
+        var firstWarmup = batcher.GetAsync(Warmups.FirstId, 0, CancellationToken.None);
+        await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var secondWarmup = batcher.GetAsync(Warmups.SecondId, 0, CancellationToken.None);
+        await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var first = batcher.GetAsync("Q1", 0, firstCancellation.Token);
         var second = batcher.GetAsync("Q2", 0, secondCancellation.Token);
+        releaseWarmups.TrySetResult();
         // Registered last, this runs before WaitAsync's callback. The token is cancelled,
         // but Q2 cannot remove its mapped waiter until this barrier opens.
         using var registration = secondCancellation.Token.Register(() =>
         {
             secondCancellationEntered.TrySetResult();
-            releaseSecondCancellation.Wait(TimeSpan.FromSeconds(5));
+            releaseSecondCancellation.Wait(TimeSpan.FromSeconds(30));
         });
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         var cancelSecond = Task.Run(secondCancellation.Cancel, TestContext.Current.CancellationToken);
-        await secondCancellationEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        firstCancellation.Cancel();
-        await abandoning.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await secondCancellationEntered.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        // Cancel on another thread: the abandon hook blocks inside Cancel until released below, which previously
+        // stalled this thread for the full 5 s barrier timeout and made the interleaving timing-dependent.
+        var cancelFirst = Task.Run(firstCancellation.Cancel, TestContext.Current.CancellationToken);
+        await abandoning.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         // The old batch has been closed, but its HTTP cancellation has deliberately not run yet.
         var fresh = batcher.GetAsync("Q2", 0, CancellationToken.None);
-        releaseCancellation.Set();
+        // Let Q2's cancellation finish before the HTTP abort runs. Otherwise the aborted batch may complete Q2's old work
+        // first and its already-cancelled wait would return that result instead of throwing.
         releaseSecondCancellation.Set();
-
         await cancelSecond;
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
-        Assert.Equal("m/Q2", (await fresh.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).Identifier.Value);
+        releaseCancellation.Set();
+
+        await cancelFirst;
+        await Task.WhenAll(firstWarmup, secondWarmup);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+        Assert.Equal("m/Q2", (await fresh.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken)).Identifier.Value);
         Assert.Equal(2, calls);
     }
 
@@ -240,9 +274,9 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         // Occupy both HTTP slots so Q1 and Q2 deterministically join one batch, independently of how long caller
         // creation takes under full-suite CPU load (the batch window alone made this flaky on a loaded host).
         var firstWarmup = client.GetRottenTomatoesIdAsync("Q9000001", CancellationToken.None);
-        await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var secondWarmup = client.GetRottenTomatoesIdAsync("Q9000002", CancellationToken.None);
-        await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         var pending = new[] { client.GetRottenTomatoesIdResultAsync("Q1", CancellationToken.None),
             client.GetRottenTomatoesIdResultAsync("Q2", CancellationToken.None) };
@@ -276,10 +310,10 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         });
         var client = CreateClient(handler);
         var original = client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         Assert.Equal("m/Q1_new", await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None, forceRefresh: true)
-            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            .WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
         release.TrySetResult();
         Assert.Equal("m/Q1_old", await original);
         Assert.Equal("m/Q1_new", await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None));
@@ -313,9 +347,9 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         try
         {
             var firstWarmup = client.GetRottenTomatoesIdAsync("Q9000001", cancellation.Token);
-            await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await firstWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
             var secondWarmup = client.GetRottenTomatoesIdAsync("Q9000002", cancellation.Token);
-            await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await secondWarmupStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
             // Both HTTP slots stay occupied until every forced generation is queued.
             // This tests queued coalescing without relying on the 10ms dispatch window.
@@ -339,12 +373,14 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
     [Fact]
     public async Task SharedBatchReadsHighestLiveCallerPriorityIncludingPromotion()
     {
+        var warmups = new Warmups();
         var started = Signal();
         var inspect = Signal();
         var promoted = false;
         ProviderWorkPriority observed = ProviderWorkPriority.Maintenance;
         var handler = new AsyncHandler(async (request, token) =>
         {
+            if (await warmups.HoldAsync(request, token)) return Identifiers(request);
             var priority = ProviderExecutionContext.CapturePriorityAccessor();
             started.TrySetResult();
             await inspect.Task.WaitAsync(token);
@@ -352,17 +388,20 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
             return Identifiers(request);
         });
         var client = CreateClient(handler);
+        var occupied = await warmups.OccupyAsync(client);
         Task<string?> first;
         Task<string?> second;
         using (ProviderExecutionContext.Push(() => promoted ? ProviderWorkPriority.Foreground : ProviderWorkPriority.Warmup))
             first = client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None);
         using (ProviderExecutionContext.Push(() => ProviderWorkPriority.Maintenance))
             second = client.GetRottenTomatoesIdAsync("Q2", CancellationToken.None);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        // Both callers are queued behind busy HTTP slots, so they are guaranteed to share one batch.
+        warmups.Release();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         promoted = true;
         inspect.TrySetResult();
 
-        await Task.WhenAll(first, second);
+        await Task.WhenAll(first, second, occupied);
         Assert.Equal(ProviderWorkPriority.Foreground, observed);
     }
 
@@ -384,7 +423,7 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         });
         var client = CreateClient(handler);
         var initial = Enumerable.Range(1, 100).Select(id => client.GetRottenTomatoesIdAsync($"Q{id}", CancellationToken.None)).ToArray();
-        await initialBatchesStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await initialBatchesStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var before = Enumerable.Range(101, 200).Select(id => client.GetRottenTomatoesIdAsync($"Q{id}", CancellationToken.None)).ToArray();
         Task<string?>[] background;
         using (ProviderExecutionContext.Push(() => ProviderWorkPriority.Maintenance))
@@ -407,19 +446,31 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         {
             using var store = new PerformanceDiagnosticStore(new TelemetryOptions(), directory);
             var telemetry = new PremiereTelemetry(store);
-            var handler = new AsyncHandler((request, _) => Task.FromResult(Identifiers(request)));
+            var warmups = new Warmups();
+            var handler = new AsyncHandler(async (request, token) =>
+            {
+                await warmups.HoldAsync(request, token);
+                return Identifiers(request);
+            });
             var client = CreateClient(handler, telemetry);
+            // The warmups run outside any diagnostic context and keep both HTTP slots busy, so the two
+            // contexts below share one batch however long the calls take; their events are filtered out by load id.
+            var occupied = await warmups.OccupyAsync(client);
             var contexts = new[] { telemetry.CreateDiagnosticContext(), telemetry.CreateDiagnosticContext() };
             var calls = contexts.Select((context, index) =>
             {
                 using var scope = telemetry.UseDiagnosticContext(context);
                 return client.GetRottenTomatoesIdAsync($"Q{index + 1}", CancellationToken.None);
             }).ToArray();
+            warmups.Release();
             await Task.WhenAll(calls);
+            await occupied;
             using (telemetry.UseDiagnosticContext(contexts[0]))
                 await client.GetRottenTomatoesIdAsync("Q1", CancellationToken.None);
             telemetry.FlushDiagnostics();
-            var events = ReadEvents(directory);
+            var loadIds = contexts.Select(context => context.LoadId).ToHashSet();
+            var events = ReadEvents(directory)
+                .Where(entry => entry.TryGetProperty("loadId", out var load) && load.GetString() is { } id && loadIds.Contains(id)).ToArray();
 
             var batches = events.Where(entry => entry.GetProperty("event").GetString() == "provider.wikimedia.batch.completed").ToArray();
             Assert.Equal(2, batches.Length);
@@ -470,12 +521,14 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
             Assert.False((await client.GetRottenTomatoesIdResultAsync("Q1", CancellationToken.None)).IsSuccess);
             using var cancellation = new CancellationTokenSource();
             var cancelled = client.GetRottenTomatoesIdResultAsync("Q2", cancellation.Token);
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
 
             JsonElement[] events = [];
-            for (var attempt = 0; attempt < 100; attempt++)
+            // Event-driven in spirit: poll until the cancelled batch has been recorded, with a deadline that load cannot outrun.
+            var deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 30;
+            while (Stopwatch.GetTimestamp() < deadline)
             {
                 telemetry.FlushDiagnostics();
                 events = ReadEvents(directory);
@@ -517,6 +570,51 @@ public sealed class WikimediaBatchIntegrationTests(ITestOutputHelper output)
         => uri.AbsolutePath.Contains("Special:EntityData", StringComparison.Ordinal)
             ? [Path.GetFileNameWithoutExtension(uri.AbsolutePath)]
             : Uri.UnescapeDataString(uri.Query.TrimStart('?').Split('&').Single(part => part.StartsWith("ids=", StringComparison.Ordinal))[4..]).Split('|');
+
+    /// <summary>Keeps both HTTP slots busy so lookups issued afterwards queue together and form one batch.</summary>
+    private sealed class Warmups
+    {
+        internal const string FirstId = "Q9000001";
+        internal const string SecondId = "Q9000002";
+        private readonly TaskCompletionSource _first = Signal();
+        private readonly TaskCompletionSource _second = Signal();
+        private readonly TaskCompletionSource _release = Signal();
+
+        internal static IEnumerable<Uri> Exclude(IEnumerable<Uri> requests)
+            => requests.Where(uri => EntityIds(uri)[0] is not (FirstId or SecondId));
+
+        /// <summary>Holds warmup requests until <see cref="Release"/>; returns false for every other request.</summary>
+        internal async Task<bool> HoldAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            var id = EntityIds(request.RequestUri!)[0];
+            if (id is not (FirstId or SecondId)) return false;
+            (id == FirstId ? _first : _second).TrySetResult();
+            await _release.Task.WaitAsync(token);
+            return true;
+        }
+
+        /// <summary>Starts both warmups and returns once each holds an HTTP slot; await the result after <see cref="Release"/>.</summary>
+        internal async Task<Task> OccupyAsync(WikimediaClient client)
+        {
+            var first = client.GetRottenTomatoesIdAsync(FirstId, CancellationToken.None);
+            await Started(_first.Task, first, "first");
+            var second = client.GetRottenTomatoesIdAsync(SecondId, CancellationToken.None);
+            await Started(_second.Task, second, "second");
+            return Task.WhenAll(first, second);
+        }
+
+        private static async Task Started(Task signal, Task lookup, string name)
+        {
+            var timer = Stopwatch.StartNew();
+            try { await signal.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken); }
+            catch (TimeoutException exception)
+            {
+                throw new InvalidOperationException($"The {name} warmup not started after {timer.ElapsedMilliseconds} ms; lookup status={lookup.Status}; {lookup.Exception}", exception);
+            }
+        }
+
+        internal void Release() => _release.TrySetResult();
+    }
 
     private sealed class AsyncHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> responder) : HttpMessageHandler
     {
