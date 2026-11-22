@@ -30,9 +30,13 @@ Lists (-Project, -Filter, -RunnerArguments) are comma separated, also when the s
 
 What it does: inside one WSL shell (Ubuntu-24.04) it takes this checkout's check lock, starts a disposable postgres
 container (the image pinned in compose.yaml, data on tmpfs, max_connections=300) on a private Docker network, builds
-the requested test projects inside premierecalendar-dev-app:latest, runs each test executable directly (xUnit.net 4
+the requested test projects inside premierecalendar-dev-app:latest (one MSBuild invocation through a solution filter in
+container-local /tmp when several suites are selected; on a combined failure each project is rebuilt to attribute it),
+runs each test executable directly (xUnit.net 4
 projects are executables; this skips the `dotnet test` start-up cost) and attempts bounded, ownership-verified cleanup
-of the server, runner and network on exit. Unresolved cleanup is reported and fails the run. The repository is mounted into the container as /src. The network is created
+of the server, runner and network on exit. Unresolved cleanup is reported and fails the run. The repository is mounted into the container as /src. PostgreSQL's start-up overlaps the build: the runner is started
+immediately, the shell polls the server every 0.2 s (bounded to 180 s) and the runner waits for a readiness marker
+before its first suite. The default worker budgets are `auto` (see -Cpus). The network is created
 with an explicit subnet because the Docker default address pools can be exhausted. The test password is generated per
 run and travels only over stdin and inherited environment variables, never through arguments or WSL temp files.
 
@@ -71,7 +75,8 @@ One or more xUnit.net query filters (see the link above), combined with OR. Cann
 Overrides the assembly parallelization mode: none, collections or all (see tests/*/AssemblyConfiguration.cs).
 
 .PARAMETER MaxThreads
-Overrides the maximum number of test threads (default 2): a number, default, unlimited or a multiplier such as 2x.
+Overrides the maximum number of test threads (default auto, same rule as -Cpus): a number, auto, default, unlimited or a
+multiplier such as 2x.
 
 .PARAMETER RunnerArguments
 Extra arguments for the xUnit.net test executable (single-dash switches such as -longRunning 30 or -explicit on),
@@ -93,10 +98,11 @@ Skips the build and runs the output of the previous run of the same worktree and
 Builds from scratch in a throwaway container location instead of this checkout's build directory.
 
 .PARAMETER Cpus
-CPU limit of the test container (default 2); the PostgreSQL container gets 2.
+CPU limit of the test container: a number or auto (default). auto is half of the engine's CPUs read with nproc in the WSL
+guest (at least 2, at most 64); the PostgreSQL container always gets 2. The resolved value is printed as PC_TEST_BUDGET.
 
 .PARAMETER BuildMaxCpuCount
-Maximum MSBuild worker count (default 2). Suites still build and run sequentially.
+Maximum MSBuild worker count: a number or auto (default, same rule as -Cpus). Suites run sequentially.
 
 .PARAMETER BuildVolume
 Override for the generated Docker build volume. It must belong exclusively
@@ -116,7 +122,8 @@ Prints the plan (projects, build and runner arguments, storage, results folder, 
 WSL or Docker.
 
 .PARAMETER TimeoutSeconds
-Total WSL execution, bounded guest cleanup and output-drain budget (default 1800 seconds).
+Total WSL execution, bounded guest cleanup and output-drain budget. Default: 600 s plus 900 s per Unit/Component/
+Integration suite (1800 s per Browser suite), at most 7200 s (3300 s for the default three suites).
 Browser qualification explicitly uses 2400 seconds. A timeout never proves Linux cleanup.
 #>
 [CmdletBinding()]
@@ -127,15 +134,15 @@ param(
     [string[]] $QueryFilter,
     [ValidateSet('none', 'collections', 'all')]
     [string] $Parallel,
-    [string] $MaxThreads = '2',
+    [string] $MaxThreads = 'auto',
     [Alias('ExtraTestArguments')]
     [string[]] $RunnerArguments = @(),
     [ValidateSet('Release', 'Debug')]
     [string] $Configuration = 'Release',
-    [ValidateRange(1, 64)]
-    [int] $Cpus = 2,
-    [ValidateRange(1, 64)]
-    [int] $BuildMaxCpuCount = 2,
+    [ValidatePattern('^(auto|[1-9][0-9]?)$')]
+    [string] $Cpus = 'auto',
+    [ValidatePattern('^(auto|[1-9][0-9]?)$')]
+    [string] $BuildMaxCpuCount = 'auto',
     [switch] $NoRuntimeAsync,
     [switch] $NoRestore,
     [switch] $NoBuild,
@@ -150,7 +157,7 @@ param(
     [string] $WslDistribution = 'Ubuntu-24.04',
     [ValidateSet('musl', 'glibc')]
     [string] $CacheFlavor,
-    [ValidateRange(30, 86400)][int] $TimeoutSeconds = 1800,
+    [ValidateRange(0, 86400)][int] $TimeoutSeconds = 0,
     [switch] $Plan
 )
 
@@ -182,6 +189,12 @@ foreach ($item in $Project) {
     if (-not $suites.Contains($match)) { $suites.Add($match) }
 }
 if ($suites.Count -eq 0) { throw 'No project selected.' }
+foreach ($budget in @($Cpus, $BuildMaxCpuCount)) { if ($budget -ne 'auto' -and [int] $budget -gt 64) { throw 'Worker budgets must be auto or 1-64.' } }
+# Default total deadline scales with the selection: 600 s plus 900 s per Unit/Component/Integration suite (1800 s for
+# Browser), at most 7200 s. An explicit -TimeoutSeconds always wins.
+if ($TimeoutSeconds -eq 0) {
+    $TimeoutSeconds = [Math]::Min(7200, 600 + 900 * @($suites | Where-Object { $_ -ne 'Browser' }).Count + 1800 * @($suites | Where-Object { $_ -eq 'Browser' }).Count)
+} elseif ($TimeoutSeconds -lt 30) { throw '-TimeoutSeconds must be at least 30.' }
 if ($Filter -and $QueryFilter) { throw '-Filter and -QueryFilter cannot be combined.' }
 if ($FreshBuild -and ($NoBuild -or $BuildVolume)) { throw '-FreshBuild cannot be combined with -NoBuild or -BuildVolume.' }
 foreach ($f in @($Filter)) {
@@ -208,7 +221,8 @@ if ($Filter) {
 }
 if ($QueryFilter) { foreach ($q in $QueryFilter) { $runner.Add('-filter'); $runner.Add($q) } }
 if ($Parallel) { $runner.Add('-parallelMode'); $runner.Add($Parallel) }
-if ($MaxThreads) { $runner.Add('-maxThreads'); $runner.Add($MaxThreads) }
+$maxThreadsIndex = -1
+if ($MaxThreads) { $runner.Add('-maxThreads'); $maxThreadsIndex = $runner.Count; $runner.Add($MaxThreads) }
 foreach ($a in $RunnerArguments) { $runner.Add($a) }
 $buildArguments = @('-c', $Configuration, '--nologo', '-v', 'q', "-maxcpucount:$BuildMaxCpuCount")
 if ($NoRuntimeAsync) { $buildArguments += '-p:UseRuntimeAsync=false' }
@@ -235,6 +249,7 @@ if ($Plan) {
         Cpus = $Cpus
         BuildMaxCpuCount = $BuildMaxCpuCount
         TimeoutSeconds = $TimeoutSeconds
+        AutoBudget = 'auto = max(2, engine CPUs / 2), read with nproc in the WSL guest at run time'
     }
     return
 }
@@ -253,10 +268,17 @@ $server = "pcpg-db-$runId"
 $runnerName = "pcpg-test-$runId"
 $password = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLowerInvariant()
 $subnetOctet = Get-Random -Minimum 1 -Maximum 250
-$runnerWords = ($runner | ForEach-Object { ConvertTo-BashLiteral $_ }) -join ' '
-$buildWords = ($buildArguments | ForEach-Object { ConvertTo-BashLiteral $_ }) -join ' '
+# `auto` budgets are resolved in the guest shell (PC_BUDGET) before containers start; explicit numbers pass through.
+$runnerWords = (0..($runner.Count - 1) | Where-Object { $runner.Count -gt 0 } | ForEach-Object {
+    if ($_ -eq $maxThreadsIndex -and $runner[$_] -eq 'auto') { '"$PC_BUDGET"' } else { ConvertTo-BashLiteral $runner[$_] }
+}) -join ' '
+$buildWords = ($buildArguments | ForEach-Object { if ($_ -eq '-maxcpucount:auto') { '"-maxcpucount:$PC_BUDGET"' } else { ConvertTo-BashLiteral $_ } }) -join ' '
+$cpusWord = if ($Cpus -eq 'auto') { '$pc_budget' } else { $Cpus }
+$threadsWord = if ($MaxThreads -eq 'auto') { '"$pc_budget"' } else { ConvertTo-BashLiteral $MaxThreads }
+$buildCpusWord = if ($BuildMaxCpuCount -eq 'auto') { '$pc_budget' } else { $BuildMaxCpuCount }
 $doBuild = if ($NoBuild) { '0' } else { '1' }
 $suiteList = $suites -join ' '
+$PostgresReadySeconds = 180
 $configLower = $Configuration.ToLowerInvariant()
 
 $innerTemplate = @'
@@ -264,17 +286,39 @@ printf %s "$PC_TEST_PASSWORD" > /tmp/pc-test-postgres-password
 mkdir -p '/src/@@RESULTS@@'
 status=0
 summary=''
+built=0
+# One MSBuild evaluation/restore for every selected project (the application project is shared). A solution filter
+# in container-local /tmp lists exactly the selected test projects plus the application; the checkout is not written.
+# If the combined build fails, each project is built separately below so the failure is attributed per suite.
+if [ '@@DOBUILD@@' = 1 ] && [ @@SUITECOUNT@@ -gt 1 ]; then
+  filter=/tmp/pc-selected-tests.slnf
+  printf '{"solution":{"path":"/src/PremiereCalendar.slnx","projects":["PremiereCalendar/PremiereCalendar.csproj"' > "$filter"
+  for suite in @@SUITES@@; do printf ',"tests/PremiereCalendar.%sTests/PremiereCalendar.%sTests.csproj"' "$suite" "$suite" >> "$filter"; done
+  printf ']}}\n' >> "$filter"
+  echo "=== build @@SUITES@@ (one MSBuild invocation)"
+  t0=$(date +%s)
+  if dotnet build "$filter" @@BUILDWORDS@@; then built=1; echo "build time: $(( $(date +%s) - t0 )) s"
+  else echo "COMBINED BUILD FAILED: building each project separately to attribute the failure"; fi
+fi
+waited=0
 for suite in @@SUITES@@; do
   name="PremiereCalendar.${suite}Tests"
   proj="tests/$name/$name.csproj"
   exe="/build/bin/$name/@@CONFIGLOWER@@/$name"
-  if [ '@@DOBUILD@@' = 1 ]; then
+  if [ '@@DOBUILD@@' = 1 ] && [ "$built" = 0 ]; then
     echo "=== build $name"
     t0=$(date +%s)
     dotnet build "$proj" @@BUILDWORDS@@ || { echo "BUILD FAILED: $name"; status=1; summary="$summary\n$name: build failed"; continue; }
     echo "build time: $(( $(date +%s) - t0 )) s"
   fi
   [ -x "$exe" ] || { echo "Missing test executable $exe (run without -NoBuild)"; status=1; summary="$summary\n$name: no executable"; continue; }
+  # PostgreSQL starts while the build runs; the host creates this marker once it answers queries.
+  if [ "$waited" = 0 ]; then
+    waited=1
+    n=0
+    while [ ! -e /tmp/pc-postgres-ready ] && [ "$n" -lt 1500 ]; do sleep 0.2; n=$((n + 1)); done
+    [ -e /tmp/pc-postgres-ready ] || { echo 'Disposable PostgreSQL did not become ready.'; exit 24; }
+  fi
   echo "=== run $name"
   t0=$(date +%s)
   # The exit code travels through a file because busybox sh has no PIPESTATUS.
@@ -290,7 +334,7 @@ printf "\n=== summary%b\n" "$summary"
 exit $status
 '@
 $inner = $innerTemplate.Replace('@@RESULTS@@', $resultsRelative).Replace('@@SUITES@@', $suiteList).Replace('@@CONFIGLOWER@@', $configLower).
-    Replace('@@DOBUILD@@', $doBuild).Replace('@@BUILDWORDS@@', $buildWords).Replace('@@RUNNERWORDS@@', $runnerWords)
+    Replace('@@DOBUILD@@', $doBuild).Replace('@@SUITECOUNT@@', [string] $suites.Count).Replace('@@BUILDWORDS@@', $buildWords).Replace('@@RUNNERWORDS@@', $runnerWords)
 $innerEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($inner -replace "`r`n", "`n")))
 
 # A single WSL shell owns the lock and the cleanup. Passwords travel on stdin and inherited environment variables,
@@ -349,6 +393,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export POSTGRES_PASSWORD='$password' PGPASSWORD='$password' PC_TEST_PASSWORD='$password'
+# Worker budget: auto = half of the engine's CPUs (other tenants share it), at least 2, at most 64.
+pc_ncpu=`$(nproc 2>/dev/null || echo 2)
+pc_budget=`$(( pc_ncpu / 2 )); [ "`$pc_budget" -ge 2 ] || pc_budget=2; [ "`$pc_budget" -le 64 ] || pc_budget=64
+printf 'PC_TEST_BUDGET engineCpus=%s runnerCpus=%s maxThreads=%s buildMaxCpuCount=%s postgresCpus=2 timeoutSeconds=%s\n' "`$pc_ncpu" "$cpusWord" $threadsWord "$buildCpusWord" '$TimeoutSeconds'
 created=0
 for attempt in 0 1 2 3 4 5; do
   octet=`$(( ($subnetOctet + attempt * 7) % 250 + 1 ))
@@ -360,14 +408,8 @@ server_attempted=1
 server_id=`$(docker run --pull=never -d --name '$server' --label premierecalendar.test=$runId --network '$network' --cpus=2 --tmpfs /var/lib/postgresql \
   -e POSTGRES_PASSWORD -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=postgres \
   "`$postgres_image" -c max_connections=300)
-ready=0
-for i in `$(seq 1 90); do
-  if docker exec -e PGPASSWORD '$server' psql -h 127.0.0.1 -U premierecalendar -d postgres -Atc 'select 1' >/dev/null 2>&1; then ready=1; break; fi
-  sleep 2
-done
-[ "`$ready" = 1 ] || { echo 'Disposable PostgreSQL did not become ready.' >&2; docker logs --tail 40 '$server' >&2 || true; exit 24; }
 runner_attempted=1
-runner_id=`$(docker create --pull=never --name '$runnerName' --label premierecalendar.test=$runId --network '$network' --cpus=$Cpus -v $(ConvertTo-BashLiteral $wslRoot):/src \
+runner_id=`$(docker create --pull=never --name '$runnerName' --label premierecalendar.test=$runId --network '$network' --cpus=$cpusWord -e PC_BUDGET=`$pc_budget -v $(ConvertTo-BashLiteral $wslRoot):/src \
   -v $(ConvertTo-BashLiteral $wslPackages):/root/.nuget/packages $buildMount -w /src \
   -e DOTNET_CLI_HOME=/build/.sdk-cache/dotnet -e DOTNET_GENERATE_ASPNET_CERTIFICATE=false -e NUGET_PLUGINS_CACHE_PATH=/build/.sdk-cache/nuget-plugins -e PC_SDK_CACHE_OWNER=$(ConvertTo-BashLiteral $sdkCacheOwner) -e ArtifactsPath=/build -e NUGET_PACKAGES=/root/.nuget/packages -e NUGET_SCRATCH=/root/.nuget/packages/.scratch -e NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   -e PREMIERECALENDAR_TEST_POSTGRES='Host=$server;Port=5432;Database=postgres;Username=premierecalendar' \
@@ -376,7 +418,26 @@ runner_id=`$(docker create --pull=never --name '$runnerName' --label premierecal
 case "`$runner_id`$server_id`$network_id" in *[!0-9a-f]*|'') echo 'Invalid immutable test resource identity.' >&2; exit 28 ;; esac
 [ "`${#runner_id}" = 64 ] && [ "`${#server_id}" = 64 ] && [ "`${#network_id}" = 64 ] || exit 28
 echo "PC_TEST_RESOURCES runner=`$runner_id server=`$server_id network=`$network_id label=$runId"
-docker start --attach "`$runner_id" </dev/null
+# The build needs no database: start the runner now and let PostgreSQL's start-up overlap it. The runner waits for
+# /tmp/pc-postgres-ready (created below once the server answers queries) before it runs its first suite.
+docker start --attach "`$runner_id" </dev/null &
+attach_pid=`$!
+ready=0
+deadline=`$((SECONDS + $PostgresReadySeconds))
+while [ "`$SECONDS" -lt "`$deadline" ]; do
+  if docker exec -e PGPASSWORD '$server' psql -h 127.0.0.1 -U premierecalendar -d postgres -Atc 'select 1' >/dev/null 2>&1; then ready=1; break; fi
+  kill -0 "`$attach_pid" 2>/dev/null || break
+  sleep 0.2
+done
+if [ "`$ready" = 1 ]; then
+  until docker exec "`$runner_id" touch /tmp/pc-postgres-ready >/dev/null 2>&1; do
+    kill -0 "`$attach_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+elif kill -0 "`$attach_pid" 2>/dev/null; then
+  echo 'Disposable PostgreSQL did not become ready.' >&2; docker logs --tail 40 '$server' >&2 || true; exit 24
+fi
+wait "`$attach_pid"
 "@
 
 Write-Host "Results: $resultsHost"
