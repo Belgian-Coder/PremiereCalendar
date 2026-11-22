@@ -19,6 +19,14 @@ which the lane requires.
 | 6 | Deterministic batch-window tests; `[Collection]` replaced by effective `DisableParallelization` where state is shared | intermittent Wikimedia/IMDb/Calendar failures under load | repeated runs green, including `-MaxThreads 12` |
 | 7 | Release steps: DB-only Trivy cache with currency gates, NuGet package cache, BuildKit restore cache, Trivy and Syft concurrently | scan 370 s, NuGet restore 20 s, restore after a csproj change 88 s | scan 71-86 s in the release, restore 4 s, 25-45 s |
 | 8 | Release steps 2-7 in one command (`eng/release/Invoke-LocalGates.ps1`) with safe concurrency and `gates/stage-timings.json` | steps run one by one | 1.2.20: 944 s wall for 1,702 s of step time |
+| 9 | Builds and tests read source from a content-hash-verified ext4 mirror instead of the virtiofs `/mnt/d` mount (the WSL disk itself lives on D:) | `git status` 10-36 s, reading all files 24.5 s, cold app build 211 s, warm test build 65-240 s | 0.02-0.3 s, 0.13 s, 107 s, 15-44 s; sync 0.6-0.7 s per run (6.7 s first time) |
+| 10 | Passing-result cache keyed by all source bytes, image, selection and configuration (also used by the release test step, recorded as `reusedResults`) | identical rerun of the three suites: full run again | 11 s, no container |
+| 11 | Test impact selection in `Invoke-Validation -Changed` (test classes that reference the changed types, safe fallbacks) | every app change ran all three suites | e.g. one Component change selected ~48 of 275 tests; wiring changes still run whole suites |
+| 12 | PostgreSQL CPU quota scales with the runner budget; longer test DB timeouts; two load flakes removed | Npgsql read timeouts under 6 threads; full three-suite run 1,037 s | full three-suite run 267 s, all 2,319 passing |
+
+These rules are enforced, not only documented: `tests/HarnessPolicy.Tests.ps1` (static lane) fails when a script
+mounts the Windows checkout as build source, when the mirror, cache, auto budget or impact defaults regress, when the
+release receipt stops recording result reuse, or when AGENTS.md stops teaching them.
 
 Necessity review: removed the Windows-only file-lock test (product is Linux-container
 only), a duplicated 4,000-item checkpoint row, a JavaScript source-text grep, two
