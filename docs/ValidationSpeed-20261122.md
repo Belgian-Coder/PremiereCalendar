@@ -31,3 +31,17 @@ Follow-ups not done: calendar autoload re-pump after a pending window move, a
 per-step deadline in `Invoke-LocalGates.ps1`, a broader null-splat lint, recording an
 `-IgnoreUnfixed` policy in `release-config.json`, a scram/password-file smoke variant
 and a resumable NAS copy in `Close-Release.ps1`.
+
+## How the work was split
+
+Seven bounded work packages were handed to Claude Sonnet 5.5 subagents at medium
+effort, one `feature/speed-*` branch and worktree each, then merged by the
+integrator (merge commits `1d7bbfb` static lane, `d59f081` release orchestrator,
+`0fa26da` harness tests, `53990a8` test runner, `629f3d5` service suites,
+`a21e40e` release steps, `3443c69` flake hardening). The 22 commits that carry
+a `Co-Authored-By: Claude Sonnet 5.5` trailer between `8f55aea` and this record
+are theirs; integration, review fixes and the release are the integrator's
+(Claude Opus 5.5) commits. Before the release, fresh Claude Opus 5.5 (high)
+and Claude Sonnet 5.5 (xhigh) subagents reviewed the speed work and,
+separately, the earlier unreleased range `c4d8637..8f55aea`; their record is
+`source-review.json` in the NAS release evidence `releases/1.2.20-candidate2`.
