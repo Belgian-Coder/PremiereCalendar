@@ -254,22 +254,12 @@ public sealed class FileImageCacheTests : IDisposable
         }
 
         var current = await cache.GetOrAddAsync(imageUrl, false, CancellationToken.None);
-        if (OperatingSystem.IsWindows())
-        {
-            // Windows rejects this replacement. The failed commit must retain the old pair.
-            Assert.True(refreshed.IsStale);
-            Assert.Equal(oldMetadata, await File.ReadAllBytesAsync(metadataPath, TestContext.Current.CancellationToken));
-            Assert.Equal(first.ContentHash, current.ContentHash);
-        }
-        else
-        {
-            // Unix directory permissions allow replacing an owned read-only file atomically.
-            Assert.False(refreshed.IsStale);
-            Assert.NotEqual(oldMetadata, await File.ReadAllBytesAsync(metadataPath, TestContext.Current.CancellationToken));
-            Assert.NotEqual(first.ContentHash, current.ContentHash);
-            Assert.Equal(refreshed.ContentHash, current.ContentHash);
-            Assert.Equal(Marker(2, 4, 5), await File.ReadAllBytesAsync(current.FilePath, TestContext.Current.CancellationToken));
-        }
+        // Unix directory permissions allow replacing an owned read-only file atomically.
+        Assert.False(refreshed.IsStale);
+        Assert.NotEqual(oldMetadata, await File.ReadAllBytesAsync(metadataPath, TestContext.Current.CancellationToken));
+        Assert.NotEqual(first.ContentHash, current.ContentHash);
+        Assert.Equal(refreshed.ContentHash, current.ContentHash);
+        Assert.Equal(Marker(2, 4, 5), await File.ReadAllBytesAsync(current.FilePath, TestContext.Current.CancellationToken));
 
         Assert.Equal(2, handler.Requests.Count);
         Assert.Equal(oldBytes, await File.ReadAllBytesAsync(first.FilePath, TestContext.Current.CancellationToken));

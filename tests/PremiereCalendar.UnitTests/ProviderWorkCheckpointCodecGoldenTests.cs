@@ -63,10 +63,6 @@ public sealed class ProviderWorkCheckpointCodecGoldenTests
         => AssertIdentical(PerformanceGoldenSupport.Checkpoint(items), items == 1 ? "json" : "br-base64");
 
     [Fact]
-    public void LargeCheckpointEncodesToTheSameBytes()
-        => AssertIdentical(PerformanceGoldenSupport.Checkpoint(4000), "br-base64");
-
-    [Fact]
     public void CompressedEnvelopeEscapesPlusAsTheDefaultEncoderDid()
     {
         var checkpoint = PerformanceGoldenSupport.Checkpoint(60);

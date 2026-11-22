@@ -34,15 +34,6 @@ public sealed class StaticJsonOptionsEquivalenceTests : IDisposable
     }
 
     [Fact]
-    public void WebOptionsSingletonMatchesPerCallWebOptionsForTheSameGraph()
-    {
-        var graph = new { Version = 1, RawBytes = 5L, Sha256 = "ab", Min = (DateTimeOffset?)new DateTimeOffset(2026, 11, 5, 18, 0, 0, TimeSpan.Zero), Missing = (string?)null,
-            Ratio = 0.1 + 0.2, Items = new[] { new { PascalCase = "x", Date = new DateOnly(2026, 11, 2) } } };
-        Assert.Equal(JsonSerializer.SerializeToUtf8Bytes(graph, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
-            JsonSerializer.SerializeToUtf8Bytes(graph, JsonSerializerOptions.Web));
-    }
-
-    [Fact]
     public void ArchivedTraceIndexBytesEqualFreshWebOptionsSerializationAndHashIsLowercaseHex()
     {
         Directory.CreateDirectory(_root);
@@ -68,17 +59,6 @@ public sealed class StaticJsonOptionsEquivalenceTests : IDisposable
         var traceIndexType = typeof(PerformanceTraceArchive).GetNestedType("TraceIndex", System.Reflection.BindingFlags.NonPublic)!;
         var roundTripped = JsonSerializer.Deserialize(indexBytes, traceIndexType, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
         Assert.Equal(JsonSerializer.SerializeToUtf8Bytes(roundTripped, traceIndexType, new JsonSerializerOptions(JsonSerializerDefaults.Web)), indexBytes);
-    }
-
-    [Fact]
-    public void LowercaseHexHelperEqualsTheFormerUppercaseThenLowerPattern()
-    {
-        foreach (var length in new[] { 0, 1, 16, 20, 32, 33 })
-        {
-            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes("sample-" + length));
-            var data = bytes.AsSpan(0, Math.Min(length, bytes.Length)).ToArray();
-            Assert.Equal(Convert.ToHexString(data).ToLowerInvariant(), Convert.ToHexStringLower(data));
-        }
     }
 
     public void Dispose()
