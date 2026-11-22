@@ -83,11 +83,13 @@ Assert-Speed ($vulnerable.Exit -eq 1 -and $vulnerable.Report -match '"trivyZeroV
 $bash = $null
 if ($IsWindows) {
     # Git for Windows' bash; the System32/WindowsApps bash.exe would start WSL instead.
-    $bash = @(Get-Command bash -All -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -like '*\Git\*' } | ForEach-Object Source)[0]
+    $bash = Get-Command bash -All -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -like '*\Git\*' } | ForEach-Object Source | Select-Object -First 1
 }
 else { $bash = (Get-Command bash -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)?.Source }
-$stub = 'docker() { case "$*" in *trivy-fixture*) sleep 2; echo trivy-out; return ${TRIVY_EXIT:-0};; *syft-fixture*) sleep 2; echo syft-out; return ${SYFT_EXIT:-0};; esac; return 99; }'
-$stub = 'docker() { case "$*" in *trivy-fixture*) sleep 2; echo trivy-out; return ${TRIVY_EXIT:-0};; *syft-fixture*) sleep 2; echo syft-out; return ${SYFT_EXIT:-0};; *meta-fixture*) echo meta-out; return ${META_EXIT:-0};; esac; return 99; }'
+# Each scanner double announces its start and waits (up to 30 s) for the other one to start: a sequential script can
+# never satisfy that rendezvous and fails with 70, so success proves overlap independently of host load.
+$stub = 'pc_meet() { : > "$PC_SYNC/$1"; i=0; while [ ! -e "$PC_SYNC/$2" ]; do i=$((i+1)); [ $i -le 300 ] || return 70; sleep 0.1; done; }
+docker() { case "$*" in *trivy-fixture*) pc_meet trivy syft || return 70; echo trivy-out; return ${TRIVY_EXIT:-0};; *syft-fixture*) pc_meet syft trivy || return 70; echo syft-out; return ${SYFT_EXIT:-0};; *meta-fixture*) echo meta-out; return ${META_EXIT:-0};; esac; return 99; }'
 function Invoke-ScanScript([int] $TrivyExit, [int] $SyftExit, [string] $Name, [int] $MetaExit = 0) {
     $dir = Join-Path $work $Name; $null = New-Item -ItemType Directory -Path $dir
     $staged = Join-Path $dir 'staged'; $null = New-Item -ItemType Directory -Path $staged
@@ -96,16 +98,18 @@ function Invoke-ScanScript([int] $TrivyExit, [int] $SyftExit, [string] $Name, [i
         -TrivyLog "$posix/t.log" -SyftLog "$posix/s.log" -MetadataArguments @('run', 'meta-fixture') -MetadataFile "$posix/meta.json" -CleanupPath "$posix/staged" -DockerDefinition $stub
     $scriptPath = Join-Path $dir 'scan.sh'
     [IO.File]::WriteAllText($scriptPath, $text.Replace("`r`n", "`n"))
+    $sync = Join-Path $dir 'sync'; $null = New-Item -ItemType Directory -Path $sync
+    $env:PC_SYNC = $sync -replace '\\', '/'
     $env:TRIVY_EXIT = $TrivyExit; $env:SYFT_EXIT = $SyftExit; $env:META_EXIT = $MetaExit
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $null = & $bash ($scriptPath -replace '\\', '/') 2>&1
     $exit = $LASTEXITCODE; $elapsed = $clock.Elapsed.TotalSeconds
-    Remove-Item Env:TRIVY_EXIT, Env:SYFT_EXIT, Env:META_EXIT
+    Remove-Item Env:TRIVY_EXIT, Env:SYFT_EXIT, Env:META_EXIT, Env:PC_SYNC
     [pscustomobject]@{ Exit = $exit; Elapsed = $elapsed; Dir = $dir; Script = $scriptPath; Staged = $staged }
 }
 if ($bash) {
     $both = Invoke-ScanScript 0 0 'scan-ok'
-    Assert-Speed ($both.Exit -eq 0 -and $both.Elapsed -lt 3.6) "Trivy and Syft did not overlap or failed (exit $($both.Exit), $([math]::Round($both.Elapsed, 2)) s)."
+    Assert-Speed ($both.Exit -eq 0) "Trivy and Syft did not overlap or failed (exit $($both.Exit), $([math]::Round($both.Elapsed, 2)) s)."
     Assert-Speed ((Get-Content -LiteralPath (Join-Path $both.Dir 't.log') -Raw).Trim() -ceq 'trivy-out' -and (Get-Content -LiteralPath (Join-Path $both.Dir 's.log') -Raw).Trim() -ceq 'syft-out') 'Per-tool logs are mixed up.'
     Assert-Speed (-not (Test-Path -LiteralPath $both.Staged)) 'The staged copy was not removed when the scan script ended.'
     Assert-Speed ((Get-Content -LiteralPath (Join-Path $both.Dir 'meta.json') -Raw).Trim() -ceq 'meta-out') 'The Trivy DB metadata was not captured after a successful scan.'
@@ -114,9 +118,11 @@ if ($bash) {
     Assert-Speed ((Invoke-ScanScript 0 0 'scan-meta' 5).Exit -eq 14) 'A failed DB metadata read did not fail the step (exit 14).'
     Assert-Speed ((Invoke-ScanScript 0 4 'scan-syft').Exit -eq 12) 'A Syft failure was not reported as exit 12.'
     Assert-Speed ((Invoke-ScanScript 3 4 'scan-both').Exit -eq 13) 'A double failure was not reported as exit 13.'
+    $rerunSync = Join-Path $both.Dir 'sync-rerun'; $null = New-Item -ItemType Directory -Path $rerunSync
+    $env:PC_SYNC = $rerunSync -replace '\\', '/'
     $env:TRIVY_EXIT = 0; $env:SYFT_EXIT = 0; $env:META_EXIT = 0
     $null = & $bash ($both.Script -replace '\\', '/') 2>&1
-    $rerun = $LASTEXITCODE; Remove-Item Env:TRIVY_EXIT, Env:SYFT_EXIT, Env:META_EXIT
+    $rerun = $LASTEXITCODE; Remove-Item Env:TRIVY_EXIT, Env:SYFT_EXIT, Env:META_EXIT, Env:PC_SYNC
     Assert-Speed ($rerun -eq 13) 'Existing scan logs were overwritten instead of refused.'
 }
 else { Write-Host 'SKIPPED: no bash found for the concurrent scan script checks.' }

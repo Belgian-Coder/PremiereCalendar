@@ -211,3 +211,4 @@ finally {
 }
 if ($script:Failures.Count -gt 0) { Write-Host "ReleaseOrchestrator tests: $($script:Passed) passed, $($script:Failures.Count) FAILED"; exit 1 }
 Write-Host "ReleaseOrchestrator tests: $($script:Passed) passed, 0 failed"
+exit 0

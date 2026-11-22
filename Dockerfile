@@ -44,7 +44,11 @@ COPY --from=build --chown=$APP_UID:$APP_UID /out/ ./
 # Nightly schedules use IANA zones. Reuse timezone data from the pinned SDK
 # image so the runtime supports Brussels/DST and configurable zone overrides.
 COPY --from=build /usr/share/zoneinfo/ /usr/share/zoneinfo/
-RUN mkdir -p /app/App_Data && chown -R $APP_UID:$APP_UID /app/App_Data
+# The pinned base still ships OpenSSL 3.5.9-r0; take the fixed Alpine packages explicitly. The version floor makes the
+# build fail rather than silently ship the vulnerable libraries if the repository cannot supply them. Drop this line once
+# the pinned base image contains 3.5.9-r1 or later.
+RUN apk add --no-cache --upgrade 'libcrypto3>=3.5.9-r1' 'libssl3>=3.5.9-r1' \
+    && mkdir -p /app/App_Data && chown -R $APP_UID:$APP_UID /app/App_Data
 USER $APP_UID
 EXPOSE 8080
 ENTRYPOINT ["dotnet", "PremiereCalendar.dll"]

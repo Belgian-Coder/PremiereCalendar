@@ -12,7 +12,8 @@
 . (Join-Path $PSScriptRoot '../Wsl.Transport.ps1')
 $script:ReleaseRepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $script:ReleaseScriptRoot = $PSScriptRoot
-$script:ReleaseWsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
+# Dot-sourcing must work on the macOS static lane (no SystemRoot); execution still requires the Windows/WSL builder.
+$script:ReleaseWsl = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\wsl.exe' } else { 'wsl.exe' }
 $script:ReleaseDistro = 'Ubuntu-24.04'
 $script:ReleaseDockerPrefix = @('-d', $script:ReleaseDistro, '--exec', 'docker', '--host', 'unix:///var/run/docker.sock')
 $script:ReleaseAllowMutation = $false
