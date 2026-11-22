@@ -11,39 +11,68 @@ spec = importlib.util.spec_from_file_location('batch_checker', CHECKER)
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
 
+def git_in(root, *args):
+    return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'commit.gpgsign=false', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-C', str(root), *args], stderr=subprocess.PIPE, text=True)
+
+
+def remove_owned(root):
+    """Delete a directory this run created (read-only Git objects included); never anything outside it."""
+    root = pathlib.Path(root)
+    assert root.resolve().is_relative_to(FOLDER.resolve())
+
+    def remove_owned_readonly(function, path, error):
+        assert pathlib.Path(path).resolve().is_relative_to(root.resolve())
+        if not isinstance(error[1], PermissionError):
+            raise error[1]
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        function(path)
+    shutil.rmtree(root, onerror=remove_owned_readonly)
+
+
+# One real committed repository is built per run (unique directory) and copied for every case: five Git
+# processes per case dominated the runtime, while each case still gets its own independent repository.
+TEMPLATE = None
+TEMPLATE_SHA = None
+
+
+def setUpModule():
+    global TEMPLATE, TEMPLATE_SHA
+    TEMPLATE = pathlib.Path(tempfile.mkdtemp(prefix='template-', dir=FOLDER))
+    assert TEMPLATE.resolve().is_relative_to(FOLDER.resolve())
+    git_in(TEMPLATE, 'init', '--quiet')
+    (TEMPLATE / 'src').mkdir()
+    (TEMPLATE / "src/é O'Brien $(NEVER).cs").write_bytes(b'class A {}\n')
+    (TEMPLATE / 'src/B.cs').write_bytes(b'class A {}\n')
+    (TEMPLATE / 'settings.json').write_text('{}\n')
+    git_in(TEMPLATE, 'add', '--', 'src', 'settings.json')
+    git_in(TEMPLATE, 'commit', '--quiet', '-m', 'fixture')
+    TEMPLATE_SHA = git_in(TEMPLATE, 'rev-parse', 'HEAD').strip()
+
+
+def tearDownModule():
+    if TEMPLATE is not None:
+        remove_owned(TEMPLATE)
+
+
 class Functional(unittest.TestCase):
 
     def setUp(self):
         self.root = pathlib.Path(tempfile.mkdtemp(prefix='fixture-', dir=FOLDER))
         assert self.root.resolve().is_relative_to(FOLDER.resolve())
-        self.git('init', '--quiet')
-        (self.root / 'src').mkdir()
+        shutil.copytree(TEMPLATE, self.root, dirs_exist_ok=True)
         self.a = self.root / "src/é O'Brien $(NEVER).cs"
         self.b = self.root / 'src/B.cs'
-        self.a.write_bytes(b'class A {}\n')
-        self.b.write_bytes(self.a.read_bytes())
         self.config = self.root / 'settings.json'
-        self.config.write_text('{}\n')
-        self.git('add', '--', 'src', 'settings.json')
-        self.git('commit', '--quiet', '-m', 'fixture')
-        self.sha = self.git('rev-parse', 'HEAD').strip()
+        self.sha = TEMPLATE_SHA
         self.manifest = self.root / 'fingerprints.json'
         self.map = {str(p.relative_to(self.root)).replace('\\', '/'): hashlib.sha256(p.read_bytes()).hexdigest() for p in (self.a, self.b, self.config)}
         self.write()
 
     def tearDown(self):
-        assert self.root.resolve().is_relative_to(FOLDER.resolve())
-
-        def remove_owned_readonly(function, path, error):
-            assert pathlib.Path(path).resolve().is_relative_to(self.root.resolve())
-            if not isinstance(error[1], PermissionError):
-                raise error[1]
-            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-            function(path)
-        shutil.rmtree(self.root, onerror=remove_owned_readonly)
+        remove_owned(self.root)
 
     def git(self, *args):
-        return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'commit.gpgsign=false', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-C', str(self.root), *args], stderr=subprocess.PIPE, text=True)
+        return git_in(self.root, *args)
 
     def write(self):
         self.manifest.write_text(json.dumps(self.map), encoding='utf-8')
