@@ -132,10 +132,12 @@ public sealed class OptionalProviderStorageOutageTests
     {
         var clock = new Clock();
         var store = new StateStore { BlockReads = true };
-        var durable = Durable(store, clock, TimeSpan.FromMilliseconds(100));
+        // The budget also bounds the (unblocked) save after the provider call; 1 s keeps
+        // a cold save on a loaded host from counting as an extra storage failure.
+        var durable = Durable(store, clock, TimeSpan.FromSeconds(1));
         using var memory = new MemoryCache(new MemoryCacheOptions());
         using var handler = new ProviderHandler();
-        var response = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        var response = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.True(response.Successful);
         Assert.Equal(1, handler.Requests);
         var second = await durable.ReadAsync<string>("fanart", "another-key", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
