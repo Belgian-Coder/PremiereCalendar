@@ -221,7 +221,7 @@ try {
     $testScriptWindows = $global:HarnessCapturedScripts[-1]
     Invoke-HarnessFixtureScript (Join-Path $root 'eng/wsl-docker.ps1') @{ Action = 'check'; SourceMount = 'Windows' } | Out-Null
     $checkScriptWindows = $global:HarnessCapturedScripts[-1]
-    $wslRootPath = '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/')
+    $wslRootPath = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }   # the mocked wslpath passes POSIX paths through
     Assert-Harness ($testScript.Contains('-v "$pc_src":/src') -and $testScript.Contains("-v '$wslRootPath/artifacts':/src/artifacts") -and $testScript.Contains('PC_SOURCE_MIRROR') -and $testScript -notmatch [regex]::Escape("-v '$wslRootPath':/src")) 'The default test run does not mount the verified mirror (with this checkout''s artifacts over it).'
     Assert-Harness ($checkScript.Contains('-v "$pc_src":/src') -and $checkScript.Contains('PC_SOURCE_MIRROR') -and $checkScript.Contains('git hash-object --no-filters --stdin-paths') -and $checkScript.IndexOf('flock -n 9') -lt $checkScript.IndexOf('pc_mirror_sync()')) 'The scoped check does not sync and verify the mirror under its lock.'
     Assert-Harness ($testScript.IndexOf('flock -n 9') -lt $testScript.IndexOf('pc_mirror_sync()') -and $testScript.IndexOf('pc_mirror_sync()') -lt $testScript.IndexOf('docker network create') -and $testScript -match 'exit 5[12]') 'The mirror is verified after the lock and before any container resource is created.'

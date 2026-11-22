@@ -240,6 +240,8 @@ if ($composeText -notmatch '(?m)^\s*image:\s*(postgres:\S+@sha256:[0-9a-f]{64})\
 }
 $postgresImage = $Matches[1]
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+# Two runs started within the same second must not share (and mix) a results folder: take the next free second.
+for ($shift = 1; Test-Path -LiteralPath (Join-Path $context.Root "artifacts/test-results/$stamp"); $shift++) { $stamp = (Get-Date).AddSeconds($shift).ToString('yyyyMMdd-HHmmss') }
 $resultsRelative = "artifacts/test-results/$stamp"
 $resultsHost = Join-Path $context.Root $resultsRelative
 
