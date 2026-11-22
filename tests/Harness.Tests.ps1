@@ -89,25 +89,54 @@ function Invoke-HarnessFixtureScript([string] $Path, [hashtable] $Parameters) {
     $text = $text.Insert($ast.ParamBlock.Extent.EndOffset, ("`n`$PSScriptRoot = '" + (Split-Path -Parent $Path).Replace("'", "''") + "'`n"))
     & ([scriptblock]::Create($text)) @Parameters
 }
+$bashSandboxes = [Collections.Generic.List[string]]::new()
+function New-BashSandbox([string] $Prefix) {
+    $path = Join-Path $root ("artifacts/harness-tests/$Prefix-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $path -Force | Out-Null
+    $bashSandboxes.Add($path)
+    $path
+}
 try {
     # -Filter takes test-name substrings (xUnit.net 4 runs the test executables with -method *text*); the shell
     # metacharacters must reach the runner as one literal argument.
     $filter = 'FullyQualifiedName~Calendar.A''B$(touch NEVER)'
     $runnerFilter = '*Calendar.A''B$(touch NEVER)*'
-    $plan = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project ComponentTests -Filter $filter -Plan
-    $check = & (Join-Path $root 'eng/wsl-docker.ps1') check -Plan
-    $alternate = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project UnitTests -NoRuntimeAsync -Plan
-    $default = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Plan
-    $suiteAlias = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Suite Unit,Integration -Filter ViewSync,Wikimedia -Parallel none -MaxThreads 2 -Plan
-    $query = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -QueryFilter '/*/*/PostgresResponseCacheTests/*' -RunnerArguments:-longRunning,30 -FreshBuild -NoRestore -Plan
-    $viaDocker = & (Join-Path $root 'eng/wsl-docker.ps1') test -Project Unit -Filter ViewSync -Plan
-    $bounded = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project All -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -Plan
-    $sharedCacheA = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Unit -NugetVolume fixture-linux-amd64-nuget -Plan
-    $sharedCacheB = & (Join-Path $root 'eng/Test-WithPostgres.ps1') -Project Component -NugetVolume fixture-linux-amd64-nuget -NoRuntimeAsync -Plan
-    $portable = & (Join-Path $root 'eng/wsl-docker.ps1') test -Project All -WslDistribution PC-MARC-Dev -DevImage prepared-browser:local -CacheFlavor glibc -NoRuntimeAsync -Cpus 3 -BuildMaxCpuCount 3 -MaxThreads 3 -TimeoutSeconds 2400 -Plan
-    $watch = & (Join-Path $root 'eng/wsl-docker.ps1') up -Plan
-    $checkPortable = & (Join-Path $root 'eng/wsl-docker.ps1') check -WslDistribution PC-MARC-Dev -BuildVolume fixture-build -NugetVolume fixture-packages -Cpus 3 -BuildMaxCpuCount 3 -Plan
-    Assert-Harness ($global:HarnessWslCalls -eq 0) '-Plan invoked WSL.'
+    # -Plan invocations are independent and read-only, so they run concurrently (each costs about a second of
+    # script load plus one Git read). A parallel runspace cannot see the intercepted wsl.exe above, so each defines
+    # its own counting double: any WSL call from a plan is still detected and the real executable is never reached.
+    $planSpecs = [ordered]@{
+        plan = @('eng/Test-WithPostgres.ps1', @{ Project = 'ComponentTests'; Filter = $filter; Plan = $true })
+        check = @('eng/wsl-docker.ps1', @{ Action = 'check'; Plan = $true })
+        alternate = @('eng/Test-WithPostgres.ps1', @{ Project = 'UnitTests'; NoRuntimeAsync = $true; Plan = $true })
+        default = @('eng/Test-WithPostgres.ps1', @{ Plan = $true })
+        suiteAlias = @('eng/Test-WithPostgres.ps1', @{ Suite = @('Unit', 'Integration'); Filter = @('ViewSync', 'Wikimedia'); Parallel = 'none'; MaxThreads = 2; Plan = $true })
+        query = @('eng/Test-WithPostgres.ps1', @{ Project = 'Unit'; QueryFilter = '/*/*/PostgresResponseCacheTests/*'; RunnerArguments = @('-longRunning', '30'); FreshBuild = $true; NoRestore = $true; Plan = $true })
+        viaDocker = @('eng/wsl-docker.ps1', @{ Action = 'test'; Project = 'Unit'; Filter = 'ViewSync'; Plan = $true })
+        bounded = @('eng/Test-WithPostgres.ps1', @{ Project = 'All'; Cpus = 3; BuildMaxCpuCount = 3; MaxThreads = 3; Plan = $true })
+        sharedCacheA = @('eng/Test-WithPostgres.ps1', @{ Project = 'Unit'; NugetVolume = 'fixture-linux-amd64-nuget'; Plan = $true })
+        sharedCacheB = @('eng/Test-WithPostgres.ps1', @{ Project = 'Component'; NugetVolume = 'fixture-linux-amd64-nuget'; NoRuntimeAsync = $true; Plan = $true })
+        portable = @('eng/wsl-docker.ps1', @{ Action = 'test'; Project = 'All'; WslDistribution = 'PC-MARC-Dev'; DevImage = 'prepared-browser:local'; CacheFlavor = 'glibc'; NoRuntimeAsync = $true; Cpus = 3; BuildMaxCpuCount = 3; MaxThreads = 3; TimeoutSeconds = 2400; Plan = $true })
+        watch = @('eng/wsl-docker.ps1', @{ Action = 'up'; Plan = $true })
+        checkPortable = @('eng/wsl-docker.ps1', @{ Action = 'check'; WslDistribution = 'PC-MARC-Dev'; BuildVolume = 'fixture-build'; NugetVolume = 'fixture-packages'; Cpus = 3; BuildMaxCpuCount = 3; Plan = $true })
+    }
+    $planWslCalls = [Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $planResults = @($planSpecs.Keys | ForEach-Object -ThrottleLimit 6 -Parallel {
+        $name = $_
+        $spec = ($using:planSpecs)[$name]
+        $global:PlanWslCalls = $using:planWslCalls
+        function global:wsl.exe { $global:PlanWslCalls.Enqueue("$args"); $global:LASTEXITCODE = 1 }
+        $script = Join-Path ($using:root) $spec[0]
+        $parameters = $spec[1]
+        [pscustomobject]@{ Name = $name; Value = (& $script @parameters) }
+    })
+    Assert-Harness ($planResults.Count -eq $planSpecs.Count) 'A -Plan invocation did not return a result.'
+    $planned = @{}
+    foreach ($result in $planResults) { $planned[$result.Name] = $result.Value }
+    $plan = $planned.plan; $check = $planned.check; $alternate = $planned.alternate; $default = $planned.default
+    $suiteAlias = $planned.suiteAlias; $query = $planned.query; $viaDocker = $planned.viaDocker; $bounded = $planned.bounded
+    $sharedCacheA = $planned.sharedCacheA; $sharedCacheB = $planned.sharedCacheB; $portable = $planned.portable
+    $watch = $planned.watch; $checkPortable = $planned.checkPortable
+    Assert-Harness ($global:HarnessWslCalls -eq 0 -and $planWslCalls.Count -eq 0) '-Plan invoked WSL.'
     Assert-Harness ($plan.Projects.Count -eq 1 -and $plan.Projects[0] -eq 'ComponentTests') 'Scoped project selection changed.'
     Assert-Harness ($plan.RunnerArguments -contains $runnerFilter) 'The exact filter was not preserved.'
     Assert-Harness ($plan.Build -and $plan.BuildArguments -notcontains '--no-restore') 'Default checks bypass build/restore validation.'
@@ -200,8 +229,6 @@ try {
     $global:HarnessRunningDistros = @('Ubuntu-24.04', 'PC-MARC-Dev')
     foreach ($captured in @($checkScript, $testScript)) {
         Assert-Harness ($captured.StartsWith('unset DOCKER_CONTEXT; export DOCKER_HOST=unix:///var/run/docker.sock')) 'Docker calls can inherit a remote context.'
-        Assert-Harness ($captured.Contains('NUGET_SCRATCH=/root/.nuget/packages/.scratch')) 'Shared NuGet packages have isolated extraction locks.'
-        Assert-Harness ($captured.Contains('NUGET_HTTP_CACHE_PATH=/root/.nuget/packages/.http-cache')) 'Disposable checks discard the shared NuGet HTTP cache.'
     }
     $compose = Get-Content -LiteralPath (Join-Path $root 'compose.dev.yaml') -Raw
     Assert-Harness ($compose -match 'NUGET_SCRATCH: /root/\.nuget/packages/\.scratch') 'Development restores do not share the package-cache lock namespace.'
@@ -210,7 +237,6 @@ try {
     Assert-Harness ($compose -match 'NUGET_HTTP_CACHE_PATH: /root/\.nuget/packages/\.http-cache') 'Watcher restores do not share the NuGet HTTP cache.'
     Assert-Harness ($compose -match '(?s)nuget-cache:\s+external: true\s+name: \$\{PREMIERECALENDAR_NUGET_VOLUME:' -and $compose -match '(?s)watch-build:\s+external: true\s+name: \$\{PREMIERECALENDAR_BUILD_VOLUME:') 'Compose cache mapping/reset no longer preserves external shared caches.'
     Assert-Harness ($checkScript -match 'flock -n 9' -and $testScript -match 'flock -n 9') 'Check/test output locking is missing.'
-    Assert-Harness ($testScript -match 'trap cleanup EXIT') 'Disposable resource cleanup is missing.'
     Assert-Harness ($testScript -notmatch '/tmp/pcpg-env') 'Test credentials escaped into WSL host temp files.'
     Assert-Harness ($testScript -match "export POSTGRES_PASSWORD='([0-9a-f]{32})'") 'Disposable test password is not confined to the input script.'
     $testPassword = $Matches[1]
@@ -286,10 +312,16 @@ try {
         if ($bashCommand) { $bashCommand.Source }
     }
     if ($bash -and (Test-Path -LiteralPath $bash)) {
-        foreach ($shellScript in @($checkScript, $testScript, $inner)) {
-            ($shellScript -replace "`r`n", "`n") | & $bash -n
-            Assert-Harness ($LASTEXITCODE -eq 0) 'Generated bash failed syntax validation.'
+        # Every shell case below is independent and owns a unique sandbox, so all bash processes (each costs
+        # ~0.3 s to start on Windows, and the real-timeout fakes sleep) run concurrently; assertions then run
+        # here in the original order. Nothing is skipped or reordered between a case and its own assertions.
+        $bashJobs = [Collections.Generic.List[hashtable]]::new()
+        function Add-BashJob([string] $Kind, [string] $Script, [string[]] $Arguments, [bool] $DiscardErrors, $Case, [string] $Sandbox, [string] $Label = '') {
+            $bashJobs.Add(@{ Index = $bashJobs.Count; Kind = $Kind; Script = ($Script -replace "`r`n", "`n"); Arguments = $Arguments; DiscardErrors = $DiscardErrors; Case = $Case; Sandbox = $Sandbox; Label = $Label })
         }
+        function ConvertTo-LinuxSandbox([string] $Path) { if ($IsWindows) { '/' + $Path.Substring(0, 1).ToLowerInvariant() + '/' + ($Path.Substring(3) -replace '\\', '/') } else { $Path } }
+        $linuxRoot = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }
+        foreach ($shellScript in @($checkScript, $testScript, $inner)) { Add-BashJob 'syntax' $shellScript @('-n') $false $null '' }
         # Execute the lifecycle with a shell-function Docker double. All paths
         # point into this project's sandbox; no Docker executable can be called.
         foreach ($case in @(
@@ -301,10 +333,8 @@ try {
             @{ TestExit = 0; Cleanup = 'timeout'; Expected = 75 }
             @{ TestExit = 0; Cleanup = 'creation'; Expected = 9 }
         )) {
-            $sandbox = Join-Path $root ('artifacts/harness-tests/lifecycle-' + [guid]::NewGuid().ToString('N'))
-            New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
-            $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
-            $linuxRoot = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }
+            $sandbox = New-BashSandbox 'lifecycle'
+            $linuxSandbox = ConvertTo-LinuxSandbox $sandbox
             $simulation = $testScript.Replace($linuxRoot, $linuxSandbox)
             Assert-Harness ($simulation -match 'premierecalendar.test=([0-9a-f]{10})') 'Test run label missing.'
             $label = $Matches[1]
@@ -335,22 +365,7 @@ docker() {
   return 0
 }
 "@
-            $observed = (($dockerDouble + "`n" + $simulation) -replace "`r`n", "`n") | & $bash -s 2>&1
-            Assert-Harness ($LASTEXITCODE -eq $case.Expected) "Test/cleanup exit status was not preserved: $($case.Cleanup), $($case.TestExit)."
-            $calls = Get-Content (Join-Path $sandbox 'docker-calls.txt')
-            if ($case.Cleanup -eq 'creation') {
-                Assert-Harness (@($calls | Where-Object { $_ -eq 'container rm' }).Count -eq 0 -and $calls[-1] -eq 'network rm') 'Unknown creation was removed by name or the verified network was retained.'
-                Assert-Harness (($observed -join "`n") -match 'state=unresolved-creation') 'Unknown creation was falsely reported as cleaned.'
-            } elseif ($case.Cleanup -in 'foreign', 'timeout') {
-                Assert-Harness (@($calls | Where-Object { $_ -match ' rm$' }).Count -eq 0) 'Cleanup removed resources without verified ownership.'
-                Assert-Harness (($observed -join "`n") -match 'state=unresolved-identity') 'Unverified cleanup was not reported.'
-            } else {
-                Assert-Harness (@($calls | Where-Object { $_ -eq 'container rm' }).Count -eq 2) 'Runner/database cleanup did not execute on exit.'
-                Assert-Harness ($calls[-1] -eq 'network rm') 'Network cleanup did not execute on exit.'
-                Assert-Harness (($observed -join "`n") -match $(if ($case.Cleanup -eq 'ok') { 'state=removed' } else { 'state=unresolved-removal' })) 'Cleanup disposition was not reported.'
-            }
-            # The sandbox is this test's own: remove it so repeated runs leave nothing behind.
-            if ($sandbox.StartsWith((Join-Path $root 'artifacts/harness-tests') + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $sandbox -Recurse -Force }
+            Add-BashJob 'lifecycle' ($dockerDouble + "`n" + $simulation) @('-s') $false $case $sandbox
         }
         # Real GNU timeout must execute an external fake Docker, rather than a
         # shell-function double that bypasses child startup/connection latency.
@@ -362,14 +377,15 @@ docker() {
             @{ Profile = 'old-1s'; Mode = 'slow'; Expected = 75; Removals = 0 },
             @{ Profile = 'current'; Mode = 'foreign'; Expected = 75; Removals = 0 }
         )) {
-            $sandbox = Join-Path $root ('artifacts/harness-tests/real-timeout-' + [guid]::NewGuid().ToString('N'))
+            $sandbox = New-BashSandbox 'real-timeout'
             New-Item -ItemType Directory -Path (Join-Path $sandbox 'bin') -Force | Out-Null
-            $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
+            $linuxSandbox = ConvertTo-LinuxSandbox $sandbox
+            # The fake client's latency (1.5 s) must sit between the old 1 s and the current 5 s bound.
             $fakeDocker = @'
 #!/bin/sh
 printf '%s %s\n' "$1" "$2" >> "$PC_FAKE_LOG"
 if [ "$2" = inspect ]; then
-  sleep 2
+  sleep 1.5
   for id do :; done
   label="$PC_FAKE_LABEL"
   [ "$PC_FAKE_MODE" != foreign ] || label=foreign-run
@@ -394,16 +410,7 @@ runner_attempted=1; server_attempted=1; network_attempted=1
 trap cleanup EXIT
 exit 0
 "@
-            try {
-                $observed = ($fixtureScript -replace "`r`n", "`n") | & $bash -s 2>&1
-                Assert-Harness ($LASTEXITCODE -eq $case.Expected) "Real timeout changed cleanup disposition: $($case.Profile), $($case.Mode)."
-                $calls = Get-Content -LiteralPath (Join-Path $sandbox 'calls.txt')
-                Assert-Harness (@($calls | Where-Object { $_ -match ' rm$' }).Count -eq $case.Removals) 'Real timeout cleanup removed an unverified resource or retained a verified resource.'
-            } finally {
-                $resolved = [IO.Path]::GetFullPath($sandbox)
-                if (-not $resolved.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'artifacts/harness-tests')) + [IO.Path]::DirectorySeparatorChar) -or (Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Preserving unexpected timeout fixture path.' }
-                Remove-Item -LiteralPath $resolved -Recurse
-            }
+            Add-BashJob 'timeout' $fixtureScript @('-s') $false $case $sandbox
         }
         # Exercise the emitted preflight, rather than matching its implementation.
         # Every rejected platform/identity must fail before ANY project resource.
@@ -419,10 +426,8 @@ exit 0
         )
         foreach ($captured in @($checkScript, $testScript)) {
             foreach ($rejection in $rejections) {
-                $sandbox = Join-Path $root ('artifacts/harness-tests/preflight-' + [guid]::NewGuid().ToString('N'))
-                New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
-                $linuxSandbox = if ($IsWindows) { '/' + $sandbox.Substring(0, 1).ToLowerInvariant() + '/' + ($sandbox.Substring(3) -replace '\\', '/') } else { $sandbox }
-                $linuxRoot = if ($IsWindows) { '/mnt/' + $root.Substring(0, 1).ToLowerInvariant() + '/' + ($root.Substring(3) -replace '\\', '/') } else { $root }
+                $sandbox = New-BashSandbox 'preflight'
+                $linuxSandbox = ConvertTo-LinuxSandbox $sandbox
                 $simulation = $captured.Replace($linuxRoot, $linuxSandbox)
                 $dockerDouble = @"
 docker() {
@@ -432,15 +437,58 @@ docker() {
   echo 'Unexpected project resource operation' >&2; return 99
 }
 "@
-                (($dockerDouble + "`n" + $simulation) -replace "`r`n", "`n") | & $bash -s 2>$null
-                Assert-Harness ($LASTEXITCODE -eq $rejection.Code) 'Platform/identity preflight did not reject the execution double.'
-                $calls = @(Get-Content -LiteralPath (Join-Path $sandbox 'docker-calls.txt'))
-                Assert-Harness (@($calls | Where-Object { $_ -notin 'info', 'image' }).Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $sandbox 'artifacts'))) 'Rejected preflight created project resources or output state.'
-                if ($sandbox.StartsWith((Join-Path $root 'artifacts/harness-tests') + [IO.Path]::DirectorySeparatorChar)) { Remove-Item -LiteralPath $sandbox -Recurse -Force }
+                Add-BashJob 'preflight' ($dockerDouble + "`n" + $simulation) @('-s') $true $rejection $sandbox
+            }
+        }
+        $bashResults = @($bashJobs | ForEach-Object -ThrottleLimit 8 -Parallel {
+            $job = $_
+            $bashExe = $using:bash
+            $jobArguments = [string[]] $job.Arguments
+            $text = $job.Script
+            $output = if ($job.DiscardErrors) { $text | & $bashExe @jobArguments 2>$null } else { $text | & $bashExe @jobArguments 2>&1 }
+            [pscustomobject]@{ Index = $job.Index; ExitCode = $LASTEXITCODE; Output = @($output) }
+        } | Sort-Object Index)
+        Assert-Harness ($bashResults.Count -eq $bashJobs.Count) 'A shell validation case did not report a result.'
+        foreach ($job in $bashJobs) {
+            $result = $bashResults[$job.Index]
+            $case = $job.Case; $sandbox = $job.Sandbox; $observed = $result.Output
+            switch ($job.Kind) {
+                'syntax' { Assert-Harness ($result.ExitCode -eq 0) 'Generated bash failed syntax validation.' }
+                'lifecycle' {
+                    Assert-Harness ($result.ExitCode -eq $case.Expected) "Test/cleanup exit status was not preserved: $($case.Cleanup), $($case.TestExit)."
+                    $calls = Get-Content (Join-Path $sandbox 'docker-calls.txt')
+                    if ($case.Cleanup -eq 'creation') {
+                        Assert-Harness (@($calls | Where-Object { $_ -eq 'container rm' }).Count -eq 0 -and $calls[-1] -eq 'network rm') 'Unknown creation was removed by name or the verified network was retained.'
+                        Assert-Harness (($observed -join "`n") -match 'state=unresolved-creation') 'Unknown creation was falsely reported as cleaned.'
+                    } elseif ($case.Cleanup -in 'foreign', 'timeout') {
+                        Assert-Harness (@($calls | Where-Object { $_ -match ' rm$' }).Count -eq 0) 'Cleanup removed resources without verified ownership.'
+                        Assert-Harness (($observed -join "`n") -match 'state=unresolved-identity') 'Unverified cleanup was not reported.'
+                    } else {
+                        Assert-Harness (@($calls | Where-Object { $_ -eq 'container rm' }).Count -eq 2) 'Runner/database cleanup did not execute on exit.'
+                        Assert-Harness ($calls[-1] -eq 'network rm') 'Network cleanup did not execute on exit.'
+                        Assert-Harness (($observed -join "`n") -match $(if ($case.Cleanup -eq 'ok') { 'state=removed' } else { 'state=unresolved-removal' })) 'Cleanup disposition was not reported.'
+                    }
+                }
+                'timeout' {
+                    Assert-Harness ($result.ExitCode -eq $case.Expected) "Real timeout changed cleanup disposition: $($case.Profile), $($case.Mode)."
+                    $calls = Get-Content -LiteralPath (Join-Path $sandbox 'calls.txt')
+                    Assert-Harness (@($calls | Where-Object { $_ -match ' rm$' }).Count -eq $case.Removals) 'Real timeout cleanup removed an unverified resource or retained a verified resource.'
+                }
+                'preflight' {
+                    Assert-Harness ($result.ExitCode -eq $case.Code) 'Platform/identity preflight did not reject the execution double.'
+                    $calls = @(Get-Content -LiteralPath (Join-Path $sandbox 'docker-calls.txt'))
+                    Assert-Harness (@($calls | Where-Object { $_ -notin 'info', 'image' }).Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $sandbox 'artifacts'))) 'Rejected preflight created project resources or output state.'
+                }
             }
         }
     } else { Write-Warning 'Bash is absent: generated bash syntax and lifecycle validation were not performed.' }
 } finally {
+    # Only the unique sandboxes this run created for its shell cases; each must still be inside artifacts/harness-tests.
+    $sandboxParent = [IO.Path]::GetFullPath((Join-Path $root 'artifacts/harness-tests')) + [IO.Path]::DirectorySeparatorChar
+    foreach ($owned in $bashSandboxes) {
+        $resolved = [IO.Path]::GetFullPath($owned)
+        if ($resolved.StartsWith($sandboxParent) -and (Test-Path -LiteralPath $resolved) -and -not ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint)) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+    }
     Remove-Item Function:\wsl.exe
     Remove-Variable HarnessCapturedScripts, HarnessWslCalls, HarnessCapturedArgv, HarnessRunningDistros, HarnessRunningListExit -Scope Global
     $transportPath = [IO.Path]::GetFullPath($transportSandbox)

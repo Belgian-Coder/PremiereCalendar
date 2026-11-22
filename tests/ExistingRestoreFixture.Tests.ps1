@@ -1,13 +1,34 @@
 #Requires -Version 7.0
 # Run the real compatibility script with only external Docker/SQL/Python calls doubled.
 [CmdletBinding()]
-param()
+param([ValidateSet('All', 'Historical', 'MutationsA', 'MutationsB', 'Canonical')][string] $Section = 'All')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if ($Section -eq 'All') {
+    # The doubles live in per-process globals and every case owns its directory in a unique sandbox, so the
+    # independent groups run as concurrent child processes; the parent sums their check counts.
+    $self = $PSCommandPath
+    $pwshPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $results = @('Historical', 'MutationsA', 'MutationsB', 'Canonical' | ForEach-Object -ThrottleLimit 4 -Parallel {
+        $output = & $using:pwshPath -NoProfile -File $using:self -Section $_ 2>&1
+        [pscustomobject]@{ Section = $_; ExitCode = $LASTEXITCODE; Output = @($output | ForEach-Object { "$_" }) }
+    })
+    $total = 0
+    foreach ($name in 'Historical', 'MutationsA', 'MutationsB', 'Canonical') {
+        $result = @($results | Where-Object Section -eq $name)
+        if ($result.Count -ne 1 -or $result[0].ExitCode -ne 0 -or $result[0].Output.Count -eq 0 -or $result[0].Output[-1] -notmatch '^(\d+) existing restored-fixture checks passed') {
+            $result | ForEach-Object { $_.Output } | Write-Host
+            throw "Existing-fixture section failed: $name"
+        }
+        $total += [int] $Matches[1]
+    }
+    Write-Host "$total existing restored-fixture checks passed; all external processes were doubled."
+    return
+}
 $release = Join-Path $root 'eng/release'
 $helper = Join-Path $release 'Test-BackupCompatibility.ps1'
-$sandbox = Join-Path $root ('artifacts/harness-tests/existing-fixture-' + [guid]::NewGuid().ToString('N'))
+$sandbox = Join-Path $root ('artifacts/harness-tests/existing-fixture-' + $Section.ToLowerInvariant() + '-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
 $count = 0
 function Assert-FixtureTest([bool] $Condition, [string] $Message) {
@@ -151,6 +172,7 @@ function Invoke-FixtureComparisonDouble {
 }
 
 try {
+    if ($Section -eq 'Historical') {
     $f = New-FixtureCase
     $plan = & $helper -Bundle $f.New -OriginalRestoreBundle $f.Old -ContinuityProof $f.Descriptor -WhatIf 6>&1
     Assert-FixtureTest ($f.Calls.Count -eq 0 -and -not (Test-Path (Join-Path $f.New 'existing-fixture-compatibility.json'))) 'WhatIf invoked an external boundary or wrote compatibility evidence.'
@@ -179,7 +201,10 @@ try {
     $removals = @($f.Calls | Where-Object { $_[0] -eq 'rm' })
     Assert-FixtureTest ($removals.Count -eq 1 -and $removals[0][2] -eq ('c' * 64)) 'Historical cleanup did not target only its own immutable candidate ID.'
 
-    foreach ($mutation in @('missing', 'replacement', 'restart', 'network-recreated', 'paused', 'persistent', 'snapshot', 'restart-after-attach', 'hash', 'receipt-binding', 'phase-tamper', 'terminal-tamper', 'dump-binding', 'failed-anchor', 'candidate-image', 'candidate-health')) {
+    }
+    $allMutations = @('missing', 'replacement', 'restart', 'network-recreated', 'paused', 'persistent', 'snapshot', 'restart-after-attach', 'hash', 'receipt-binding', 'phase-tamper', 'terminal-tamper', 'dump-binding', 'failed-anchor', 'candidate-image', 'candidate-health')
+    $mutations = switch ($Section) { 'MutationsA' { $allMutations[0..7] } 'MutationsB' { $allMutations[8..15] } default { @() } }
+    foreach ($mutation in $mutations) {
         $f = New-FixtureCase $mutation
         if ($mutation -eq 'hash') { [IO.File]::AppendAllText((Join-Path $f.Old 'backup-schema-after.txt'), 'changed') }
         if ($mutation -eq 'receipt-binding') {
@@ -219,6 +244,7 @@ try {
         if ($mutation -in 'restart-after-attach', 'candidate-health') { Assert-FixtureTest (-not $f.Attached) 'Failed historical attachment left its candidate running.' }
         else { Assert-FixtureTest (@($f.Calls | Where-Object { $_[0] -eq 'run' }).Count -eq 0) "Rejected fixture attached candidate: $mutation" }
     }
+    if ($Section -eq 'Canonical') {
     $f = New-FixtureCase 'startup-failure'
     $canonicalStartup = Join-Path "$($f.New).private" 'backup-compat-startup-state.txt'
     [IO.File]::WriteAllText($canonicalStartup, 'preserve canonical diagnostic')
@@ -251,7 +277,8 @@ try {
     $rejected = $false
     try { & ([scriptblock]::Create($guard.Extent.Text)) } catch { $rejected = $true }
     Assert-FixtureTest $rejected 'Production freshness guard accepted an expired historical backup.'
-    Write-Host "$count existing restored-fixture checks passed; all external processes were doubled."
+    }
+    Write-Host "$count existing restored-fixture checks passed ($Section section); all external processes were doubled."
 } finally {
     Remove-Variable FixtureDouble -Scope Global -ErrorAction SilentlyContinue
     $resolved = [IO.Path]::GetFullPath($sandbox)

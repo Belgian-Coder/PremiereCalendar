@@ -1,7 +1,7 @@
 """Exact-byte source fingerprint and Git batch protocol regressions; no SDK or services."""
 import sys
 sys.dont_write_bytecode = True
-import hashlib, importlib.util, io, json, os, pathlib, shutil, stat, subprocess, tempfile, unittest
+import atexit, concurrent.futures, hashlib, importlib.util, io, json, os, pathlib, shutil, stat, subprocess, tempfile, threading, time, unittest
 from unittest.mock import patch
 REPO = pathlib.Path(__file__).resolve().parents[1]
 FOLDER = REPO / 'artifacts/source-fingerprint-tests'
@@ -11,39 +11,67 @@ spec = importlib.util.spec_from_file_location('batch_checker', CHECKER)
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
 
+def git_in(root, *args):
+    return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'commit.gpgsign=false', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-C', str(root), *args], stderr=subprocess.PIPE, text=True)
+
+
+def remove_owned(root):
+    """Delete a directory this run created (read-only Git objects included); never anything outside it."""
+    root = pathlib.Path(root)
+    assert root.resolve().is_relative_to(FOLDER.resolve())
+
+    def remove_owned_readonly(function, path, error):
+        assert pathlib.Path(path).resolve().is_relative_to(root.resolve())
+        if not isinstance(error[1], PermissionError):
+            raise error[1]
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        function(path)
+    shutil.rmtree(root, onerror=remove_owned_readonly)
+
+
+# One real committed repository is built per run (unique directory, removed at exit) and copied for every case:
+# five Git processes per case dominated the runtime, while each case still gets its own independent repository.
+_template = None
+_template_lock = threading.Lock()
+
+
+def template():
+    global _template
+    with _template_lock:
+        if _template is None:
+            root = pathlib.Path(tempfile.mkdtemp(prefix='template-', dir=FOLDER))
+            assert root.resolve().is_relative_to(FOLDER.resolve())
+            atexit.register(remove_owned, root)
+            git_in(root, 'init', '--quiet')
+            (root / 'src').mkdir()
+            (root / "src/é O'Brien $(NEVER).cs").write_bytes(b'class A {}\n')
+            (root / 'src/B.cs').write_bytes(b'class A {}\n')
+            (root / 'settings.json').write_text('{}\n')
+            git_in(root, 'add', '--', 'src', 'settings.json')
+            git_in(root, 'commit', '--quiet', '-m', 'fixture')
+            _template = (root, git_in(root, 'rev-parse', 'HEAD').strip())
+        return _template
+
+
 class Functional(unittest.TestCase):
 
     def setUp(self):
         self.root = pathlib.Path(tempfile.mkdtemp(prefix='fixture-', dir=FOLDER))
         assert self.root.resolve().is_relative_to(FOLDER.resolve())
-        self.git('init', '--quiet')
-        (self.root / 'src').mkdir()
+        source, self.sha = template()
+        shutil.copytree(source, self.root, dirs_exist_ok=True)
         self.a = self.root / "src/é O'Brien $(NEVER).cs"
         self.b = self.root / 'src/B.cs'
-        self.a.write_bytes(b'class A {}\n')
-        self.b.write_bytes(self.a.read_bytes())
         self.config = self.root / 'settings.json'
-        self.config.write_text('{}\n')
-        self.git('add', '--', 'src', 'settings.json')
-        self.git('commit', '--quiet', '-m', 'fixture')
-        self.sha = self.git('rev-parse', 'HEAD').strip()
         self.manifest = self.root / 'fingerprints.json'
         self.map = {str(p.relative_to(self.root)).replace('\\', '/'): hashlib.sha256(p.read_bytes()).hexdigest() for p in (self.a, self.b, self.config)}
         self.write()
 
     def tearDown(self):
-        assert self.root.resolve().is_relative_to(FOLDER.resolve())
-
-        def remove_owned_readonly(function, path, error):
-            assert pathlib.Path(path).resolve().is_relative_to(self.root.resolve())
-            if not isinstance(error[1], PermissionError):
-                raise error[1]
-            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-            function(path)
-        shutil.rmtree(self.root, onerror=remove_owned_readonly)
+        remove_owned(self.root)
 
     def git(self, *args):
-        return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'commit.gpgsign=false', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-C', str(self.root), *args], stderr=subprocess.PIPE, text=True)
+        return git_in(self.root, *args)
 
     def write(self):
         self.manifest.write_text(json.dumps(self.map), encoding='utf-8')
@@ -232,5 +260,45 @@ class Protocol(unittest.TestCase):
     def test_batch_failure_refused(self):
         with self.assertRaises(SystemExit):
             self.check(self.frame(), rc=1)
+
+
+class ConcurrentRunner(unittest.TextTestRunner):
+    """Run the independent Functional cases (own repository, subprocess-only) on worker threads.
+
+    Protocol cases patch module attributes of the checker, so they stay serial on the calling thread.
+    """
+
+    def run(self, test):
+        def flatten(suite):
+            for item in suite:
+                yield from flatten(item) if isinstance(item, unittest.TestSuite) else [item]
+        cases = list(flatten(test))
+        parallel = [c for c in cases if isinstance(c, Functional)]
+        serial = [c for c in cases if not isinstance(c, Functional)]
+        result = self._makeResult()
+        unittest.registerResult(result)
+        result.failfast, result.buffer, result.tb_locals = self.failfast, self.buffer, self.tb_locals
+        started = time.perf_counter()
+        result.startTestRun()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, os.cpu_count() or 2)) as pool:
+                futures = [pool.submit(unittest.TestSuite([c]).run, result) for c in parallel]
+                unittest.TestSuite(serial).run(result)
+                for future in futures:
+                    future.result()
+        finally:
+            result.stopTestRun()
+        self.stream.writeln()
+        result.printErrors()
+        self.stream.writeln('-' * 70)
+        self.stream.writeln(f'Ran {result.testsRun} tests in {time.perf_counter() - started:.3f}s')
+        self.stream.writeln()
+        if result.wasSuccessful():
+            self.stream.writeln('OK')
+        else:
+            self.stream.writeln(f'FAILED (failures={len(result.failures)}, errors={len(result.errors)})')
+        return result
+
+
 if __name__ == '__main__':
-    unittest.main(verbosity=1)
+    unittest.main(testRunner=ConcurrentRunner, verbosity=1)
