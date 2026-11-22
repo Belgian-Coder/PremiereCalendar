@@ -29,6 +29,9 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root 'eng') -Recurse -F
     Assert-Policy (-not ([IO.File]::ReadAllText($file.FullName) -match '/mnt/[a-z]/[^\s"'']*:/src')) "$relative bind-mounts a /mnt/<drive> path as /src."
 }
 Assert-Policy ((Read-Repo 'compose.dev.yaml') -match '\./:/src') 'The Compose watcher exception moved; review this policy.'
+# The mirror copies regular files only, so a tracked symlink would silently be missing from builds.
+$trackedLinks = @(& git -C $root ls-files -s | Where-Object { $_ -match '^120000 ' })
+Assert-Policy ($trackedLinks.Count -eq 0) "Tracked symlinks are not supported by the source mirror: $($trackedLinks -join ', ')"
 
 $env:PC_HARNESS_LANE = 'Wsl'   # the WSL helpers' plans are checked on every host (the native lane is checked in 2b)
 # 2. Defaults of the WSL helpers: mirror source and the passing-result cache (plans only; no WSL is invoked).

@@ -108,11 +108,17 @@ service/browser commands are in [Testing](docs/Testing.md#local-only-execution).
   supported Linux containers. Windows helpers require an explicitly selected,
   already running WSL distribution and local Linux/amd64 engine. They pin the local Docker socket, ignoring an
   inherited remote context. Never replace container acceptance with native SDK
-  compilation, even when a host has the exact SDK.
-- macOS ARM64 currently supports the static lane only (`eng/Invoke-StaticChecks.ps1`,
-  verified natively on 22 Nov 2026; PowerShell 7 and Python 3.10+ are prerequisites). The WSL helpers and NAS
-  release scripts are not a Mac execution backend; do not invent ARM64 release,
-  signing or browser acceptance. Use an approved Windows builder for the
+  compilation, even when a host has the exact SDK (the macOS native lane is
+  feedback only).
+- macOS ARM64 supports the static lane (`eng/Invoke-StaticChecks.ps1`) and, as a
+  feedback-only lane, native application builds and Unit, Component and Integration
+  tests (`eng/Test-WithPostgres.ps1`, `Invoke-Validation.ps1 -Run`) using the host
+  .NET SDK and a throwaway local PostgreSQL (prerequisites: PowerShell 7, Python
+  3.10+, the `global.json` SDK, PostgreSQL 18 binaries). Native results never
+  replace release acceptance: complete regression, Browser, vulnerability, SBOM and
+  exact-image gates and the release scripts stay on the Windows/WSL linux/amd64
+  builder. The WSL helpers and NAS release scripts are not a Mac execution
+  backend; do not invent ARM64 release, signing or browser acceptance. Use an approved Windows builder for the
   existing linux/amd64 release artifact.
 - Share only committed source across hosts. Keep mutable outputs, test results,
   databases, credentials and package caches on their owning host/worktree;

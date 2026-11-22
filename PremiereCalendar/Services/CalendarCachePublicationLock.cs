@@ -62,8 +62,15 @@ internal static class CalendarCachePublicationLock
         }
     }
 
+    // Lock contention: EWOULDBLOCK is 11 on Linux and 35 on macOS; 32/33 are the Windows sharing/lock violations.
+    // 35 is EDEADLK on Linux, so it only counts on macOS (the Linux container behaviour is unchanged).
     private static bool IsSharingViolation(IOException exception)
-        => (exception.HResult & 0xffff) is 11 or 32 or 33;
+        => (exception.HResult & 0xffff) switch
+        {
+            11 or 32 or 33 => true,
+            35 => OperatingSystem.IsMacOS(),
+            _ => false
+        };
 
     private sealed class PublicationScope(string directory, PublicationScope? parent)
     {

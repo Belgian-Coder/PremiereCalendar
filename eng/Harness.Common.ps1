@@ -200,7 +200,11 @@ function Get-HarnessSourceManifest([string] $Root) {
     $set = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     foreach ($path in $listed.Output.Split([char]0, [StringSplitOptions]::RemoveEmptyEntries)) {
         # Tracked files deleted from the working tree are still listed from the index; a build cannot read them.
-        if (-not [IO.File]::Exists([IO.Path]::Combine($Root, $path.Replace('/', [IO.Path]::DirectorySeparatorChar)))) { continue }
+        $info = [IO.FileInfo]::new([IO.Path]::Combine($Root, $path.Replace('/', [IO.Path]::DirectorySeparatorChar)))
+        if (-not $info.Exists) { continue }
+        # Only regular files are mirrored: an untracked link (for example a WSL `src -> /src` symlink) has no content
+        # a build needs and cannot be hashed. HarnessPolicy.Tests.ps1 guarantees that no symlink is tracked.
+        if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $info.LinkTarget) { continue }
         if ($path -match '[\r\n]') { throw 'A source path contains a line break; the mirror refuses it.' }
         [void] $set.Add($path)
     }
