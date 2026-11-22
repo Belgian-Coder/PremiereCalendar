@@ -209,7 +209,7 @@ work by absolute path from any folder and have no Windows-only dependency.
 ```powershell
 # Everything the portable lane covers, concurrently, one summary (see the measurement below)
 pwsh -NoProfile -File ./eng/Invoke-StaticChecks.ps1
-# Only what your change can affect (docs, eng/tests scripts, app code), see below
+# Only what your change can affect (docs, eng/tests scripts, app code incl. the impacted test classes), see below
 pwsh -NoProfile -File ./eng/Invoke-Validation.ps1 -Changed
 ```
 
@@ -240,10 +240,54 @@ and untracked files, following the table in "Scoped application checks":
 | --- | --- | --- |
 | Documentation only (`*.md`, `docs/**`) | `Docs` and `GitDiffCheck` | none |
 | `eng/**`, `tests/*.ps1`, `tests/*.py`, `tests/fixtures/**` | the checks whose table row covers those files (for example `eng/run-with-sdk-cache.sh` runs `SdkCache` and `ScriptSyntax`); all checks for a file no row covers | none |
-| `PremiereCalendar/**` C#/project files | applicable rows plus `GitDiffCheck` | `eng/Test-WithPostgres.ps1 -Project Unit,Component,Integration` (one build pass that also compiles the app) |
-| `*.razor`, `*.css`, `*.js` | same | `-Project Component` (its build compiles the app); Browser checks are required before release |
-| `tests/PremiereCalendar.<X>Tests/**` | same | `-Project <X>` (Browser tests are only flagged: they need the prepared browser image) |
-| `Dockerfile`, `compose*.yaml`, `global.json`, `Directory.Build.props`, `PremiereCalendar.slnx`, `tests/Shared/**` | same | all three service suites (their single build compiles the app; a separate App check runs only when no suite is selected) |
+| `PremiereCalendar/**/*.cs`, `*.razor` | applicable rows plus `GitDiffCheck` | test impact selection (below): `eng/Test-WithPostgres.ps1 -Project <suites> -Filter <classes>` for the test classes that reference the changed types; whole suites for each fallback |
+| `*.css`, `*.js` (no type to follow) | same | `-Project Component` (its build compiles the app); Browser checks are required before release; a Razor component is mapped by its name like C# |
+| `tests/PremiereCalendar.<X>Tests/**/*.cs` | same | the changed test classes in `<X>` plus the tests that reference them (Browser tests are only flagged: they need the prepared browser image); test-project `*.csproj`, `AssemblyConfiguration.cs`, data files: whole `<X>` suite |
+| `Dockerfile`, `compose*.yaml`, `global.json`, `Directory.Build.props`, `PremiereCalendar.slnx`, `tests/Shared/**`, `PremiereCalendar.csproj`, `Program.cs`, `Hosting/**`, `appsettings*.json`, `_Imports.razor` | same | all three service suites (their single build compiles the app; a separate App check runs only when no suite is selected) |
+
+#### Test impact selection
+
+Minimising test runs matters more than minimising commands, so `-Changed` does not
+schedule whole suites for an application change. `Get-TestImpact` in
+`eng/StaticChecks.Common.ps1` (pure PowerShell text analysis, no SDK, about
+3 to 7 s) works as follows:
+
+1. It reads the types declared in each changed `PremiereCalendar/**/*.cs` and
+   `*.razor` file (class, record, struct, interface, enum, partial; a Razor
+   component also contributes its file name) and the base types and interfaces
+   those declarations name. A changed file under
+   `tests/PremiereCalendar.{Unit,Component,Integration}Tests/` contributes its own
+   test classes (top-level types in files with `[Fact]`/`[Theory]`).
+2. One bounded hop: every unchanged application or test-helper file that mentions
+   a changed type contributes its own declared types (DI wiring files such as
+   `Program.cs` and `Hosting/**` are not followed; generic consumer type names
+   are skipped and noted), so an interface or implementation change reaches the
+   tests of its direct consumers. A second hop is deliberately not taken.
+3. Every test class in the three service suites that mentions any of those names
+   as a whole word is selected. Matching is textual and over-selects (comments and
+   strings count); it is meant never to under-select by design, but it is not a
+   proof, which is why the complete suites remain the release gate.
+4. The command is `eng/Test-WithPostgres.ps1 -Project <suites with a selection>
+   -Filter .ClassA.,.ClassB.`. The runner matches `-Filter` values as
+   `*value*` against `Namespace.Class.Method`, so the dot-delimited `.Class.`
+   cannot hit `ClassExtra` or `MyClass`. Suites without a selected class do not run.
+
+Whole-suite fallbacks, each reported with its reason by `-Plan`: shared
+infrastructure or wiring (`Program.cs`, `Hosting/**`, `Properties/**`, `*.csproj`,
+`appsettings*.json`, `_Imports`/`App`/`Routes` Razor files, `tests/Shared/**`,
+`AssemblyConfiguration.cs`, `Directory.Build.props`, `global.json`, `Dockerfile`,
+`compose*.yaml`); a type name that is too generic (fewer than 4 characters or in the
+list returned by `Get-GenericTypeNames`, for example `Options`, `Result`); no test
+referencing the change; more than 60 selected classes, more than 40% of a suite's
+classes (for suites above 10 classes); or selected classes holding more than 60% of
+the suite's tests according to the newest `artifacts/test-results/*/<Suite>.ctrf.json`
+(this checkout, then the primary checkout), because a filtered run then saves too
+little. Whole suites and narrowed suites run as two separate commands (two builds).
+`-FullSuites` disables the selection and schedules whole suites as before.
+
+Narrowed runs are feedback only. The complete Unit, Component and Integration
+suites still run once per release candidate (release step 6) and Browser checks stay
+separate; a green narrowed run never replaces them.
 
 On Windows, `-Run` executes the builder commands after the static checks passed,
 one after another (never concurrently in one worktree); without `-Run`, and on
@@ -360,7 +404,7 @@ pwsh -File D:\Projects\PremiereCalendar\eng\Test-WithPostgres.ps1 -Project Unit
 | Razor/CSS/JavaScript/navigation | App build and relevant component tests; affected browser cases | Complete suites and serial browser performance/accessibility checks |
 | Database, dependency, container or cross-cutting change | Affected integration/project build first | Complete regression, database and exact-image release gates |
 
-`eng/Invoke-Validation.ps1 -Changed` applies the feedback column to the current changes (see [Portable static checks](#portable-static-checks)); the acceptance column is never implied by it.
+`eng/Invoke-Validation.ps1 -Changed` applies the feedback column to the current changes (see [Portable static checks](#portable-static-checks)); the acceptance column is never implied by it. For application code the feedback column is narrowed to the impacted test classes by the [test impact selection](#test-impact-selection); `-FullSuites` runs whole suites.
 
 Each checkout/worktree owns named ext4 Docker build volumes, separated by Linux/amd64 ABI (`musl` or `glibc`), runtime-async mode and check/watcher role. A project-scoped Linux/amd64 NuGet volume is shared across worktrees. Source and timestamped `artifacts/test-results/<run>` reports stay in the native checkout. Existing native output remains under `artifacts/build/host` and native packages under `artifacts/packages/host`; old Linux bind caches are preserved. Helpers retain the worktree's `artifacts/check.lock` to reject concurrent check/test writers. Do not bypass that lock with concurrent raw `dotnet` commands. Sharing packages does not share `obj`/`bin`, test databases, results or application data. See [Docker and PostgreSQL](DockerAndPostgres.md#local-development) for the profile naming and watcher mapping.
 
