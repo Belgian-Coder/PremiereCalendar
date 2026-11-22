@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 # Docker-free checks for the release-step speed changes: shared cache volumes, the Trivy database age gate,
-# concurrent Trivy/Syft failure propagation and the -WhatIf plans.
+# concurrent Trivy/Syft failure propagation, the -WhatIf plans and the Dockerfile cache mounts.
 [CmdletBinding()]
 param([string] $PythonExecutable)
 Set-StrictMode -Version Latest
@@ -138,6 +138,13 @@ Assert-Speed (-not (Test-Path -LiteralPath (Join-Path $plansBundle 'release-nuge
 # --- NuGet audit container: read-only, tmpfs HTTP cache, packages on the labelled volume
 $auditScript = Get-Content -LiteralPath (Join-Path $root 'eng/release/Invoke-NuGetAudit.ps1') -Raw
 Assert-Speed ($auditScript -match '--read-only' -and $auditScript -match 'NUGET_HTTP_CACHE_PATH=/tmp/' -and $auditScript -match 'NUGET_PACKAGES=/nuget-packages' -and $auditScript -notmatch 'NUGET_PACKAGES=/tmp') 'The NuGet audit container lost read-only, the tmpfs HTTP cache or the package volume.'
+
+# --- Dockerfile: restore and publish must mount the same package cache, and nothing else may reference it
+$dockerfile = Get-Content -LiteralPath (Join-Path $root 'Dockerfile') -Raw
+$mounts = [regex]::Matches($dockerfile, '(?m)^RUN --mount=type=cache,id=premierecalendar-nuget,target=/nuget-packages \\\r?\n\s+dotnet (restore|publish)')
+Assert-Speed ((@($mounts | ForEach-Object { $_.Groups[1].Value } | Sort-Object) -join ',') -ceq 'publish,restore') 'Restore and publish must both mount the NuGet cache (publish uses --no-restore).'
+Assert-Speed ($dockerfile -match '(?m)^ENV NUGET_PACKAGES=/nuget-packages\s*$') 'The build stage must point NuGet at the cache mount.'
+Assert-Speed (($dockerfile -split '(?m)^FROM ')[2] -notmatch 'nuget-packages') 'The development target must not depend on the cache mount.'
 
 Remove-Item -LiteralPath $work -Recurse -Force
 Write-Host "$count release speed checks passed."

@@ -200,7 +200,7 @@ Creates a read-only, tmpfs-only PostgreSQL container on a new internal network (
 pwsh -File "$rel\Build-Image.ps1" -Bundle $bundle -ExpectedRevision $commit
 ```
 
-`HEAD` must be the commit with a clean tracked tree and no untracked source files. The commit is archived with `git archive` (`core.autocrlf=false`), every archived C# and SQL file is compared with its committed blob, and linux/amd64 is built from that archive only (it is the build context on stdin) with `VERSION`, `SOURCE_REVISION`, `BUILD_ID` and `BUILD_TIME_UTC` build arguments. The image is exported with `docker save`; `build-metadata.json` records the archive hash, image id and labels.
+`HEAD` must be the commit with a clean tracked tree and no untracked source files. The commit is archived with `git archive` (`core.autocrlf=false`), every archived C# and SQL file is compared with its committed blob, and linux/amd64 is built from that archive only (it is the build context on stdin) with `VERSION`, `SOURCE_REVISION`, `BUILD_ID` and `BUILD_TIME_UTC` build arguments. The image is exported with `docker save`; `build-metadata.json` records the archive hash, image id and labels. The Dockerfile restores NuGet packages through a BuildKit cache mount (`id=premierecalendar-nuget`, mounted again on the `--no-restore` publish), so a changed project file downloads only new packages; the cache never enters an image layer and the image content is unchanged.
 
 ## Step 4: NuGet audit
 

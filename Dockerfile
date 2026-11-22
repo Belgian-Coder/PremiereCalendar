@@ -3,13 +3,18 @@ FROM mcr.microsoft.com/dotnet/sdk:11.0.100-alpine3.24@sha256:52556c0fb9d0f609ae9
 WORKDIR /src
 COPY global.json Directory.Build.props PremiereCalendar.slnx ./
 COPY PremiereCalendar/PremiereCalendar.csproj PremiereCalendar/
-RUN dotnet restore PremiereCalendar/PremiereCalendar.csproj --nologo
+# The package cache lives outside the image (BuildKit cache mount), so a changed project file re-downloads only new
+# packages. It never enters an image layer; publish mounts it again because --no-restore still reads the packages.
+ENV NUGET_PACKAGES=/nuget-packages
+RUN --mount=type=cache,id=premierecalendar-nuget,target=/nuget-packages \
+    dotnet restore PremiereCalendar/PremiereCalendar.csproj --nologo
 COPY PremiereCalendar/ PremiereCalendar/
 ARG VERSION=0.0.0-container
 ARG SOURCE_REVISION=unknown
 ARG BUILD_ID=container
 ARG BUILD_TIME_UTC=unknown
-RUN dotnet publish PremiereCalendar/PremiereCalendar.csproj -c Release --no-restore -o /out \
+RUN --mount=type=cache,id=premierecalendar-nuget,target=/nuget-packages \
+    dotnet publish PremiereCalendar/PremiereCalendar.csproj -c Release --no-restore -o /out \
     /p:Version="$VERSION" /p:InformationalVersion="$VERSION+$BUILD_ID" \
     /p:SourceRevisionId="$SOURCE_REVISION" /p:BuildId="$BUILD_ID" /p:BuildTimeUtc="$BUILD_TIME_UTC" \
     /p:UseAppHost=false \
