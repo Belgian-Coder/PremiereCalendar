@@ -1,12 +1,14 @@
 #Requires -Version 7.0
 # Exercise real release command expressions and the native argv boundary without WSL/Docker.
 [CmdletBinding()]
-param([Parameter(Mandatory)][string] $PythonExecutable)
+param([string] $PythonExecutable)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $root 'eng/release/ReleaseCommon.ps1')
-$fixturePython = (Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop).Source
+. (Join-Path $root 'eng/Python.Common.ps1')
+$fixturePython = Resolve-PythonExecutable $PythonExecutable
+if (-not $fixturePython) { throw 'Python 3.10 or newer is required; pass -PythonExecutable.' }
 function Assert-HarnessWslRunning { }
 function New-HarnessWslStartInfo([string[]] $Arguments) {
     $start = [Diagnostics.ProcessStartInfo]::new($fixturePython)

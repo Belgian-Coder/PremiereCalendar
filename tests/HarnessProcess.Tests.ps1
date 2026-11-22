@@ -1,12 +1,14 @@
 #Requires -Version 7.0
 # Native pipe/deadline checks; Python is a controlled child, never a WSL/SDK fallback.
 [CmdletBinding()]
-param([string] $PythonExecutable = 'python')
+param([string] $PythonExecutable)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'eng/Harness.Common.ps1')
-$python = (Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop).Source
+. (Join-Path $root 'eng/Python.Common.ps1')
+$python = Resolve-PythonExecutable $PythonExecutable
+if (-not $python) { throw 'Python 3.10 or newer is required; pass -PythonExecutable.' }
 $fixture = Join-Path $PSScriptRoot 'fixtures/harness_client.py'
 $folder = Join-Path $root ('artifacts/harness-process-tests/' + [guid]::NewGuid().ToString('N'))
 [void] (New-Item -ItemType Directory -Path $folder)

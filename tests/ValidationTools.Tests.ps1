@@ -5,6 +5,7 @@ param([string] $PythonExecutable)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $root 'eng/Python.Common.ps1')
 $sandboxRoot = Join-Path $root 'artifacts/harness-tests'
 $sandbox = Join-Path $sandboxRoot ('validation-' + [guid]::NewGuid().ToString('N'))
 $count = 0
@@ -21,7 +22,7 @@ function Assert-Rejected([scriptblock] $Action, [string] $Expected) {
 }
 try {
     [void][IO.Directory]::CreateDirectory((Join-Path $sandbox 'eng'))
-    Copy-Item -LiteralPath (Join-Path $root 'eng/Test-Docs.ps1'), (Join-Path $root 'eng/Test-ScriptSyntax.ps1') -Destination (Join-Path $sandbox 'eng')
+    Copy-Item -LiteralPath (Join-Path $root 'eng/Test-Docs.ps1'), (Join-Path $root 'eng/Test-ScriptSyntax.ps1'), (Join-Path $root 'eng/Python.Common.ps1') -Destination (Join-Path $sandbox 'eng')
     & git -C $sandbox init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the disposable fixture repository.' }
     Write-Fixture 'README.md' '# Fixture'
@@ -56,15 +57,14 @@ try {
     Write-Fixture 'eng/invalid.ps1' '# valid PowerShell'
     Write-Fixture 'eng/one.py' 'value = 1'
     Write-Fixture 'eng/two.py' 'value = 2'
-    $python = if ($PythonExecutable) { Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop }
-              else { Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    $python = Resolve-PythonExecutable $PythonExecutable
     if ($python) {
-        & $syntax -PythonExecutable $python.Source 6>$null
+        & $syntax -PythonExecutable $python 6>$null
         $count++
         Write-Fixture 'eng/two.py' 'def broken('
-        Assert-Rejected { & $syntax -PythonExecutable $python.Source } '*script problem*'
+        Assert-Rejected { & $syntax -PythonExecutable $python } '*script problem*'
         Write-Fixture 'eng/two.py' 'value = 2'
-        & $syntax -PythonExecutable $python.Source 6>$null
+        & $syntax -PythonExecutable $python 6>$null
         $count++
         if (Get-ChildItem -LiteralPath $sandbox -Recurse -Filter '*.pyc') { throw 'Python validation wrote bytecode.' }
         $count++
@@ -134,7 +134,7 @@ for phase in ("validate", "package"):
     assert argv[argv.index("-ExpectedOldVersion") + 1] == "0.0.1"
     assert argv[argv.index("-ExpectedStackRevision") + 1] == "1"
 '@
-        & $python.Source -I -B -c $contractCheck $client $manifest
+        & $python -I -B -c $contractCheck $client $manifest
         if ($LASTEXITCODE -ne 0) { throw 'Release manifest does not satisfy the shared client contract.' }
         $count++
     }

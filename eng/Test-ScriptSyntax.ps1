@@ -18,14 +18,14 @@ pwsh -File D:\Projects\PremiereCalendar\eng\Test-ScriptSyntax.ps1
 param([string] $PythonExecutable)
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Python.Common.ps1')
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 # Tracked plus untracked-but-not-ignored files: fast, and it skips ignored scratch folders, artifacts and build output.
 $names = (& git -C $root ls-files -z --cached --others --exclude-standard) -split "`0" | Where-Object { $_ -match '\.(ps1|py|sh|sql)$' }
 if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed.' }
 $files = @($names | ForEach-Object { Join-Path $root $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Get-Item)
 $problems = [Collections.Generic.List[string]]::new()
-$python = if ($PythonExecutable) { Get-Command $PythonExecutable -CommandType Application -ErrorAction Stop }
-          else { Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
+$python = Resolve-PythonExecutable $PythonExecutable
 $pyChecked = 0
 $psChecked = 0
 
@@ -64,7 +64,7 @@ for path in json.load(sys.stdin):
 sys.exit(1 if failed else 0)
 '@
         $pythonFiles = @($files | Where-Object Extension -eq '.py' | ForEach-Object FullName)
-        $output = ConvertTo-Json -InputObject $pythonFiles -Compress | & $python.Source -I -c $code 2>&1
+        $output = ConvertTo-Json -InputObject $pythonFiles -Compress | & $python -I -c $code 2>&1
         if ($LASTEXITCODE -ne 0) { $problems.Add("Python syntax check failed: $($output -join ' ')") }
     }
 }
