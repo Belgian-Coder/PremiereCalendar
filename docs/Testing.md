@@ -335,7 +335,7 @@ file is missing from it):
 | Name | Command | Guards |
 | --- | --- | --- |
 | `Harness` | `tests/Harness.Tests.ps1` | WSL/Docker/PostgreSQL helper plans, argument and cache-volume contracts |
-| `HarnessProcess` | `tests/HarnessProcess.Tests.ps1` | native child-process pipes, deadlines and cleanup |
+| `HarnessProcess` | `tests/HarnessProcess.Tests.ps1` | native child-process pipes, deadlines and cleanup (a warm-up fixture absorbs the cold first interpreter start before any tight deadline; failures print the last fixture result and the warm-up time) |
 | `ReleaseTransport` | `tests/ReleaseTransport.Tests.ps1` | release transport I/O, timeouts, no false "absent" results |
 | `HarnessCacheRoot` | `tests/HarnessCacheRoot.Tests.ps1` | canonical primary/clone cache-root binding with real Git fixtures |
 | `ExistingRestoreFixture` | `tests/ExistingRestoreFixture.Tests.ps1` | restore-compatibility fixture handling in the release scripts |
