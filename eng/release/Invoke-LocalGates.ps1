@@ -290,14 +290,21 @@ public sealed class GateProcess : IDisposable {
     }
     Thread Pump(StreamReader reader) {
         var t = new Thread(() => {
-            string line;
+            string line; bool writeFailed = false;
             try {
                 while ((line = reader.ReadLine()) != null) {
                     // A late line after Dispose (deadline give-up) is dropped, never thrown on this background thread.
-                    lock (gate) { if (closed) return; log.WriteLine(line); }
+                    // After a failed log write the pump keeps draining (and discarding) so the child never blocks on a full pipe.
+                    lock (gate) {
+                        if (closed || writeFailed) continue;
+                        try { log.WriteLine(line); }
+                        catch (IOException) {
+                            writeFailed = true;
+                            try { log.WriteLine("PC_GATE_LOG_WRITE_FAILED: later output of this step was not recorded"); } catch { }
+                        }
+                    }
                 }
-            } catch (ObjectDisposedException) { } catch (InvalidOperationException) { }
-            catch (IOException) { lock (gate) { if (!closed) { try { log.WriteLine("PC_GATE_LOG_WRITE_FAILED: later output of this step was not recorded"); } catch { } } } }
+            } catch (ObjectDisposedException) { } catch (InvalidOperationException) { } catch (IOException) { }
         }) { IsBackground = true };
         t.Start();
         return t;
