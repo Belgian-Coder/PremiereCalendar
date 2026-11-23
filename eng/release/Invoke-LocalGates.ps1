@@ -27,7 +27,7 @@ already finished), so every build is bound to the tested bytes regardless of tim
 tests first.
 
 Failure handling: on the first failed step no new step is launched, running steps finish (a Docker build or restore is
-never killed mid-way), the evidence that exists is listed and the run exits 1. There is no automatic retry. A failed step
+never killed mid-way unless it passes its own per-step deadline, see -StepDeadlineSeconds), the evidence that exists is listed and the run exits 1. There is no automatic retry. A failed step
 that wrote evidence needs a new bundle (docs/Releasing.md, "When something fails").
 
 Resume: before launching anything every step is classified from the exact evidence files its script writes. Complete
@@ -72,6 +72,15 @@ Forwarded to Restore-Backup.ps1 as -TimeoutSeconds when supplied.
 .PARAMETER FingerprintWaitSeconds
 How long Build-Image may wait for the test run to freeze the fingerprint file (default 300).
 
+.PARAMETER StepDeadlineSeconds
+Per-step deadline overrides as a hashtable of step id to seconds, for example @{ tests = 9000; scans = 5400 }. Defaults
+(seconds): tests 5400 (the -TimeoutSeconds plus 900 when supplied), restore-init 900, restore 3600 (the
+-RestoreTimeoutSeconds plus 600 when supplied), build 3600, nuget-audit 1200, scans 3600, smoke 1800, backup-compat 1800.
+When a running step passes its deadline the orchestrator writes a note to the step's log, kills that step's whole
+process tree, records the step as failed (exit 124, marker and timings written, so the usual evidence listing and
+"new bundle" rule apply) and starts nothing further. Other running steps finish under their own deadlines. A deadline
+never removes or relaxes a gate: it only turns a hang into a failure.
+
 .PARAMETER ChildWhatIf
 With -WhatIf: also run each child script with -WhatIf (Windows builder; local files only).
 
@@ -97,6 +106,7 @@ param(
     [ValidateRange(30, 3600)][int] $RestoreTimeoutSeconds,
     [ValidateRange(1, 3600)][int] $FingerprintWaitSeconds = 300,
     [switch] $ChildWhatIf,
+    [hashtable] $StepDeadlineSeconds = @{},
     # Test hook: replaces the child-process launcher. Called with a step object (Id, Script, Arguments, LogPath);
     # must return an object with IsDone and ExitCode properties. Used only by tests/ReleaseOrchestrator.Tests.ps1.
     [Parameter(DontShow)][scriptblock] $StepRunner,
@@ -122,6 +132,20 @@ $version = [string]$config.version
 $gatesDir = Join-Path $bundlePath 'gates'
 $fingerprintFile = Join-Path $bundlePath 'tested-source-fingerprints.json'
 
+# Per-step deadlines (seconds). A hung step must end the gates instead of blocking them forever.
+$stepDeadlines = [ordered]@{
+    'tests' = $(if ($bound.ContainsKey('TimeoutSeconds')) { $TimeoutSeconds + 900 } else { 5400 })
+    'restore-init' = 900
+    'restore' = $(if ($bound.ContainsKey('RestoreTimeoutSeconds')) { $RestoreTimeoutSeconds + 600 } else { 3600 })
+    'build' = 3600; 'nuget-audit' = 1200; 'scans' = 3600; 'smoke' = 1800; 'backup-compat' = 1800
+}
+foreach ($key in @($StepDeadlineSeconds.Keys)) {
+    if (-not $stepDeadlines.Contains([string]$key)) { throw "-StepDeadlineSeconds names an unknown step '$key'. Known: $($stepDeadlines.Keys -join ', ')." }
+    $value = 0
+    if (-not [int]::TryParse([string]$StepDeadlineSeconds[$key], [ref]$value) -or $value -lt 1 -or $value -gt 86400) { throw "-StepDeadlineSeconds for '$key' must be 1-86400 seconds." }
+    $stepDeadlines[[string]$key] = $value
+}
+
 # ----------------------------------------------------------------------------------------------- step definitions
 
 function New-Step {
@@ -131,7 +155,7 @@ function New-Step {
         Id = $Id; Title = $Title; Script = (Join-Path $releaseRoot $Script); ScriptName = $Script
         Arguments = @($Arguments); After = @($After); Class = $Class; Required = @($Required); Validate = $Validate
         Status = 'pending'; Marker = $null; Evidence = $null; Handle = $null; LogPath = $null; StartUtc = $null; EndUtc = $null
-        Seconds = $null; ExitCode = $null; Note = $null; Clock = $null
+        Seconds = $null; ExitCode = $null; Note = $null; Clock = $null; DeadlineSeconds = $stepDeadlines[$Id]; TimedOutAt = $null
     }
 }
 
@@ -272,6 +296,11 @@ public sealed class GateProcess : IDisposable {
         t.Start();
         return t;
     }
+    // Deadline stop: note in the log, then kill the step's whole process tree (the pwsh child and everything it started).
+    public void Kill(string note) {
+        lock (gate) { try { log.WriteLine(note); } catch { } }
+        try { if (!process.HasExited) process.Kill(true); } catch { }
+    }
     public bool IsDone { get { return process.HasExited && !pumps[0].IsAlive && !pumps[1].IsAlive; } }
     public int ExitCode { get { return process.ExitCode; } }
     public void Dispose() { lock (gate) { log.Dispose(); } process.Dispose(); }
@@ -341,6 +370,7 @@ function Show-Plan {
         Write-Host ("  {0}. {1,-14} [{2}] {3}; {4}" -f $n, $s.Id, $s.Class, $after, $state)
         Write-Host "       $(Format-CommandLine $s)"
     }
+    Write-Host "Step deadlines (s): $(($stepDeadlines.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')"
     Write-Host "Logs: $gatesDir\<step>.log; timings: $gatesDir\stage-timings.json"
     foreach ($p in $preflightProblems) { Write-Host "WARNING: $p" }
 }
@@ -398,12 +428,23 @@ function Complete-Step($Step) {
     $Step.Clock.Stop()
     $Step.EndUtc = [DateTimeOffset]::UtcNow
     $Step.Seconds = [math]::Round($Step.Clock.Elapsed.TotalSeconds, 3)
-    $Step.ExitCode = [int]$h.ExitCode
+    $Step.ExitCode = if ($Step.TimedOutAt) { 124 } else { [int]$h.ExitCode }
     if ($h -is [IDisposable]) { $h.Dispose() }
     $Step.Status = if ($Step.ExitCode -eq 0) { 'passed' } else { 'failed' }
-    $record = [ordered]@{ step = $Step.Id; exitCode = $Step.ExitCode; startUtc = $Step.StartUtc.ToString('O'); endUtc = $Step.EndUtc.ToString('O'); seconds = $Step.Seconds; log = (Split-Path -Leaf $Step.LogPath) }
+    if ($Step.TimedOutAt) { $Step.Note = "exceeded its deadline of $($Step.DeadlineSeconds) s; the step's process tree was killed" }
+    $record = [ordered]@{ step = $Step.Id; exitCode = $Step.ExitCode; deadlineSeconds = $Step.DeadlineSeconds; timedOut = [bool]$Step.TimedOutAt; startUtc = $Step.StartUtc.ToString('O'); endUtc = $Step.EndUtc.ToString('O'); seconds = $Step.Seconds; log = (Split-Path -Leaf $Step.LogPath) }
     Write-NewFile $Step.Marker ((ConvertTo-Json -InputObject $record) + "`n")
     Write-Host ("[{0}] {1} {2} in {3}s (exit {4})" -f ([DateTime]::UtcNow.ToString('HH:mm:ss')), $Step.Id, $Step.Status.ToUpperInvariant(), $Step.Seconds, $Step.ExitCode)
+}
+
+# Stops a step that passed its deadline. The step is then completed through the ordinary path (marker, timings, failure
+# handling), so its bookkeeping and the evidence listing run exactly as for any other failure.
+function Stop-StepAtDeadline($Step) {
+    $message = "Gate step '$($Step.Id)' exceeded its deadline of $($Step.DeadlineSeconds) s; killing its process tree."
+    Write-Host "[$([DateTime]::UtcNow.ToString('HH:mm:ss'))] $message"
+    $Step.TimedOutAt = [DateTimeOffset]::UtcNow
+    $kill = $Step.Handle.PSObject.Methods['Kill']
+    if ($kill) { try { $kill.Invoke("PC_GATE_DEADLINE $message") } catch { Write-Host "Could not stop step '$($Step.Id)': $($_.Exception.Message)" } }
 }
 
 function Test-CanStart($Step, [object[]] $Running) {
@@ -431,7 +472,11 @@ try {
     while ($true) {
         $running = @($steps | Where-Object { $_.Status -eq 'running' })
         foreach ($s in $running) {
-            if ($s.Handle.IsDone) { Complete-Step $s; if ($s.Status -eq 'failed' -and -not $failed) { $failed = $s } }
+            if (-not $s.TimedOutAt -and -not $s.Handle.IsDone -and $s.Clock.Elapsed.TotalSeconds -gt $s.DeadlineSeconds) { Stop-StepAtDeadline $s }
+            # A killed tree normally drains at once; if its pipes stay open, give up after 30 s so the gates still end.
+            if ($s.Handle.IsDone -or ($s.TimedOutAt -and ([DateTimeOffset]::UtcNow - $s.TimedOutAt).TotalSeconds -gt 30)) {
+                Complete-Step $s; if ($s.Status -eq 'failed' -and -not $failed) { $failed = $s }
+            }
         }
         $running = @($steps | Where-Object { $_.Status -eq 'running' })
         if (-not $failed -and -not $fatal) {
@@ -470,7 +515,7 @@ try {
 finally {
     $wall.Stop()
     $finishedUtc = [DateTimeOffset]::UtcNow
-    # Running children are never killed here (a Docker build or restore must finish); an abort leaves them to finish.
+    # Running children are never killed here; an abort leaves them to finish. Only a step past its own deadline is killed (above).
     foreach ($s in @($steps | Where-Object { $_.Status -eq 'running' })) { $s.Status = 'abandoned-running' }
     foreach ($s in @($steps | Where-Object { $_.Status -eq 'pending' })) { $s.Status = 'not-started' }
 
@@ -496,7 +541,7 @@ finally {
         failedStep = $(if ($failed) { $failed.Id } else { $null }); error = $fatal
         steps = @($steps | ForEach-Object {
                 [ordered]@{
-                    id = $_.Id; script = $_.ScriptName; class = $_.Class; status = $_.Status; note = $_.Note
+                    id = $_.Id; script = $_.ScriptName; class = $_.Class; status = $_.Status; note = $_.Note; deadlineSeconds = $_.DeadlineSeconds
                     startUtc = $(if ($_.StartUtc) { $_.StartUtc.ToString('O') } else { $null }); endUtc = $(if ($_.EndUtc) { $_.EndUtc.ToString('O') } else { $null })
                     seconds = $_.Seconds; exitCode = $_.ExitCode; log = $(if ($_.LogPath) { Split-Path -Leaf $_.LogPath } else { $null })
                 } })
@@ -519,6 +564,6 @@ finally {
         }
     }
 }
-if ($failed) { Write-Host "ERROR: gate step '$($failed.Id)' failed with exit code $($failed.ExitCode); see $($failed.LogPath)."; exit 1 }
+if ($failed) { Write-Host "ERROR: gate step '$($failed.Id)' failed with exit code $($failed.ExitCode)$(if ($failed.TimedOutAt) { " (deadline of $($failed.DeadlineSeconds) s exceeded, process tree killed)" }); see $($failed.LogPath)."; exit 1 }
 if ($fatal) { Write-Host "ERROR: $fatal"; exit 1 }
 Write-Host 'All local gates passed. Next: Load-Image, Deploy-Release, Verify-Release, Close-Release (docs/Releasing.md).'
