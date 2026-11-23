@@ -76,6 +76,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Test-WithPostgres.ps1 refuses 1-59; refuse here, before anything is frozen (a late refusal would burn the bundle).
+if ($TimeoutSeconds -ne 0 -and $TimeoutSeconds -lt 60) { throw '-TimeoutSeconds must be 0 (the runner default) or at least 60.' }
 . (Join-Path $PSScriptRoot 'ReleaseCommon.ps1')
 $ctx = Get-ReleaseContext -Bundle $Bundle
 $fingerprints = Join-Path $ctx.Bundle 'tested-source-fingerprints.json'
