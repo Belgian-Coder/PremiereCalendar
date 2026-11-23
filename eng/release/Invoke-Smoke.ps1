@@ -67,7 +67,8 @@ $null = Invoke-LocalDocker run --rm --name $probeBuild -v "$(ConvertTo-WslPath (
 if (-not (Test-Path -LiteralPath (Join-Path $probeRoot 'out\TimezoneProbe.dll'))) { throw 'The time-zone probe was not built.' }
 
 $connection = 'Host=smoke-db;Database=premierecalendar;Username=premierecalendar;GSS Encryption Mode=Disable'
-$null = Invoke-LocalDocker network create --internal --subnet $subnet --label $label $network
+$subnet = New-ReleaseNetwork -Context $ctx -Offset 1 -Label $label -Name $network -Internal
+Write-Host "Smoke network $network uses subnet $subnet"
 $null = Invoke-LocalDocker run -d --name $db --label $label --network $network --network-alias smoke-db --read-only `
     --tmpfs '/var/lib/postgresql:rw,size=512m' --tmpfs '/tmp:rw,size=64m' --tmpfs '/run/postgresql:rw,size=16m' `
     -e PGDATA=/var/lib/postgresql/data/pgdata -e POSTGRES_USER=premierecalendar -e POSTGRES_DB=premierecalendar -e POSTGRES_HOST_AUTH_METHOD=trust $cfg.postgresImage

@@ -60,4 +60,17 @@ foreach ($file in @('Initialize-RestoreCheck.ps1', 'Invoke-Smoke.ps1', 'Test-Bac
     }
 }
 if ($count -ne 4) { throw 'Release Docker command coverage changed.' }
+# Per-bundle network creation: bounded alternative subnets, never a role of this bundle, always an explicit /24 in the prefix.
+$subnetContext = [pscustomobject]@{ Config = [pscustomobject]@{ subnetPrefix = '10.139'; subnetOctet = 20 } }
+$candidates = @(Get-ReleaseSubnetCandidates $subnetContext 1)
+if ($candidates[0] -ne '10.139.21.0/24' -or $candidates.Count -ne 6 -or @($candidates | Select-Object -Unique).Count -ne 6) { throw "Unexpected subnet candidates: $($candidates -join ', ')" }
+foreach ($candidate in $candidates[1..5]) { if ($candidate -notmatch '^10\.139\.(\d+)\.0/24$' -or [int]$Matches[1] -lt 1 -or [int]$Matches[1] -gt 250 -or ([int]$Matches[1] -ge 20 -and [int]$Matches[1] -le 29)) { throw "Subnet candidate collides with the bundle's own roles or leaves the range: $candidate" } }
+if (-not (Test-ReleaseSubnetOverlap 'Error response from daemon: Pool overlaps with other one on this address space') -or (Test-ReleaseSubnetOverlap 'network name already in use')) { throw 'Subnet overlap detection changed.' }
+foreach ($script in 'Invoke-Smoke.ps1', 'Initialize-RestoreCheck.ps1') {
+    $text = Get-Content -Raw -LiteralPath (Join-Path $root "eng/release/$script")
+    if ($text -notmatch 'New-ReleaseNetwork' -or $text -match 'Invoke-LocalDocker network create') { throw "$script must create its network through New-ReleaseNetwork (explicit --subnet with bounded retry)." }
+}
+if ((Get-Content -Raw -LiteralPath (Join-Path $root 'eng/release/ReleaseCommon.ps1')) -notmatch [regex]::Escape("'--subnet', `$subnet, '--label', `$Label")) { throw 'New-ReleaseNetwork lost its explicit --subnet or label.' }
+$count++
+
 Write-Host "$count release Docker argv checks passed across the native process boundary; no WSL/Docker call."
