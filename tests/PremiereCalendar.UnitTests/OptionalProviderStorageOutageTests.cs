@@ -140,6 +140,9 @@ public sealed class OptionalProviderStorageOutageTests
         var response = await Fanart(memory, handler, durable, clock).GetMovieArtworkWithStatusAsync(42, TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.True(response.Successful);
         Assert.Equal(1, handler.Requests);
+        // The cold save after the provider call really happened (it is not skipped by backoff).
+        Assert.Single(store.Values);
+        Assert.Equal(1, store.Saves);
         var second = await durable.ReadAsync<string>("fanart", "another-key", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderResponseCacheReadStatus.StorageUnavailable, second.Status);
         // Below the threshold there is no retry time at all (never a deadline in the past).
@@ -151,6 +154,28 @@ public sealed class OptionalProviderStorageOutageTests
         var skipped = await durable.ReadAsync<string>("fanart", "skipped-key", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderResponseCacheReadStatus.StorageUnavailable, skipped.Status);
         Assert.Equal(reads, store.Reads);
+    }
+
+    [Fact]
+    public async Task SaveSlowerThanTheBudgetThatThenSucceedsIsNotAStorageFailure()
+    {
+        var clock = new Clock();
+        // The store ignores the token and completes only after the budget has expired, so the save is
+        // deterministically slower than the budget yet successful.
+        var store = new StateStore { SaveCompletesAfterBudget = true };
+        var durable = Durable(store, clock, TimeSpan.FromMilliseconds(50));
+        for (var index = 0; index < ProviderResponseCache.FailuresBeforeBackoff + 1; index++)
+        {
+            await durable.SaveAsync("fanart", $"slow-{index}", "value", TestContext.Current.CancellationToken);
+        }
+
+        // Every save reached storage (none was skipped by backoff) and none opened a backoff.
+        Assert.Equal(ProviderResponseCache.FailuresBeforeBackoff + 1, store.Saves);
+        Assert.Equal(ProviderResponseCache.FailuresBeforeBackoff + 1, store.Values.Count);
+        store.SaveCompletesAfterBudget = false;
+        var read = await durable.ReadAsync<string>("fanart", "slow-0", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
+        Assert.Equal(ProviderResponseCacheReadStatus.Hit, read.Status);
+        Assert.Null(read.RetryAtUtc);
     }
 
     [Fact]
@@ -281,6 +306,7 @@ public sealed class OptionalProviderStorageOutageTests
         public bool Unavailable;
         public bool FailSaves;
         public bool BlockReads;
+        public bool SaveCompletesAfterBudget;
         public TimeSpan ReadDelay;
         private int _reads;
         public int Reads => Volatile.Read(ref _reads);
@@ -294,11 +320,19 @@ public sealed class OptionalProviderStorageOutageTests
             if (Unavailable) throw new IOException("Simulated unavailable response storage.");
             return Values.GetValueOrDefault((provider, scope, key));
         }
-        public Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken)
+        private int _saves;
+        public int Saves => Volatile.Read(ref _saves);
+        public async Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken)
         {
             if (Unavailable || FailSaves) throw new IOException("Simulated unavailable response storage.");
+            if (SaveCompletesAfterBudget)
+            {
+                var expired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var registration = cancellationToken.Register(expired.SetResult);
+                await expired.Task;
+            }
+            Interlocked.Increment(ref _saves);
             Values[(state.Provider, state.Scope, state.Key)] = state;
-            return Task.CompletedTask;
         }
         public Task<IReadOnlyList<ProviderCacheState>> GetRecentAsync(int take, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<ProviderCacheState>>(Values.Values.Take(take).ToArray());
         public Task<IReadOnlyList<ProviderCacheState>> GetByProviderAsync(string provider, int take, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<ProviderCacheState>>(Values.Values.Where(value => value.Provider == provider).Take(take).ToArray());
