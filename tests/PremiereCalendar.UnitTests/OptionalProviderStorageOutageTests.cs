@@ -132,8 +132,6 @@ public sealed class OptionalProviderStorageOutageTests
     {
         var clock = new Clock();
         var store = new StateStore { BlockReads = true };
-        // The budget also bounds the (unblocked) save after the provider call; 1 s keeps
-        // a cold save on a loaded host from counting as an extra storage failure.
         var durable = Durable(store, clock, TimeSpan.FromSeconds(1));
         using var memory = new MemoryCache(new MemoryCacheOptions());
         using var handler = new ProviderHandler();
@@ -176,6 +174,25 @@ public sealed class OptionalProviderStorageOutageTests
         var read = await durable.ReadAsync<string>("fanart", "slow-0", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
         Assert.Equal(ProviderResponseCacheReadStatus.Hit, read.Status);
         Assert.Null(read.RetryAtUtc);
+    }
+
+    [Fact]
+    public async Task SaveCancelledByTheBudgetStillCountsTowardsBackoff()
+    {
+        var clock = new Clock();
+        // The store honours the token, so each save is abandoned by the budget (not completed late).
+        var store = new StateStore { BlockSaves = true };
+        var durable = Durable(store, clock, TimeSpan.FromMilliseconds(50));
+        for (var index = 0; index < ProviderResponseCache.FailuresBeforeBackoff; index++)
+        {
+            await durable.SaveAsync("fanart", $"abandoned-{index}", "value", TestContext.Current.CancellationToken);
+        }
+
+        Assert.Empty(store.Values);
+        var read = await durable.ReadAsync<string>("fanart", "after", TimeSpan.FromDays(1), TestContext.Current.CancellationToken);
+        Assert.Equal(ProviderResponseCacheReadStatus.StorageUnavailable, read.Status);
+        Assert.Equal(clock.GetUtcNow().AddSeconds(5), read.RetryAtUtc);
+        Assert.Equal(0, store.Reads);
     }
 
     [Fact]
@@ -307,6 +324,7 @@ public sealed class OptionalProviderStorageOutageTests
         public bool FailSaves;
         public bool BlockReads;
         public bool SaveCompletesAfterBudget;
+        public bool BlockSaves;
         public TimeSpan ReadDelay;
         private int _reads;
         public int Reads => Volatile.Read(ref _reads);
@@ -325,6 +343,7 @@ public sealed class OptionalProviderStorageOutageTests
         public async Task SaveAsync(ProviderCacheState state, CancellationToken cancellationToken)
         {
             if (Unavailable || FailSaves) throw new IOException("Simulated unavailable response storage.");
+            if (BlockSaves) await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             if (SaveCompletesAfterBudget)
             {
                 var expired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

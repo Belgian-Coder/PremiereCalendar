@@ -79,10 +79,11 @@ function loadMoreUntilComplete(sentinel) {
     }
 
     const day = sentinel.closest("[data-testid='calendar-day']");
-    if (!isPrevious && day instanceof HTMLElement) {
-      // IntersectionObserver reports only visibility changes. While a window move is pending the
-      // control is disabled and the click is ignored, so resume once the move settles.
-      repumpWhenWindowSettles(sentinel, day);
+    if (day instanceof HTMLElement) {
+      // IntersectionObserver reports only visibility changes. A click ignored while a move is pending,
+      // or a move that completes without toggling pending, would otherwise stall autoload while the
+      // sentinel stays in view, so resume once the window settles.
+      repumpWhenWindowSettles(day);
     }
 
     if (!(button instanceof HTMLButtonElement && button.disabled) && day?.dataset.dayWindowPending !== "true") {
@@ -99,24 +100,34 @@ function isNearDayAutoloadViewport(element) {
   return rect.bottom >= -400 && rect.top <= window.innerHeight + 400;
 }
 
-function repumpWhenWindowSettles(sentinel, day) {
-  if (sentinel.premiereCalendarRepump) {
+function repumpWhenWindowSettles(day) {
+  if (day.premiereCalendarRepump) {
     return;
   }
 
   const observer = new MutationObserver(() => {
-    if (document.documentElement.contains(sentinel) && day.dataset.dayWindowPending === "true") {
+    if (document.documentElement.contains(day) && day.dataset.dayWindowPending === "true") {
       return;
     }
 
     observer.disconnect();
-    sentinel.premiereCalendarRepump = null;
-    if (document.documentElement.contains(sentinel) && isNearDayAutoloadViewport(sentinel)) {
-      loadMoreUntilComplete(sentinel);
+    day.premiereCalendarRepump = null;
+    if (!document.documentElement.contains(day)) {
+      return;
+    }
+
+    // Resume at most one direction per settle so forward and previous loads cannot ping-pong.
+    const next = [day.querySelector("[data-day-autoload-sentinel]"), day.querySelector("[data-day-window-previous]")]
+      .find((candidate) => candidate instanceof HTMLElement && isNearDayAutoloadViewport(candidate));
+    if (next) {
+      loadMoreUntilComplete(next);
     }
   });
-  observer.observe(day, { attributes: true, attributeFilter: ["data-day-window-pending"] });
-  sentinel.premiereCalendarRepump = observer;
+  observer.observe(day, {
+    attributes: true,
+    attributeFilter: ["data-day-window-pending", "data-day-window-start", "data-day-window-end"]
+  });
+  day.premiereCalendarRepump = observer;
 }
 
 function cleanupObservedDayAutoloadSentinel(sentinel) {
