@@ -187,6 +187,44 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
         }
     }
 
+    [Fact]
+    public async Task Autoload_resumes_when_a_pending_window_move_settles_while_the_sentinel_stays_visible()
+    {
+        await Page.GotoAsync(application.BaseUrl, new() { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync(new() { Timeout = 10_000 });
+        // A synthetic day whose load control mimics the component: each click starts a pending move that
+        // disables the control and settles later. The sentinel never leaves the viewport, so the
+        // IntersectionObserver reports no further change and only the pending-settled signal can resume loading.
+        var clicks = await Page.EvaluateAsync<int>("""
+            () => new Promise(resolve => {
+                const day = document.createElement('section');
+                day.setAttribute('data-testid', 'calendar-day');
+                day.dataset.dayWindowPending = 'false';
+                day.style.cssText = 'position:fixed;top:0;left:0;z-index:-1;opacity:0';
+                day.innerHTML = '<button type="button" data-day-load-more>more</button><div data-day-autoload-sentinel>sentinel</div>';
+                const button = day.querySelector('button');
+                let clicks = 0;
+                button.addEventListener('click', () => {
+                    clicks++;
+                    day.dataset.dayWindowPending = 'true';
+                    button.disabled = true;
+                    setTimeout(() => {
+                        button.disabled = false;
+                        day.dataset.dayWindowPending = 'false';
+                    }, 50);
+                });
+                document.body.appendChild(day);
+                const deadline = performance.now() + 8000;
+                const poll = () => {
+                    if (clicks >= 3 || performance.now() > deadline) { day.remove(); resolve(clicks); }
+                    else setTimeout(poll, 25);
+                };
+                poll();
+            })
+            """);
+        Assert.True(clicks >= 3, $"Autoload stalled after {clicks} load(s) while the sentinel stayed in view.");
+    }
+
     private async Task MoveWindowAsync(string direction, string[] orderedIds, int start, int end) =>
         await Page.EvaluateAsync("""
             request => new Promise((resolve, reject) => {
