@@ -247,6 +247,53 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
         }
     }
 
+    [Fact]
+    public async Task Autoload_does_not_round_trip_between_directions_when_the_window_fits_in_view()
+    {
+        await Page.GotoAsync(application.BaseUrl, new() { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync(new() { Timeout = 10_000 });
+        // Both load controls and both sentinels are within the viewport margin. Forward loading reaches the end
+        // of the day, which removes the forward sentinel. A resume that fell back to the previous direction would
+        // restore the forward sentinel and start an endless forward/previous round trip. The previous sentinel is
+        // pre-marked as observed so only the settle watcher (not the IntersectionObserver) could click it.
+        var result = await Page.EvaluateAsync<int[]>("""
+            () => new Promise(resolve => {
+                const day = document.createElement('section');
+                day.setAttribute('data-testid', 'calendar-day');
+                day.dataset.dayWindowPending = 'false';
+                day.dataset.dayWindowStart = '0';
+                day.dataset.dayWindowEnd = '8';
+                day.style.cssText = 'position:fixed;top:0;left:0;z-index:-1;opacity:0';
+                const forwardMarkup = '<button type="button" data-day-load-more>more</button><div data-day-autoload-sentinel>next</div>';
+                day.innerHTML = '<button type="button" data-day-load-previous>previous</button>'
+                    + '<div data-day-window-previous data-autoload-observed="true">previous</div><div data-slot>' + forwardMarkup + '</div>';
+                const slot = day.querySelector('[data-slot]');
+                let forwardClicks = 0, previousClicks = 0, end = 8;
+                const wire = () => slot.querySelector('button')?.addEventListener('click', () => {
+                    forwardClicks++;
+                    setTimeout(() => {
+                        end += 8;
+                        if (end >= 24) slot.innerHTML = '';
+                        day.dataset.dayWindowEnd = String(end);
+                    }, 20);
+                });
+                day.querySelector('[data-day-load-previous]').addEventListener('click', () => {
+                    previousClicks++;
+                    setTimeout(() => {
+                        end -= 8;
+                        if (!slot.firstElementChild) { slot.innerHTML = forwardMarkup; wire(); }
+                        day.dataset.dayWindowEnd = String(end);
+                    }, 20);
+                });
+                wire();
+                document.body.appendChild(day);
+                setTimeout(() => { day.remove(); resolve([forwardClicks, previousClicks]); }, 2000);
+            })
+            """);
+        Assert.Equal(2, result[0]);
+        Assert.Equal(0, result[1]);
+    }
+
     private async Task MoveWindowAsync(string direction, string[] orderedIds, int start, int end) =>
         await Page.EvaluateAsync("""
             request => new Promise((resolve, reject) => {

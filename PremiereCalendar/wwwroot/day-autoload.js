@@ -79,7 +79,7 @@ function loadMoreUntilComplete(sentinel) {
     }
 
     const day = sentinel.closest("[data-testid='calendar-day']");
-    if (day instanceof HTMLElement) {
+    if (!isPrevious && day instanceof HTMLElement) {
       // IntersectionObserver reports only visibility changes. A click ignored while a move is pending,
       // or a move that completes without toggling pending, would otherwise stall autoload while the
       // sentinel stays in view, so resume once the window settles.
@@ -116,10 +116,10 @@ function repumpWhenWindowSettles(day) {
       return;
     }
 
-    // Resume at most one direction per settle so forward and previous loads cannot ping-pong.
-    const next = [day.querySelector("[data-day-autoload-sentinel]"), day.querySelector("[data-day-window-previous]")]
-      .find((candidate) => candidate instanceof HTMLElement && isNearDayAutoloadViewport(candidate));
-    if (next) {
+    // Only the forward direction resumes. Resuming previous (or whichever is near) could round-trip
+    // forward and previous forever when the whole mounted window fits in the viewport.
+    const next = day.querySelector("[data-day-autoload-sentinel]");
+    if (next instanceof HTMLElement && isNearDayAutoloadViewport(next)) {
       loadMoreUntilComplete(next);
     }
   });
