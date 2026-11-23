@@ -79,7 +79,7 @@ if ($Action -eq 'test') {
 }
 if ($Filter) { throw '-Filter is supported only with -Action test.' }
 if ($TimeoutSeconds -eq 0) { $TimeoutSeconds = 1800 }
-if ($TimeoutSeconds -lt 30) { throw '-TimeoutSeconds must be at least 30.' }
+if ($TimeoutSeconds -lt 60) { throw '-TimeoutSeconds must be at least 60.' }
 # auto = half of the engine's CPUs (other tenants share it), at least 2, at most 64; resolved in the guest, the same rule
 # as Test-WithPostgres.ps1. Explicit numbers win.
 $cpusWord = if ($Cpus -eq 'auto') { '$pc_budget' } else { $Cpus }

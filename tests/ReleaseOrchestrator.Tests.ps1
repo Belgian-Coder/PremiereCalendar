@@ -277,6 +277,33 @@ try {
     Assert-That ((Get-Content -LiteralPath (Join-Path $bundle 'gates/restore.log') -Raw) -match 'out Restore-Backup' -and (Get-Content -LiteralPath (Join-Path $bundle 'gates/restore.log') -Raw) -match 'err Restore-Backup') 'the child log keeps stdout and stderr'
     Assert-That ((@($timings.steps | Where-Object { $_.id -eq 'restore' }).exitCode) -eq 3 -and (@($timings.steps | Where-Object { $_.id -eq 'smoke' }).status) -eq 'not-started') 'the real exit code is recorded and later steps are not started'
     Assert-That ((Get-Content -LiteralPath (Join-Path $bundle 'gates/tests.log') -Raw) -match 'out Invoke-ReleaseTests') 'running children finish and keep their log after a failure'
+
+    # 13. real deadline kill through the real GateProcess: a hung real child is killed, the step fails with exit 124
+    Set-Content -LiteralPath (Join-Path $fake 'Initialize-RestoreCheck.ps1') -Value "param([string] `$Bundle)`nWrite-Output 'out hang'`nStart-Sleep -Seconds 600`n"
+    $bundle = New-Bundle
+    $global:LASTEXITCODE = 0
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $text = & (Join-Path $fake 'Invoke-LocalGates.ps1') -Bundle $bundle -ExpectedRevision $revision -SkipHostPreflight -PollMilliseconds 20 -StepDeadlineSeconds @{ 'restore-init' = 2 } *>&1 | Out-String
+    $timings = Get-Content -LiteralPath (Join-Path $bundle 'gates/stage-timings.json') -Raw | ConvertFrom-Json
+    $hung = @($timings.steps | Where-Object { $_.id -eq 'restore-init' })[0]
+    Assert-That ($global:LASTEXITCODE -eq 1 -and $hung.exitCode -eq 124 -and $hung.note -match 'process tree was killed' -and $clock.Elapsed.TotalSeconds -lt 120) "a real hung child is killed at its deadline`n$text"
+    Assert-That ($text -match 'cleanup is unconfirmed|Docker cleanup is unconfirmed' -and $text -match 'docker ps -a --filter') 'the deadline message names the unconfirmed cleanup and the docker ps hint'
+    Assert-That ((Get-Content -LiteralPath (Join-Path $bundle 'gates/restore-init.log') -Raw) -match 'PC_GATE_DEADLINE') 'the deadline note is in the step log'
+    # late output after the give-up Dispose must not crash the process (pump threads drop the line)
+    $info = [Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
+    $info.UseShellExecute = $false; $info.RedirectStandardInput = $true; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    foreach ($a in '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep 1; Write-Output late; Start-Sleep 600') { [void]$info.ArgumentList.Add($a) }
+    $lateLog = Join-Path $work 'late.log'
+    $gate = [GateProcess]::new($info, $lateLog)
+    $latePid = $gate.Pid
+    $gate.Dispose()
+    Start-Sleep -Seconds 3
+    Stop-Process -Id $latePid -Force -ErrorAction SilentlyContinue
+    Assert-That ($true) 'late output after Dispose did not crash the process'
+    $gate2 = [GateProcess]::new($info, (Join-Path $work 'kill.log'))
+    $killedReal = $gate2.Kill('kill note')
+    Assert-That ($killedReal -eq $true -and $gate2.IsDone -eq $true) 'Kill reports that the real process actually exited'
+    $gate2.Dispose()
 }
 finally {
     $resolved = [IO.Path]::GetFullPath($work)

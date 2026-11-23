@@ -98,7 +98,7 @@ param(
     [ValidateRange(1, 64)][int] $Cpus,
     [ValidateRange(1, 64)][int] $MaxThreads,
     [ValidateRange(1, 64)][int] $BuildMaxCpuCount,
-    [ValidateRange(30, 86400)][int] $TimeoutSeconds,
+    [ValidateRange(60, 86400)][int] $TimeoutSeconds,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $WslDistribution,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $BuildVolume,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string] $NugetVolume,
@@ -155,7 +155,7 @@ function New-Step {
         Id = $Id; Title = $Title; Script = (Join-Path $releaseRoot $Script); ScriptName = $Script
         Arguments = @($Arguments); After = @($After); Class = $Class; Required = @($Required); Validate = $Validate
         Status = 'pending'; Marker = $null; Evidence = $null; Handle = $null; LogPath = $null; StartUtc = $null; EndUtc = $null
-        Seconds = $null; ExitCode = $null; Note = $null; Clock = $null; DeadlineSeconds = $stepDeadlines[$Id]; TimedOutAt = $null
+        Seconds = $null; ExitCode = $null; Note = $null; Clock = $null; DeadlineSeconds = $stepDeadlines[$Id]; TimedOutAt = $null; Killed = $false
     }
 }
 
@@ -278,7 +278,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 public sealed class GateProcess : IDisposable {
-    readonly Process process; readonly StreamWriter log; readonly object gate = new object(); readonly Thread[] pumps = new Thread[2];
+    readonly Process process; readonly StreamWriter log; readonly object gate = new object(); readonly Thread[] pumps = new Thread[2]; bool closed;
     public GateProcess(ProcessStartInfo info, string logPath) {
         // CreateNew: a log is never overwritten.
         log = new StreamWriter(new FileStream(logPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read), new UTF8Encoding(false)) { AutoFlush = true };
@@ -291,19 +291,27 @@ public sealed class GateProcess : IDisposable {
     Thread Pump(StreamReader reader) {
         var t = new Thread(() => {
             string line;
-            while ((line = reader.ReadLine()) != null) { lock (gate) { log.WriteLine(line); } }
+            try {
+                while ((line = reader.ReadLine()) != null) {
+                    // A late line after Dispose (deadline give-up) is dropped, never thrown on this background thread.
+                    lock (gate) { if (closed) return; log.WriteLine(line); }
+                }
+            } catch (ObjectDisposedException) { } catch (IOException) { } catch (InvalidOperationException) { }
         }) { IsBackground = true };
         t.Start();
         return t;
     }
     // Deadline stop: note in the log, then kill the step's whole process tree (the pwsh child and everything it started).
-    public void Kill(string note) {
-        lock (gate) { try { log.WriteLine(note); } catch { } }
+    // Returns true only when the process has actually exited (verified), so callers never claim a kill that did not happen.
+    public bool Kill(string note) {
+        lock (gate) { try { if (!closed) log.WriteLine(note); } catch { } }
         try { if (!process.HasExited) process.Kill(true); } catch { }
+        try { return process.HasExited || process.WaitForExit(5000); } catch { return false; }
     }
     public bool IsDone { get { return process.HasExited && !pumps[0].IsAlive && !pumps[1].IsAlive; } }
+    public int Pid { get { return process.Id; } }
     public int ExitCode { get { return process.ExitCode; } }
-    public void Dispose() { lock (gate) { log.Dispose(); } process.Dispose(); }
+    public void Dispose() { lock (gate) { closed = true; log.Dispose(); } try { process.Dispose(); } catch { } }
 }
 '@
 }
@@ -431,7 +439,7 @@ function Complete-Step($Step) {
     $Step.ExitCode = if ($Step.TimedOutAt) { 124 } else { [int]$h.ExitCode }
     if ($h -is [IDisposable]) { $h.Dispose() }
     $Step.Status = if ($Step.ExitCode -eq 0) { 'passed' } else { 'failed' }
-    if ($Step.TimedOutAt) { $Step.Note = "exceeded its deadline of $($Step.DeadlineSeconds) s; the step's process tree was killed" }
+    if ($Step.TimedOutAt) { $Step.Note = "exceeded its deadline of $($Step.DeadlineSeconds) s; $(if ($Step.Killed) { 'the process tree was killed' } else { 'the process tree could NOT be confirmed stopped' }); Docker cleanup unconfirmed (resource prefix $($config.resourcePrefix))" }
     $record = [ordered]@{ step = $Step.Id; exitCode = $Step.ExitCode; deadlineSeconds = $Step.DeadlineSeconds; timedOut = [bool]$Step.TimedOutAt; startUtc = $Step.StartUtc.ToString('O'); endUtc = $Step.EndUtc.ToString('O'); seconds = $Step.Seconds; log = (Split-Path -Leaf $Step.LogPath) }
     Write-NewFile $Step.Marker ((ConvertTo-Json -InputObject $record) + "`n")
     Write-Host ("[{0}] {1} {2} in {3}s (exit {4})" -f ([DateTime]::UtcNow.ToString('HH:mm:ss')), $Step.Id, $Step.Status.ToUpperInvariant(), $Step.Seconds, $Step.ExitCode)
@@ -440,11 +448,16 @@ function Complete-Step($Step) {
 # Stops a step that passed its deadline. The step is then completed through the ordinary path (marker, timings, failure
 # handling), so its bookkeeping and the evidence listing run exactly as for any other failure.
 function Stop-StepAtDeadline($Step) {
-    $message = "Gate step '$($Step.Id)' exceeded its deadline of $($Step.DeadlineSeconds) s; killing its process tree."
+    $hint = "Docker cleanup is unconfirmed: inspect resources of '$($config.resourcePrefix)' (docker ps -a --filter name=$($config.resourcePrefix); test runs also carry --filter label=premierecalendar.test) and remove them by exact ID."
+    $message = "Gate step '$($Step.Id)' exceeded its deadline of $($Step.DeadlineSeconds) s; killing its process tree. $hint"
     Write-Host "[$([DateTime]::UtcNow.ToString('HH:mm:ss'))] $message"
     $Step.TimedOutAt = [DateTimeOffset]::UtcNow
+    $Step.Note = $null
+    $killed = $false
     $kill = $Step.Handle.PSObject.Methods['Kill']
-    if ($kill) { try { $kill.Invoke("PC_GATE_DEADLINE $message") } catch { Write-Host "Could not stop step '$($Step.Id)': $($_.Exception.Message)" } }
+    if ($kill) { try { $killed = [bool]($kill.Invoke("PC_GATE_DEADLINE $message")) } catch { Write-Host "Could not stop step '$($Step.Id)': $($_.Exception.Message)" } }
+    $Step.Killed = $killed
+    if (-not $killed) { Write-Host "WARNING: step '$($Step.Id)' could not be confirmed stopped; its process tree may still be running." }
 }
 
 function Test-CanStart($Step, [object[]] $Running) {
@@ -564,6 +577,6 @@ finally {
         }
     }
 }
-if ($failed) { Write-Host "ERROR: gate step '$($failed.Id)' failed with exit code $($failed.ExitCode)$(if ($failed.TimedOutAt) { " (deadline of $($failed.DeadlineSeconds) s exceeded, process tree killed)" }); see $($failed.LogPath)."; exit 1 }
+if ($failed) { Write-Host "ERROR: gate step '$($failed.Id)' failed with exit code $($failed.ExitCode)$(if ($failed.TimedOutAt) { " (deadline of $($failed.DeadlineSeconds) s exceeded, process tree $(if ($failed.Killed) { 'killed' } else { 'NOT confirmed stopped' }); Docker resources of prefix '$($config.resourcePrefix)' may remain, cleanup unconfirmed: docker ps -a --filter name=$($config.resourcePrefix))" }); see $($failed.LogPath)."; exit 1 }
 if ($fatal) { Write-Host "ERROR: $fatal"; exit 1 }
 Write-Host 'All local gates passed. Next: Load-Image, Deploy-Release, Verify-Release, Close-Release (docs/Releasing.md).'
