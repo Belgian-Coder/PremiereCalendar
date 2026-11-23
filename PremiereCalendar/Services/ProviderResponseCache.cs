@@ -239,7 +239,9 @@ public sealed class ProviderResponseCache(
                 Namespace(provider), ProviderCacheScope.Item, Hash(requestKey), now,
                 null, null, null, json), budget.Token);
             cancellationToken.ThrowIfCancellationRequested();
-            budget.Token.ThrowIfCancellationRequested();
+            // A save that completed is a success even when it outlasted the budget: only a faulted or
+            // budget-cancelled save (handled below) indicates unavailable storage.
+            if (budget.IsCancellationRequested) reason = "slow_save";
             outcome = oversized ? "invalidated" : "saved";
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

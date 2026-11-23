@@ -78,11 +78,45 @@ function loadMoreUntilComplete(sentinel) {
       return;
     }
 
-    button.click();
+    const day = sentinel.closest("[data-testid='calendar-day']");
+    if (!isPrevious && day instanceof HTMLElement) {
+      // IntersectionObserver reports only visibility changes. While a window move is pending the
+      // control is disabled and the click is ignored, so resume once the move settles.
+      repumpWhenWindowSettles(sentinel, day);
+    }
+
+    if (!(button instanceof HTMLButtonElement && button.disabled) && day?.dataset.dayWindowPending !== "true") {
+      button.click();
+    }
     sentinel.dataset.autoloadLoading = "false";
   };
 
   pump();
+}
+
+function isNearDayAutoloadViewport(element) {
+  const rect = element.getBoundingClientRect();
+  return rect.bottom >= -400 && rect.top <= window.innerHeight + 400;
+}
+
+function repumpWhenWindowSettles(sentinel, day) {
+  if (sentinel.premiereCalendarRepump) {
+    return;
+  }
+
+  const observer = new MutationObserver(() => {
+    if (document.documentElement.contains(sentinel) && day.dataset.dayWindowPending === "true") {
+      return;
+    }
+
+    observer.disconnect();
+    sentinel.premiereCalendarRepump = null;
+    if (document.documentElement.contains(sentinel) && isNearDayAutoloadViewport(sentinel)) {
+      loadMoreUntilComplete(sentinel);
+    }
+  });
+  observer.observe(day, { attributes: true, attributeFilter: ["data-day-window-pending"] });
+  sentinel.premiereCalendarRepump = observer;
 }
 
 function cleanupObservedDayAutoloadSentinel(sentinel) {
