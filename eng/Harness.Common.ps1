@@ -188,6 +188,19 @@ function ConvertTo-WslPath([string] $Path,
     $result.Output.Trim()
 }
 
+# The guest resolves `auto` budgets as max(2, min(64, nproc / 2)); the cache key needs the same number on the host
+# before the run so a changed engine CPU count invalidates reuse. Returns $null when the probe fails (the caller then
+# must not reuse recorded results).
+function Get-HarnessWslAutoBudget([string] $WslDistribution) {
+    try {
+        Assert-HarnessWslRunning $WslDistribution
+        $result = Invoke-HarnessWslClient (New-HarnessWslStartInfo @('-d', $WslDistribution, '--', 'nproc')) -CaptureOutput -TimeoutSeconds 30
+        if ($result.TimedOut -or -not $result.OutputDrained -or $result.ExitCode -ne 0 -or $result.Output.Trim() -notmatch '^\d{1,4}$') { return $null }
+        Get-HarnessAutoBudgetFromCpus ([int] $result.Output.Trim())
+    } catch { $null }
+}
+function Get-HarnessAutoBudgetFromCpus([int] $Cpus) { [string] [Math]::Min(64, [Math]::Max(2, [int] [Math]::Floor($Cpus / 2))) }
+
 # ---------------------------------------------------------------------------
 # Source mirror: WSL runs build and test containers from a per-checkout copy of the checkout's source on the
 # distribution's ext4 disk instead of the Windows drive mounted into WSL (about 100x faster file metadata and reads).

@@ -228,7 +228,7 @@ foreach ($budget in @($Cpus, $BuildMaxCpuCount)) { if ($budget -ne 'auto' -and [
 # Browser), at most 7200 s. An explicit -TimeoutSeconds always wins.
 if ($TimeoutSeconds -eq 0) {
     $TimeoutSeconds = [Math]::Min(7200, 600 + 900 * @($suites | Where-Object { $_ -ne 'Browser' }).Count + 1800 * @($suites | Where-Object { $_ -eq 'Browser' }).Count)
-} elseif ($TimeoutSeconds -lt 30) { throw '-TimeoutSeconds must be at least 30.' }
+} elseif ($TimeoutSeconds -lt 60) { throw '-TimeoutSeconds must be at least 60 (the WSL guest reserves a cleanup grace, scaled to a third of the timeout, 30 s at least).' }
 if ($Filter -and $QueryFilter) { throw '-Filter and -QueryFilter cannot be combined.' }
 if ($FreshBuild -and ($NoBuild -or $BuildVolume)) { throw '-FreshBuild cannot be combined with -NoBuild or -BuildVolume.' }
 foreach ($f in @($Filter)) {
@@ -554,8 +554,10 @@ $innerEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($inner
 $buildScript = { param($sync)
 $cacheBlock = ''
 if ($cacheEnabled) {
+    # `auto` threads resolve in the guest from nproc; the key records that resolved number (an unresolvable probe never matches).
+    $resolvedAutoThreads = if ($MaxThreads -eq 'auto') { $probe = Get-HarnessWslAutoBudget $WslDistribution; if ($probe) { $probe } else { "unresolved-$runId" } } else { 'auto' }
     $script:cacheInputs = @{
-        schema = 2; manifest = $sync.ManifestSha256; maxThreads = (Get-HarnessCacheMaxThreads $MaxThreads); utcDate = (Get-HarnessCacheUtcDate); suites = @($suites | Sort-Object); filter = @($Filter | Sort-Object)
+        schema = 3; manifest = $sync.ManifestSha256; maxThreads = (Get-HarnessCacheMaxThreads $MaxThreads $resolvedAutoThreads); utcDate = (Get-HarnessCacheUtcDate); suites = @($suites | Sort-Object); filter = @($Filter | Sort-Object)
         queryFilter = @($QueryFilter | Sort-Object); parallel = [string] $Parallel; runnerArguments = @($RunnerArguments)
         configuration = $Configuration; runtimeAsync = (-not $NoRuntimeAsync); postgresImage = $postgresImage; cacheFlavor = $CacheFlavor
     }
@@ -686,7 +688,9 @@ wait "`$attach_pid"
 Write-Host "Results folder: $resultsHost"
 Write-Host "Test run label: premierecalendar.test=$runId; resource names: $runnerName, $server, $network"
 $started = Get-Date
-$cleanupGraceSeconds = 300
+# The guest cleanup grace is 300 s (the worst case of 6 bounded docker calls) for timeouts of 900 s or more, which covers
+# every default and release timeout; a smaller explicit timeout scales it down (a third, at least 30 s) so it stays usable.
+$cleanupGraceSeconds = [Math]::Min(300, [Math]::Max(30, [int] [Math]::Floor($TimeoutSeconds / 3)))
 $remaining = [int][Math]::Floor($TimeoutSeconds - $budgetClock.Elapsed.TotalSeconds)
 if ($remaining -lt ($cleanupGraceSeconds + 11)) { throw 'Insufficient total test deadline remains for execution, cleanup and drain.' }
 try {

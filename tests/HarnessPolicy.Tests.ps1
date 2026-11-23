@@ -84,9 +84,16 @@ Assert-Policy ($releaseTests -match 'postgresCpus=\(\\d\+\)' -and $releaseTests 
 # Only verified, reproducible runs are cached (and only within one UTC day).
 Assert-Policy ($testText -match '\$cacheEnabled = -not \$NoCache -and -not \$NoBuild -and -not \$FreshBuild -and \$SourceMount -eq ''Mirror''' -and $testText -match '-not \$NoCache -and -not \$NoBuild -and -not \$FreshBuild\r?\n' -and ([regex]::Matches($testText, 'Test-HarnessSourceUnchanged')).Count -eq 2) 'The result cache is not limited to verified sources (mirror, no -NoBuild/-FreshBuild, source re-hashed before the build and after the run).'
 # Cleanup bounds: per-call limit 45 s, guest grace 300 s, release docker-info probe 120 s.
-Assert-Policy ($testText -match 'timeout --kill-after=1s 45s docker' -and $testText -notmatch 'timeout --kill-after=1s 18s' -and $testText -match '\$cleanupGraceSeconds = 300') 'The bounded test cleanup lost its 45 s per-call limit or 300 s guest grace.'
+Assert-Policy ($testText -match 'timeout --kill-after=1s 45s docker' -and $testText -notmatch 'timeout --kill-after=1s 18s' -and $testText -match '\$cleanupGraceSeconds = \[Math\]::Min\(300, \[Math\]::Max\(30') 'The bounded test cleanup lost its 45 s per-call limit or 300 s guest grace.'
 Assert-Policy ((Read-Repo 'eng/Wsl.Transport.ps1') -match 'ValidateRange\(15, 300\)\]\[int\] \$CleanupGraceSeconds' -and (Read-Repo 'eng/release/ReleaseCommon.ps1') -match "\@\('info'\) -CallLimit 120") 'The transport grace range or the release docker-info probe limit changed.'
 Assert-Policy ((Read-Repo 'eng/release/Invoke-Candidate.ps1') -match "\`$Jobs = 'auto'") 'Invoke-Candidate no longer defaults to the auto budget.'
+
+# Release bundle evidence excludes the test hosts' runtime data; the Trivy DB age check fails closed on a failing find.
+Assert-Policy ($releaseTests -match "Name -cne 'local-data'") 'Invoke-ReleaseTests copies local-data (runtime data and logs of the test hosts) into the bundle.'
+$scansText = Read-Repo 'eng/release/Invoke-Scans.ps1'
+Assert-Policy ($scansText -match 'stale=`\$\(find .*-mmin \+300\) \|\| stale=find-failed' -and $scansText -notmatch '-n `"`\$\(find') 'The Trivy DB age check ignores a failing find.'
+# Every gate step has a deadline.
+Assert-Policy ((Read-Repo 'eng/release/Invoke-LocalGates.ps1') -match 'StepDeadlineSeconds' -and (Read-Repo 'eng/release/Invoke-LocalGates.ps1') -match 'Stop-StepAtDeadline') 'Invoke-LocalGates lost its per-step deadline.'
 
 # 5. A new session learns the policy: AGENTS.md (loaded natively by Codex and Claude Code) must keep these rules.
 $agents = (Read-Repo 'AGENTS.md') -replace '\s+', ' '
