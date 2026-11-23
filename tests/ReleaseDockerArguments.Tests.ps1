@@ -73,4 +73,24 @@ foreach ($script in 'Invoke-Smoke.ps1', 'Initialize-RestoreCheck.ps1') {
 if ((Get-Content -Raw -LiteralPath (Join-Path $root 'eng/release/ReleaseCommon.ps1')) -notmatch [regex]::Escape("'--subnet', `$subnet, '--label', `$Label")) { throw 'New-ReleaseNetwork lost its explicit --subnet or label.' }
 $count++
 
+# New-ReleaseNetwork with a stubbed Docker client: overlap -> retry -> success; other error -> immediate throw; exhaustion -> throw.
+$script:networkCalls = [Collections.Generic.List[string]]::new(); $script:networkPlan = @()
+function Invoke-ReleaseDockerClient([string[]] $DockerArguments, [string] $InputText = '', [double] $CallLimit = 0, [switch] $CaptureOutput, [IO.TextWriter] $StandardOutputWriter, [IO.TextWriter] $StandardErrorWriter) {
+    $script:networkCalls.Add($DockerArguments -join ' ')
+    $step = $script:networkPlan[[Math]::Min($script:networkCalls.Count, $script:networkPlan.Count) - 1]
+    if ($step.ContainsKey('Error')) { $StandardErrorWriter.Write($step.Error) }
+    [pscustomobject]@{ ExitCode = $step.Exit; Output = '' }
+}
+$overlap = @{ Exit = 1; Error = 'Error response from daemon: Pool overlaps with other one on this address space' }
+$script:networkPlan = @($overlap, $overlap, @{ Exit = 0 })
+$used = New-ReleaseNetwork -Context $subnetContext -Offset 1 -Label 'l=x' -Name 'net' -Internal 6>$null
+if ($script:networkCalls.Count -ne 3 -or $used -ne $candidates[2] -or @($script:networkCalls | Where-Object { $_ -notmatch '--internal --subnet 10\.139\.\d+\.0/24 --label l=x net$' }).Count) { throw "Overlap retry misbehaved: $($script:networkCalls -join ' | ')" }
+$script:networkCalls.Clear(); $script:networkPlan = @(@{ Exit = 1; Error = 'network with name net already exists' })
+$threw = $false; try { New-ReleaseNetwork -Context $subnetContext -Offset 1 -Label 'l=x' -Name 'net' 6>$null 2>$null | Out-Null } catch { $threw = $true }
+if (-not $threw -or $script:networkCalls.Count -ne 1) { throw 'A non-overlap error must fail immediately without retry.' }
+$script:networkCalls.Clear(); $script:networkPlan = @($overlap)
+$threw = $false; try { New-ReleaseNetwork -Context $subnetContext -Offset 1 -Label 'l=x' -Name 'net' 6>$null 2>$null | Out-Null } catch { $threw = $_.Exception.Message -match 'No free explicit' }
+if (-not $threw -or $script:networkCalls.Count -ne 6) { throw "Exhaustion must throw after exactly 6 attempts (got $($script:networkCalls.Count))." }
+$count++
+
 Write-Host "$count release Docker argv checks passed across the native process boundary; no WSL/Docker call."

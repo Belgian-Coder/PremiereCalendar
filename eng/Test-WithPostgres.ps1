@@ -597,7 +597,9 @@ cleanup_resource() {
     cleanup_failed=1; return 0
   fi
   # Each inspect/removal is independently bounded, including timeout's kill
-  # grace: at most 6 x 46s = 276s for all three resources within the guest's
+  # grace: at most 6 x 46s = 276s for all three resources; the grace is 300s only for timeouts of 900s or more and a third of
+  # the timeout below that, so a timeout under about 828s gets a shorter grace than the worst-case cleanup (a loaded engine may leave
+  # labelled resources, reported as unresolved) within the guest's
   # 300s grace. A loaded shared engine has been measured at 19s per inspect and over 18s per removal,
   # so the former 5s bound reported live resources as unresolved and leaked them.
   case "`$id" in *[!0-9a-f]*|'') cleanup_failed=1; echo "PC_TEST_CLEANUP kind=`$kind name=`$name state=invalid-id" >&2; return 0 ;; esac

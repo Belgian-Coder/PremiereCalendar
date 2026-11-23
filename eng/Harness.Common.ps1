@@ -194,7 +194,7 @@ function ConvertTo-WslPath([string] $Path,
 function Get-HarnessWslAutoBudget([string] $WslDistribution) {
     try {
         Assert-HarnessWslRunning $WslDistribution
-        $result = Invoke-HarnessWslClient (New-HarnessWslStartInfo @('-d', $WslDistribution, '--', 'nproc')) -CaptureOutput -TimeoutSeconds 30
+        $result = Invoke-HarnessWslClient (New-HarnessWslStartInfo @('-d', $WslDistribution, '--exec', 'nproc')) -CaptureOutput -TimeoutSeconds 30
         if ($result.TimedOut -or -not $result.OutputDrained -or $result.ExitCode -ne 0 -or $result.Output.Trim() -notmatch '^\d{1,4}$') { return $null }
         Get-HarnessAutoBudgetFromCpus ([int] $result.Output.Trim())
     } catch { $null }
