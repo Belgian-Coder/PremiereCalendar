@@ -296,7 +296,8 @@ public sealed class GateProcess : IDisposable {
                     // A late line after Dispose (deadline give-up) is dropped, never thrown on this background thread.
                     lock (gate) { if (closed) return; log.WriteLine(line); }
                 }
-            } catch (ObjectDisposedException) { } catch (IOException) { } catch (InvalidOperationException) { }
+            } catch (ObjectDisposedException) { } catch (InvalidOperationException) { }
+            catch (IOException) { lock (gate) { if (!closed) { try { log.WriteLine("PC_GATE_LOG_WRITE_FAILED: later output of this step was not recorded"); } catch { } } } }
         }) { IsBackground = true };
         t.Start();
         return t;
@@ -577,6 +578,6 @@ finally {
         }
     }
 }
-if ($failed) { Write-Host "ERROR: gate step '$($failed.Id)' failed with exit code $($failed.ExitCode)$(if ($failed.TimedOutAt) { " (deadline of $($failed.DeadlineSeconds) s exceeded, process tree $(if ($failed.Killed) { 'killed' } else { 'NOT confirmed stopped' }); Docker resources of prefix '$($config.resourcePrefix)' may remain, cleanup unconfirmed: docker ps -a --filter name=$($config.resourcePrefix))" }); see $($failed.LogPath)."; exit 1 }
+if ($failed) { Write-Host "ERROR: gate step '$($failed.Id)' failed with exit code $($failed.ExitCode)$(if ($failed.TimedOutAt) { " (deadline of $($failed.DeadlineSeconds) s exceeded, process tree $(if ($failed.Killed) { 'killed' } else { 'NOT confirmed stopped' }); Docker resources of prefix '$($config.resourcePrefix)' may remain, cleanup unconfirmed: docker ps -a --filter name=$($config.resourcePrefix); test-run resources are named pcpg-* and labelled premierecalendar.test, use --filter label=premierecalendar.test)" }); see $($failed.LogPath)."; exit 1 }
 if ($fatal) { Write-Host "ERROR: $fatal"; exit 1 }
 Write-Host 'All local gates passed. Next: Load-Image, Deploy-Release, Verify-Release, Close-Release (docs/Releasing.md).'

@@ -287,7 +287,7 @@ try {
     $timings = Get-Content -LiteralPath (Join-Path $bundle 'gates/stage-timings.json') -Raw | ConvertFrom-Json
     $hung = @($timings.steps | Where-Object { $_.id -eq 'restore-init' })[0]
     Assert-That ($global:LASTEXITCODE -eq 1 -and $hung.exitCode -eq 124 -and $hung.note -match 'process tree was killed' -and $clock.Elapsed.TotalSeconds -lt 120) "a real hung child is killed at its deadline`n$text"
-    Assert-That ($text -match 'cleanup is unconfirmed|Docker cleanup is unconfirmed' -and $text -match 'docker ps -a --filter') 'the deadline message names the unconfirmed cleanup and the docker ps hint'
+    Assert-That ($text -match 'cleanup is unconfirmed|Docker cleanup is unconfirmed' -and $text -match 'docker ps -a --filter' -and $text -match 'filter label=premierecalendar.test') 'the deadline message names the unconfirmed cleanup and the docker ps hint'
     Assert-That ((Get-Content -LiteralPath (Join-Path $bundle 'gates/restore-init.log') -Raw) -match 'PC_GATE_DEADLINE') 'the deadline note is in the step log'
     # late output after the give-up Dispose must not crash the process (pump threads drop the line)
     $info = [Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
@@ -299,9 +299,10 @@ try {
     $gate.Dispose()
     Start-Sleep -Seconds 3
     Stop-Process -Id $latePid -Force -ErrorAction SilentlyContinue
-    Assert-That ($true) 'late output after Dispose did not crash the process'
+    Assert-That (-not ((Get-Content -LiteralPath $lateLog -Raw) -match 'late')) 'late output after Dispose did not crash the process and was not written to the closed log'
     $gate2 = [GateProcess]::new($info, (Join-Path $work 'kill.log'))
     $killedReal = $gate2.Kill('kill note')
+    $doneBy = [DateTime]::UtcNow.AddSeconds(3); while (-not $gate2.IsDone -and [DateTime]::UtcNow -lt $doneBy) { Start-Sleep -Milliseconds 50 }
     Assert-That ($killedReal -eq $true -and $gate2.IsDone -eq $true) 'Kill reports that the real process actually exited'
     $gate2.Dispose()
 }
