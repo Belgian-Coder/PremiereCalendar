@@ -19,7 +19,7 @@ The runner is eng\Test-WithPostgres.ps1 (xUnit.net 4 on Microsoft.Testing.Platfo
 prints that folder in a "Results:" line; the counts
 come from the CTRF summary (tests, passed, failed, skipped, pending, other). If a CTRF file is missing, the xUnit.net
 "Total: n, Errors: n, Failed: n, Skipped: n, Not Run: n" line of the suite's log is used instead. The CTRF, TRX and log
-files are copied into the bundle under tests\ as evidence.
+files are copied into the bundle under tests\ as evidence (not the local-data folder of the test hosts' runtime data).
 
 .PARAMETER Bundle
 Full path of the release bundle.
@@ -151,7 +151,13 @@ $exit = $run.ExitCode
 $finished = [DateTimeOffset]::UtcNow
 # By construction a release run never reuses earlier results (-NoCache); a REUSED line would mean the gate tested nothing.
 if (Select-String -LiteralPath $log -Pattern '^REUSED passing results from ' -Quiet) { throw "The test runner reported REUSED results although -NoCache was passed; the release gate did not run its own tests. See $log." }
-if ($run.ResultsFolder -and (Test-Path -LiteralPath $run.ResultsFolder)) { Copy-Item -LiteralPath $run.ResultsFolder -Destination $resultsEvidence -Recurse }
+if ($run.ResultsFolder -and (Test-Path -LiteralPath $run.ResultsFolder)) {
+    # The reports and logs are the evidence. local-data holds the test hosts' runtime data and logs (written as root by the
+    # containers); it stays in the checkout's artifacts and is never copied into the bundle.
+    New-Item -ItemType Directory -Path $resultsEvidence -Force | Out-Null
+    Get-ChildItem -LiteralPath $run.ResultsFolder -Force | Where-Object { $_.Name -cne 'local-data' } |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $resultsEvidence -Recurse }
+}
 if ($exit -ne 0) { throw "Tests did not pass (exit code $exit); the log is kept as $log. A new bundle is needed for the next attempt." }
 Invoke-ReleasePython (Join-Path $PSScriptRoot 'freeze_test_source.py') --repo $ctx.Repo --revision $ExpectedRevision --verify $fingerprints
 Assert-CleanSourceAtRevision -Revision $ExpectedRevision

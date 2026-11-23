@@ -78,9 +78,10 @@ echo '$($metadata.archiveSha256)  $staging/$archiveName' | sha256sum -c -
 "@
 $null = Initialize-ReleaseCacheVolume 'trivy'
 # The cache only saves the download: a copy that this cache downloaded more than 5 hours ago is discarded so Trivy
-# fetches the current DB, as a fresh volume did (summarize_scan.py also rejects a download older than 6 hours).
+# fetches the current DB, as a fresh volume did. A failing find (permission or I/O error) counts as stale and discards the
+# copy, never as fresh (summarize_scan.py also rejects a download older than 6 hours).
 $null = Invoke-LocalDocker run --rm --name $names.TrivyAge -v "$($trivyCache.Name):$trivyCachePath" --entrypoint sh $cfg.trivyImage -c `
-    "if [ -n `"`$(find $trivyCachePath -maxdepth 1 -name metadata.json -mmin +300)`" ]; then rm -f $trivyCachePath/trivy.db $trivyCachePath/metadata.json; fi"
+    "stale=`$(find $trivyCachePath -maxdepth 1 -name metadata.json -mmin +300) || stale=find-failed; if [ -n `"`$stale`" ]; then rm -f $trivyCachePath/trivy.db $trivyCachePath/metadata.json; fi"
 $stageExit = Invoke-LocalShell $stage
 if ($stageExit -ne 0) {
     # Exit 2 means the directory already existed and is not ours: never remove it.
