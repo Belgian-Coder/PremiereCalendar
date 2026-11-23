@@ -42,6 +42,11 @@ function Invoke-CapturedFixture($Start, [string] $Text, [double] $Seconds) {
         [pscustomobject]@{ Result = $result; Out = $out.ToString(); Error = $errorText.ToString(); Seconds = $clock.Elapsed.TotalSeconds }
     } finally { [Console]::SetOut($oldOut); [Console]::SetError($oldError); $out.Dispose(); $errorText.Dispose() }
 }
+# Absorb the one-off cold interpreter start (first exec of a fresh checkout's interpreter and fixture: macOS
+# code-signature/XProtect assessment, page cache) before any tight deadline is measured. Success-only, generous.
+$warm = Invoke-CapturedFixture (New-FixtureStart argv) '' 60
+Assert-Process ($warm.Result.ExitCode -eq 0 -and $warm.Result.OutputDrained) 'Interpreter warm-up fixture failed.'
+$coldStart = $warm.Seconds
 $secret = [guid]::NewGuid().ToString('N')
 $inputText = $secret + ('x' * 524288)
 $start = New-FixtureStart duplex
@@ -57,10 +62,10 @@ Assert-Process ($run.Result.TimedOut -and -not $run.Result.OutputDrained -and $r
 Assert-Process (-not (Get-Process -Id $run.Result.ClientPid -ErrorAction SilentlyContinue)) 'Owned timed-out client remains live.'
 
 $pidFile = Join-Path $folder 'child.pid'
-$run = Invoke-CapturedFixture (New-FixtureStart inherited_pipe @($pidFile)) '' 4
-# Deadline covers two interpreter starts inside a fully parallel static lane; the descendant holds the pipe for 15 s, so a
-# bypass would take far longer than 10 s.
-Assert-Process ($run.Result.ExitCode -eq 0 -and $run.Result.TimedOut -and -not $run.Result.OutputDrained -and $run.Seconds -lt 10) "An inherited pipe handle bypassed the drain deadline (exit $($run.Result.ExitCode), timedOut $($run.Result.TimedOut), drained $($run.Result.OutputDrained), $([math]::Round($run.Seconds, 1)) s)."
+$run = Invoke-CapturedFixture (New-FixtureStart inherited_pipe @($pidFile)) '' 8
+# The parent must start, spawn the descendant and exit inside the deadline, which is therefore generous (warm-up start
+# time is in the failure text); the descendant holds the pipe for 15 s, so a bypass would take far longer than 13 s.
+Assert-Process ($run.Result.ExitCode -eq 0 -and $run.Result.TimedOut -and -not $run.Result.OutputDrained -and $run.Seconds -lt 13) "An inherited pipe handle bypassed the drain deadline (warm-up start $([math]::Round($coldStart, 1)) s, exit $($run.Result.ExitCode), timedOut $($run.Result.TimedOut), drained $($run.Result.OutputDrained), $([math]::Round($run.Seconds, 1)) s)."
 Assert-Process ($run.Out -eq "PARENT_END`n") 'Parent output was not preserved before drain timeout.'
 $childId = [int] (Get-Content -LiteralPath $pidFile -Raw)
 Assert-Process ([bool] (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'Client ownership killed an unrelated descendant tree.'
