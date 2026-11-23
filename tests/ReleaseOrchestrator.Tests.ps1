@@ -24,14 +24,15 @@ function New-StubRunner {
         $record = [pscustomobject]@{ Id = $step.Id; Arguments = $step.Arguments; Start = [DateTime]::UtcNow; Done = $null; LogPath = $step.LogPath }
         $global:Calls.Add($record)
         [IO.File]::WriteAllText($step.LogPath, "stub $($step.Id)`n")       # CreateNew semantics are the launcher's contract
-        $handle = [pscustomobject]@{ Record = $record; Plan = $plan; Polls = 0; FingerprintFile = $global:FingerprintFile }
+        $handle = [pscustomobject]@{ Record = $record; Plan = $plan; Polls = 0; FingerprintFile = $global:FingerprintFile; Killed = $false; KillNote = '' }
+        Add-Member -InputObject $handle -MemberType ScriptMethod -Name Kill -Value { param($note) $this.Killed = $true; $this.KillNote = $note }
         Add-Member -InputObject $handle -MemberType NoteProperty -Name ExitCode -Value ([int]$plan.Exit)
         Add-Member -InputObject $handle -MemberType ScriptProperty -Name IsDone -Value {
             if ($this.Plan.ContainsKey('FingerprintAtMs') -and -not (Test-Path -LiteralPath $this.FingerprintFile) -and $this.Polls -ge $this.Plan.FingerprintAtMs) {
                 [IO.File]::WriteAllText($this.FingerprintFile, '{"a":"b"}'); $global:FingerprintCreated = [DateTime]::UtcNow
             }
             $this.Polls++
-            $done = $this.Polls -ge $this.Plan.Ms
+            $done = if ($this.Plan.ContainsKey('Hang')) { $this.Killed } else { $this.Polls -ge $this.Plan.Ms }
             if ($done -and -not $this.Record.Done) { $this.Record.Done = [DateTime]::UtcNow }
             $done
         }
@@ -107,6 +108,21 @@ try {
     $bundle = New-Bundle
     $r = Invoke-Gates $bundle @{ ParallelRuntimeChecks = $true }
     Assert-That ($r.Exit -eq 0 -and (Test-Overlap (Get-Call 'smoke') (Get-Call 'backup-compat')) -and -not (Test-Overlap (Get-Call 'tests') (Get-Call 'smoke'))) '-ParallelRuntimeChecks overlaps smoke with compat but still not with tests'
+
+    # 3b. per-step deadline: a hung step is killed, recorded as failed (exit 124), nothing else starts, markers and timings are written
+    $global:Scenario = & $happy
+    $global:Scenario['restore-init'] = @{ Ms = 1; Exit = 0; Hang = $true }
+    $bundle = New-Bundle
+    $r = Invoke-Gates $bundle @{ StepDeadlineSeconds = @{ 'restore-init' = 1 }; Serial = $true }
+    $t = Get-Content -LiteralPath $r.Timings[0].FullName -Raw | ConvertFrom-Json
+    $hung = @($t.steps | Where-Object { $_.id -eq 'restore-init' })[0]
+    Assert-That ($r.Exit -eq 1 -and $t.failedStep -eq 'restore-init' -and $hung.exitCode -eq 124 -and $hung.deadlineSeconds -eq 1 -and $hung.note -match 'deadline') "a hung step is killed at its deadline and reported failed`n$($r.Text)"
+    Assert-That ($r.Text -match "exceeded its deadline of 1 s" -and (Test-Path -LiteralPath (Join-Path $bundle 'gates/restore-init.result.json'))) 'the deadline message is clear and the step marker is still written'
+    Assert-That (@($t.steps | Where-Object { $_.status -eq 'not-started' }).Count -eq 6 -and @($global:Calls | Where-Object { $_.Id -eq 'restore' }).Count -eq 0) 'nothing is started after a deadline failure'
+    $bundle = New-Bundle
+    $r = Invoke-Gates $bundle @{ StepDeadlineSeconds = @{ nonsense = 5 } }
+    Assert-That ($r.Text -match 'unknown step') 'an unknown step id in -StepDeadlineSeconds is rejected'
+
 
     # 4. stop on first failure: running steps finish, nothing new starts, no retry
     $global:Scenario = & $happy

@@ -53,6 +53,8 @@ function global:wsl.exe {
             "/mnt/$drive/$relative"
         } elseif ($path.StartsWith('/')) { $path }
         else { throw "Unexpected mock path: $path" }
+    } elseif ($CommandArguments -contains 'nproc') {
+        '8'
     } elseif ($CommandArguments -contains '-s') {
         $global:HarnessCapturedScripts.Add(($input -join "`n"))
         # A test may stand in for the guest: the hook sees the script and sets HarnessWslExitCode.
@@ -214,7 +216,7 @@ try {
     Assert-Harness ($alternate.BuildStorage -ne $plan.BuildStorage) 'Runtime-async modes share build state.'
     Assert-Harness ($check.Command -match 'dotnet build PremiereCalendar/PremiereCalendar.csproj') 'App check expands to the full solution.'
     Invoke-HarnessFixtureScript (Join-Path $root 'eng/wsl-docker.ps1') @{ Action = 'check' }
-    Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'ComponentTests'; Filter = $filter; WslDistribution = 'PC-MARC-Dev' } 6>$null | Out-Null
+    Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'ComponentTests'; Filter = $filter; WslDistribution = 'PC-MARC-Dev'; MaxThreads = 2 } 6>$null | Out-Null
     Assert-Harness ($global:HarnessCapturedScripts.Count -eq 2) 'Expected two intercepted bash scripts.'
     $checkScript = $global:HarnessCapturedScripts[0]
     $testScript = $global:HarnessCapturedScripts[1]
@@ -430,9 +432,16 @@ dotnet() {
         $run = & $cacheRun ($viewSync + $uncached)
         Assert-Harness ($null -eq $run.Failure -and $run.Output -notmatch 'REUSED' -and $run.Script -notmatch 'pc_candidate|image-id' -and $global:HarnessCreated.Count -eq $before + 1 -and -not (Test-Path -LiteralPath (Join-Path $global:HarnessCreated[-1] 'result-key.json'))) "A run with $($uncached.Keys -join ',') used or recorded the result cache."
     }
+    # A small explicit -TimeoutSeconds stays usable: the guest cleanup grace scales to a third of it (300 s only from 900 s).
+    $smallTimeout = & $cacheRun @{ Project = 'Unit'; Filter = 'ViewSync'; NoCache = $true; TimeoutSeconds = 120; MaxThreads = 2 }
+    $executeArgv = @($global:HarnessCapturedArgv | Where-Object { $_ -contains '--signal=TERM' })[-1]
+    Assert-Harness ($null -eq $smallTimeout.Failure -and $executeArgv -contains '--kill-after=40s') "A 120 s -TimeoutSeconds was refused or did not scale the cleanup grace: $($smallTimeout.Failure)"
+    $tooSmall = ''
+    try { Invoke-HarnessFixtureScript (Join-Path $root 'eng/Test-WithPostgres.ps1') @{ Project = 'Unit'; NoCache = $true; TimeoutSeconds = 45 } 6>$null | Out-Null } catch { $tooSmall = $_.Exception.Message }
+    Assert-Harness ($tooSmall -match 'at least 60') 'A timeout below the real minimum gave no clear error.'
     # The key inputs of a real run carry the UTC date (date-dependent tests) and the effective -MaxThreads.
     $dayInputs = (Get-Content -LiteralPath (Join-Path $recordedFolder 'result-key.json') -Raw | ConvertFrom-Json)
-    Assert-Harness ($dayInputs.inputs.utcDate -eq (Get-HarnessCacheUtcDate) -and $dayInputs.inputs.maxThreads -eq 'auto' -and $dayInputs.inputs.schema -eq 2) 'The recorded key inputs lack the UTC date or the effective -MaxThreads.'
+    Assert-Harness ($dayInputs.inputs.utcDate -eq (Get-HarnessCacheUtcDate) -and $dayInputs.inputs.maxThreads -eq '4' -and $dayInputs.inputs.schema -eq 3) 'The recorded key inputs lack the UTC date or the resolved -MaxThreads (nproc 8 -> 4).'
     # Invoke the canonical wrapper's actual child-launch function with only the
     # child executable intercepted. Release/NAS transports are never loaded.
     $releaseTokens = $null; $releaseErrors = $null
@@ -871,6 +880,9 @@ try {
         $changedInputs = $cacheInputs.Clone(); foreach ($k in $mutation.Keys) { $changedInputs[$k] = $mutation[$k] }
         Assert-Harness ((Get-HarnessResultInputsHash $changedInputs) -ne $baseHash) "Result key ignores $($mutation.Keys -join ',')."
     }
+    Assert-Harness ((Get-HarnessAutoBudgetFromCpus 1) -eq '2' -and (Get-HarnessAutoBudgetFromCpus 8) -eq '4' -and (Get-HarnessAutoBudgetFromCpus 200) -eq '64') 'The host-side auto budget differs from the guest rule max(2, min(64, nproc / 2)).'
+    $wslTestText = Get-Content -Raw -LiteralPath (Join-Path $root 'eng/Test-WithPostgres.ps1')
+    Assert-Harness ($wslTestText -match 'schema = 3; manifest = \$sync\.ManifestSha256; maxThreads = \(Get-HarnessCacheMaxThreads \$MaxThreads \$resolvedAutoThreads\)') 'The WSL result-cache key must record the resolved -MaxThreads (schema 3).'
     Assert-Harness ((Get-HarnessCacheMaxThreads 'auto' '6') -eq '6' -and (Get-HarnessCacheMaxThreads '3' '6') -eq '3' -and (Get-HarnessCacheUtcDate) -match '^\d{4}-\d{2}-\d{2}$') 'The effective -MaxThreads or UTC date helpers are wrong.'
     Assert-Harness ((Get-HarnessResultKey $baseHash ('sha256:' + 'a' * 64)) -ne (Get-HarnessResultKey $baseHash ('sha256:' + 'b' * 64))) 'The result key ignores the development image identity.'
     $resultsRoot = New-MirrorSandbox 'cache-results'

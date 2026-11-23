@@ -254,6 +254,42 @@ function Invoke-LocalDocker {
     ConvertFrom-ReleaseDockerOutput $result.Output
 }
 
+function Get-ReleaseSubnetCandidates {
+    # The derived subnet first, then bounded alternatives with other third octets (never the bundle's own roles N..N+2, never
+    # outside 1-250), so a collision with another bundle's or project's network (about 1 in 70) does not end the release.
+    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)][ValidateRange(0, 9)][int] $Offset, [ValidateRange(1, 12)][int] $Attempts = 6)
+    $base = [int] $Context.Config.subnetOctet
+    $candidates = [Collections.Generic.List[string]]::new()
+    $candidates.Add((Get-ReleaseSubnet $Context $Offset))
+    for ($i = 1; $candidates.Count -lt $Attempts -and $i -lt 400; $i++) {
+        $octet = (($base + $Offset + $i * 37) % 250) + 1
+        if ($octet -ge $base -and $octet -le $base + 9) { continue }
+        $subnet = "$($Context.Config.subnetPrefix).$octet.0/24"
+        if (-not $candidates.Contains($subnet)) { $candidates.Add($subnet) }
+    }
+    $candidates.ToArray()
+}
+
+function Test-ReleaseSubnetOverlap([string] $Text) { $Text -match 'Pool overlaps with other one on this address space|invalid pool request|overlaps with' }
+
+function New-ReleaseNetwork {
+    # Creates the labelled network with an explicit --subnet (never without one) and retries with alternative derived
+    # subnets only when Docker reports an address overlap. Returns the subnet actually used.
+    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)][int] $Offset, [Parameter(Mandatory)][string] $Label, [Parameter(Mandatory)][string] $Name, [switch] $Internal)
+    $last = ''
+    foreach ($subnet in (Get-ReleaseSubnetCandidates $Context $Offset)) {
+        $arguments = @('network', 'create') + $(if ($Internal) { '--internal' }) + @('--subnet', $subnet, '--label', $Label, $Name)
+        $errors = [IO.StringWriter]::new()
+        $result = Invoke-ReleaseDockerClient -DockerArguments $arguments -CaptureOutput -StandardErrorWriter $errors
+        if ($result.ExitCode -eq 0) { return $subnet }
+        $last = $errors.ToString()
+        if (-not (Test-ReleaseSubnetOverlap $last)) { [Console]::Error.Write($last); throw "Local Docker command failed (exit $($result.ExitCode))." }
+        Write-Host "Subnet $subnet overlaps an existing network; trying another derived subnet."
+    }
+    [Console]::Error.Write($last)
+    throw "No free explicit /24 subnet was found for network $Name after bounded attempts."
+}
+
 function Invoke-LocalDockerInput([string] $InputText, [string[]] $DockerArguments) {
     $result = Invoke-ReleaseDockerClient -DockerArguments $DockerArguments -InputText $InputText -CaptureOutput -StandardErrorWriter ([Console]::Error)
     if ($result.ExitCode -ne 0) { throw "Local Docker text-input command failed (exit $($result.ExitCode))." }
