@@ -187,42 +187,64 @@ public sealed class CalendarBrowserRegressionTests(BrowserAppFixture application
         }
     }
 
-    [Fact]
-    public async Task Autoload_resumes_when_a_pending_window_move_settles_while_the_sentinel_stays_visible()
+    [Theory]
+    [InlineData("pending", 3)]
+    [InlineData("non-trim", 3)]
+    [InlineData("sentinel-leaves-view", 1)]
+    public async Task Autoload_resumes_after_a_window_move_only_while_the_sentinel_stays_visible(string scenario, int expectedClicks)
     {
         await Page.GotoAsync(application.BaseUrl, new() { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Page.Locator("[data-testid='premiere-card']").First.WaitForAsync(new() { Timeout = 10_000 });
-        // A synthetic day whose load control mimics the component: each click starts a pending move that
-        // disables the control and settles later. The sentinel never leaves the viewport, so the
-        // IntersectionObserver reports no further change and only the pending-settled signal can resume loading.
+        // A synthetic day whose load control mimics the component. "pending": each click disables the control
+        // and settles later. "non-trim": the move completes without ever toggling pending, only the window end
+        // changes. "sentinel-leaves-view": the sentinel scrolls away after the first load. The sentinel stays in
+        // view otherwise, so the IntersectionObserver reports no further change and only the settle signal can
+        // resume loading.
         var clicks = await Page.EvaluateAsync<int>("""
-            () => new Promise(resolve => {
+            scenario => new Promise(resolve => {
                 const day = document.createElement('section');
                 day.setAttribute('data-testid', 'calendar-day');
                 day.dataset.dayWindowPending = 'false';
+                day.dataset.dayWindowStart = '0';
+                day.dataset.dayWindowEnd = '8';
                 day.style.cssText = 'position:fixed;top:0;left:0;z-index:-1;opacity:0';
                 day.innerHTML = '<button type="button" data-day-load-more>more</button><div data-day-autoload-sentinel>sentinel</div>';
                 const button = day.querySelector('button');
+                const sentinel = day.querySelector('[data-day-autoload-sentinel]');
                 let clicks = 0;
                 button.addEventListener('click', () => {
                     clicks++;
+                    if (scenario === 'non-trim') {
+                        setTimeout(() => { day.dataset.dayWindowEnd = String(8 + clicks * 8); }, 20);
+                        return;
+                    }
                     day.dataset.dayWindowPending = 'true';
                     button.disabled = true;
                     setTimeout(() => {
+                        if (scenario === 'sentinel-leaves-view') sentinel.style.cssText = 'position:fixed;top:20000px';
                         button.disabled = false;
                         day.dataset.dayWindowPending = 'false';
                     }, 50);
                 });
                 document.body.appendChild(day);
-                const deadline = performance.now() + 8000;
+                const expected = scenario === 'sentinel-leaves-view' ? 1 : 3;
+                const finish = () => { day.remove(); resolve(clicks); };
+                const deadline = performance.now() + (expected === 1 ? 1500 : 8000);
                 const poll = () => {
-                    if (clicks >= 3 || performance.now() > deadline) { day.remove(); resolve(clicks); }
+                    if ((expected > 1 && clicks >= expected) || performance.now() > deadline) finish();
                     else setTimeout(poll, 25);
                 };
                 poll();
             })
-            """);
-        Assert.True(clicks >= 3, $"Autoload stalled after {clicks} load(s) while the sentinel stayed in view.");
+            """, scenario);
+        if (expectedClicks == 1)
+        {
+            Assert.Equal(1, clicks);
+        }
+        else
+        {
+            Assert.True(clicks >= expectedClicks, $"Autoload stalled after {clicks} load(s) ({scenario}) while the sentinel stayed in view.");
+        }
     }
 
     private async Task MoveWindowAsync(string direction, string[] orderedIds, int start, int end) =>
