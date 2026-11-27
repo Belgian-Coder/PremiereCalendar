@@ -76,8 +76,8 @@ param(
     [string] $NasReleaseRoot,
     [string] $ComposeRoot,
     [string] $PortainerApiScript,
-    [string] $TrivyImage = 'aquasec/trivy:0.74.0',
-    [string] $SyftImage = 'anchore/syft:v1.51.0'
+    [string] $TrivyImage = 'aquasec/trivy:0.76.2',
+    [string] $SyftImage = 'anchore/syft:v1.57.2'
 )
 
 $ErrorActionPreference = 'Stop'
