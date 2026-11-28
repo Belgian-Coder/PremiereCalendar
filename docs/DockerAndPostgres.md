@@ -37,6 +37,11 @@ one `linux-amd64-nuget` project volume, with every consumer using
 with normal NuGet expiration and revalidation; auditing remains enabled. The
 worktree `artifacts/check.lock` still excludes concurrent check/test writers.
 
+A Compose Watch sync of the Windows `D:` checkout into a WSL container was
+piloted on 2026-11-15 and rejected: Windows create/rename events did not reach
+the container and a dependency-lock change did not trigger a rebuild. Keep the
+supported helpers above; do not use Compose Watch as a source sync or barrier.
+
 SDK CLI state and NuGet plugin metadata persist at
 `/build/.sdk-cache/dotnet` and `/build/.sdk-cache/nuget-plugins` inside that same
 isolated build storage. `SdkCacheStorage` reports its `BuildStorage` and
