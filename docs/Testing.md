@@ -28,7 +28,7 @@ sequentially when execution is allocated:
 $distro = 'PC-MARC-Dev'
 & ./eng/wsl-docker.ps1 check -Project App -WslDistribution $distro -Plan
 & ./eng/Test-WithPostgres.ps1 -Project Unit,Component,Integration -WslDistribution $distro
-# Set $browserImage to the approved, already prepared local Linux/amd64 browser image.
+# Set $browserImage to the prepared local Linux/amd64 browser image (see "Prepared browser image" below).
 & ./eng/Test-WithPostgres.ps1 -Project Browser -WslDistribution $distro -DevImage $browserImage -CacheFlavor glibc -TimeoutSeconds 2400
 ```
 
@@ -491,6 +491,27 @@ Do not restart someone else's stack to adopt it. This follows
 [NuGet's shared-cache coordination requirement](https://learn.microsoft.com/en-us/nuget/consume-packages/managing-the-global-packages-and-cache-folders).
 
 The default helper covers unit, component and integration projects. Browser tests are opt-in (`-Project Browser -DevImage <prepared-image> -CacheFlavor glibc`): the Alpine SDK development image does not include compatible Playwright browsers. Use the established prepared browser environment, run after service tests (not alongside them), and retain all timing/assertion budgets. Never report default tests as complete browser acceptance. There is no npm toolchain in this Blazor project.
+
+### Prepared browser image
+
+The prepared browser image is reproducible from `eng/browser-image/Dockerfile`:
+the official `mcr.microsoft.com/playwright/dotnet` image for the pinned
+Playwright version (Ubuntu 26.04 "resolute", browsers in `/ms-playwright`)
+plus the `global.json` SDK copied from the official SDK image of the same
+Ubuntu release, both pinned by digest. The tag carries the Playwright version
+and the first 12 hex digits of the SHA-256 of the LF-normalized Dockerfile.
+Build it in the selected WSL engine (it downloads only the two pinned base
+images and uses no build context):
+
+```powershell
+$df = (Get-Content -Raw 'D:\Projects\PremiereCalendar\eng\browser-image\Dockerfile') -replace "`r", ''
+$hash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($df))) -replace '-', '').ToLowerInvariant().Substring(0, 12)
+$browserImage = "premierecalendar-ci-browser:1.64.1-resolute-$hash"
+$df | wsl.exe -d Ubuntu-24.04 --exec docker -H unix:///var/run/docker.sock build --platform linux/amd64 --pull -t $browserImage -
+```
+
+A Playwright package bump needs a matching base image tag and digest (the
+browser builds must match the package), and therefore a new image.
 
 The browser performance contract requires three forward window transitions and
 one Previous transition, checking each completed range and every ordered canonical
