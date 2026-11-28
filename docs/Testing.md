@@ -500,14 +500,19 @@ Playwright version (Ubuntu 26.04 "resolute", browsers in `/ms-playwright`)
 plus the `global.json` SDK copied from the official SDK image of the same
 Ubuntu release, both pinned by digest. The tag carries the Playwright version
 and the first 12 hex digits of the SHA-256 of the LF-normalized Dockerfile.
-Build it in the selected WSL engine (it downloads only the two pinned base
-images and uses no build context):
+Build it in the selected WSL distribution's engine, the one whose
+`-WslDistribution` the Browser run uses (the helpers never pull images, so an
+image built in another engine is refused). Run the commands from any folder
+inside the checkout or worktree you build from; the image downloads only the
+two pinned base images and uses no build context:
 
 ```powershell
-$df = (Get-Content -Raw 'D:\Projects\PremiereCalendar\eng\browser-image\Dockerfile') -replace "`r", ''
+$distro = 'PC-MARC-Dev'   # Ubuntu-24.04 on WINDOWS11-VM
+$dockerfile = Join-Path (git rev-parse --show-toplevel) 'eng/browser-image/Dockerfile'
+$df = (Get-Content -Raw $dockerfile) -replace "`r", ''
 $hash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($df))) -replace '-', '').ToLowerInvariant().Substring(0, 12)
 $browserImage = "premierecalendar-ci-browser:1.64.1-resolute-$hash"
-$df | wsl.exe -d Ubuntu-24.04 --exec docker -H unix:///var/run/docker.sock build --platform linux/amd64 --pull -t $browserImage -
+$df | wsl.exe -d $distro --exec docker -H unix:///var/run/docker.sock build --platform linux/amd64 --pull -t $browserImage -
 ```
 
 A Playwright package bump needs a matching base image tag and digest (the
